@@ -1545,10 +1545,13 @@ def asr(vad_segments, audio):
 import concurrent.futures
 
 @time_logger
-def asr_MoE(vad_segments, audio, segment_demucs_flags=None, enable_word_timestamps=False, device="cuda"):
+def asr_MoE(vad_segments, audio, segment_demucs_flags=None, enable_word_timestamps=False, device="cuda", lang="en"):
     """
     Perform Automatic Speech Recognition (ASR) on the VAD segments using MoE with Parallel Execution.
     [Updated] Runs Whisper, Parakeet, and Canary in parallel using ThreadPoolExecutor.
+
+    When `lang == "vi"`, the second and third ASR slots are swapped to VN-capable
+    models: PhoWhisper-large (asr_model_2) and ChunkFormer-CTC (canary_model).
     """
     if len(vad_segments) == 0:
         return [], 0.0, 0.0
@@ -1625,7 +1628,7 @@ def asr_MoE(vad_segments, audio, segment_demucs_flags=None, enable_word_timestam
                 sf.write(temp_wav.name, segment_audio_16k, 16000)
                 # Ensure write is flushed
                 temp_wav.flush()
-                
+
                 answer_ids = canary_model.generate(
                     prompts=[[{"role": "user", "content": f"Transcribe the following: {canary_model.audio_locator_tag}", "audio": [temp_wav.name]}]],
                     max_new_tokens=128,
@@ -1634,6 +1637,38 @@ def asr_MoE(vad_segments, audio, segment_demucs_flags=None, enable_word_timestam
                 return text_canary
         except Exception as e:
             logger.error(f"Canary failed: {e}")
+            return ""
+
+    def run_phowhisper_task(segment_audio_16k):
+        # PhoWhisper-large via a transformers ASR pipeline stored in asr_model_2 (VN path).
+        try:
+            result = asr_model_2(
+                {"array": segment_audio_16k, "sampling_rate": 16000},
+                generate_kwargs={"language": "vi", "task": "transcribe"},
+            )
+            if isinstance(result, dict):
+                return result.get("text", "") or ""
+            return str(result) if result else ""
+        except Exception as e:
+            logger.error(f"PhoWhisper failed: {e}")
+            return ""
+
+    def run_chunkformer_task(segment_audio_16k):
+        # ChunkFormer-CTC expects a wav path; tempfile is opened inside the thread.
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as temp_wav:
+                sf.write(temp_wav.name, segment_audio_16k, 16000)
+                temp_wav.flush()
+                text = canary_model.endless_decode(
+                    audio_path=temp_wav.name,
+                    chunk_size=64,
+                    left_context_size=128,
+                    right_context_size=128,
+                    total_batch_duration=1800,
+                )
+                return text if isinstance(text, str) else str(text)
+        except Exception as e:
+            logger.error(f"ChunkFormer failed: {e}")
             return ""
     # ---------------------------------------------
 
@@ -1676,16 +1711,20 @@ def asr_MoE(vad_segments, audio, segment_demucs_flags=None, enable_word_timestam
             # Submit Tasks in Parallel
             # ---------------------------------------------------------------------
             future_whisper = executor.submit(run_whisper_task, segment_audio_16k, dummy_vad)
-            future_parakeet = executor.submit(run_parakeet_task, segment_audio_16k)
-            future_canary = executor.submit(run_canary_task, segment_audio_16k)
+            if lang == "vi":
+                future_2 = executor.submit(run_phowhisper_task, segment_audio_16k)
+                future_3 = executor.submit(run_chunkformer_task, segment_audio_16k)
+            else:
+                future_2 = executor.submit(run_parakeet_task, segment_audio_16k)
+                future_3 = executor.submit(run_canary_task, segment_audio_16k)
 
             # ---------------------------------------------------------------------
             # Wait for results (Barrier)
             # ---------------------------------------------------------------------
             # .result() blocks until the future is done
             whisper_res = future_whisper.result()
-            text_parakeet = future_parakeet.result()
-            text_canary = future_canary.result()
+            text_2 = future_2.result()
+            text_3 = future_3.result()
 
             # Unpack Whisper results
             text_whisper = whisper_res["text"]
@@ -1696,21 +1735,25 @@ def asr_MoE(vad_segments, audio, segment_demucs_flags=None, enable_word_timestam
             # ---------------------------------------------------------------------
             # 5. Ensemble & Result Construction
             # ---------------------------------------------------------------------
-            text_ensemble = rover.align_and_vote([text_whisper, text_canary, text_parakeet])
+            text_ensemble = rover.align_and_vote([text_whisper, text_3, text_2])
 
             seg_result = {
                 "start": start_time,
                 "end": end_time,
                 "text": text_ensemble,
                 "text_whisper": text_whisper,
-                "text_parakeet": text_parakeet,
-                "text_canary": text_canary,
                 "speaker": speaker,
                 "language": detected_language,
                 "demucs": segment_demucs_flags[idx] if idx < len(segment_demucs_flags) else False,
-                "is_separated": is_enhanced, 
+                "is_separated": is_enhanced,
                 "sepreformer": segment.get("sepreformer", False)
             }
+            if lang == "vi":
+                seg_result["text_phowhisper"] = text_2
+                seg_result["text_chunkformer"] = text_3
+            else:
+                seg_result["text_parakeet"] = text_2
+                seg_result["text_canary"] = text_3
             
             if is_enhanced:
                 seg_result["enhanced_audio"] = raw_audio
@@ -2624,7 +2667,8 @@ def main_process(audio_path, save_path=None, audio_name=None,
                 audio,
                 segment_demucs_flags=segment_demucs_flags,
                 enable_word_timestamps=args.whisperx_word_timestamps,
-                device=device_name
+                device=device_name,
+                lang=args.lang,
             )
 
             asr_end = time.time()
@@ -2898,6 +2942,14 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        "--lang",
+        type=str,
+        default="en",
+        choices=["en", "vi"],
+        help="Pipeline language. 'en' uses Whisper+Parakeet+Canary MoE. 'vi' swaps in Whisper+PhoWhisper+ChunkFormer.",
+    )
+
+    parser.add_argument(
         "--ASRMoE",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -3071,7 +3123,7 @@ if __name__ == "__main__":
             device_name,
             compute_type=args.compute_type,
             threads=args.threads,
-            language="en",
+            language=args.lang,
 
         # ASR model options can be modified via default_asr_options in whisper_asr.py.
 
@@ -3089,20 +3141,38 @@ if __name__ == "__main__":
             compute_type=args.compute_type,
             threads=args.threads,
 
-            language="en",
+            language=args.lang,
             asr_options=asr_options_dict if asr_options_dict else None,
 
             )
     if args.ASRMoE:
-        import nemo.collections.asr as nemo_asr
-        asr_model_2 = nemo_asr.models.ASRModel.from_pretrained(model_name="nvidia/parakeet-tdt-0.6b-v2")
+        if args.lang == "vi":
+            # VN MoE: replace Parakeet with PhoWhisper-large and Canary with ChunkFormer-CTC.
+            # Variable names asr_model_2 / canary_model are reused as the second/third ASR slots.
+            from transformers import pipeline as hf_asr_pipeline
+            from chunkformer import ChunkFormerModel
 
-        # Load Canary model
-        logger.debug(" * Loading Canary Model")
-        canary_model = SALM.from_pretrained('nvidia/canary-qwen-2.5b')
-        canary_model = canary_model.to(device)
-        canary_model.eval()
-        logger.debug(f" * Canary model loaded on {device}")
+            logger.debug(" * Loading PhoWhisper-large (VN, slot 2)")
+            asr_model_2 = hf_asr_pipeline(
+                "automatic-speech-recognition",
+                model="vinai/PhoWhisper-large",
+                device=device,
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            )
+
+            logger.debug(" * Loading ChunkFormer-CTC (VN, slot 3)")
+            canary_model = ChunkFormerModel.from_pretrained("khanhld/chunkformer-ctc-large-vie")
+            logger.debug(f" * PhoWhisper + ChunkFormer loaded on {device}")
+        else:
+            import nemo.collections.asr as nemo_asr
+            asr_model_2 = nemo_asr.models.ASRModel.from_pretrained(model_name="nvidia/parakeet-tdt-0.6b-v2")
+
+            # Load Canary model
+            logger.debug(" * Loading Canary Model")
+            canary_model = SALM.from_pretrained('nvidia/canary-qwen-2.5b')
+            canary_model = canary_model.to(device)
+            canary_model.eval()
+            logger.debug(f" * Canary model loaded on {device}")
         # Client initialization
     #client = OpenAI(api_key="YOUR_API_KEY")
     model_name = "gpt-4.1"
