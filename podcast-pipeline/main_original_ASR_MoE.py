@@ -3094,25 +3094,24 @@ if __name__ == "__main__":
     logger.debug(" * Loading ASR Model")
 
     if args.initprompt == True:
+        # initial_prompt seeds Whisper's decoder context to anchor transcription style
+        # (keeps disfluencies/backchannels rather than stripping them like training subs do).
+        # Keep prompt monolingual: cross-script tokens can pull the language head off VN.
+        if args.lang == "vi":
+            initial_prompt_text = (
+                "Ừ. Dạ. Vâng. À. Ờ. Ừm. Đúng rồi. Vậy hả. Thế à. Ok. Ừ ha. Ờ ha. À ha. Ừ nhỉ."
+            )
+        else:
+            initial_prompt_text = (
+                "Um. Uh, Ah. Like, you know. I mean, right. Actually. Basically, and right? "
+                "okay. Alright. Emm. Mm. So. Oh. Hoo hoo."
+                "生于忧患,死于安乐。岂不快哉?当然,嗯,呃,就,这样,那个,哪个,啊,呀,哎呀,哎哟,唉哇,啧,唷,哟,噫!"
+                "微斯人,吾谁与归?ええと、あの、ま、そう、ええ。"
+                "äh, hm, so, tja, halt, eigentlich. euh, quoi, bah, ben, tu vois, tu sais, t'sais, "
+                "eh bien, du coup. genre, comme, style. 응,어,그,음."
+            )
         asr_options_dict = {
-            #"log_prob_threshold": -1.0,
-            #"no_speech_threshold": 0.6,
-            # 生于忧患,死于安乐。岂不快哉?当然,嗯,呃,就,这样,那个,哪个,啊,呀,哎呀,哎哟,唉哇,啧,唷,哟,噫!微斯人,吾谁与归?ええと、あの、ま、そう、ええ。äh, hm, so, tja, halt, eigentlich. euh, quoi, bah, ben, tu vois, tu sais, t'sais, eh bien, du coup. genre, comme, style. 응,어,그,음
-
-            # Original initial prompt (kept for reference)
-            # "initial_prompt": "ha. heh. Mm, hmm. Mm hm. uh. Uh huh. Mm huh. Uh. hum Uh. Ah. Uh hu. Like. you know. Yeah. I mean. right. Actually. Basically, and right? okay. Alright. Emm. So. Oh. Hoo. Hu. Hoo, hoo. Heah. Ha. Yu. Nah. Uh-huh. No way. Uh-oh. Jeez. Whoa. Dang. Gosh. Duh. Whoops. Phew. Woo. Ugh. Er. Geez. Oh wow. Oh man. Uh yeah. Uh huh. For real?",
-
-            #"initial_prompt": "ha. heh. Mm, hmm. uh. "
-
-            # Notes on initial_prompt behavior:
-            # - Without initial_prompt: No ASR gaps, but filler word recognition is poor.
-            # - With original initial_prompt: No ASR gaps, but desired filler word recognition is poor.
-            # - With completely different prompt (removing CJK characters): Occasional ASR gaps.
-            # - Modifying original prompt with only 3 or fewer desired filler words: No ASR gaps while achieving good filler word recognition.
-
-
-            "initial_prompt": "Um. Uh, Ah. Like, you know. I mean, right. Actually. Basically, and right? okay. Alright. Emm. Mm. So. Oh. Hoo hoo.生于忧患,死于安乐。岂不快哉?当然,嗯,呃,就,这样,那个,哪个,啊,呀,哎呀,哎哟,唉哇,啧,唷,哟,噫!微斯人,吾谁与归?ええと、あの、ま、そう、ええ。äh, hm, so, tja, halt, eigentlich. euh, quoi, bah, ben, tu vois, tu sais, t'sais, eh bien, du coup. genre, comme, style. 응,어,그,음.",
-
+            "initial_prompt": initial_prompt_text,
         }
         # Add word_timestamps if flag is enabled
         if args.whisperx_word_timestamps:
