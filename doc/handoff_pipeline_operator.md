@@ -93,6 +93,61 @@ Columns:
 
 ## 5. Adding a batch — recommended workflow
 
+### Step 5.0 — What we look for in a source clip
+
+**Target profile** (in priority order):
+1. **Dyadic** — exactly 2 speakers. Non-negotiable for full-duplex stereo (L=speaker A, R=speaker B; a 3rd speaker breaks the design). See `doc/full_duplex_data_scaling.md`.
+2. **Long-form** — episode length ≥ 15 min, ideally 30-60 min. Longer episodes give more contiguous runs that survive our gap/dyadic filters (see `build_training_conversations.py` yield stats).
+3. **Native Vietnamese** — Bắc/Trung/Nam regional variety all fine. Minimal code-switching with English (keeps ASR confidence high).
+4. **Clean audio** — studio or headset recording, minimal reverb, minimal background music. Demucs removes music but leaves artifacts on heavy BGM.
+5. **Natural conversation** — real turn-taking, backchannels, interruptions. Scripted / read-aloud content teaches the model the wrong turn-taking dynamics for a full-duplex model.
+
+**Avoid**:
+- Multi-host / panel shows (>2 speakers active) — most content will be dropped as `multi_speaker` at normalize time.
+- Vlogs / monologue narration — no dialogue to learn from.
+- Music-heavy shows (reality TV, MVs, dance clips) — Demucs strips vocals from music-and-vocal mixes with distortion residue that trips downstream filters.
+- Very short clips (< 15 min) — few contiguous runs survive; low yield per pipeline cost.
+- Age-restricted content — yt-dlp can't fetch without exported cookies.
+- Vietnamese-English code-switch content (e.g. "Easy Vietnamese" family) unless you specifically want it — Whisper's language detection can flip mid-turn.
+
+### Channels already processed (as of 2026-08-12)
+
+**High-yield, keep pulling** (these are your first stops for new batches):
+
+| Channel | Handle | Format | Ep length | Status | Notes |
+|---|---|---|---|---|---|
+| Have A Sip | `@Vietcetera` | Celebrity/creator interview, dyadic | 15-60 min | ~200/1358 tapped | Best yield channel. Whole-episode mode (`start=end=0`) recommended. |
+| Tự Tình Lúc 0h | `@LieuHaTrinh` | Emotional dyadic interview | 30-60 min | ~30/436 tapped | Bắc dialect. |
+| Chuyện-Trò Podcast | `@LearnwithSuongMai` (Học Văn Cô Sương Mai) | Teacher × student, dyadic | 40-60 min | 11/11 tapped both as 4-min slices AND whole episodes | Small pool but very clean. |
+| unlock fm | `@unlockfm` | Dyadic interview | 20-45 min | 22/48 tapped | Southern-influenced VN. |
+
+**Mixed / needs filtering**:
+
+| Channel | Notes |
+|---|---|
+| VIETSUCCESS (1024 vids) | Only ~200 are true dyadic interview (Modern Farmer / Mindful Leadership / Thought Show series). Filter carefully. |
+| An Truong Đi Xin Việc | Dyadic comedy talkshow, but heavy overlap → low FD yield after filters. |
+| Bơ Đi Mà Sống (Vietcetera) | Handle seems broken (only 1 video enumerated). Worth re-checking. |
+| Tâm Sự Bí Mật | 58 videos, lifestyle/emotion podcast. Un-vetted yield. |
+
+**Avoid for full-duplex**:
+
+| Channel | Why |
+|---|---|
+| Khoai Lang Thang (KLT) | Travel vlog, mostly monologue narration. Batch 3 pulled 80 clips with poor yield. |
+| WOW HCMC | Reality TV with music intros — heavy BGM residue. |
+| VTV Cà Phê Sáng, VTV Vui Cùng Tiếng Việt | Multi-host + foreign guests + code-switching. |
+| Easy Vietnamese family | Pedagogical VN-EN code-switch — language flips confuse Whisper. |
+
+**Untapped candidates worth exploring** (handles need verification):
+- Ta Đi Tây (diaspora interviews) — dyadic when 1-guest format, per-clip dedup needed
+- Được/Mất — Buddhist podcast, dyadic potential
+- Nhật Ký Ban Công — lifestyle dyadic
+- Have A Chat GPT — Vietcetera podcast, dyadic
+- The Quốc Khánh Show — celebrity interview
+
+**Guideline**: before adding a channel, pull 1 test episode → run through pipeline → check the resulting `training_conversations_fullduplex/stats.json` for clean-hour yield. Below ~10% clean-hours-per-raw-hour, drop the channel.
+
 ### Step 5.1 — Find candidate episodes
 Enumerate a YouTube channel:
 ```bash
