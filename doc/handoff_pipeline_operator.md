@@ -2,7 +2,10 @@
 
 > Purpose: teach a new teammate to add source clips, run the full processing pipeline, and land results on HuggingFace. Written 2026-08-12 by Tuan.
 
-Not a design doc — for the "why" see `doc/full_duplex_data_scaling.md` and the memory files under `~/.claude/projects/-Users-tuandinh-repo-sommelier/memory/`. This is the "how to run it".
+**Repo**: https://github.com/tuanad121/sommelier (branch: `main`)
+**HF dataset**: https://huggingface.co/datasets/tuanamz/vi-sommelier-v0 (private — request access from Tuan)
+
+Not a design doc — for the "why" see `doc/full_duplex_data_scaling.md`. This is the "how to run it".
 
 ## 1. What this pipeline does
 
