@@ -9,7 +9,7 @@ Not a design doc — for the "why" see `doc/full_duplex_data_scaling.md`. This i
 
 ## 1. What this pipeline does
 
-Takes a TSV of Vietnamese podcast YouTube URLs → produces per-clip diarized ASR JSON + per-turn audio + a stack of quality sidecars (music detection, force-alignment, speaker attribution, overlap separation). Output lands in a HuggingFace private dataset (`tuanamz/vi-sommelier-v0`) as one directory per source clip. Downstream extractors turn that into training-ready conversations (half-duplex JSONL or full-duplex 2-channel stereo).
+Takes a TSV of Vietnamese podcast YouTube URLs → produces per-clip diarized ASR JSON + per-turn audio + a stack of quality sidecars (music detection, force-alignment, speaker attribution, overlap separation). Output lands as one directory per source clip in a HuggingFace private dataset (the canonical one is Tuan's `tuanamz/vi-sommelier-v0`; you'll create and push to your own — see §2). Downstream extractors turn that into training-ready conversations (half-duplex JSONL or full-duplex 2-channel stereo).
 
 Current state: 650 source clips on HF (~28 h raw, ~8 h clean dyadic 6-turn conversations, ~5 h stereo full-duplex). Target: extend to 15-20 h stereo FD via batches 4+.
 
@@ -21,7 +21,9 @@ Current state: 650 source clips on HF (~28 h raw, ~8 h clean dyadic 6-turn conve
 - External: `external/clearvoice/` (for gated MossFormer2, has its own venv)
 
 **Access needed**
-- HuggingFace: write access to `tuanamz/vi-sommelier-v0`. Ask Tuan to add teammate to the `tuanamz` org, then generate personal WRITE token at https://huggingface.co/settings/tokens
+- HuggingFace: create your own private dataset repo — e.g. `<your-hf-username>/vi-sommelier-batchN` or a shared org repo you own. Then generate a personal WRITE token at https://huggingface.co/settings/tokens.
+  - **Do not push to `tuanamz/vi-sommelier-v0` directly.** That's the canonical read-only-to-you dataset. Concurrent writes race; the last push wins and can clobber the other's batches.
+  - Sharing your batch back: two options. (a) Push to your own repo, then Tuan does a periodic merge into `tuanamz/vi-sommelier-v0`. (b) You get READ access to `tuanamz/vi-sommelier-v0` so your downstream training can consume both your repo + Tuan's without duplication. Ask Tuan for READ access at minimum.
 - Compute: **any Linux box with a GPU works** (single GPU sufficient for slow-mode, 2×A100 recommended for parallel sidecars). The Vinbdi cluster is what Tuan uses (SLURM job 9417 on `dgx-a100-5`). Teammate should get their own cluster account or bring their own compute.
 
 **System dependencies**
@@ -197,14 +199,18 @@ bash scripts/launch_normalize_all.sh
 Drop filters applied here: `phantom` (no Sortformer speaker), `misattributed` (ECAPA disagrees), `has_bgm` (PANNs music > threshold), `multi_speaker` (>2 concurrent). See `scripts/normalize_to_hf_jsonl.py` for exact thresholds.
 
 ### Step 5.7 — Push to HuggingFace
+
+**Heads-up**: `scripts/upload_to_hf.py` has `REPO_ID = "tuanamz/vi-sommelier-v0"` hardcoded near the top of the file. **Change it to your own dataset repo before running** — do not push to Tuan's canonical repo (see §2 Access). Also update `DATASET_README` if the README wording no longer fits your batch.
+
 ```bash
-export HF_TOKEN=hf_...   # WRITE token
+export HF_TOKEN=hf_...   # WRITE token for YOUR HF dataset repo
 cd $REPO
+# after editing REPO_ID in scripts/upload_to_hf.py:
 uv run --with huggingface_hub python scripts/upload_to_hf.py
-# updates tuanamz/vi-sommelier-v0 (private) via symlink-based staging (fast, no disk copy)
+# pushes to <your-hf-username>/<your-dataset-name> via symlink-based staging (fast, no disk copy)
 ```
 
-Confirm in browser: https://huggingface.co/datasets/tuanamz/vi-sommelier-v0/tree/main/clips (private — needs login).
+Confirm your push in browser: https://huggingface.co/datasets/<your-hf-username>/<your-dataset-name>/tree/main/clips
 
 ### Step 5.8 — Regenerate deduplication cache
 ```bash
