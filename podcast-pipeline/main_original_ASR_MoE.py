@@ -1654,21 +1654,24 @@ def asr_MoE(vad_segments, audio, segment_demucs_flags=None, enable_word_timestam
             return ""
 
     def run_chunkformer_task(segment_audio_16k):
-        # ChunkFormer-CTC expects a wav path; tempfile is opened inside the thread.
+        # Run Qwen3-ASR for inference
         try:
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as temp_wav:
-                sf.write(temp_wav.name, segment_audio_16k, 16000)
-                temp_wav.flush()
-                text = canary_model.endless_decode(
-                    audio_path=temp_wav.name,
-                    chunk_size=64,
-                    left_context_size=128,
-                    right_context_size=128,
-                    total_batch_duration=1800,
-                )
-                return text if isinstance(text, str) else str(text)
+            conversation = [
+                {"role": "user", "content": [
+                    {"type": "audio", "audio_url": "dummy"},
+                    {"type": "text", "text": "Transcribe the audio in Vietnamese."},
+                ]}
+            ]
+            processor = canary_model.processor
+            text = processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
+            inputs = processor(text=text, audios=segment_audio_16k, return_tensors="pt", sampling_rate=16000).to(device)
+            
+            gen_ids = canary_model.generate(**inputs, max_new_tokens=256)
+            gen_ids = gen_ids[:, inputs.input_ids.size(1):]
+            response = processor.batch_decode(gen_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+            return response.strip()
         except Exception as e:
-            logger.error(f"ChunkFormer failed: {e}")
+            logger.error(f"Qwen3-ASR failed: {e}")
             return ""
     # ---------------------------------------------
 
@@ -2587,10 +2590,21 @@ def main_process(audio_path, save_path=None, audio_name=None,
         diarization_frames = []
         try:
             for chunk in diar_chunks:
-                predicted_segments, _ = diar_model.diarize(
-                    audio=chunk["path"], batch_size=1, include_tensor_outputs=True
-                )
-                chunk_df = sortformer_dia(predicted_segments)
+                if args.dia3:
+                    import torchaudio
+                    waveform, sr = torchaudio.load(chunk["path"])
+                    waveform = waveform.to(device)
+                    segments = dia_pipeline({"waveform": waveform, "sample_rate": sr})
+                    data = []
+                    for turn, _, speaker in segments.itertracks(yield_label=True):
+                        data.append({"speaker": speaker, "start": turn.start, "end": turn.end})
+                    import pandas as pd
+                    chunk_df = pd.DataFrame(data) if data else pd.DataFrame(columns=["speaker", "start", "end"])
+                else:
+                    predicted_segments, _ = diar_model.diarize(
+                        audio=chunk["path"], batch_size=1, include_tensor_outputs=True
+                    )
+                    chunk_df = sortformer_dia(predicted_segments)
                 if not chunk_df.empty:
                     chunk_df["start"] += chunk["offset"]
                     chunk_df["end"] += chunk["offset"]
@@ -2861,7 +2875,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--whisper_arch",
         type=str,
-        default="large-v3",
+        default="large-v3-turbo",
         help="The name of the Whisper model to load.",
     )
     parser.add_argument(
@@ -3063,7 +3077,7 @@ if __name__ == "__main__":
     if args.dia3 == True:
         print("Using diarization-3.1 model")
         dia_pipeline = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-3.1",
+        "pyannote/speaker-diarization-community-1",
         #"pyannote/speaker-diarization",
         use_auth_token=cfg["huggingface_token"],
 
@@ -3072,7 +3086,7 @@ if __name__ == "__main__":
         
     else:
         dia_pipeline = Pipeline.from_pretrained(
-            #"pyannote/speaker-diarization-3.1",
+            #"pyannote/speaker-diarization-community-1",
             "pyannote/speaker-diarization",
             use_auth_token=cfg["huggingface_token"]
         )
@@ -3118,7 +3132,7 @@ if __name__ == "__main__":
             asr_options_dict["word_timestamps"] = True
 
         asr_model = whisper_asr.load_asr_model(
-            "large-v3",
+            "large-v3-turbo",
             device_name,
             compute_type=args.compute_type,
             threads=args.threads,
@@ -3135,7 +3149,7 @@ if __name__ == "__main__":
             asr_options_dict["word_timestamps"] = True
 
         asr_model = whisper_asr.load_asr_model(
-            "large-v3",
+            "large-v3-turbo",
             device_name,
             compute_type=args.compute_type,
             threads=args.threads,
@@ -3159,9 +3173,15 @@ if __name__ == "__main__":
                 torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
             )
 
-            logger.debug(" * Loading ChunkFormer-CTC (VN, slot 3)")
-            canary_model = ChunkFormerModel.from_pretrained("khanhld/chunkformer-ctc-large-vie")
-            logger.debug(f" * PhoWhisper + ChunkFormer loaded on {device}")
+            from transformers import AutoProcessor, AutoModelForMultimodalLM
+            logger.debug(" * Loading Qwen3-ASR (VN, slot 3)")
+            canary_model = AutoModelForMultimodalLM.from_pretrained(
+                "Qwen/Qwen3-ASR-1.7B-hf", 
+                device_map="auto", 
+                torch_dtype=torch.float16
+            )
+            canary_model.processor = AutoProcessor.from_pretrained("Qwen/Qwen3-ASR-1.7B-hf")
+            logger.debug(f" * PhoWhisper + Qwen3-ASR loaded successfully")
         else:
             import nemo.collections.asr as nemo_asr
             asr_model_2 = nemo_asr.models.ASRModel.from_pretrained(model_name="nvidia/parakeet-tdt-0.6b-v2")
@@ -3199,7 +3219,7 @@ if __name__ == "__main__":
         speaker_embedder = None
 
     # load model from Hugging Face model card directly (You need a Hugging Face token)
-    diar_model = SortformerEncLabelModel.from_pretrained("nvidia/diar_sortformer_4spk-v1")
+    diar_model = SortformerEncLabelModel.from_pretrained("nvidia/diar_sortformer_4spk-v2.1")
     diar_model.eval()
 
     # Initialize Pyannote embedding model (only when sepreformer is enabled)
