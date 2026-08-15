@@ -69,6 +69,9 @@ def transcribe(model, processor, device, audio_path, language="vi"):
             gen_ids = model.generate(**inputs, max_new_tokens=256)
             gen_ids = gen_ids[:, inputs.input_ids.size(1):]
             response = processor.batch_decode(gen_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+            
+            if "<asr_text>" in response:
+                response = response.split("<asr_text>")[-1]
 
         return response.strip()
     except Exception as e:
