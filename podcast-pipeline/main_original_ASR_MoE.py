@@ -1657,24 +1657,38 @@ def asr_MoE(vad_segments, audio, segment_demucs_flags=None, enable_word_timestam
             return ""
 
     def run_chunkformer_task(segment_audio_16k):
-        # Run Qwen3-ASR for inference
+        # Run Qwen3-ASR for inference via subprocess worker
         try:
-            conversation = [
-                {"role": "user", "content": [
-                    {"type": "audio", "audio_url": "dummy"},
-                    {"type": "text", "text": "Transcribe the audio in Vietnamese."},
-                ]}
-            ]
-            processor = canary_model.processor
-            text = processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
-            inputs = processor(text=text, audios=segment_audio_16k, return_tensors="pt", sampling_rate=16000).to(device)
+            if not _qwen3_ready or qwen3_process is None:
+                return ""
             
-            gen_ids = canary_model.generate(**inputs, max_new_tokens=256)
-            gen_ids = gen_ids[:, inputs.input_ids.size(1):]
-            response = processor.batch_decode(gen_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
-            return response.strip()
+            # Save audio to a temporary file
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_audio:
+                tmp_audio_path = tmp_audio.name
+            sf.write(tmp_audio_path, segment_audio_16k, 16000)
+
+            # Send request
+            req = {"cmd": "transcribe", "audio_path": tmp_audio_path, "language": "vi"}
+            qwen3_process.stdin.write(json.dumps(req) + "\n")
+            
+            # Read response
+            resp_line = qwen3_process.stdout.readline()
+            
+            # Cleanup temp file
+            if os.path.exists(tmp_audio_path):
+                os.remove(tmp_audio_path)
+                
+            if not resp_line:
+                logger.error("Qwen3-ASR worker returned empty response.")
+                return ""
+                
+            resp = json.loads(resp_line)
+            if "error" in resp:
+                logger.error(f"Qwen3-ASR worker error: {resp['error']}")
+                return ""
+            return resp.get("text", "")
         except Exception as e:
-            logger.error(f"Qwen3-ASR failed: {e}")
+            logger.error(f"Qwen3-ASR worker communication failed: {e}")
             return ""
     # ---------------------------------------------
 
@@ -3186,15 +3200,47 @@ if __name__ == "__main__":
                 torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
             )
 
-            from transformers import AutoProcessor, AutoModelForMultimodalLM
-            logger.debug(" * Loading Qwen3-ASR (VN, slot 3)")
-            canary_model = AutoModelForMultimodalLM.from_pretrained(
-                "Qwen/Qwen3-ASR-1.7B-hf", 
-                device_map={"":  device_2}, 
-                torch_dtype=torch.float16
+            # Qwen3-ASR runs in a separate environment (qwen3_env) via subprocess worker
+            # to avoid huggingface-hub dependency conflict with WhisperX
+            import subprocess as _sp
+            qwen3_env_bin = os.environ.get(
+                "QWEN3_PYTHON",
+                os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "qwen3_env", "bin", "python"),
             )
-            canary_model.processor = AutoProcessor.from_pretrained("Qwen/Qwen3-ASR-1.7B-hf")
-            logger.debug(f" * PhoWhisper + Qwen3-ASR loaded successfully")
+            qwen3_worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qwen3_worker.py")
+            qwen3_env_for_worker = os.environ.copy()
+            qwen3_env_for_worker["CUDA_VISIBLE_DEVICES"] = "1"  # Physical GPU 1 → cuda:0 inside worker
+
+            logger.debug(f" * Starting Qwen3-ASR worker subprocess: {qwen3_env_bin}")
+            qwen3_process = _sp.Popen(
+                [qwen3_env_bin, qwen3_worker_script],
+                stdin=_sp.PIPE, stdout=_sp.PIPE, stderr=_sp.PIPE,
+                text=True, bufsize=1,
+                env=qwen3_env_for_worker,
+            )
+
+            # Wait for worker to become ready
+            canary_model = None  # No in-process model; inference via qwen3_process
+            _qwen3_ready = False
+            for _startup_line in iter(qwen3_process.stdout.readline, ""):
+                _startup_line = _startup_line.strip()
+                if not _startup_line:
+                    continue
+                try:
+                    _msg = json.loads(_startup_line)
+                    logger.debug(f" * Qwen3 worker: {_msg}")
+                    if _msg.get("status") == "ready":
+                        _qwen3_ready = True
+                        break
+                except json.JSONDecodeError:
+                    logger.debug(f" * Qwen3 worker (raw): {_startup_line}")
+            if not _qwen3_ready:
+                logger.error(" * Qwen3-ASR worker failed to start!")
+                _qwen3_stderr = qwen3_process.stderr.read()
+                if _qwen3_stderr:
+                    logger.error(f" * Qwen3 worker stderr: {_qwen3_stderr[:2000]}")
+            else:
+                logger.debug(f" * PhoWhisper + Qwen3-ASR worker loaded successfully")
         else:
             import nemo.collections.asr as nemo_asr
             asr_model_2 = nemo_asr.models.ASRModel.from_pretrained(model_name="nvidia/parakeet-tdt-0.6b-v2")
