@@ -3191,7 +3191,7 @@ if __name__ == "__main__":
             # VN MoE: replace Parakeet with PhoWhisper-large and Canary with ChunkFormer-CTC.
             # Variable names asr_model_2 / canary_model are reused as the second/third ASR slots.
             from transformers import pipeline as hf_asr_pipeline
-            from chunkformer import ChunkFormerModel
+            # from chunkformer import ChunkFormerModel
 
             logger.debug(f" * Loading PhoWhisper-large (VN, slot 2) on {device_2}")
             asr_model_2 = hf_asr_pipeline(
