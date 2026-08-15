@@ -3267,10 +3267,11 @@ if __name__ == "__main__":
 
     speaker_embedder = None
     try:
+        from pyannote.audio import Model
+        emb_model = Model.from_pretrained("pyannote/embedding", token=cfg["huggingface_token"])
         speaker_embedder = Inference(
-            "pyannote/embedding",
+            emb_model,
             device=device,
-            use_auth_token=cfg["huggingface_token"],
             window="whole",
         )
         logger.debug(" * Speaker embedding model loaded for cross-chunk linking")

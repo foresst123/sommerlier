@@ -36,6 +36,11 @@ def load_model():
         device_map={"": device},
         torch_dtype=torch.float16
     )
+    
+    # Ép kiểu toàn bộ model một cách triệt để về float16 
+    # để loại bỏ các bias còn kẹt ở bfloat16
+    model.to(torch.float16)
+    
     model.eval()
 
     print(json.dumps({"status": "ready", "device": str(device)}), flush=True)
