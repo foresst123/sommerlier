@@ -145,6 +145,12 @@ class RoverEnsembler:
         # Select the longest sequence as pivot (usually the most accurate)
         pivot_idx = max(range(len(all_tokens)), key=lambda i: len(all_tokens[i]))
         pivot = all_tokens[pivot_idx]
+        
+        import string
+        def _norm(t_list):
+            return [t.lower().strip(string.punctuation) for t in t_list]
+            
+        pivot_norm = _norm(pivot)
 
         # Initialize confusion network: start each position with the pivot token
         confusion_net = [[pivot[i]] for i in range(len(pivot))]
@@ -153,8 +159,9 @@ class RoverEnsembler:
         for idx, tokens in enumerate(all_tokens):
             if idx == pivot_idx:
                 continue
-
-            matcher = difflib.SequenceMatcher(None, pivot, tokens)
+                
+            tokens_norm = _norm(tokens)
+            matcher = difflib.SequenceMatcher(None, pivot_norm, tokens_norm)
 
             for tag, i1, i2, j1, j2 in matcher.get_opcodes():
                 if tag == 'equal':
@@ -272,14 +279,18 @@ class RoverEnsembler:
 
         # Tokenize by word
         all_tokens = [t.split() for t in transcripts]
+        
+        # Normalize tokens (lowercase, remove punctuation) for fair similarity calculation
+        import string
+        norm_tokens = [[tok.lower().strip(string.punctuation) for tok in tokens] for tokens in all_tokens]
 
         # Calculate similarity between transcripts to detect outliers
         similarities = []
-        for i in range(len(all_tokens)):
+        for i in range(len(norm_tokens)):
             sim_scores = []
-            for j in range(len(all_tokens)):
+            for j in range(len(norm_tokens)):
                 if i != j:
-                    sim = RoverEnsembler.calculate_transcript_similarity(all_tokens[i], all_tokens[j])
+                    sim = RoverEnsembler.calculate_transcript_similarity(norm_tokens[i], norm_tokens[j])
                     sim_scores.append(sim)
             avg_sim = sum(sim_scores) / len(sim_scores) if sim_scores else 0.0
             similarities.append(avg_sim)
@@ -320,31 +331,44 @@ class RoverEnsembler:
             if not trusted_candidates:
                 trusted_candidates = valid_candidates
 
-            # Select the word with the most votes
-            votes = collections.Counter(trusted_candidates)
-            best_word, count = votes.most_common(1)[0]
+            # Select the word with the most votes using normalized words
+            norm_map = collections.defaultdict(list)
+            for c in trusted_candidates:
+                n_w = c.lower().strip(string.punctuation)
+                if n_w:
+                    norm_map[n_w].append(c)
+
+            if not norm_map:
+                continue
+
+            votes = {n_w: len(orig_ws) for n_w, orig_ws in norm_map.items()}
+            # Find the normalized word with the max votes
+            best_norm_word = max(votes, key=votes.get)
+            count = votes[best_norm_word]
+
+            # Reconstruct the original word: prefer pivot's format if the pivot matches the winning word
+            pivot_word = candidates[0] if candidates[0] else ""
+            pivot_norm = pivot_word.lower().strip(string.punctuation)
+            
+            if pivot_norm == best_norm_word:
+                best_word = pivot_word
+            else:
+                best_word = norm_map[best_norm_word][0]
 
             # Repetition pattern check: skip if the same word was recently repeated
-            if RoverEnsembler.has_local_repetition(final_output, best_word):
-                # If repetition, select the next most frequent candidate
-                if len(votes) > 1:
-                    best_word = votes.most_common(2)[1][0]
+            if RoverEnsembler.has_local_repetition([w.lower().strip(string.punctuation) for w in final_output], best_norm_word):
+                # If repetition, select the next most frequent candidate if available
+                sorted_votes = sorted(votes.items(), key=lambda x: x[1], reverse=True)
+                if len(sorted_votes) > 1:
+                    best_norm_word = sorted_votes[1][0]
+                    best_word = norm_map[best_norm_word][0]
+                    count = sorted_votes[1][1]
                 else:
                     # No other candidates available, skip
                     continue
 
-            # Accept if majority vote, otherwise prioritize pivot
-            if count >= len(trusted_candidates) / 2:
-                final_output.append(best_word)
-            else:
-                # Prioritize pivot's token
-                pivot_word = candidates[0] if candidates[0] else best_word
-                # Check pivot for repetition too
-                if RoverEnsembler.has_local_repetition(final_output, pivot_word):
-                    if pivot_word != best_word:
-                        final_output.append(best_word)
-                else:
-                    final_output.append(pivot_word)
+            # Accept if majority vote, otherwise prioritize pivot (already handled by preferring pivot format above)
+            final_output.append(best_word)
 
         return " ".join(final_output)
 
@@ -2955,7 +2979,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--speaker-link-threshold",
         type=float,
-        default=0.75,
+        default=0.49,
         help="Cosine similarity threshold for linking speakers across diarization chunks",
     )
 
