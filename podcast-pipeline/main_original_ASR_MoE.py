@@ -2613,7 +2613,7 @@ def main_process(audio_path, save_path=None, audio_name=None,
                     waveform = waveform.to(device)
                     segments = dia_pipeline({"waveform": waveform, "sample_rate": sr})
                     data = []
-                    for turn, _, speaker in segments.itertracks(yield_label=True):
+                    for turn, _, speaker in (segments.speaker_diarization if hasattr(segments, "speaker_diarization") else segments).itertracks(yield_label=True):
                         data.append({"speaker": speaker, "start": turn.start, "end": turn.end})
                     import pandas as pd
                     chunk_df = pd.DataFrame(data) if data else pd.DataFrame(columns=["speaker", "start", "end"])
@@ -3106,7 +3106,8 @@ if __name__ == "__main__":
         dia_pipeline = Pipeline.from_pretrained(
         "pyannote/speaker-diarization-community-1",
         #"pyannote/speaker-diarization",
-        token=cfg["huggingface_token"],
+        use_auth_token=cfg["huggingface_token"],
+
 
     )
         dia_pipeline.to(device)
@@ -3278,7 +3279,7 @@ if __name__ == "__main__":
         speaker_embedder = None
 
     # load model from Hugging Face model card directly (You need a Hugging Face token)
-    diar_model = SortformerEncLabelModel.from_pretrained("nvidia/diar_sortformer_4spk-v2.1")
+    diar_model = SortformerEncLabelModel.from_pretrained("nvidia/diar_streaming_sortformer_4spk-v2.1")
     diar_model = diar_model.to(device_2)
     diar_model.eval()
     logger.debug(f" * Sortformer loaded on {device_2}")
