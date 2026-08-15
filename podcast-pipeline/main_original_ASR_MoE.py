@@ -67,7 +67,10 @@ from panns_inference import AudioTagging
 import soundfile as sf
 
 from nemo.collections.asr.models import SortformerEncLabelModel
-from nemo.collections.speechlm2.models import SALM
+try:
+    from nemo.collections.speechlm2.models import SALM
+except ImportError:
+    SALM = None
 
 import json
 import re
