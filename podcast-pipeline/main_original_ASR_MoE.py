@@ -1770,7 +1770,7 @@ def asr_MoE(vad_segments, audio, segment_demucs_flags=None, enable_word_timestam
             }
             if lang == "vi":
                 seg_result["text_phowhisper"] = text_2
-                seg_result["text_chunkformer"] = text_3
+                seg_result["text_qwen3"] = text_3
             else:
                 seg_result["text_parakeet"] = text_2
                 seg_result["text_canary"] = text_3
