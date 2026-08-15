@@ -3082,7 +3082,7 @@ if __name__ == "__main__":
         dia_pipeline = Pipeline.from_pretrained(
         "pyannote/speaker-diarization-community-1",
         #"pyannote/speaker-diarization",
-        use_auth_token=cfg["huggingface_token"],
+        token=cfg["huggingface_token"],
 
     )
         dia_pipeline.to(device)
@@ -3091,7 +3091,7 @@ if __name__ == "__main__":
         dia_pipeline = Pipeline.from_pretrained(
             #"pyannote/speaker-diarization-community-1",
             "pyannote/speaker-diarization",
-            use_auth_token=cfg["huggingface_token"]
+            token=cfg["huggingface_token"]
         )
         dia_pipeline.to(device)
 
@@ -3213,7 +3213,7 @@ if __name__ == "__main__":
         speaker_embedder = Inference(
             "pyannote/embedding",
             device=device,
-            use_auth_token=cfg["huggingface_token"],
+            token=cfg["huggingface_token"],
             window="whole",
         )
         logger.debug(" * Speaker embedding model loaded for cross-chunk linking")
@@ -3231,7 +3231,7 @@ if __name__ == "__main__":
         logger.debug(" * Loading Pyannote Embedding Model")
         try:
             from pyannote.audio import Model as PyannoteModel
-            embedding_model = PyannoteModel.from_pretrained("pyannote/embedding", use_auth_token=cfg["huggingface_token"])
+            embedding_model = PyannoteModel.from_pretrained("pyannote/embedding", token=cfg["huggingface_token"])
             embedding_model = embedding_model.to(device)
             logger.debug(" * Pyannote Embedding Model loaded successfully")
         except Exception as e:
