@@ -33,8 +33,7 @@ def load_model():
     processor = AutoProcessor.from_pretrained(model_name)
     model = AutoModelForMultimodalLM.from_pretrained(
         model_name,
-        device_map={"": device},
-        torch_dtype=torch.float16,
+        device_map={"": device}
     )
     model.eval()
 
@@ -58,7 +57,7 @@ def transcribe(model, processor, device, audio_path, language="vi"):
         ]
 
         text = processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
-        inputs = processor(text=text, audios=audio_data, return_tensors="pt", sampling_rate=16000).to(device)
+        inputs = processor(text=text, audio=audio_data, return_tensors="pt", sampling_rate=16000).to(device)
 
         with torch.no_grad():
             gen_ids = model.generate(**inputs, max_new_tokens=256)
