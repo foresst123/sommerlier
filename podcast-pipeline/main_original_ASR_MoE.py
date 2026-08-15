@@ -3059,8 +3059,8 @@ if __name__ == "__main__":
         logger.info("Using GPU")
         n_gpus = torch.cuda.device_count()
         # GPU 0: Whisper (slot 1) + Diarization + VAD + PANNs
-        device_name = "cuda:0"
-        device = torch.device(device_name)
+        device_name = "cuda"  # CTranslate2/faster-whisper requires "cuda", not "cuda:0"
+        device = torch.device("cuda:0")
         # GPU 1: PhoWhisper (slot 2) + Qwen3-ASR (slot 3) + Sortformer
         if n_gpus >= 2:
             device_2 = torch.device("cuda:1")
