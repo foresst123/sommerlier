@@ -3057,12 +3057,22 @@ if __name__ == "__main__":
     # Load models
     if detect_gpu():
         logger.info("Using GPU")
-        device_name = "cuda"
+        n_gpus = torch.cuda.device_count()
+        # GPU 0: Whisper (slot 1) + Diarization + VAD + PANNs
+        device_name = "cuda:0"
         device = torch.device(device_name)
+        # GPU 1: PhoWhisper (slot 2) + Qwen3-ASR (slot 3) + Sortformer
+        if n_gpus >= 2:
+            device_2 = torch.device("cuda:1")
+            logger.info(f"Dual-GPU mode: GPU 0 (Whisper/Diar/VAD) + GPU 1 (PhoWhisper/Qwen3/Sortformer)")
+        else:
+            device_2 = device
+            logger.info("Single-GPU mode: all models on cuda:0")
     else:
         logger.info("Using CPU")
         device_name = "cpu"
         device = torch.device(device_name)
+        device_2 = device
         # whisperX expects compute type: int8
         logger.info("Overriding the compute type to int8")
         args.compute_type = "int8"
@@ -3168,11 +3178,11 @@ if __name__ == "__main__":
             from transformers import pipeline as hf_asr_pipeline
             from chunkformer import ChunkFormerModel
 
-            logger.debug(" * Loading PhoWhisper-large (VN, slot 2)")
+            logger.debug(f" * Loading PhoWhisper-large (VN, slot 2) on {device_2}")
             asr_model_2 = hf_asr_pipeline(
                 "automatic-speech-recognition",
                 model="vinai/PhoWhisper-large",
-                device=device,
+                device=device_2,
                 torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
             )
 
@@ -3180,7 +3190,7 @@ if __name__ == "__main__":
             logger.debug(" * Loading Qwen3-ASR (VN, slot 3)")
             canary_model = AutoModelForMultimodalLM.from_pretrained(
                 "Qwen/Qwen3-ASR-1.7B-hf", 
-                device_map="auto", 
+                device_map={"":  device_2}, 
                 torch_dtype=torch.float16
             )
             canary_model.processor = AutoProcessor.from_pretrained("Qwen/Qwen3-ASR-1.7B-hf")
@@ -3223,7 +3233,9 @@ if __name__ == "__main__":
 
     # load model from Hugging Face model card directly (You need a Hugging Face token)
     diar_model = SortformerEncLabelModel.from_pretrained("nvidia/diar_sortformer_4spk-v2.1")
+    diar_model = diar_model.to(device_2)
     diar_model.eval()
+    logger.debug(f" * Sortformer loaded on {device_2}")
 
     # Initialize Pyannote embedding model (only when sepreformer is enabled)
     embedding_model = None
