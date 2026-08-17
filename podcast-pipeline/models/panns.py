@@ -18,6 +18,10 @@ class PANNSDetector:
         if sample_rate != 32000:
             audio_array = librosa.resample(audio_array, orig_sr=sample_rate, target_sr=32000)
             
+        # PANNs (Cnn14) requires a minimum length to pass through all pooling layers (approx 1 second)
+        if len(audio_array) < 32000:
+            return False, 0.0
+            
         if len(audio_array.shape) > 1:
             audio_array = audio_array.mean(axis=1) if audio_array.shape[1] == 2 else audio_array
             
