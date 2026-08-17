@@ -35,7 +35,7 @@ class SRCorrNetSeparator:
             try:
                 from models.SR_CorrNet_L_WSJ0.model import Model
             except ModuleNotFoundError as e:
-                raise RuntimeError(f"Could not import SR-CorrNet! Make sure the source code is cloned exactly at: {srcorrnet_path}\n(You can run: !git clone https://github.com/leolincoln/SR_CorrNet_SS.git {srcorrnet_path})\nOriginal error: {e}")
+                raise RuntimeError(f"Could not import SR-CorrNet! Make sure the source code is cloned exactly at: {srcorrnet_path}\n(You can run: !git clone https://github.com/dmlguq456/SR_CorrNet_SS.git {srcorrnet_path})\nOriginal error: {e}")
             for module_name, module_obj in cleared_modules.items():
                 sys.modules[module_name] = module_obj
 
