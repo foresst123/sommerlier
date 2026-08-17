@@ -52,7 +52,11 @@ def main():
         offline_dir = os.path.join(base_dir, "offline_weights")
         os.environ["HF_HOME"] = os.path.join(offline_dir, "huggingface")
         os.environ["TORCH_HOME"] = os.path.join(offline_dir, "torch")
-        print(f"[*] Running in H100 Offline Mode. Using weights from: {offline_dir}")
+        os.environ["XDG_CACHE_HOME"] = offline_dir
+        os.environ["HOME"] = offline_dir  # For PANNS
+        os.environ["SRCORRNET_PATH"] = os.path.join(offline_dir, "srcorrnet")
+        os.environ["SOMMELIER_USE_BF16"] = "1"
+        print(f"[*] Running in H100 Offline Mode. Using weights from: {offline_dir} (bfloat16 enabled)")
         
     logger = Logger.get_logger()
     logger.info(f"Starting Sommelier Pipeline for Job: {args.job_id}")

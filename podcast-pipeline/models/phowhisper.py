@@ -5,8 +5,13 @@ class PhoWhisperASR:
     """Wrapper for PhoWhisper-large via transformers pipeline."""
     
     def __init__(self, device: torch.device, dtype=None):
+        import os
         if dtype is None:
-            dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+            use_bf16 = os.environ.get("SOMMELIER_USE_BF16") == "1"
+            if device.type == "cuda":
+                dtype = torch.bfloat16 if use_bf16 else torch.float16
+            else:
+                dtype = torch.float32
             
         self.pipeline = pipeline(
             "automatic-speech-recognition",

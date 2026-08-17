@@ -14,11 +14,15 @@ class WhisperASR:
         if isinstance(self.device, torch.device) and self.device.index is not None:
             device_index = self.device.index
             
+        use_bf16 = os.environ.get("SOMMELIER_USE_BF16") == "1"
+        compute_type = "bfloat16" if use_bf16 else "float16"
+        if self.device.type != "cuda": compute_type = "int8"
+            
         self.model = load_asr_model(
             whisper_arch=model_size,
             device="cuda" if self.device.type == "cuda" else "cpu",
             device_index=device_index,
-            compute_type="float16" if self.device.type == "cuda" else "int8",
+            compute_type=compute_type,
             language=None, # Will auto-detect or be overridden during transcribe
             vad_model=None,
             vad_options=None,
