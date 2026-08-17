@@ -48,8 +48,11 @@ class ASRService:
 
     def _run_whisper_batch(self, audios_16k: list, dummy_vads: list) -> list:
         results = []
-        for a, v in zip(audios_16k, dummy_vads):
+        total = len(audios_16k)
+        for i, (a, v) in enumerate(zip(audios_16k, dummy_vads)):
             results.append(self._run_whisper(a, v))
+            if self.logger and (i + 1) % max(1, total // 10) == 0:
+                self.logger.info(f"[Whisper] Tiến độ: {i + 1}/{total} đoạn.")
         return results
 
     def _run_phowhisper_batch(self, audios_16k: list) -> list:
@@ -58,15 +61,18 @@ class ASRService:
         try:
             # Reduced batch_size from 16 to 4 to prevent CUDA OOM on 15GB GPU 
             # since Qwen3 is also occupying ~10GB on the same GPU.
-            return self.phowhisper.transcribe_batch(audios_16k, batch_size=4)
+            return self.phowhisper.transcribe_batch(audios_16k, batch_size=4, logger=self.logger)
         except Exception as e:
             if self.logger: self.logger.error(f"PhoWhisper batch error: {e}")
             return [""] * len(audios_16k)
 
     def _run_qwen3_batch(self, audios_16k: list, chunk_indices: list, tmp_dir: str) -> list:
         results = []
-        for a, idx in zip(audios_16k, chunk_indices):
+        total = len(audios_16k)
+        for i, (a, idx) in enumerate(zip(audios_16k, chunk_indices)):
             results.append(self._run_qwen3(a, idx, tmp_dir))
+            if self.logger and (i + 1) % max(1, total // 10) == 0:
+                self.logger.info(f"[Qwen3-ASR] Tiến độ: {i + 1}/{total} đoạn.")
         return results
 
     def process(self, segments: List[EnhancedSegment], audio: AudioData, enable_word_timestamps: bool = False) -> List[TranscriptSegment]:
