@@ -16,6 +16,16 @@ class SRCorrNetSeparator:
         
         original_sys_path = sys.path.copy()
         try:
+            import subprocess
+            
+            # --- AUTO CLONE LOGIC ---
+            if not os.path.exists(srcorrnet_path):
+                print(f"[Auto-Setup] Không tìm thấy mã nguồn SR-CorrNet tại {srcorrnet_path}. Đang tiến hành Clone tự động...")
+                # Tạo thư mục cha nếu chưa có
+                os.makedirs(os.path.dirname(srcorrnet_path), exist_ok=True)
+                subprocess.run(["git", "clone", "https://github.com/dmlguq456/SR_CorrNet_SS.git", srcorrnet_path], check=True)
+                print("[Auto-Setup] Clone thành công!")
+                
             podcast_pipeline_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             paths_to_remove = [p for p in sys.path if podcast_pipeline_path in p]
             for path in paths_to_remove:
@@ -30,6 +40,19 @@ class SRCorrNetSeparator:
             for module_name in modules_to_clear:
                 cleared_modules[module_name] = sys.modules[module_name]
                 del sys.modules[module_name]
+
+            # --- AUTO INSTALL LOGIC ---
+            # Thử nạp loguru, nếu không có thì tự động cài đặt repo
+            try:
+                import loguru
+            except ImportError:
+                print(f"[Auto-Setup] Thiếu thư viện loguru (và có thể các phụ thuộc khác). Đang tự động cài đặt SR-CorrNet...")
+                try:
+                    subprocess.run(["uv", "pip", "install", "-e", srcorrnet_path, "--python", sys.executable], check=True)
+                except FileNotFoundError:
+                    # Fallback to pip if uv is not available
+                    subprocess.run([sys.executable, "-m", "pip", "install", "-e", srcorrnet_path], check=True)
+                print("[Auto-Setup] Cài đặt phụ thuộc thành công!")
 
             try:
                 # 1. Try Old Structure (leolincoln repo)
