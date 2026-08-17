@@ -135,7 +135,9 @@ def main():
             whisper=model_loader.get("whisper"),
             phowhisper=model_loader.get("phowhisper"),
             qwen3=model_loader.get("qwen3"),
-            logger=logger
+            logger=logger,
+            model_loader=model_loader,
+            qwen3_service=qwen3_service
         )
         caption_svc = CaptionService(
             captioner=model_loader.get("captioner"),

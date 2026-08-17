@@ -9,11 +9,13 @@ from algorithms.asr.rover import RoverEnsembler
 class ASRService:
     """Coordinates MoE ASR models and ROVER ensemble."""
     
-    def __init__(self, whisper, phowhisper, qwen3, logger=None):
+    def __init__(self, whisper, phowhisper, qwen3, logger=None, model_loader=None, qwen3_service=None):
         self.whisper = whisper
         self.phowhisper = phowhisper
         self.qwen3 = qwen3
         self.logger = logger
+        self.model_loader = model_loader
+        self.qwen3_service = qwen3_service
         
     def _run_whisper(self, audio_16k, dummy_vad, language="vi"):
         try:
@@ -51,6 +53,8 @@ class ASRService:
         for a, v in zip(audios_16k, dummy_vads):
             results.append(self._run_whisper(a, v))
             if callback: callback()
+        if getattr(self, "model_loader", None):
+            self.model_loader.unload("whisper")
         return results
 
     def _run_phowhisper_batch(self, audios_16k: list, callback=None) -> list:
@@ -59,7 +63,10 @@ class ASRService:
         try:
             # Reduced batch_size from 16 to 4 to prevent CUDA OOM on 15GB GPU 
             # since Qwen3 is also occupying ~10GB on the same GPU.
-            return self.phowhisper.transcribe_batch(audios_16k, batch_size=4, logger=self.logger, callback=callback)
+            res = self.phowhisper.transcribe_batch(audios_16k, batch_size=4, logger=self.logger, callback=callback)
+            if getattr(self, "model_loader", None):
+                self.model_loader.unload("phowhisper")
+            return res
         except Exception as e:
             if self.logger: self.logger.error(f"PhoWhisper batch error: {e}")
             return [""] * len(audios_16k)
@@ -69,6 +76,8 @@ class ASRService:
         for a, idx in zip(audios_16k, chunk_indices):
             results.append(self._run_qwen3(a, idx, tmp_dir))
             if callback: callback()
+        if getattr(self, "qwen3_service", None):
+            self.qwen3_service.stop()
         return results
 
     def process(self, segments: List[EnhancedSegment], audio: AudioData, enable_word_timestamps: bool = False) -> List[TranscriptSegment]:
