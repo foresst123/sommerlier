@@ -46,31 +46,29 @@ class ASRService:
             if self.logger: self.logger.error(f"Qwen3 error: {e}")
             return ""
 
-    def _run_whisper_batch(self, audios_16k: list, dummy_vads: list) -> list:
-        from tqdm import tqdm
+    def _run_whisper_batch(self, audios_16k: list, dummy_vads: list, pbar=None) -> list:
         results = []
-        total = len(audios_16k)
-        for a, v in tqdm(zip(audios_16k, dummy_vads), total=total, desc="[Whisper]", position=0, leave=True):
+        for a, v in zip(audios_16k, dummy_vads):
             results.append(self._run_whisper(a, v))
+            if pbar: pbar.update(1)
         return results
 
-    def _run_phowhisper_batch(self, audios_16k: list) -> list:
+    def _run_phowhisper_batch(self, audios_16k: list, pbar=None) -> list:
         if not self.phowhisper:
             return [""] * len(audios_16k)
         try:
             # Reduced batch_size from 16 to 4 to prevent CUDA OOM on 15GB GPU 
             # since Qwen3 is also occupying ~10GB on the same GPU.
-            return self.phowhisper.transcribe_batch(audios_16k, batch_size=4, logger=self.logger)
+            return self.phowhisper.transcribe_batch(audios_16k, batch_size=4, logger=self.logger, pbar=pbar)
         except Exception as e:
             if self.logger: self.logger.error(f"PhoWhisper batch error: {e}")
             return [""] * len(audios_16k)
 
-    def _run_qwen3_batch(self, audios_16k: list, chunk_indices: list, tmp_dir: str) -> list:
-        from tqdm import tqdm
+    def _run_qwen3_batch(self, audios_16k: list, chunk_indices: list, tmp_dir: str, pbar=None) -> list:
         results = []
-        total = len(audios_16k)
-        for a, idx in tqdm(zip(audios_16k, chunk_indices), total=total, desc="[Qwen3-ASR]", position=2, leave=True):
+        for a, idx in zip(audios_16k, chunk_indices):
             results.append(self._run_qwen3(a, idx, tmp_dir))
+            if pbar: pbar.update(1)
         return results
 
     def process(self, segments: List[EnhancedSegment], audio: AudioData, enable_word_timestamps: bool = False) -> List[TranscriptSegment]:
@@ -121,14 +119,18 @@ class ASRService:
             return []
 
         # 2. Run batched inference in parallel
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-            fw = executor.submit(self._run_whisper_batch, audios_16k, dummy_vads)
-            fp = executor.submit(self._run_phowhisper_batch, audios_16k)
-            fq = executor.submit(self._run_qwen3_batch, audios_16k, chunk_indices, tmp_dir)
-
-            whisper_results = fw.result()
-            pho_results = fp.result()
-            qwen_results = fq.result()
+        from tqdm import tqdm
+        total_asr_tasks = len(audios_16k) * 3
+        
+        with tqdm(total=total_asr_tasks, desc="[ASR MoE] Xử lý song song 3 mô hình") as pbar:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+                fw = executor.submit(self._run_whisper_batch, audios_16k, dummy_vads, pbar)
+                fp = executor.submit(self._run_phowhisper_batch, audios_16k, pbar)
+                fq = executor.submit(self._run_qwen3_batch, audios_16k, chunk_indices, tmp_dir, pbar)
+    
+                whisper_results = fw.result()
+                pho_results = fp.result()
+                qwen_results = fq.result()
 
         # 3. Zip and vote
         from tqdm import tqdm
