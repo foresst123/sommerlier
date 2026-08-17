@@ -72,10 +72,18 @@ class SRCorrNetSeparator:
                     
                     # Find model.pt in the new structure
                     model_files = glob.glob(os.path.join(srcorrnet_path, "**", "model.pt"), recursive=True)
+                    
+                    if not model_files:
+                        sommerlier_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                        offline_weights_dir = os.path.join(sommerlier_dir, "offline_weights")
+                        if os.path.exists(offline_weights_dir):
+                            model_files = glob.glob(os.path.join(offline_weights_dir, "**", "model.pt"), recursive=True)
+                            
                     if model_files:
                         checkpoint_path = model_files[0]
                     else:
-                        raise FileNotFoundError(f"Could not find model.pt anywhere in {srcorrnet_path}")
+                        # Fallback to HF Hub ID so SSInference downloads it automatically
+                        checkpoint_path = "shinuh/sr-corrnet-ss-1ch-wsj-fix-2spk-l-dm"
                         
                     self.model = SSInference.from_pretrained(
                         config=config_path,
