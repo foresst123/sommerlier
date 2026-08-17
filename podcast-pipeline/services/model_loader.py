@@ -87,7 +87,6 @@ class ModelLoader:
         
         if getattr(self.args, "ASRMoE", False) and getattr(self.args, "lang", "vi") == "vi":
             if self.logger: self.logger.info(f"Loading Whisper on {self.device_1}")
-
             self.models["whisper"] = WhisperASR(
                 model_size=getattr(self.args, "model_size", "large-v3-turbo"),
                 device=self.device_1
