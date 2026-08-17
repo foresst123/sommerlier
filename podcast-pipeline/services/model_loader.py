@@ -56,7 +56,15 @@ class ModelLoader:
         """Load SR-CorrNet if enabled."""
         if getattr(self.args, "srcorrnet", False):
             if self.logger: self.logger.info(f"Loading SR-CorrNet on {self.device_1}")
-            srcorrnet_path = os.environ.get("SRCORRNET_PATH", self.config.get("srcorrnet_path", ""))
+            
+            srcorrnet_path = os.environ.get("SRCORRNET_PATH")
+            if not srcorrnet_path:
+                srcorrnet_path = self.config.get("srcorrnet_path", "")
+                if not srcorrnet_path:
+                    # Fallback to the original path used in Kaggle notebook
+                    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    srcorrnet_path = os.path.join(base_dir, "SR_CorrNet_SS")
+                    
             self.models["separator"] = SRCorrNetSeparator(
                 srcorrnet_path=srcorrnet_path,
                 device=self.device_1
