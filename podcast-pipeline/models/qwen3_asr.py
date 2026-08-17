@@ -22,10 +22,10 @@ class Qwen3ASRClient:
                 return ""
                 
             resp = json.loads(resp_line.strip())
-            if resp.get("status") == "ok":
-                return resp.get("text", "")
+            if "text" in resp:
+                return resp["text"]
             else:
-                print(f"[Qwen3ASRClient] Worker error: {resp.get('message', resp_line)}", flush=True)
+                print(f"[Qwen3ASRClient] Worker error: {resp.get('error', resp_line)}", flush=True)
                 return ""
         except Exception as e:
             print(f"[Qwen3ASRClient] Exception in transcribe: {e}", flush=True)

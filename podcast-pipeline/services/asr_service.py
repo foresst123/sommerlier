@@ -56,7 +56,9 @@ class ASRService:
         if not self.phowhisper:
             return [""] * len(audios_16k)
         try:
-            return self.phowhisper.transcribe_batch(audios_16k, batch_size=16)
+            # Reduced batch_size from 16 to 4 to prevent CUDA OOM on 15GB GPU 
+            # since Qwen3 is also occupying ~10GB on the same GPU.
+            return self.phowhisper.transcribe_batch(audios_16k, batch_size=4)
         except Exception as e:
             if self.logger: self.logger.error(f"PhoWhisper batch error: {e}")
             return [""] * len(audios_16k)
