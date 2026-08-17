@@ -15,7 +15,8 @@ class CaptionService:
             
         if self.logger: self.logger.info(f"Adding Qwen3-Omni captions to {len(segments)} segments...")
         
-        for seg in segments:
+        from tqdm import tqdm
+        for seg in tqdm(segments, desc="[Qwen3-Omni] Captioning", leave=True):
             # We need the exact audio slice.
             if seg.index in segments_audio_data:
                 seg_audio = segments_audio_data[seg.index]

@@ -109,7 +109,8 @@ class DiarizationService:
                 chunk_frames.append(df)
         else:
             # Pyannote
-            for chunk in chunks:
+            from tqdm import tqdm
+            for chunk in tqdm(chunks, desc="[Pyannote] Phân rã", leave=True):
                 diar_out = self.diarizer.diarize(chunk.path)
                 data = []
                 # Mirror original code: community-1 model wraps result in object with
@@ -130,7 +131,6 @@ class DiarizationService:
                             })
                     except Exception as e:
                         if self.logger: self.logger.error(f"Error iterating diarization result: {e}")
-                if self.logger: self.logger.info(f"Chunk {chunk.offset:.1f}s: {len(data)} segments from diarization")
                 df = pd.DataFrame(data) if data else pd.DataFrame(columns=["start", "end", "speaker"])
                 chunk_frames.append(df)
 
