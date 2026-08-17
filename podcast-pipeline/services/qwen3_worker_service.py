@@ -37,10 +37,11 @@ class Qwen3WorkerService:
         ready = False
         for _ in range(60): # timeout 60s
             line = self.process.stdout.readline()
-            if "READY" in line:
+            if not line:
+                break
+            if "ready" in line.lower():
                 ready = True
                 break
-            time.sleep(1)
             
         if not ready:
             err = self.process.stderr.read()
