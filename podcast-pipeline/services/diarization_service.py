@@ -112,15 +112,28 @@ class DiarizationService:
             for chunk in chunks:
                 diar_out = self.diarizer.diarize(chunk.path)
                 data = []
-                if isinstance(diar_out, Annotation):
-                    for turn, _, speaker in diar_out.itertracks(yield_label=True):
-                        data.append({
-                            "start": turn.start + chunk.offset,
-                            "end": turn.end + chunk.offset,
-                            "speaker": speaker
-                        })
-                df = pd.DataFrame(data)
+                # Mirror original code: community-1 model wraps result in object with
+                # .speaker_diarization attribute. Must check this first before treating
+                # result as bare Annotation.
+                annotation = (
+                    diar_out.speaker_diarization
+                    if hasattr(diar_out, "speaker_diarization")
+                    else diar_out
+                )
+                if annotation is not None:
+                    try:
+                        for turn, _, speaker in annotation.itertracks(yield_label=True):
+                            data.append({
+                                "start": turn.start + chunk.offset,
+                                "end": turn.end + chunk.offset,
+                                "speaker": speaker
+                            })
+                    except Exception as e:
+                        if self.logger: self.logger.error(f"Error iterating diarization result: {e}")
+                if self.logger: self.logger.info(f"Chunk {chunk.offset:.1f}s: {len(data)} segments from diarization")
+                df = pd.DataFrame(data) if data else pd.DataFrame(columns=["start", "end", "speaker"])
                 chunk_frames.append(df)
+
                 
         # Cross-chunk fusion
         if len(chunks) > 1 and self.embedder:
