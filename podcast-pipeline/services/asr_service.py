@@ -46,29 +46,29 @@ class ASRService:
             if self.logger: self.logger.error(f"Qwen3 error: {e}")
             return ""
 
-    def _run_whisper_batch(self, audios_16k: list, dummy_vads: list, pbar=None) -> list:
+    def _run_whisper_batch(self, audios_16k: list, dummy_vads: list, callback=None) -> list:
         results = []
         for a, v in zip(audios_16k, dummy_vads):
             results.append(self._run_whisper(a, v))
-            if pbar: pbar.update(1)
+            if callback: callback()
         return results
 
-    def _run_phowhisper_batch(self, audios_16k: list, pbar=None) -> list:
+    def _run_phowhisper_batch(self, audios_16k: list, callback=None) -> list:
         if not self.phowhisper:
             return [""] * len(audios_16k)
         try:
             # Reduced batch_size from 16 to 4 to prevent CUDA OOM on 15GB GPU 
             # since Qwen3 is also occupying ~10GB on the same GPU.
-            return self.phowhisper.transcribe_batch(audios_16k, batch_size=4, logger=self.logger, pbar=pbar)
+            return self.phowhisper.transcribe_batch(audios_16k, batch_size=4, logger=self.logger, callback=callback)
         except Exception as e:
             if self.logger: self.logger.error(f"PhoWhisper batch error: {e}")
             return [""] * len(audios_16k)
 
-    def _run_qwen3_batch(self, audios_16k: list, chunk_indices: list, tmp_dir: str, pbar=None) -> list:
+    def _run_qwen3_batch(self, audios_16k: list, chunk_indices: list, tmp_dir: str, callback=None) -> list:
         results = []
         for a, idx in zip(audios_16k, chunk_indices):
             results.append(self._run_qwen3(a, idx, tmp_dir))
-            if pbar: pbar.update(1)
+            if callback: callback()
         return results
 
     def process(self, segments: List[EnhancedSegment], audio: AudioData, enable_word_timestamps: bool = False) -> List[TranscriptSegment]:
@@ -119,18 +119,42 @@ class ASRService:
             return []
 
         # 2. Run batched inference in parallel
-        from tqdm import tqdm
-        total_asr_tasks = len(audios_16k) * 3
+        import threading
+        import sys
+        import time
         
-        with tqdm(total=total_asr_tasks, desc="[ASR MoE] Xử lý song song 3 mô hình") as pbar:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-                fw = executor.submit(self._run_whisper_batch, audios_16k, dummy_vads, pbar)
-                fp = executor.submit(self._run_phowhisper_batch, audios_16k, pbar)
-                fq = executor.submit(self._run_qwen3_batch, audios_16k, chunk_indices, tmp_dir, pbar)
-    
-                whisper_results = fw.result()
-                pho_results = fp.result()
-                qwen_results = fq.result()
+        progress = {"whisper": 0, "pho": 0, "qwen": 0}
+        total = len(audios_16k)
+        stop_event = threading.Event()
+        
+        def monitor_progress():
+            while not stop_event.is_set():
+                w, p, q = progress["whisper"], progress["pho"], progress["qwen"]
+                sys.stdout.write(f"\r[ASR] Whisper: {w}/{total} | PhoWhisper: {p}/{total} | Qwen3: {q}/{total}")
+                sys.stdout.flush()
+                time.sleep(1.0)
+            w, p, q = progress["whisper"], progress["pho"], progress["qwen"]
+            sys.stdout.write(f"\r[ASR] Whisper: {w}/{total} | PhoWhisper: {p}/{total} | Qwen3: {q}/{total}\n")
+            sys.stdout.flush()
+            
+        monitor_thread = threading.Thread(target=monitor_progress)
+        monitor_thread.start()
+        
+        def cb_whisper(): progress["whisper"] += 1
+        def cb_pho(): progress["pho"] += 1
+        def cb_qwen(): progress["qwen"] += 1
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            fw = executor.submit(self._run_whisper_batch, audios_16k, dummy_vads, cb_whisper)
+            fp = executor.submit(self._run_phowhisper_batch, audios_16k, cb_pho)
+            fq = executor.submit(self._run_qwen3_batch, audios_16k, chunk_indices, tmp_dir, cb_qwen)
+
+            whisper_results = fw.result()
+            pho_results = fp.result()
+            qwen_results = fq.result()
+            
+        stop_event.set()
+        monitor_thread.join()
 
         # 3. Zip and vote
         from tqdm import tqdm
