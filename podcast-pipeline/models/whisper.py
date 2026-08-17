@@ -185,7 +185,7 @@ class VadFreeFasterWhisperPipeline(FasterWhisperPipeline):
         segments: List[SingleSegment] = []
         batch_size = batch_size or self._batch_size
         total_segments = len(vad_segments)
-        progress = tqdm.tqdm(total=total_segments, desc="Transcribing")
+        progress = tqdm.tqdm(total=total_segments, desc="Transcribing", disable=not print_progress)
         for idx, out in enumerate(
             self.__call__(
                 data(audio, vad_segments),
@@ -193,8 +193,7 @@ class VadFreeFasterWhisperPipeline(FasterWhisperPipeline):
                 num_workers=num_workers,
             )
         ):
-            if print_progress:
-                progress.update(1)
+            progress.update(1)
             text = out["text"]
             if batch_size in [0, 1, None]:
                 text = text[0]
@@ -206,6 +205,7 @@ class VadFreeFasterWhisperPipeline(FasterWhisperPipeline):
                     "speaker": vad_segments[idx].get("speaker", None),
                 }
             )
+        progress.close()
 
         # revert the tokenizer if multilingual inference is enabled
         if self.preset_language is None:
