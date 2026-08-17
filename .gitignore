@@ -40,3 +40,7 @@ processed_folders_log.txt
 .Trashes
 ehthumbs.db
 Thumbs.db
+offline_weights
+download_offline_weights.sh
+vi_audio_output
+test_dir

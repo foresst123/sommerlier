@@ -32,9 +32,10 @@ class PhoWhisperASR:
     
     def transcribe(self, audio_16k_array) -> str:
         """Run inference and return Vietnamese text."""
+        dummy_vad = [{"start": 0.0, "end": len(audio_16k_array) / 16000.0}]
         result = self.model.transcribe(
             audio_16k_array,
-            None,
+            dummy_vad,
             batch_size=1,
             language="vi",
             print_progress=False

@@ -1,6 +1,6 @@
 import os
 import argparse
-from huggingface_hub import snapshot_download
+from huggingface_hub import snapshot_download, hf_hub_download
 
 def download_models(token=None):
     # Set cache directories
