@@ -62,7 +62,9 @@ class ModelLoader:
                 srcorrnet_path = self.config.get("srcorrnet_path", "")
                 if not srcorrnet_path:
                     # Fallback to the original path used in Kaggle notebook
-                    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    # __file__ is podcast-pipeline/services/model_loader.py
+                    # 1: services, 2: podcast-pipeline, 3: root
+                    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
                     srcorrnet_path = os.path.join(base_dir, "SR_CorrNet_SS")
                     
             self.models["separator"] = SRCorrNetSeparator(
