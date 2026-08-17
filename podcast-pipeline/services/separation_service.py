@@ -63,8 +63,13 @@ class SeparationService:
             return [EnhancedSegment(**s.__dict__) for s in segments]
             
         enhanced_segments = [EnhancedSegment(**s.__dict__) for s in segments]
+        # Initialize enhanced_audio with the full original segment audio
         sr = audio.sample_rate
         waveform = audio.waveform
+        for enh_seg in enhanced_segments:
+            start_f = int(enh_seg.start * sr)
+            end_f = int(enh_seg.end * sr)
+            enh_seg.enhanced_audio = waveform[start_f:end_f].copy()
         
         # Build reference embeddings
         ref_embeddings = {}
@@ -94,19 +99,31 @@ class SeparationService:
             id_1 = self._identify_speaker(src1, sr, ref_embeddings, candidates)
             id_2 = seg1["speaker"] if id_1 == seg2["speaker"] else seg2["speaker"]
             
-            # Update enhanced_segments
+            # Splice separated audio back into enhanced_segments at the correct relative offset
             for enh_seg in enhanced_segments:
                 if enh_seg.index == seg1["index"] and enh_seg.speaker == id_1:
-                    enh_seg.enhanced_audio = src1
-                    enh_seg.srcorrnet = True
+                    rel_start = start_frame - int(enh_seg.start * sr)
+                    limit = min(len(src1), len(enh_seg.enhanced_audio[rel_start:]))
+                    if limit > 0:
+                        enh_seg.enhanced_audio[rel_start:rel_start+limit] = src1[:limit]
+                        enh_seg.srcorrnet = True
                 elif enh_seg.index == seg2["index"] and enh_seg.speaker == id_1:
-                    enh_seg.enhanced_audio = src1
-                    enh_seg.srcorrnet = True
+                    rel_start = start_frame - int(enh_seg.start * sr)
+                    limit = min(len(src1), len(enh_seg.enhanced_audio[rel_start:]))
+                    if limit > 0:
+                        enh_seg.enhanced_audio[rel_start:rel_start+limit] = src1[:limit]
+                        enh_seg.srcorrnet = True
                 elif enh_seg.index == seg1["index"] and enh_seg.speaker == id_2:
-                    enh_seg.enhanced_audio = src2
-                    enh_seg.srcorrnet = True
+                    rel_start = start_frame - int(enh_seg.start * sr)
+                    limit = min(len(src2), len(enh_seg.enhanced_audio[rel_start:]))
+                    if limit > 0:
+                        enh_seg.enhanced_audio[rel_start:rel_start+limit] = src2[:limit]
+                        enh_seg.srcorrnet = True
                 elif enh_seg.index == seg2["index"] and enh_seg.speaker == id_2:
-                    enh_seg.enhanced_audio = src2
-                    enh_seg.srcorrnet = True
+                    rel_start = start_frame - int(enh_seg.start * sr)
+                    limit = min(len(src2), len(enh_seg.enhanced_audio[rel_start:]))
+                    if limit > 0:
+                        enh_seg.enhanced_audio[rel_start:rel_start+limit] = src2[:limit]
+                        enh_seg.srcorrnet = True
                     
         return enhanced_segments

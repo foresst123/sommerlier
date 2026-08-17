@@ -75,10 +75,27 @@ class DiarizationService:
             paths = [c.path for c in chunks]
             batch_result = self.diarizer.diarize(paths)
             for idx, res in enumerate(batch_result):
-                if res and isinstance(res, dict) and "segments" in res:
-                    df = pd.DataFrame(res["segments"])
-                else:
-                    df = pd.DataFrame(columns=["start", "end", "speaker"])
+                # Sortformer returns a list of strings per chunk, e.g. ["0.0 1.5 speaker_0", ...]
+                data = []
+                if res:
+                    # NeMo can sometimes nest the result depending on batch config
+                    lists = [x for x in res if isinstance(x, (list, tuple))]
+                    if not lists:
+                        lists = [res] if isinstance(res, list) else [[res]]
+                    segs = [s for sub in lists for s in sub if isinstance(s, str)]
+                    
+                    for seg in segs:
+                        parts = seg.split()
+                        if len(parts) >= 3:
+                            start = float(parts[0])
+                            end = float(parts[1])
+                            # sp format is usually "speaker_X"
+                            sp = parts[2]
+                            num = int(sp.split('_')[1]) if '_' in sp else 0
+                            speaker = f"SPEAKER_{num:02d}"
+                            data.append({"start": start, "end": end, "speaker": speaker})
+                            
+                df = pd.DataFrame(data) if data else pd.DataFrame(columns=["start", "end", "speaker"])
                 df = apply_sortformer_segment_padding(
                     df, 
                     pad_onset=getattr(args, "sortformer_pad_onset", 0.0),
@@ -123,12 +140,18 @@ class DiarizationService:
             return DiarizationResult(segments=[], num_speakers=0, method="sortformer" if is_sortformer else "pyannote")
             
         combined_df = combined_df.sort_values("start").reset_index(drop=True)
-        raw_list = df_to_list(combined_df)
+        
+        # Apply VAD to split long continuous segments if VAD is available
+        if getattr(args, "vad", False) and self.vad_model:
+            vad_audio = {"waveform": audio.waveform, "sample_rate": audio.sample_rate}
+            raw_list = self.vad_model.vad(combined_df, vad_audio)
+        else:
+            raw_list = df_to_list(combined_df)
         
         # Build schemas
         final_segments = []
         for d in raw_list:
-            final_segments.append(Segment(index=d["index"], start=d["start"], end=d["end"], speaker=d["speaker"]))
+            final_segments.append(Segment(index=str(d.get("index", "00000")).zfill(5), start=d["start"], end=d["end"], speaker=d["speaker"]))
             
         num_spk = len(combined_df["speaker"].unique())
         

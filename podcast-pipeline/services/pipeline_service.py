@@ -84,8 +84,26 @@ class PipelineService:
             
         # 8. Export Results
         save_path = getattr(args, "save_path", "./output")
+        if save_path == "./output":
+            suffix = "dia3" if getattr(args, "dia3", False) else "ori"
+            do_vad = getattr(args, "vad", False)
+            merge_gap = getattr(args, "merge_gap", 2.0)
+            seg_th = getattr(args, "seg_th", 0.11)
+            min_cluster = getattr(args, "min_cluster_size", 11)
+            clust_th = getattr(args, "clust_th", 0.5)
+            llm = getattr(args, "LLM", "case_0")
+            
+            base_dir = os.path.dirname(audio_path)
+            audio_name = os.path.splitext(os.path.basename(audio_path))[0]
+            
+            save_path = os.path.join(
+                base_dir, "_final",
+                f"-srcorrnet-{getattr(args, 'srcorrnet', False)}-demucs-{getattr(args, 'panns', False)}-vad-{do_vad}-diaModel-{suffix}-initPrompt-True-merge_gap-{merge_gap}-seg_th-{seg_th}-cl_min-{min_cluster}-cl-th-{clust_th}-LLM-{llm}",
+                audio_name
+            )
+            
         os.makedirs(save_path, exist_ok=True)
-        base_name = audio_data.name.split('.')[0]
+        base_name = os.path.splitext(os.path.basename(audio_path))[0]
         
         self.export_svc.export_json(transcripts, os.path.join(save_path, f"{base_name}.json"))
         self.export_svc.export_srt(transcripts, os.path.join(save_path, f"{base_name}.srt"))

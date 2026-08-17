@@ -14,6 +14,10 @@ class PANNSDetector:
         
     def detect_music(self, audio_array, sample_rate: int = 32000, threshold: float = 0.5) -> tuple:
         """Detect if music is present in audio."""
+        import librosa
+        if sample_rate != 32000:
+            audio_array = librosa.resample(audio_array, orig_sr=sample_rate, target_sr=32000)
+            
         if len(audio_array.shape) > 1:
             audio_array = audio_array.mean(axis=1) if audio_array.shape[1] == 2 else audio_array
             

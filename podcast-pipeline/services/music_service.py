@@ -39,7 +39,17 @@ class MusicService:
             if has_music:
                 if self.logger: self.logger.info(f"Music detected (prob {prob:.2f}) for {seg.index}. Removing...")
                 if self.full_vocals is not None:
-                    seg.enhanced_audio = self.full_vocals[start_frame:end_frame]
+                    target_len = len(raw_audio)
+                    start = min(start_frame, len(self.full_vocals))
+                    end = min(end_frame, len(self.full_vocals))
+                    vocal_slice = self.full_vocals[start:end]
+                    
+                    if len(vocal_slice) < target_len:
+                        import numpy as np
+                        pad_width = target_len - len(vocal_slice)
+                        vocal_slice = np.pad(vocal_slice, (0, pad_width), mode='constant')
+                        
+                    seg.enhanced_audio = vocal_slice
                 else:
                     seg.enhanced_audio = self.demucs.separate_segment(raw_audio, sr)
                 seg.demucs = True

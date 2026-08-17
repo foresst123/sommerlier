@@ -32,6 +32,13 @@ def parse_args():
     parser.add_argument("--llm_refinement", action="store_true", help="Enable LLM label refinement")
     parser.add_argument("--sortformer_pad_onset", default=0.0, type=float, help="Sortformer start padding")
     parser.add_argument("--sortformer_pad_offset", default=0.0, type=float, help="Sortformer end padding")
+    parser.add_argument("--vad", action="store_true", help="Enable VAD")
+    parser.add_argument("--merge_gap", default=2.0, type=float, help="Gap threshold for merging segments")
+    parser.add_argument("--seg_th", default=0.11, type=float, help="Segmentation threshold")
+    parser.add_argument("--min_cluster_size", default=11, type=int, help="Minimum cluster size")
+    parser.add_argument("--clust_th", default=0.5, type=float, help="Clustering threshold")
+    parser.add_argument("--LLM", default="case_0", type=str, help="LLM refinement case")
+    parser.add_argument("--initprompt", action="store_true", help="Use initial prompt for LLM")
     return parser.parse_args()
 
 def main():
