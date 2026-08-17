@@ -55,8 +55,9 @@ class ModelLoader:
         """Load SR-CorrNet if enabled."""
         if getattr(self.args, "srcorrnet", False):
             if self.logger: self.logger.info(f"Loading SR-CorrNet on {self.device_1}")
+            srcorrnet_path = os.environ.get("SRCORRNET_PATH", self.config.get("srcorrnet_path", ""))
             self.models["separator"] = SRCorrNetSeparator(
-                srcorrnet_path=self.config.get("srcorrnet_path", ""),
+                srcorrnet_path=srcorrnet_path,
                 device=self.device_1
             )
             
