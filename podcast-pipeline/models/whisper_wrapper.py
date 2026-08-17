@@ -22,7 +22,6 @@ class WhisperASR:
             language=None, # Will auto-detect or be overridden during transcribe
             vad_model=None,
             vad_options=None,
-            download_root=os.path.join(".cache", "huggingface"),
             threads=4
         )
 

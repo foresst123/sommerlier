@@ -39,10 +39,21 @@ def parse_args():
     parser.add_argument("--clust_th", default=0.5, type=float, help="Clustering threshold")
     parser.add_argument("--LLM", default="case_0", type=str, help="LLM refinement case")
     parser.add_argument("--initprompt", action="store_true", help="Use initial prompt for LLM")
+    parser.add_argument("--env", default="kaggle", type=str, choices=["kaggle", "h100"], help="Environment: 'kaggle' (online) or 'h100' (offline VPC)")
     return parser.parse_args()
 
 def main():
     args = parse_args()
+    
+    if args.env == "h100":
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        offline_dir = os.path.join(base_dir, "offline_weights")
+        os.environ["HF_HOME"] = os.path.join(offline_dir, "huggingface")
+        os.environ["TORCH_HOME"] = os.path.join(offline_dir, "torch")
+        print(f"[*] Running in H100 Offline Mode. Using weights from: {offline_dir}")
+        
     logger = Logger.get_logger()
     logger.info(f"Starting Sommelier Pipeline for Job: {args.job_id}")
 
