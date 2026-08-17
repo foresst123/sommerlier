@@ -63,9 +63,13 @@ class SileroVAD:
 
             self.vad_model = vad_model
             (get_speech_timestamps, _, _, _, _) = utils
-            self.get_speech_timestamps = get_speech_timestamps
+            self._get_speech_timestamps = get_speech_timestamps
         except Exception as e:
             raise RuntimeError(f"Failed to load VAD model: {e}")
+
+    def get_speech_timestamps(self, audio_segment, **kwargs):
+        """Wrapper for PyTorch Hub get_speech_timestamps."""
+        return self._get_speech_timestamps(audio_segment, self.vad_model, **kwargs)
 
     def segment_speech(self, audio_segment, start_time, end_time, sampling_rate):
         """
@@ -87,7 +91,7 @@ class SileroVAD:
             raise ValueError("Invalid audio segment")
 
         speech_timestamps = self.get_speech_timestamps(
-            audio_segment, self.vad_model, sampling_rate=sampling_rate
+            audio_segment, sampling_rate=sampling_rate
         )
 
         adjusted_timestamps = [
