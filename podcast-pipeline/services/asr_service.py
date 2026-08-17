@@ -66,6 +66,8 @@ class ASRService:
                 if self.logger: self.logger.warning(f"Segment {seg.index} has empty audio, skipping")
                 continue
 
+            # All ASR models (Whisper, PhoWhisper, Qwen3) are trained on 16kHz audio.
+            # We resample the base 24kHz pipeline audio down to 16kHz just for ASR inference.
             if sr != 16000:
                 audio_16k = librosa.resample(raw_audio, orig_sr=sr, target_sr=16000)
             else:
