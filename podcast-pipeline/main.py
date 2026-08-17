@@ -39,6 +39,11 @@ def main():
     logger = Logger(logging_level="DEBUG").get_logger()
     logger.info(f"Starting Sommelier Pipeline for Job: {args.job_id}")
 
+    import torch
+    if torch.cuda.is_available() and torch.cuda.device_count() == 1:
+        logger.info(f"Only 1 GPU detected. Overriding gpu_2 ({args.gpu_2}) to use gpu_1 ({args.gpu_1}).")
+        args.gpu_2 = args.gpu_1
+
     with open(args.config, 'r') as f:
         config = json.load(f)
 
