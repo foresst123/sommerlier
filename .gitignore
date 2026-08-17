@@ -44,3 +44,5 @@ offline_weights
 download_offline_weights.sh
 vi_audio_output
 test_dir
+vi_audio_output(2)
+vi_audio_output copy
