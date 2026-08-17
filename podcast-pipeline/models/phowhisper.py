@@ -26,3 +26,25 @@ class PhoWhisperASR:
         elif isinstance(result, dict):
             return result.get("text", "")
         return str(result)
+
+    def transcribe_batch(self, audio_16k_arrays: list, batch_size: int = 16) -> list:
+        """Run batched inference and return list of Vietnamese texts."""
+        if not audio_16k_arrays:
+            return []
+            
+        inputs = [{"array": arr, "sampling_rate": 16000} for arr in audio_16k_arrays]
+        results = self.pipeline(
+            inputs,
+            generate_kwargs={"language": "vi"},
+            batch_size=batch_size
+        )
+        
+        texts = []
+        for res in results:
+            if isinstance(res, list) and len(res) > 0:
+                texts.append(res[0].get("text", ""))
+            elif isinstance(res, dict):
+                texts.append(res.get("text", ""))
+            else:
+                texts.append(str(res))
+        return texts

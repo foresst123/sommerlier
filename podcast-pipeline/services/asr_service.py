@@ -44,6 +44,27 @@ class ASRService:
             if self.logger: self.logger.error(f"Qwen3 error: {e}")
             return ""
 
+    def _run_whisper_batch(self, audios_16k: list, dummy_vads: list) -> list:
+        results = []
+        for a, v in zip(audios_16k, dummy_vads):
+            results.append(self._run_whisper(a, v))
+        return results
+
+    def _run_phowhisper_batch(self, audios_16k: list) -> list:
+        if not self.phowhisper:
+            return [""] * len(audios_16k)
+        try:
+            return self.phowhisper.transcribe_batch(audios_16k, batch_size=16)
+        except Exception as e:
+            if self.logger: self.logger.error(f"PhoWhisper batch error: {e}")
+            return [""] * len(audios_16k)
+
+    def _run_qwen3_batch(self, audios_16k: list, chunk_indices: list, tmp_dir: str) -> list:
+        results = []
+        for a, idx in zip(audios_16k, chunk_indices):
+            results.append(self._run_qwen3(a, idx, tmp_dir))
+        return results
+
     def process(self, segments: List[EnhancedSegment], audio: AudioData, enable_word_timestamps: bool = False) -> List[TranscriptSegment]:
         import tempfile
         tmp_dir = tempfile.mkdtemp(prefix="qwen3_asr_")
@@ -51,12 +72,18 @@ class ASRService:
         rover = RoverEnsembler()
 
         if self.logger:
-            self.logger.info(f"ASR processing {len(segments)} segments")
+            self.logger.info(f"ASR processing {len(segments)} segments using Batched Inference")
             self.logger.info("Note: ASR models require 16kHz audio. Resampling from base 24kHz to 16kHz internally.")
 
-        for seg in segments:
-            sr = audio.sample_rate
+        valid_segments = []
+        audios_16k = []
+        dummy_vads = []
+        chunk_indices = []
 
+        sr = audio.sample_rate
+
+        # 1. Prepare data
+        for seg in segments:
             if seg.enhanced_audio is not None:
                 raw_audio = seg.enhanced_audio
             else:
@@ -68,8 +95,6 @@ class ASRService:
                 if self.logger: self.logger.warning(f"Segment {seg.index} has empty audio, skipping")
                 continue
 
-            # All ASR models (Whisper, PhoWhisper, Qwen3) are trained on 16kHz audio.
-            # We resample the base 24kHz pipeline audio down to 16kHz just for ASR inference.
             if sr != 16000:
                 audio_16k = librosa.resample(raw_audio, orig_sr=sr, target_sr=16000)
             else:
@@ -79,17 +104,29 @@ class ASRService:
                 if self.logger: self.logger.warning(f"Segment {seg.index} too short ({len(audio_16k)} samples), skipping")
                 continue
 
-            dummy_vad = [{"start": 0.0, "end": len(audio_16k) / 16000}]
+            valid_segments.append(seg)
+            audios_16k.append(audio_16k)
+            dummy_vads.append([{"start": 0.0, "end": len(audio_16k) / 16000}])
+            chunk_indices.append(seg.index)
 
-            # Run 3 ASR models in parallel using a *separate* short-lived executor per segment
-            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as seg_executor:
-                fw = seg_executor.submit(self._run_whisper, audio_16k, dummy_vad)
-                fp = seg_executor.submit(self._run_phowhisper, audio_16k)
-                fq = seg_executor.submit(self._run_qwen3, audio_16k, seg.index, tmp_dir)
+        if not valid_segments:
+            return []
 
-                t_whisper, lang, words = fw.result()
-                t_pho = fp.result()
-                t_qwen = fq.result()
+        # 2. Run batched inference in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            fw = executor.submit(self._run_whisper_batch, audios_16k, dummy_vads)
+            fp = executor.submit(self._run_phowhisper_batch, audios_16k)
+            fq = executor.submit(self._run_qwen3_batch, audios_16k, chunk_indices, tmp_dir)
+
+            whisper_results = fw.result()
+            pho_results = fp.result()
+            qwen_results = fq.result()
+
+        # 3. Zip and vote
+        for i, seg in enumerate(valid_segments):
+            t_whisper, lang, words = whisper_results[i]
+            t_pho = pho_results[i]
+            t_qwen = qwen_results[i]
 
             final_text = rover.align_and_vote([t_whisper, t_qwen, t_pho])
 
