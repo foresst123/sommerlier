@@ -37,9 +37,12 @@ class PhoWhisperASR:
         if not audio_16k_arrays:
             return []
             
-        inputs = [{"array": arr, "sampling_rate": 16000} for arr in audio_16k_arrays]
+        def data_generator():
+            for arr in audio_16k_arrays:
+                yield {"array": arr, "sampling_rate": 16000}
+                
         results = self.pipeline(
-            inputs,
+            data_generator(),
             generate_kwargs={"language": "vi"},
             batch_size=batch_size
         )
