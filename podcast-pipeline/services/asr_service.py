@@ -50,7 +50,9 @@ class ASRService:
         results = []
         rover = RoverEnsembler()
 
-        if self.logger: self.logger.info(f"ASR processing {len(segments)} segments")
+        if self.logger:
+            self.logger.info(f"ASR processing {len(segments)} segments")
+            self.logger.info("Note: ASR models require 16kHz audio. Resampling from base 24kHz to 16kHz internally.")
 
         for seg in segments:
             sr = audio.sample_rate
