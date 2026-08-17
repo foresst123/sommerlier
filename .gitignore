@@ -1,3 +1,42 @@
 vi_audio_final/*
 sommerlier14-8*
 vi_audio_output(2) copy
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+qwen3_env/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# Project specific caches and outputs
+.cache/
+cache/
+podcast-pipeline/cache/
+podcast-pipeline/output/
+output/
+*_opus_cache/
+*.pkl
+checkpoint_*.pkl
+processed_folders_log.txt
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
