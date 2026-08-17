@@ -4,7 +4,6 @@ from typing import Dict, Any
 from models.whisper_wrapper import WhisperASR
 from models.phowhisper import PhoWhisperASR
 from models.silero_vad import SileroVAD
-from models.dnsmos import DNSMOS
 from models.pyannote import PyannoteDiarizer
 from models.pyannote_embedding import PyannoteEmbedder
 from models.sortformer import SortformerDiarizer
@@ -31,7 +30,6 @@ class ModelLoader:
         """Load essential models (VAD, DNSMOS)."""
         if self.logger: self.logger.info(f"Loading Base models on {self.device_1}")
         self.models["vad"] = SileroVAD(device=self.device_1)
-        self.models["dnsmos"] = DNSMOS(device=self.device_1)
         
     def load_diarization_models(self):
         """Load Pyannote/Sortformer based on args."""
