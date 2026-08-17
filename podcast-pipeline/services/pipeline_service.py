@@ -41,6 +41,7 @@ class PipelineService:
         else:
             chunks, _ = self.diarization_svc.prepare_chunks(audio_data)
             diarization_result = self.diarization_svc.run_diarization(chunks, audio_data, args)
+            if self.logger: self.logger.info(f"[DEBUG] Diarization returned {len(diarization_result.segments)} segments via {diarization_result.method}")
             checkpoint.save("diarization", diarization_result)
             
         # 3. Speech Separation (Overlap)
@@ -49,6 +50,7 @@ class PipelineService:
             enhanced_segments = checkpoint.load("separation")
         else:
             enhanced_segments = self.separation_svc.process_overlaps(diarization_result.segments, audio_data)
+            if self.logger: self.logger.info(f"[DEBUG] After Separation: {len(enhanced_segments)} segments")
             checkpoint.save("separation", enhanced_segments)
             
         # 4. Background Music Removal
@@ -57,6 +59,7 @@ class PipelineService:
             enhanced_segments = checkpoint.load("music_removal")
         else:
             enhanced_segments = self.music_svc.process_segments(enhanced_segments, audio_data)
+            if self.logger: self.logger.info(f"[DEBUG] After Music Removal: {len(enhanced_segments)} segments")
             checkpoint.save("music_removal", enhanced_segments)
             
         # 5. ASR Ensemble (MoE)
@@ -64,7 +67,9 @@ class PipelineService:
             if self.logger: self.logger.info("Loading ASR from checkpoint")
             transcripts = checkpoint.load("asr")
         else:
+            if self.logger: self.logger.info(f"[DEBUG] Sending {len(enhanced_segments)} segments to ASR")
             transcripts = self.asr_svc.process(enhanced_segments, audio_data)
+            if self.logger: self.logger.info(f"[DEBUG] ASR returned {len(transcripts)} transcripts")
             checkpoint.save("asr", transcripts)
             
         # 6. Qwen3-Omni Captioning
