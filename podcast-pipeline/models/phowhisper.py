@@ -1,60 +1,56 @@
+import os
 import torch
-from transformers import pipeline
+from models.whisper import load_asr_model
 
 class PhoWhisperASR:
-    """Wrapper for PhoWhisper-large via transformers pipeline."""
+    """Wrapper for PhoWhisper-large using faster-whisper (CTranslate2)."""
     
     def __init__(self, device: torch.device, dtype=None):
-        import os
-        if dtype is None:
-            use_bf16 = os.environ.get("SOMMELIER_USE_BF16") == "1"
-            if device.type == "cuda":
-                dtype = torch.bfloat16 if use_bf16 else torch.float16
-            else:
-                dtype = torch.float32
+        if device is None:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = device
             
-        self.pipeline = pipeline(
-            "automatic-speech-recognition",
-            model="vinai/PhoWhisper-large",
-            device=device,
-            torch_dtype=dtype,
+        device_index = 0
+        if isinstance(self.device, torch.device) and self.device.index is not None:
+            device_index = self.device.index
+            
+        use_bf16 = os.environ.get("SOMMELIER_USE_BF16") == "1"
+        compute_type = "bfloat16" if use_bf16 else "float16"
+        if self.device.type != "cuda": compute_type = "int8"
+            
+        self.model = load_asr_model(
+            whisper_arch="kiendt/PhoWhisper-large-ct2",
+            device="cuda" if self.device.type == "cuda" else "cpu",
+            device_index=device_index,
+            compute_type=compute_type,
+            language="vi",
+            vad_model=None,
+            vad_options=None,
+            threads=4
         )
     
     def transcribe(self, audio_16k_array) -> str:
         """Run inference and return Vietnamese text."""
-        result = self.pipeline(
-            {"array": audio_16k_array, "sampling_rate": 16000},
-            generate_kwargs={"language": "vi"}
+        result = self.model.transcribe(
+            audio_16k_array,
+            None,
+            batch_size=1,
+            language="vi",
+            print_progress=False
         )
-        if isinstance(result, list) and len(result) > 0:
-            return result[0].get("text", "")
-        elif isinstance(result, dict):
-            return result.get("text", "")
-        return str(result)
+        if result and "segments" in result:
+            return " ".join([s["text"] for s in result["segments"]]).strip()
+        return ""
 
     def transcribe_batch(self, audio_16k_arrays: list, batch_size: int = 16, logger=None, callback=None) -> list:
         """Run batched inference and return list of Vietnamese texts."""
         if not audio_16k_arrays:
             return []
             
-        def data_generator():
-            for arr in audio_16k_arrays:
-                yield {"array": arr, "sampling_rate": 16000}
-                
-        results = self.pipeline(
-            data_generator(),
-            generate_kwargs={"language": "vi"},
-            batch_size=batch_size
-        )
-        
         texts = []
-        for i, res in enumerate(results):
+        for arr in audio_16k_arrays:
+            texts.append(self.transcribe(arr))
             if callback: callback()
-            if isinstance(res, list) and len(res) > 0:
-                texts.append(res[0].get("text", ""))
-            elif isinstance(res, dict):
-                texts.append(res.get("text", ""))
-            else:
-                texts.append(str(res))
                 
         return texts
