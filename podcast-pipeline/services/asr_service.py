@@ -47,12 +47,11 @@ class ASRService:
             return ""
 
     def _run_whisper_batch(self, audios_16k: list, dummy_vads: list) -> list:
+        from tqdm import tqdm
         results = []
         total = len(audios_16k)
-        for i, (a, v) in enumerate(zip(audios_16k, dummy_vads)):
+        for a, v in tqdm(zip(audios_16k, dummy_vads), total=total, desc="[Whisper]", position=0, leave=True):
             results.append(self._run_whisper(a, v))
-            if self.logger and (i + 1) % max(1, total // 10) == 0:
-                self.logger.info(f"[Whisper] Tiến độ: {i + 1}/{total} đoạn.")
         return results
 
     def _run_phowhisper_batch(self, audios_16k: list) -> list:
@@ -67,12 +66,11 @@ class ASRService:
             return [""] * len(audios_16k)
 
     def _run_qwen3_batch(self, audios_16k: list, chunk_indices: list, tmp_dir: str) -> list:
+        from tqdm import tqdm
         results = []
         total = len(audios_16k)
-        for i, (a, idx) in enumerate(zip(audios_16k, chunk_indices)):
+        for a, idx in tqdm(zip(audios_16k, chunk_indices), total=total, desc="[Qwen3-ASR]", position=2, leave=True):
             results.append(self._run_qwen3(a, idx, tmp_dir))
-            if self.logger and (i + 1) % max(1, total // 10) == 0:
-                self.logger.info(f"[Qwen3-ASR] Tiến độ: {i + 1}/{total} đoạn.")
         return results
 
     def process(self, segments: List[EnhancedSegment], audio: AudioData, enable_word_timestamps: bool = False) -> List[TranscriptSegment]:

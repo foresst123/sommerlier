@@ -46,15 +46,13 @@ class PhoWhisperASR:
         
         texts = []
         total = len(audio_16k_arrays)
-        for i, res in enumerate(results):
+        from tqdm import tqdm
+        for i, res in enumerate(tqdm(results, total=total, desc="[PhoWhisper]", position=1, leave=True)):
             if isinstance(res, list) and len(res) > 0:
                 texts.append(res[0].get("text", ""))
             elif isinstance(res, dict):
                 texts.append(res.get("text", ""))
             else:
                 texts.append(str(res))
-                
-            if logger and (i + 1) % max(1, total // 10) == 0:
-                logger.info(f"[PhoWhisper] Tiến độ: {i + 1}/{total} đoạn.")
                 
         return texts
