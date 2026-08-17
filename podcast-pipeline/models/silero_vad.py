@@ -68,7 +68,29 @@ class SileroVAD:
             raise RuntimeError(f"Failed to load VAD model: {e}")
 
     def get_speech_timestamps(self, audio_segment, **kwargs):
-        """Wrapper for PyTorch Hub get_speech_timestamps."""
+        """Wrapper for PyTorch Hub get_speech_timestamps with auto-resampling."""
+        sr = kwargs.get('sampling_rate', 16000)
+        
+        # Silero VAD strictly requires 16000 (or 8000)
+        if sr not in [8000, 16000]:
+            if isinstance(audio_segment, torch.Tensor):
+                audio_np = audio_segment.cpu().numpy()
+            else:
+                audio_np = np.array(audio_segment)
+                
+            audio_16k = librosa.resample(audio_np, orig_sr=sr, target_sr=16000)
+            audio_tensor = torch.from_numpy(audio_16k).to(torch.float32)
+            
+            kwargs['sampling_rate'] = 16000
+            timestamps = self._get_speech_timestamps(audio_tensor, self.vad_model, **kwargs)
+            
+            # Scale timestamps back to original sample rate frame indices
+            scale = sr / 16000.0
+            for t in timestamps:
+                t['start'] = int(t['start'] * scale)
+                t['end'] = int(t['end'] * scale)
+            return timestamps
+            
         return self._get_speech_timestamps(audio_segment, self.vad_model, **kwargs)
 
     def segment_speech(self, audio_segment, start_time, end_time, sampling_rate):
