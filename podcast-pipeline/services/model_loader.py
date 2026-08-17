@@ -1,7 +1,7 @@
 import torch
 from typing import Dict, Any
 
-from models.whisper import WhisperASR
+from models.whisper_wrapper import WhisperASR
 from models.phowhisper import PhoWhisperASR
 from models.silero_vad import SileroVAD
 from models.dnsmos import DNSMOS
