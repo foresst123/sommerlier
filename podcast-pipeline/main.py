@@ -55,8 +55,15 @@ def main():
     if env_profile.get("offline_mode", False):
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        offline_dir = os.path.join(base_dir, "offline_weights")
+        
+        # Cho phép cấu hình đường dẫn offline trong config, mặc định là "./offline_weights"
+        custom_offline_dir = env_profile.get("offline_weights_dir", "./offline_weights")
+        if custom_offline_dir.startswith("./"):
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            offline_dir = os.path.join(base_dir, custom_offline_dir.replace("./", "", 1))
+        else:
+            offline_dir = custom_offline_dir
+            
         os.environ["HF_HOME"] = os.path.join(offline_dir, "huggingface")
         os.environ["TORCH_HOME"] = os.path.join(offline_dir, "torch")
         os.environ["XDG_CACHE_HOME"] = offline_dir
@@ -76,8 +83,7 @@ def main():
         logger.info(f"Only 1 GPU detected. Overriding gpu_2 ({args.gpu_2}) to use gpu_1 ({args.gpu_1}).")
         args.gpu_2 = args.gpu_1
 
-    with open(args.config, 'r') as f:
-        config = json.load(f)
+
 
     # 1. Start Qwen3 Worker (if MoE enabled)
     qwen3_service = None

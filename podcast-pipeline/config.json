@@ -28,7 +28,8 @@
         },
         "h100": {
             "offline_mode": true,
-            "use_bf16": true
+            "use_bf16": true,
+            "offline_weights_dir": "./offline_weights"
         }
     }
 }
