@@ -131,7 +131,8 @@ class ASRService:
             qwen_results = fq.result()
 
         # 3. Zip and vote
-        for i, seg in enumerate(valid_segments):
+        from tqdm import tqdm
+        for i, seg in enumerate(tqdm(valid_segments, desc="[ROVER] Bầu chọn", leave=True)):
             t_whisper, lang, words = whisper_results[i]
             t_pho = pho_results[i]
             t_qwen = qwen_results[i]
