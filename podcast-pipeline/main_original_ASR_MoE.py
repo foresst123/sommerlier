@@ -1075,25 +1075,25 @@ def detect_overlapping_segments(segment_list, overlap_threshold=0.2):
     return overlapping_pairs
 
 
-class SepReformerSeparator:
+class SRCorrNetSeparator:
     """
-    Class to load the SepReformer model once and perform multiple inferences.
+    Class to load the SR-CorrNet model once and perform multiple inferences.
     """
-    def __init__(self, sepreformer_path, device):
+    def __init__(self, srcorrnet_path, device):
         """
-        Initialize and load the SepReformer model.
+        Initialize and load the SR-CorrNet model.
 
         Args:
-            sepreformer_path: Path to SepReformer model directory
+            srcorrnet_path: Path to SR-CorrNet model directory
             device: torch device (cuda/cpu)
         """
         import sys
         import yaml
 
-        self.sepreformer_path = sepreformer_path
+        self.srcorrnet_path = srcorrnet_path
         self.device = device
 
-        print(f"[SepReformer] Initializing on device: {self.device}")
+        print(f"[SR-CorrNet] Initializing on device: {self.device}")
 
         # Store original sys.path to restore later
         original_sys_path = sys.path.copy()
@@ -1109,9 +1109,9 @@ class SepReformerSeparator:
             for path in paths_to_remove:
                 sys.path.remove(path)
 
-            # Add SepReformer to path
-            if sepreformer_path not in sys.path:
-                sys.path.insert(0, sepreformer_path)
+            # Add SR-CorrNet to path
+            if srcorrnet_path not in sys.path:
+                sys.path.insert(0, srcorrnet_path)
 
             # Clear conflicting modules
             modules_to_clear = [key for key in sys.modules.keys()
@@ -1121,27 +1121,27 @@ class SepReformerSeparator:
                 cleared_modules[module_name] = sys.modules[module_name]
                 del sys.modules[module_name]
 
-            # Import SepReformer's model
-            from models.SepReformer_Base_WSJ0.model import Model
+            # Import SR-CorrNet's model
+            from models.SR_CorrNet_L_WSJ0.model import Model
 
             # Restore the original modules
             for module_name, module_obj in cleared_modules.items():
                 sys.modules[module_name] = module_obj
 
-            # Load SepReformer config
-            config_path = os.path.join(sepreformer_path, "models/SepReformer_Base_WSJ0/configs.yaml")
+            # Load SR-CorrNet config
+            config_path = os.path.join(srcorrnet_path, "models/SR_CorrNet_L_WSJ0/configs.yaml")
             with open(config_path, 'r') as f:
                 yaml_dict = yaml.safe_load(f)
             self.config = yaml_dict["config"]
 
             # Load model
-            print("[SepReformer] Loading model...")
+            print("[SR-CorrNet] Loading model...")
             self.model = Model(**self.config["model"])
 
             # Load checkpoint
-            checkpoint_dir = os.path.join(sepreformer_path, "models/SepReformer_Base_WSJ0/log/pretrain_weights")
+            checkpoint_dir = os.path.join(srcorrnet_path, "models/SR_CorrNet_L_WSJ0/log/pretrain_weights")
             if not os.path.exists(checkpoint_dir) or not os.listdir(checkpoint_dir):
-                checkpoint_dir = os.path.join(sepreformer_path, "models/SepReformer_Base_WSJ0/log/scratch_weights")
+                checkpoint_dir = os.path.join(srcorrnet_path, "models/SR_CorrNet_L_WSJ0/log/scratch_weights")
 
             checkpoint_files = [f for f in os.listdir(checkpoint_dir) if f.endswith(('.pt', '.pth'))]
             if not checkpoint_files:
@@ -1153,7 +1153,7 @@ class SepReformerSeparator:
             self.model = self.model.to(device)
             self.model.eval()
 
-            print("[SepReformer] Model initialization complete!")
+            print("[SR-CorrNet] Model initialization complete!")
 
         finally:
             # Restore original sys.path
@@ -1206,7 +1206,7 @@ class SepReformerSeparator:
             return src1, src2
 
         except Exception as e:
-            logger.error(f"SepReformer separation failed: {e}")
+            logger.error(f"SR-CorrNet separation failed: {e}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
             return audio_segment, audio_segment
@@ -1283,25 +1283,25 @@ def identify_speaker_with_embedding(audio_segment, sample_rate, reference_embedd
 def process_overlapping_segments_with_separation(segment_list, audio, overlap_threshold=1.0,
                                                  separator=None, embedding_model=None):
     """
-    Process overlapping segments by separating them with SepReformer.
+    Process overlapping segments by separating them with SR-CorrNet.
     [Updated] Matches the volume of separated audio to the original overlap audio to prevent volume jumps.
 
     Args:
         segment_list: List of segments
         audio: Audio dictionary
         overlap_threshold: Overlap threshold
-        separator: Pre-loaded SepReformerSeparator object
+        separator: Pre-loaded SRCorrNetSeparator object
         embedding_model: Pre-loaded pyannote embedding model
     """
     if separator is None:
-        logger.warning("SepReformer separator not provided, skipping separation")
+        logger.warning("SR-CorrNet separator not provided, skipping separation")
         return audio, segment_list
 
     if embedding_model is None:
         logger.warning("Embedding model not provided, skipping separation")
         return audio, segment_list
 
-    logger.info(f"Processing overlapping segments with SepReformer (threshold: {overlap_threshold}s)")
+    logger.info(f"Processing overlapping segments with SR-CorrNet (threshold: {overlap_threshold}s)")
 
     # -------------------------------------------------------------------------
     # [Added] Volume matching helper function
@@ -1340,8 +1340,8 @@ def process_overlapping_segments_with_separation(segment_list, audio, overlap_th
             end_frame = int(seg['end'] * sample_rate)
             seg['enhanced_audio'] = waveform[start_frame:end_frame].copy()
         
-        if 'sepreformer' not in seg:
-            seg['sepreformer'] = False
+        if 'srcorrnet' not in seg:
+            seg['srcorrnet'] = False
 
     # Detect overlapping segments
     overlapping_pairs = detect_overlapping_segments(segment_list, overlap_threshold)
@@ -1402,7 +1402,7 @@ def process_overlapping_segments_with_separation(segment_list, audio, overlap_th
         end_frame = int(overlap_end * sample_rate)
         overlap_audio = waveform[start_frame:end_frame]
 
-        # Separate with SepReformer
+        # Separate with SR-CorrNet
         separated_src1, separated_src2 = separator.separate(
             overlap_audio, sample_rate
         )
@@ -1424,7 +1424,7 @@ def process_overlapping_segments_with_separation(segment_list, audio, overlap_th
         # ---------------------------------------------------------------------
         # Adjust separated audio to match the RMS energy of the original overlap region (mixed sound)
         # (Note: the original has 2 speakers mixed so its energy is naturally higher than a single separated source,
-        #  but this reference is much more natural than letting SepReformer output spike to 0dB.)
+        #  but this reference is much more natural than letting SR-CorrNet output spike to 0dB.)
         
         logger.debug(f"   Adjusting volume for overlap {pair_idx+1}...")
         seg1_part = match_target_amplitude(seg1_part, overlap_audio)
@@ -1438,7 +1438,7 @@ def process_overlapping_segments_with_separation(segment_list, audio, overlap_th
         limit_len_1 = min(len(seg1_part), len(seg1['enhanced_audio'][rel_start_1:]))
         if limit_len_1 > 0:
             seg1['enhanced_audio'][rel_start_1 : rel_start_1 + limit_len_1] = seg1_part[:limit_len_1]
-            seg1['sepreformer'] = True
+            seg1['srcorrnet'] = True
             logger.info(f"  ✓ Updated Seg1 enhanced_audio with volume-adjusted separated audio") 
 
         # 2) Update Seg2
@@ -1448,7 +1448,7 @@ def process_overlapping_segments_with_separation(segment_list, audio, overlap_th
         limit_len_2 = min(len(seg2_part), len(seg2['enhanced_audio'][rel_start_2:]))
         if limit_len_2 > 0:
             seg2['enhanced_audio'][rel_start_2 : rel_start_2 + limit_len_2] = seg2_part[:limit_len_2]
-            seg2['sepreformer'] = True
+            seg2['srcorrnet'] = True
             logger.info(f"  ✓ Updated Seg2 enhanced_audio with volume-adjusted separated audio")
 
     return audio, segment_list
@@ -1496,7 +1496,7 @@ def asr(vad_segments, audio):
         is_enhanced = False
 
         if "enhanced_audio" in segment:
-            # Prefer using audio separated by SepReformer if available
+            # Prefer using audio separated by SR-CorrNet if available
             raw_audio = segment["enhanced_audio"]
             is_enhanced = True
         else:
@@ -1549,7 +1549,7 @@ def asr(vad_segments, audio):
                         # 3. Restore metadata
                         res_seg["speaker"] = speaker
                         res_seg["language"] = transcribe_result.get("language", language)
-                        res_seg["sepreformer"] = segment.get("sepreformer", False)
+                        res_seg["srcorrnet"] = segment.get("srcorrnet", False)
                         res_seg["is_separated"] = is_enhanced
                         
                         if is_enhanced:
@@ -1790,7 +1790,7 @@ def asr_MoE(vad_segments, audio, segment_demucs_flags=None, enable_word_timestam
                 "language": detected_language,
                 "demucs": segment_demucs_flags[idx] if idx < len(segment_demucs_flags) else False,
                 "is_separated": is_enhanced,
-                "sepreformer": segment.get("sepreformer", False)
+                "srcorrnet": segment.get("srcorrnet", False)
             }
             if lang == "vi":
                 seg_result["text_phowhisper"] = text_2
@@ -1832,7 +1832,7 @@ def add_qwen3omni_caption(filtered_list, audio, save_path):
     for idx, segment in enumerate(filtered_list):
         try:
             # Extract segment audio
-            # [CRITICAL] Prefer audio processed by SepReformer if available (to match the saved file)
+            # [CRITICAL] Prefer audio processed by SR-CorrNet if available (to match the saved file)
             if "enhanced_audio" in segment:
                 segment_audio = segment["enhanced_audio"]
                 sample_rate = audio["sample_rate"]
@@ -2516,7 +2516,7 @@ def ko_process_json(input_list: str) -> None:
 def export_segments_with_enhanced_audio(audio_info, segment_list, save_dir, audio_name):
     """
     Export segments to MP3 files.
-    If 'enhanced_audio' exists in the segment (processed by SepReformer), use it.
+    If 'enhanced_audio' exists in the segment (processed by SR-CorrNet), use it.
     Otherwise, slice from the original audio.
     """
     import os
@@ -2549,7 +2549,7 @@ def export_segments_with_enhanced_audio(audio_info, segment_list, save_dir, audi
         filename = f"{idx_str}_{spk}.mp3"
         file_path = os.path.join(segments_dir, filename)
 
-        # 1. Check for SepReformer-processed 'enhanced_audio'
+        # 1. Check for SR-CorrNet-processed 'enhanced_audio'
         if seg.get("is_separated", False) and "enhanced_audio" in seg:
             # Convert Numpy array -> Pydub AudioSegment
             enhanced_waveform = seg["enhanced_audio"]
@@ -2565,7 +2565,7 @@ def export_segments_with_enhanced_audio(audio_info, segment_list, save_dir, audi
                 sample_width=2,
                 channels=1
             )
-            # logger.debug(f"Segment {idx_str}: Saved using SepReformer output.")
+            # logger.debug(f"Segment {idx_str}: Saved using SR-CorrNet output.")
 
         else:
             # 3. If neither applied, extract from original
@@ -2580,9 +2580,9 @@ def main_process(audio_path, save_path=None, audio_name=None,
                  do_vad = False,
                  LLM = "",
                  use_demucs = False,
-                 use_sepreformer = False,
+                 use_srcorrnet = False,
                  overlap_threshold = 1.0,
-                 sepreformer_separator = None,
+                 srcorrnet_separator = None,
                  embedding_model = None,
                  panns_model = None,
                  speaker_embedder = None,
@@ -2604,7 +2604,7 @@ def main_process(audio_path, save_path=None, audio_name=None,
         audio_name = audio_name or os.path.splitext(os.path.basename(audio_path))[0]
         suffix = "dia3" if args.dia3 else "ori"
         save_path = save_path or os.path.join(
-            os.path.dirname(audio_path), "_final", f"-sepreformer-{args.sepreformer}" +f"-demucs-{args.demucs}"  + f"-vad-{do_vad}"+ f"-diaModel-{suffix}"
+            os.path.dirname(audio_path), "_final", f"-srcorrnet-{args.srcorrnet}" +f"-demucs-{args.demucs}"  + f"-vad-{do_vad}"+ f"-diaModel-{suffix}"
             # initial prompt off or on
             + f"-initPrompt-{args.initprompt}"
             + f"-merge_gap-{args.merge_gap}" +f"-seg_th-{args.seg_th}"+ f"-cl_min-{args.min_cluster_size}" +f"-cl-th-{args.clust_th}"+ f"-LLM-{LLM}", audio_name
@@ -2685,33 +2685,33 @@ def main_process(audio_path, save_path=None, audio_name=None,
 
         # [Fixed] Execute Step 3 before Step 2.5!
         # Step 3: Background Music Detection and Removal
-        # Clean the full audio first before running SepReformer.
+        # Clean the full audio first before running SR-CorrNet.
         logger.info("Step 3: Background Music Detection and Removal")
         # Add padding to cover ASR timestamp error margin
         audio, segment_demucs_flags = preprocess_segments_with_demucs(segment_list, audio, panns_model=panns_model, use_demucs=use_demucs, padding=0.5)
 
-        # [Fixed] Now run SepReformer with the cleaned audio
-        # Step 2.5: Overlap control using SepReformer
-        logger.info("Step 2.5: Overlap Control with SepReformer")
+        # [Fixed] Now run SR-CorrNet with the cleaned audio
+        # Step 2.5: Overlap control using SR-CorrNet
+        logger.info("Step 2.5: Overlap Control with SR-CorrNet")
         separation_time = 0.0
-        if use_sepreformer and sepreformer_separator is not None and embedding_model is not None:
+        if use_srcorrnet and srcorrnet_separator is not None and embedding_model is not None:
             separation_start = time.time()
             # At this point, audio has already been processed by Demucs.
             audio, segment_list = process_overlapping_segments_with_separation(
                 segment_list,
                 audio,
                 overlap_threshold=overlap_threshold,
-                separator=sepreformer_separator,
+                separator=srcorrnet_separator,
                 embedding_model=embedding_model
             )
             separation_end = time.time()
             separation_time = separation_end - separation_start
 
-            # Calculate SepReformer RT factor
+            # Calculate SR-CorrNet RT factor
             separation_rt = separation_time / audio_duration if audio_duration > 0 else 0
-            logger.info(f"SepReformer separation - Processing time: {separation_time:.2f}s, RT factor: {separation_rt:.4f}")
+            logger.info(f"SR-CorrNet separation - Processing time: {separation_time:.2f}s, RT factor: {separation_rt:.4f}")
         else:
-            logger.info("SepReformer overlap separation skipped (flag disabled)")
+            logger.info("SR-CorrNet overlap separation skipped (flag disabled)")
             
         logger.info("Step 4: ASR (Automatic Speech Recognition)")
         if args.ASRMoE:
@@ -2741,7 +2741,7 @@ def main_process(audio_path, save_path=None, audio_name=None,
             asr_time = asr_end-asr_start
             alignment_time = 0.0
 
-        # Calculate Whisper large v3 RT factor
+        # Calculate Whisper large-v3-turbo RT factor
         whisper_processing_time = asr_time
         whisper_rt = whisper_processing_time / audio_duration if audio_duration > 0 else 0
 
@@ -2790,12 +2790,12 @@ def main_process(audio_path, save_path=None, audio_name=None,
         print(f"  - Processing time: {dia_time:.2f} seconds")
         print(f"  - RT factor: {vad_sortformer_rt:.4f}")
         print(f"{'='*60}")
-        if use_sepreformer:
-            print(f"SepReformer Overlap Separation:")
+        if use_srcorrnet:
+            print(f"SR-CorrNet Overlap Separation:")
             print(f"  - Processing time: {separation_time:.2f} seconds")
             print(f"  - RT factor: {separation_rt:.4f}")
             print(f"{'='*60}")
-        print(f"Whisper large v3:")
+        print(f"Whisper large-v3-turbo:")
         print(f"  - Processing time: {asr_time:.2f} seconds")
         print(f"  - RT factor: {whisper_rt:.4f}")
         print(f"{'='*60}")
@@ -2843,7 +2843,7 @@ def main_process(audio_path, save_path=None, audio_name=None,
                     "processing_time_seconds": vad_sortformer_processing_time,
                     "rt_factor": vad_sortformer_rt
                 },
-                "whisper_large_v3": {
+                "whisper_large_v3_turbo": {
                     "processing_time_seconds": whisper_processing_time,
                     "rt_factor": whisper_rt
                 },
@@ -2870,9 +2870,9 @@ def main_process(audio_path, save_path=None, audio_name=None,
                 "enabled": True
             }
 
-        # Add SepReformer separation metadata if enabled
-        if use_sepreformer:
-            output_data["metadata"]["sepreformer_separation"] = {
+        # Add SR-CorrNet separation metadata if enabled
+        if use_srcorrnet:
+            output_data["metadata"]["srcorrnet_separation"] = {
                 "processing_time_seconds": separation_time,
                 "rt_factor": separation_rt,
                 "overlap_threshold_seconds": overlap_threshold,
@@ -3033,17 +3033,17 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "--sepreformer",
+        "--srcorrnet",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Enable SepReformer for overlapping speech separation",
+        help="Enable SR-CorrNet for overlapping speech separation",
     )
 
     parser.add_argument(
         "--overlap_threshold",
         type=float,
         default=1.0,
-        help="Minimum overlap duration in seconds to trigger SepReformer separation",
+        help="Minimum overlap duration in seconds to trigger SR-CorrNet separation",
     )
 
     # Sortformer diarization segment boundary adjustment (optional)
@@ -3126,7 +3126,7 @@ if __name__ == "__main__":
             "Remeber grant access following https://github.com/pyannote/pyannote-audio?tab=readme-ov-file#tldr"
         )
     if args.dia3 == True:
-        print("Using diarization-3.1 model")
+        print("Using pyannote/speaker-diarization-community-1 model")
         dia_pipeline = Pipeline.from_pretrained(
         "pyannote/speaker-diarization-community-1",
         #"pyannote/speaker-diarization",
@@ -3137,6 +3137,7 @@ if __name__ == "__main__":
         dia_pipeline.to(device)
         
     else:
+        print("Using pyannote/speaker-diarization model (default)")
         dia_pipeline = Pipeline.from_pretrained(
             #"pyannote/speaker-diarization-community-1",
             "pyannote/speaker-diarization",
@@ -3309,9 +3310,9 @@ if __name__ == "__main__":
     diar_model.eval()
     logger.debug(f" * Sortformer loaded on {device_2}")
 
-    # Initialize Pyannote embedding model (only when sepreformer is enabled)
+    # Initialize Pyannote embedding model (only when srcorrnet is enabled)
     embedding_model = None
-    if args.sepreformer:
+    if args.srcorrnet:
         logger.debug(" * Loading Pyannote Embedding Model")
         try:
             from pyannote.audio import Model as PyannoteModel
@@ -3322,19 +3323,19 @@ if __name__ == "__main__":
             logger.error(f" * Failed to load Pyannote Embedding Model: {e}")
             embedding_model = None
 
-    # Initialize SepReformer separator (only when sepreformer is enabled)
-    sepreformer_separator = None
-    if args.sepreformer:
-        logger.debug(" * Loading SepReformer Separator Model")
+    # Initialize SR-CorrNet separator (only when srcorrnet is enabled)
+    srcorrnet_separator = None
+    if args.srcorrnet:
+        logger.debug(" * Loading SR-CorrNet Separator Model")
         try:
-            sepreformer_separator = SepReformerSeparator(
-                sepreformer_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "SepReformer"),
+            srcorrnet_separator = SRCorrNetSeparator(
+                srcorrnet_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "SR_CorrNet_SS"),
                 device=device
             )
-            logger.debug(" * SepReformer Separator loaded successfully")
+            logger.debug(" * SR-CorrNet Separator loaded successfully")
         except Exception as e:
-            logger.error(f" * Failed to load SepReformer Separator: {e}")
-            sepreformer_separator = None
+            logger.error(f" * Failed to load SR-CorrNet Separator: {e}")
+            srcorrnet_separator = None
 
     # Initialize PANNs model (for background music detection)
     panns_model = None
@@ -3456,8 +3457,8 @@ if __name__ == "__main__":
 
             # 2. Execute main process (with per-file try-except handling)
             main_process(path, do_vad=args.vad, LLM=args.LLM, use_demucs=args.demucs,
-                         use_sepreformer=args.sepreformer, overlap_threshold=args.overlap_threshold,
-                         sepreformer_separator=sepreformer_separator,
+                         use_srcorrnet=args.srcorrnet, overlap_threshold=args.overlap_threshold,
+                         srcorrnet_separator=srcorrnet_separator,
                          embedding_model=embedding_model, panns_model=panns_model,
                          speaker_embedder=speaker_embedder,
                          speaker_link_threshold=args.speaker_link_threshold)
