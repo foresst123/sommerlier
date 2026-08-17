@@ -134,7 +134,8 @@ class DiarizationService:
             aligned_frames = chunk_frames
             
         # Combine
-        combined_df = pd.concat([df for df in aligned_frames if not df.empty], ignore_index=True) if aligned_frames else pd.DataFrame(columns=["start", "end", "speaker"])
+        valid_dfs = [df for df in aligned_frames if not df.empty]
+        combined_df = pd.concat(valid_dfs, ignore_index=True) if valid_dfs else pd.DataFrame(columns=["start", "end", "speaker"])
         
         if combined_df.empty:
             return DiarizationResult(segments=[], num_speakers=0, method="sortformer" if is_sortformer else "pyannote")
