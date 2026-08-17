@@ -124,7 +124,18 @@ class PipelineService:
         os.makedirs(save_path, exist_ok=True)
         base_name = os.path.splitext(os.path.basename(audio_path))[0]
         
-        self.export_svc.export_json(transcripts, os.path.join(save_path, f"{base_name}.json"))
+        metadata = {
+            "audio_file": os.path.basename(audio_path),
+            "diarization_model": "pyannote3" if getattr(args, "dia3", False) else "pyannote",
+            "asr_models": ["whisper", "phowhisper", "qwen3"] if getattr(args, "ASRMoE", False) else ["whisper"],
+            "panns_enabled": getattr(args, "panns", False),
+            "vad_enabled": getattr(args, "vad", False),
+            "srcorrnet_enabled": getattr(args, "srcorrnet", False),
+            "llm_refinement": getattr(args, "llm_refinement", False),
+            "qwen3omni_caption": getattr(args, "qwen3omni", False)
+        }
+        
+        self.export_svc.export_json(transcripts, os.path.join(save_path, f"{base_name}.json"), metadata=metadata)
         self.export_svc.export_srt(transcripts, os.path.join(save_path, f"{base_name}.srt"))
         self.export_svc.export_mp3_segments(transcripts, audio_data, save_path, base_name)
         
