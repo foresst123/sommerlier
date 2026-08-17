@@ -24,7 +24,8 @@ class MusicService:
         sr = audio.sample_rate
         waveform = audio.waveform
         
-        for seg in segments:
+        from tqdm import tqdm
+        for seg in tqdm(segments, desc="[PANNs+Demucs]", leave=True):
             # Check if it was already processed by SR-CorrNet, which also inherently isolates voice
             if seg.srcorrnet:
                 seg.demucs = False
@@ -37,7 +38,6 @@ class MusicService:
             has_music, prob = self.panns.detect_music(raw_audio, sr)
             
             if has_music:
-                if self.logger: self.logger.info(f"Music detected (prob {prob:.2f}) for {seg.index}. Removing...")
                 if self.full_vocals is not None:
                     target_len = len(raw_audio)
                     start = min(start_frame, len(self.full_vocals))

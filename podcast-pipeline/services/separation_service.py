@@ -79,7 +79,8 @@ class SeparationService:
             df = pd.DataFrame(seg_dicts)
             ref_embeddings = _compute_chunk_speaker_centroids(df, {"waveform": waveform, "sample_rate": sr}, self.embedder.inference)
             
-        for pair in overlapping_pairs:
+        from tqdm import tqdm
+        for pair in tqdm(overlapping_pairs, desc="[SR-CorrNet]", leave=True):
             seg1, seg2 = pair["seg1"], pair["seg2"]
             start_sec = pair["overlap_start"]
             end_sec = pair["overlap_end"]
