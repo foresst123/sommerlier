@@ -71,7 +71,7 @@ def transcribe(model, processor, device, audio_path, language="vi"):
         inputs = processor(text=text, audio=audio_data, return_tensors="pt", sampling_rate=16000).to(device, dtype)
 
         with torch.no_grad():
-            gen_ids = model.generate(**inputs, max_new_tokens=256)
+            gen_ids = model.generate(**inputs, max_new_tokens=256, do_sample=True, temperature=0.2)
             gen_ids = gen_ids[:, inputs.input_ids.size(1):]
             response = processor.batch_decode(gen_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
             
