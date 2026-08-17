@@ -15,14 +15,14 @@ class ASRService:
         self.qwen3 = qwen3
         self.logger = logger
         
-    def _run_whisper(self, audio_16k, dummy_vad):
+    def _run_whisper(self, audio_16k, dummy_vad, language="vi"):
         try:
-            res = self.whisper.transcribe(audio_16k, dummy_vad)
-            return res.get("text", ""), res.get("language", "en"), res.get("words", [])
+            res = self.whisper.transcribe(audio_16k, dummy_vad, language=language)
+            return res.get("text", ""), res.get("language", language), res.get("words", [])
         except Exception as e:
             if self.logger: self.logger.error(f"Whisper error: {e}")
             return "", "en", []
-            
+
     def _run_phowhisper(self, audio_16k):
         if not self.phowhisper: return ""
         try:
@@ -30,7 +30,7 @@ class ASRService:
         except Exception as e:
             if self.logger: self.logger.error(f"PhoWhisper error: {e}")
             return ""
-            
+
     def _run_qwen3(self, audio_16k, chunk_index: str, tmp_dir: str):
         if not self.qwen3: return ""
         try:
@@ -38,6 +38,8 @@ class ASRService:
             path = os.path.join(tmp_dir, f"qwen3_{chunk_index}.wav")
             sf.write(path, audio_16k, 16000)
             text = self.qwen3.transcribe(path)
+            if not text and self.logger:
+                self.logger.warning(f"Qwen3 returned empty for chunk {chunk_index}")
             if os.path.exists(path): os.remove(path)
             return text
         except Exception as e:

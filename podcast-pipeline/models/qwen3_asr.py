@@ -18,12 +18,15 @@ class Qwen3ASRClient:
             
             resp_line = self.process.stdout.readline()
             if not resp_line:
+                print("[Qwen3ASRClient] Empty response from worker", flush=True)
                 return ""
                 
             resp = json.loads(resp_line.strip())
             if resp.get("status") == "ok":
                 return resp.get("text", "")
             else:
+                print(f"[Qwen3ASRClient] Worker error: {resp.get('message', resp_line)}", flush=True)
                 return ""
         except Exception as e:
+            print(f"[Qwen3ASRClient] Exception in transcribe: {e}", flush=True)
             return ""
