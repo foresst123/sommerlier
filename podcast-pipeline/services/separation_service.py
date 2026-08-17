@@ -27,9 +27,11 @@ class SeparationService:
             return candidate_labels[0] if candidate_labels else None
             
         try:
-            audio_tensor = torch.tensor(audio_16k, dtype=torch.float32).unsqueeze(0).to(self.embedder.inference.device)
+            # Model expects (batch, channel, samples) -> unsqueeze twice
+            audio_tensor = torch.tensor(audio_16k, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(self.embedder.inference.device)
             with torch.inference_mode():
-                embedding = self.embedder.inference(audio_tensor)
+                # Use model directly to get torch tensor, then squeeze to 1D
+                embedding = self.embedder.model(audio_tensor).squeeze()
                 
             best_speaker = None
             best_sim = -1.0
@@ -37,11 +39,15 @@ class SeparationService:
             for spk in candidate_labels:
                 if spk in ref_embeddings:
                     ref_emb = ref_embeddings[spk]
+                    # ref_emb is already a 1D numpy array from centroids
+                    ref_tensor = torch.tensor(ref_emb, dtype=torch.float32).to(self.embedder.inference.device)
+                    
                     sim = torch.nn.functional.cosine_similarity(
-                        embedding.mean(dim=1),
-                        torch.tensor(ref_emb).to(self.embedder.inference.device).mean(dim=0).unsqueeze(0).mean(dim=1), # Handling shapes
+                        embedding,
+                        ref_tensor,
                         dim=0
                     ).item()
+                    
                     if sim > best_sim:
                         best_sim = sim
                         best_speaker = spk

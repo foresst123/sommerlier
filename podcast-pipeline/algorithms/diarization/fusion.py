@@ -60,7 +60,7 @@ def _compute_chunk_speaker_centroids(chunk_df: pd.DataFrame, audio_info, embedde
             centroids[speaker] = np.mean(embeddings, axis=0)
     return centroids
 
-def align_speakers_across_chunks(chunk_frames: list, audio_info, embedder: Inference, similarity_threshold: float = 0.75, logger=None):
+def align_speakers_across_chunks(chunk_frames: list, audio_info, embedder: Inference, similarity_threshold: float = 0.49, logger=None):
     if embedder is None or not chunk_frames:
         if logger: logger.warning("Speaker embedder unavailable; skipping cross-chunk speaker linking.")
         return chunk_frames

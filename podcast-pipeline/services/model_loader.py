@@ -4,8 +4,8 @@ from typing import Dict, Any
 
 from models.whisper_wrapper import WhisperASR
 from models.phowhisper import PhoWhisperASR
-from models.silero_vad import SileroVAD
 from models.pyannote import PyannoteDiarizer
+from models.diarizen_model import DiariZenDiarizer
 from models.pyannote_embedding import PyannoteEmbedder
 from models.sortformer import SortformerDiarizer
 from models.srcorrnet import SRCorrNetSeparator
@@ -42,15 +42,15 @@ class ModelLoader:
                 use_community=True
             )
         else:
-            if self.logger: self.logger.info(f"Loading Sortformer on {self.device_2}")
-            self.models["diarizer"] = SortformerDiarizer(device=self.device_2)
+            if self.logger: self.logger.info(f"Loading DiariZen WavLM-Large on {self.device_2}")
+            self.models["diarizer"] = DiariZenDiarizer(device=self.device_2)
             
-        if self.args.srcorrnet:
-            if self.logger: self.logger.info(f"Loading Pyannote Embedder on {self.device_1}")
-            self.models["embedder"] = PyannoteEmbedder(
-                token=self.config.get("huggingface_token", ""),
-                device=self.device_1
-            )
+        # Embedder is needed for cross-chunk diarization fusion AND SR-CorrNet speaker identification
+        if self.logger: self.logger.info(f"Loading Pyannote Embedder on {self.device_1}")
+        self.models["embedder"] = PyannoteEmbedder(
+            token=self.config.get("huggingface_token", ""),
+            device=self.device_1
+        )
             
     def load_separation_models(self):
         """Load SR-CorrNet if enabled."""

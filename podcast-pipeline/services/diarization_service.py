@@ -12,7 +12,8 @@ from utils.segment_utils import (
     apply_sortformer_segment_padding,
     df_to_list,
     deduplicate_segments_by_index,
-    split_long_segments
+    split_long_segments,
+    cut_by_speaker_label
 )
 from algorithms.diarization.fusion import align_speakers_across_chunks
 from algorithms.diarization.overlap import detect_overlapping_segments
@@ -26,7 +27,7 @@ class DiarizationService:
         self.embedder = embedder
         self.logger = logger
         
-    def prepare_chunks(self, audio: AudioData, max_duration: float = 600.0, min_silence: float = 0.5) -> Tuple[List[DiarizationChunk], str]:
+    def prepare_chunks(self, audio: AudioData, max_duration: float = 120.0, min_silence: float = 0.5) -> Tuple[List[DiarizationChunk], str]:
         """Split long audio using silence from VAD."""
         waveform = audio.waveform
         sr = audio.sample_rate
@@ -67,51 +68,40 @@ class DiarizationService:
         
     def run_diarization(self, chunks: List[DiarizationChunk], audio: AudioData, args: Any) -> DiarizationResult:
         """Run diarization model on all chunks, apply padding/fusion, and return unified segments."""
-        is_sortformer = not args.dia3
+        is_diarizen = not getattr(args, "dia3", False)
         chunk_frames = []
+        import pandas as pd
         
-        if is_sortformer:
-            # Sortformer can batch diarize
-            paths = [c.path for c in chunks]
-            batch_result = self.diarizer.diarize(paths)
-            for idx, res in enumerate(batch_result):
-                # Sortformer returns a list of strings per chunk, e.g. ["0.0 1.5 speaker_0", ...]
+        if is_diarizen:
+            # DiariZen
+            from tqdm import tqdm
+            for chunk in tqdm(chunks, desc="[DiariZen] Phân rã", leave=True):
+                diar_out = self.diarizer.diarize(chunk.path)
                 data = []
-                if res:
-                    # NeMo can sometimes nest the result depending on batch config
-                    lists = [x for x in res if isinstance(x, (list, tuple))]
-                    if not lists:
-                        lists = [res] if isinstance(res, list) else [[res]]
-                    segs = [s for sub in lists for s in sub if isinstance(s, str)]
-                    
-                    for seg in segs:
-                        parts = seg.split()
-                        if len(parts) >= 3:
-                            start = float(parts[0])
-                            end = float(parts[1])
-                            # sp format is usually "speaker_X"
-                            sp = parts[2]
-                            num = int(sp.split('_')[1]) if '_' in sp else 0
-                            speaker = f"SPEAKER_{num:02d}"
-                            data.append({"start": start, "end": end, "speaker": speaker})
-                            
-                df = pd.DataFrame(data) if data else pd.DataFrame(columns=["start", "end", "speaker"])
-                df = apply_sortformer_segment_padding(
-                    df, 
-                    pad_onset=getattr(args, "sortformer_pad_onset", 0.0),
-                    pad_offset=getattr(args, "sortformer_pad_offset", 0.0),
-                    audio_duration=chunks[idx].duration
+                annotation = (
+                    diar_out.speaker_diarization
+                    if hasattr(diar_out, "speaker_diarization")
+                    else diar_out
                 )
-                # Apply global offset
-                if not df.empty:
-                    df["start"] += chunks[idx].offset
-                    df["end"] += chunks[idx].offset
+                if annotation is not None:
+                    try:
+                        for turn, _, speaker in annotation.itertracks(yield_label=True):
+                            data.append({
+                                "start": turn.start + chunk.offset,
+                                "end": turn.end + chunk.offset,
+                                "speaker": speaker
+                            })
+                    except Exception as e:
+                        if self.logger: self.logger.error(f"Error iterating diarization result: {e}")
+                df = pd.DataFrame(data) if data else pd.DataFrame(columns=["start", "end", "speaker"])
                 chunk_frames.append(df)
+
         else:
             # Pyannote
             from tqdm import tqdm
             for chunk in tqdm(chunks, desc="[Pyannote] Phân rã", leave=True):
-                diar_out = self.diarizer.diarize(chunk.path)
+                # Dùng num_speakers=2 thay vì max_speakers=2 để khóa chính xác 2 người (đạt accuracy tốt nhất)
+                diar_out = self.diarizer.diarize(chunk.path, num_speakers=2)
                 data = []
                 # Mirror original code: community-1 model wraps result in object with
                 # .speaker_diarization attribute. Must check this first before treating
@@ -137,10 +127,12 @@ class DiarizationService:
                 
         # Cross-chunk fusion
         if len(chunks) > 1 and self.embedder:
+            speaker_link_threshold = getattr(args, "speaker_link_threshold", 0.49)
             aligned_frames = align_speakers_across_chunks(
                 chunk_frames, 
                 {"waveform": audio.waveform, "sample_rate": audio.sample_rate},
                 self.embedder.inference,
+                similarity_threshold=speaker_link_threshold,
                 logger=self.logger
             )
         else:
@@ -161,10 +153,17 @@ class DiarizationService:
             raw_list = self.vad_model.vad(combined_df, vad_audio)
         else:
             raw_list = df_to_list(combined_df)
+            
+        # Apply merge and smooth logic
+        merge_gap = getattr(args, "merge_gap", 2.0)
+        smoothed_list = cut_by_speaker_label(raw_list, merge_gap=merge_gap, logger=self.logger)
+        
+        # Split segments that are too long
+        final_list = split_long_segments(smoothed_list, max_duration=30.0)
         
         # Build schemas
         final_segments = []
-        for d in raw_list:
+        for d in final_list:
             final_segments.append(Segment(index=str(d.get("index", "00000")).zfill(5), start=d["start"], end=d["end"], speaker=d["speaker"]))
             
         num_spk = len(combined_df["speaker"].unique())
@@ -172,5 +171,5 @@ class DiarizationService:
         return DiarizationResult(
             segments=final_segments,
             num_speakers=num_spk,
-            method="sortformer" if is_sortformer else "pyannote"
+            method="diarizen" if is_diarizen else "pyannote"
         )
