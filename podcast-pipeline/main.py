@@ -57,7 +57,13 @@ def main():
     # 1. Start Qwen3 Worker (if MoE enabled)
     qwen3_service = None
     if args.ASRMoE:
-        qwen3_env_bin = os.environ.get("QWEN3_PYTHON", "../qwen3_env/bin/python")
+        qwen3_env_bin = os.environ.get("QWEN3_PYTHON")
+        if not qwen3_env_bin:
+            # Fallback checks: try ../ and ../../
+            if os.path.exists("../../qwen3_env/bin/python"):
+                qwen3_env_bin = "../../qwen3_env/bin/python"
+            else:
+                qwen3_env_bin = "../qwen3_env/bin/python"
         qwen3_worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qwen3_worker.py")
         qwen3_service = Qwen3WorkerService(qwen3_env_bin, qwen3_worker_script, device_id=args.gpu_2, logger=logger)
         qwen3_service.start()
