@@ -20,5 +20,15 @@
             "dim_f": 3072
         }
     },
-    "huggingface_token": "hf_XXXXXXXXXXXXXXXXXXXXXXXX"
+    "huggingface_token": "hf_XXXXXXXXXXXXXXXXXXXXXXXX",
+    "environments": {
+        "kaggle": {
+            "offline_mode": false,
+            "use_bf16": false
+        },
+        "h100": {
+            "offline_mode": true,
+            "use_bf16": true
+        }
+    }
 }

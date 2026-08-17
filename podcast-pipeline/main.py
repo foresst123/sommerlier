@@ -39,13 +39,20 @@ def parse_args():
     parser.add_argument("--clust_th", default=0.5, type=float, help="Clustering threshold")
     parser.add_argument("--LLM", default="case_0", type=str, help="LLM refinement case")
     parser.add_argument("--initprompt", action="store_true", help="Use initial prompt for LLM")
-    parser.add_argument("--env", default="kaggle", type=str, choices=["kaggle", "h100"], help="Environment: 'kaggle' (online) or 'h100' (offline VPC)")
+    parser.add_argument("--env", default="kaggle", type=str, help="Environment profile name in config.json")
     return parser.parse_args()
 
 def main():
     args = parse_args()
     
-    if args.env == "h100":
+    # Load config file
+    with open(args.config, 'r', encoding='utf-8') as f:
+        config = json.load(f)
+        
+    # Get environment profile
+    env_profile = config.get("environments", {}).get(args.env, {})
+    
+    if env_profile.get("offline_mode", False):
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -55,8 +62,11 @@ def main():
         os.environ["XDG_CACHE_HOME"] = offline_dir
         os.environ["HOME"] = offline_dir  # For PANNS
         os.environ["SRCORRNET_PATH"] = os.path.join(offline_dir, "srcorrnet")
+        print(f"[*] Running in Offline Mode (env: {args.env}). Using weights from: {offline_dir}")
+        
+    if env_profile.get("use_bf16", False):
         os.environ["SOMMELIER_USE_BF16"] = "1"
-        print(f"[*] Running in H100 Offline Mode. Using weights from: {offline_dir} (bfloat16 enabled)")
+        print(f"[*] bfloat16 enabled via config for env: {args.env}")
         
     logger = Logger.get_logger()
     logger.info(f"Starting Sommelier Pipeline for Job: {args.job_id}")
