@@ -1,7 +1,7 @@
 import os
 import tempfile
 import pandas as pd
-from typing import List, Tuple
+from typing import List, Tuple, Any
 from pyannote.core import Annotation
 from schemas.audio import AudioData, DiarizationChunk
 from schemas.segment import Segment
