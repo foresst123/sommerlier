@@ -2,18 +2,6 @@ import argparse
 import json
 import os
 from utils.logger import Logger
-from services.model_loader import ModelLoader
-from services.audio_service import AudioService
-from services.diarization_service import DiarizationService
-from services.separation_service import SeparationService
-from services.music_service import MusicService
-from services.asr_service import ASRService
-from services.caption_service import CaptionService
-from services.diarization_refinement_service import DiarizationRefinementService
-from services.export_service import ExportService
-from services.pipeline_service import PipelineService
-from services.qwen3_worker_service import Qwen3WorkerService
-
 def parse_args():
     parser = argparse.ArgumentParser(description="Sommelier ASR Pipeline")
     parser.add_argument("--audio", required=True, help="Path to input audio file")
@@ -42,38 +30,54 @@ def parse_args():
     parser.add_argument("--env", default="kaggle", type=str, help="Environment profile name in config.json")
     return parser.parse_args()
 
+# ==========================================
+# 1. EARLY ENVIRONMENT SETUP (PRE-IMPORT)
+# ==========================================
+args = parse_args()
+
+with open(args.config, 'r', encoding='utf-8') as f:
+    config = json.load(f)
+    
+env_profile = config.get("environments", {}).get(args.env, {})
+
+if env_profile.get("offline_mode", False):
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    
+    custom_offline_dir = env_profile.get("offline_weights_dir", "./offline_weights")
+    if custom_offline_dir.startswith("./"):
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        offline_dir = os.path.join(base_dir, custom_offline_dir.replace("./", "", 1))
+    else:
+        offline_dir = custom_offline_dir
+        
+    os.environ["HF_HOME"] = os.path.join(offline_dir, "huggingface")
+    os.environ["TORCH_HOME"] = os.path.join(offline_dir, "torch")
+    os.environ["XDG_CACHE_HOME"] = offline_dir
+    os.environ["HOME"] = offline_dir  # For PANNS
+    os.environ["SRCORRNET_PATH"] = os.path.join(offline_dir, "srcorrnet")
+    print(f"[*] Running in Offline Mode (env: {args.env}). Using weights from: {offline_dir}")
+    
+if env_profile.get("use_bf16", False):
+    os.environ["SOMMELIER_USE_BF16"] = "1"
+    print(f"[*] bfloat16 enabled via config for env: {args.env}")
+
+# ==========================================
+# 2. DELAYED IMPORTS
+# ==========================================
+from services.model_loader import ModelLoader
+from services.audio_service import AudioService
+from services.diarization_service import DiarizationService
+from services.separation_service import SeparationService
+from services.music_service import MusicService
+from services.asr_service import ASRService
+from services.caption_service import CaptionService
+from services.diarization_refinement_service import DiarizationRefinementService
+from services.export_service import ExportService
+from services.pipeline_service import PipelineService
+from services.qwen3_worker_service import Qwen3WorkerService
+
 def main():
-    args = parse_args()
-    
-    # Load config file
-    with open(args.config, 'r', encoding='utf-8') as f:
-        config = json.load(f)
-        
-    # Get environment profile
-    env_profile = config.get("environments", {}).get(args.env, {})
-    
-    if env_profile.get("offline_mode", False):
-        os.environ["HF_HUB_OFFLINE"] = "1"
-        os.environ["TRANSFORMERS_OFFLINE"] = "1"
-        
-        # Cho phép cấu hình đường dẫn offline trong config, mặc định là "./offline_weights"
-        custom_offline_dir = env_profile.get("offline_weights_dir", "./offline_weights")
-        if custom_offline_dir.startswith("./"):
-            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            offline_dir = os.path.join(base_dir, custom_offline_dir.replace("./", "", 1))
-        else:
-            offline_dir = custom_offline_dir
-            
-        os.environ["HF_HOME"] = os.path.join(offline_dir, "huggingface")
-        os.environ["TORCH_HOME"] = os.path.join(offline_dir, "torch")
-        os.environ["XDG_CACHE_HOME"] = offline_dir
-        os.environ["HOME"] = offline_dir  # For PANNS
-        os.environ["SRCORRNET_PATH"] = os.path.join(offline_dir, "srcorrnet")
-        print(f"[*] Running in Offline Mode (env: {args.env}). Using weights from: {offline_dir}")
-        
-    if env_profile.get("use_bf16", False):
-        os.environ["SOMMELIER_USE_BF16"] = "1"
-        print(f"[*] bfloat16 enabled via config for env: {args.env}")
         
     logger = Logger.get_logger()
     logger.info(f"Starting Sommelier Pipeline for Job: {args.job_id}")
