@@ -43,7 +43,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    logger = Logger(logging_level="DEBUG").get_logger()
+    logger = Logger.get_logger()
     logger.info(f"Starting Sommelier Pipeline for Job: {args.job_id}")
 
     import torch
