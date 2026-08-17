@@ -81,16 +81,17 @@ class ModelLoader:
             
     def load_asr_models(self, qwen3_service: Qwen3WorkerService = None):
         """Load ASR models (Whisper, PhoWhisper, Qwen3)."""
-        if self.logger: self.logger.info(f"Loading Whisper on {self.device_1}")
-        self.models["whisper"] = WhisperASR(
-            model_size=getattr(self.args, "model_size", "large-v3-turbo"),
-            device=self.device_1
-        )
+        if self.logger: self.logger.info(f"Loading PhoWhisper on {self.device_1}")
+        self.models["phowhisper"] = PhoWhisperASR(device=self.device_1)
+
         
         if getattr(self.args, "ASRMoE", False) and getattr(self.args, "lang", "vi") == "vi":
-            if self.logger: self.logger.info(f"Loading PhoWhisper on {self.device_2}")
-            self.models["phowhisper"] = PhoWhisperASR(device=self.device_2)
-            
+            if self.logger: self.logger.info(f"Loading Whisper on {self.device_1}")
+
+            self.models["whisper"] = WhisperASR(
+                model_size=getattr(self.args, "model_size", "large-v3-turbo"),
+                device=self.device_1
+            )
             if qwen3_service:
                 if self.logger: self.logger.info("Connecting to Qwen3 worker")
                 self.models["qwen3"] = Qwen3ASRClient(qwen3_service.process)
