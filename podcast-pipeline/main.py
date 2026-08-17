@@ -147,7 +147,8 @@ def main():
         # 4. Orchestrate via PipelineService
         pipeline = PipelineService(
             audio_svc, diarization_svc, separation_svc, music_svc, 
-            asr_svc, caption_svc, refinement_svc, export_svc, logger=logger
+            asr_svc, caption_svc, refinement_svc, export_svc, logger=logger,
+            model_loader=model_loader
         )
         
         logger.info(f"Running pipeline on audio: {args.audio}")

@@ -15,7 +15,8 @@ class PipelineService:
                  caption_svc, 
                  refinement_svc, 
                  export_svc, 
-                 logger=None):
+                 logger=None,
+                 model_loader=None):
         self.audio_svc = audio_svc
         self.diarization_svc = diarization_svc
         self.separation_svc = separation_svc
@@ -25,6 +26,7 @@ class PipelineService:
         self.refinement_svc = refinement_svc
         self.export_svc = export_svc
         self.logger = logger
+        self.model_loader = model_loader
         
     def run(self, args: Any, config: dict, audio_path: str):
         job_id = getattr(args, "job_id", "default_job")
@@ -44,6 +46,10 @@ class PipelineService:
             if self.logger: self.logger.info(f"[DEBUG] Diarization returned {len(diarization_result.segments)} segments via {diarization_result.method}")
             checkpoint.save("diarization", diarization_result)
             
+        if self.model_loader:
+            self.model_loader.unload("diarizer")
+            self.model_loader.unload("vad")
+            
         # 3. Speech Separation (Overlap)
         if checkpoint.exists("separation"):
             if self.logger: self.logger.info("Loading Separation from checkpoint")
@@ -53,6 +59,10 @@ class PipelineService:
             if self.logger: self.logger.info(f"[DEBUG] After Separation: {len(enhanced_segments)} segments")
             checkpoint.save("separation", enhanced_segments)
             
+        if self.model_loader:
+            self.model_loader.unload("separator")
+            self.model_loader.unload("embedder")
+            
         # 4. Background Music Removal
         if checkpoint.exists("music_removal"):
             if self.logger: self.logger.info("Loading Music Removal from checkpoint")
@@ -61,6 +71,10 @@ class PipelineService:
             enhanced_segments = self.music_svc.process_segments(enhanced_segments, audio_data)
             if self.logger: self.logger.info(f"[DEBUG] After Music Removal: {len(enhanced_segments)} segments")
             checkpoint.save("music_removal", enhanced_segments)
+            
+        if self.model_loader:
+            self.model_loader.unload("panns")
+            self.model_loader.unload("demucs")
             
         # 5. ASR Ensemble (MoE)
         if checkpoint.exists("asr"):
