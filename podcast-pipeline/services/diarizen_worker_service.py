@@ -35,20 +35,24 @@ class DiarizenWorkerService:
         
         # Wait for "READY" signal
         ready = False
+        last_stdout_lines = []
         for _ in range(60): # timeout 60s
             line = self.process.stdout.readline()
             if not line:
                 break
+            last_stdout_lines.append(line.strip())
             if "ready" in line.lower():
                 ready = True
                 break
             
         if not ready:
-            err = self.process.stderr.read()
+            err = self.process.stderr.read().strip()
+            stdout_log = " | ".join(last_stdout_lines[-5:]) # Show up to last 5 lines from stdout
+            full_err = f"{err} | stdout: {stdout_log}" if err else f"stdout: {stdout_log}"
             if self.logger:
-                self.logger.error(f"DiariZen worker failed to start: {err}")
+                self.logger.error(f"DiariZen worker failed to start: {full_err}")
             self.stop()
-            raise RuntimeError(f"DiariZen worker did not start. Err: {err}")
+            raise RuntimeError(f"DiariZen worker did not start. Err: {full_err}")
             
     def stop(self):
         """Terminates the worker process safely."""
