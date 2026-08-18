@@ -8,7 +8,7 @@ from models.silero_vad import SileroVAD
 from models.pyannote import PyannoteDiarizer
 from models.diarizen_model import DiariZenDiarizer
 from models.pyannote_embedding import PyannoteEmbedder
-from models.sortformer import SortformerDiarizer
+# from models.sortformer import SortformerDiarizer
 from models.tse_model import TargetSpeakerExtractor
 from models.panns import PANNSDetector
 from models.demucs import DemucsRemover
