@@ -30,13 +30,27 @@ class DiariZenClient:
             self.process.stdin.write(json.dumps(req) + "\n")
             self.process.stdin.flush()
             
-            resp_line = self.process.stdout.readline()
-            if not resp_line:
-                print("[DiariZenClient] Empty response from worker", flush=True)
+            resp = None
+            for _ in range(50): # read up to 50 lines to skip any warnings/newlines
+                resp_line = self.process.stdout.readline()
+                if not resp_line:
+                    break
+                
+                line_str = resp_line.strip()
+                if not line_str:
+                    continue
+                
+                try:
+                    resp = json.loads(line_str)
+                    break # successfully parsed
+                except json.JSONDecodeError:
+                    print(f"[DiariZenClient] Ignoring stdout noise: {line_str}", flush=True)
+                    continue
+
+            if resp is None:
+                print("[DiariZenClient] Empty or invalid response from worker", flush=True)
                 return None
                 
-            resp = json.loads(resp_line.strip())
-            
             if "segments" in resp:
                 import pandas as pd
                 # Return something that has .itertracks(yield_label=True) mock
