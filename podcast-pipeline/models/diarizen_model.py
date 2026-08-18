@@ -31,7 +31,7 @@ class DiariZenClient:
             self.process.stdin.flush()
             
             resp = None
-            for _ in range(50): # read up to 50 lines to skip any warnings/newlines
+            for _ in range(10000): # large number to accommodate long audio progress events and noise
                 resp_line = self.process.stdout.readline()
                 if not resp_line:
                     break
@@ -42,7 +42,14 @@ class DiariZenClient:
                 
                 try:
                     resp = json.loads(line_str)
-                    break # successfully parsed
+                    if "progress" in resp:
+                        # Use carriage return to overwrite the same line
+                        print(f"\r[DiariZenClient] {resp['progress']}", end="", flush=True)
+                        continue # Keep listening for the final segments response
+                    
+                    # Print a newline once we get the final response so subsequent logs don't overwrite the progress
+                    print()
+                    break # Successfully parsed final output
                 except json.JSONDecodeError:
                     print(f"[DiariZenClient] Ignoring stdout noise: {line_str}", flush=True)
                     continue

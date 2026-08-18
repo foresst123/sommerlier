@@ -56,6 +56,19 @@ def load_model(config_path=None, env_name="kaggle"):
 
     pipeline.to(device)
 
+    # Monkey-patch get_segmentations to emit JSON progress updates
+    import types
+    original_get_segmentations = pipeline.get_segmentations
+    def patched_get_segmentations(self_obj, file, hook=None, soft=False):
+        def custom_hook(step_name, step_details, completed=None, total=None):
+            if completed is not None and total is not None:
+                # To avoid spamming, only print every 10 chunks or the last chunk
+                if completed == total or completed % 10 == 0:
+                    print(json.dumps({"progress": f"DiariZen Progress: {completed}/{total} chunks"}), flush=True)
+        return original_get_segmentations(file, hook=custom_hook, soft=soft)
+    
+    pipeline.get_segmentations = types.MethodType(patched_get_segmentations, pipeline)
+
     print(json.dumps({"status": "ready", "device": str(device)}), flush=True)
     return pipeline, device
 
