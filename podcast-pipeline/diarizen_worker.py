@@ -32,6 +32,28 @@ def load_model(config_path=None, env_name="kaggle"):
     print(json.dumps({"status": "loading", "model": "BUT-FIT/diarizen-wavlm-large-s80-md-v2"}), flush=True)
 
     pipeline = DiariZenPipeline.from_pretrained("BUT-FIT/diarizen-wavlm-large-s80-md-v2")
+
+    if config_path and os.path.exists(config_path):
+        try:
+            with open(config_path, 'r') as f:
+                cfg = json.load(f)
+            diar_cfg = cfg.get("environments", {}).get(env_name, {}).get("models", {}).get("diarizen", {})
+            
+            # Apply batch size dynamically if present
+            if "batch_size" in diar_cfg:
+                bs = int(diar_cfg["batch_size"])
+                if hasattr(pipeline, 'segmentation_batch_size'):
+                    pipeline.segmentation_batch_size = bs
+                if hasattr(pipeline, 'embedding_batch_size'):
+                    pipeline.embedding_batch_size = bs
+                    
+            # Overwrite other internal config variables if needed without calling instantiate()
+            if hasattr(pipeline, '_segmentation') and hasattr(pipeline._segmentation, 'step'):
+                pipeline._segmentation.step = diar_cfg.get("segmentation_step", 0.1)
+
+        except Exception as e:
+            print(json.dumps({"error": f"Failed to apply config overrides: {str(e)}"}), flush=True)
+
     pipeline.to(device)
 
     print(json.dumps({"status": "ready", "device": str(device)}), flush=True)
