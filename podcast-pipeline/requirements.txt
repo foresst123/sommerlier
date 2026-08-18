@@ -37,3 +37,4 @@ omegaconf==2.3.0
 yt-dlp
 setuptools==75.0.0
 sacrebleu
+git+https://github.com/BUTSpeechFIT/DiariZen.git

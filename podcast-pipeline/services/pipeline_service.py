@@ -117,7 +117,7 @@ class PipelineService:
             
             save_path = os.path.join(
                 base_dir, "_final",
-                f"-srcorrnet-{getattr(args, 'srcorrnet', False)}-demucs-{getattr(args, 'panns', False)}-vad-{do_vad}-diaModel-{suffix}-initPrompt-True-merge_gap-{merge_gap}-seg_th-{seg_th}-cl_min-{min_cluster}-cl-th-{clust_th}-LLM-{llm}",
+                f"-tse-{getattr(args, 'tse', False)}-demucs-{getattr(args, 'panns', False)}-vad-{do_vad}-diaModel-{suffix}-initPrompt-True-merge_gap-{merge_gap}-seg_th-{seg_th}-cl_min-{min_cluster}-cl-th-{clust_th}-LLM-{llm}",
                 audio_name
             )
             
@@ -130,7 +130,7 @@ class PipelineService:
             "asr_models": ["whisper", "phowhisper", "qwen3"] if getattr(args, "ASRMoE", False) else ["whisper"],
             "panns_enabled": getattr(args, "panns", False),
             "vad_enabled": getattr(args, "vad", False),
-            "srcorrnet_enabled": getattr(args, "srcorrnet", False),
+            "tse_enabled": getattr(args, "tse", False),
             "llm_refinement": getattr(args, "llm_refinement", False),
             "qwen3omni_caption": getattr(args, "qwen3omni", False)
         }

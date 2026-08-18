@@ -14,7 +14,7 @@ def parse_args():
     parser.add_argument("--lang", default="vi", help="Language code")
     parser.add_argument("--ASRMoE", action="store_true", help="Enable MoE ASR")
     parser.add_argument("--dia3", action="store_true", help="Use Pyannote community model (default is Sortformer if false)")
-    parser.add_argument("--srcorrnet", action="store_true", help="Enable SR-CorrNet overlapping speech separation")
+    parser.add_argument("--tse", action="store_true", help="Enable Target Speaker Extraction (TSE) for overlapping speech")
     parser.add_argument("--panns", action="store_true", help="Enable background music removal")
     parser.add_argument("--qwen3omni", action="store_true", help="Enable Qwen3-Omni audio captioning")
     parser.add_argument("--llm_refinement", action="store_true", help="Enable LLM label refinement")
@@ -68,7 +68,7 @@ if env_profile.get("use_bf16", False):
 from services.model_loader import ModelLoader
 from services.audio_service import AudioService
 from services.diarization_service import DiarizationService
-from services.separation_service import SeparationService
+from services.separation_service import TargetExtractionService
 from services.music_service import MusicService
 from services.asr_service import ASRService
 from services.caption_service import CaptionService
@@ -121,9 +121,8 @@ def main():
             embedder=model_loader.get("embedder"),
             logger=logger
         )
-        separation_svc = SeparationService(
-            separator=model_loader.get("separator"),
-            embedder=model_loader.get("embedder"),
+        separation_svc = TargetExtractionService(
+            tse_model=model_loader.get("separator"),
             logger=logger
         )
         music_svc = MusicService(

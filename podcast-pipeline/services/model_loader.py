@@ -8,7 +8,7 @@ from models.pyannote import PyannoteDiarizer
 from models.diarizen_model import DiariZenDiarizer
 from models.pyannote_embedding import PyannoteEmbedder
 from models.sortformer import SortformerDiarizer
-from models.srcorrnet import SRCorrNetSeparator
+from models.tse_model import TargetSpeakerExtractor
 from models.panns import PANNSDetector
 from models.demucs import DemucsRemover
 from models.qwen3_omni import Qwen3OmniCaptioner
@@ -53,22 +53,10 @@ class ModelLoader:
         )
             
     def load_separation_models(self):
-        """Load SR-CorrNet if enabled."""
-        if getattr(self.args, "srcorrnet", False):
-            if self.logger: self.logger.info(f"Loading SR-CorrNet on {self.device_1}")
-            
-            srcorrnet_path = os.environ.get("SRCORRNET_PATH")
-            if not srcorrnet_path:
-                srcorrnet_path = self.config.get("srcorrnet_path", "")
-                if not srcorrnet_path:
-                    # Fallback to the original path used in Kaggle notebook
-                    # __file__ is podcast-pipeline/services/model_loader.py
-                    # 1: services, 2: podcast-pipeline, 3: root
-                    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-                    srcorrnet_path = os.path.join(base_dir, "SR_CorrNet_SS")
-                    
-            self.models["separator"] = SRCorrNetSeparator(
-                srcorrnet_path=srcorrnet_path,
+        """Load Target Speaker Extractor (TSE) if enabled."""
+        if getattr(self.args, "tse", False):
+            if self.logger: self.logger.info(f"Loading Target Speaker Extractor on {self.device_1}")
+            self.models["separator"] = TargetSpeakerExtractor(
                 device=self.device_1
             )
             
