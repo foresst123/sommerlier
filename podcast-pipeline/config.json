@@ -2,7 +2,18 @@
     "language": {
         "multilingual": false,
         "supported": [
-          "en", "ko", "ja", "zh", "es", "fr", "de", "it", "pt", "ru", "ar", "hi"
+            "en",
+            "ko",
+            "ja",
+            "zh",
+            "es",
+            "fr",
+            "de",
+            "it",
+            "pt",
+            "ru",
+            "ar",
+            "hi"
         ]
     },
     "entrypoint": {
@@ -33,7 +44,7 @@
                     "torch_dtype": "float16"
                 },
                 "diarizen": {
-                    "batch_size": 32,
+                    "batch_size": 4,
                     "seg_duration": 16,
                     "segmentation_step": 0.1,
                     "apply_median_filtering": true,
