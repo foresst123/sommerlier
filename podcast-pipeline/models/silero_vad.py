@@ -180,8 +180,9 @@ class SileroVAD:
             end = float(row["end"])
 
             if end <= last_end:
-                continue
-            last_end = end
+                pass
+            else:
+                last_end = end
 
             start_frame = int(start * sampling_rate)
             end_frame = int(end * sampling_rate)

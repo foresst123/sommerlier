@@ -35,19 +35,37 @@ class TargetExtractionService:
         
         for spk in set(s.speaker for s in segments):
             clean_clips = []
-            # Dynamic fallback: try 2.0s, then 1.0s, then 0.5s, then 0.0s
-            for dur_thresh in [2.0, 1.0, 0.5, 0.0]:
+            for dur_thresh in [2.0, 1.0, 0.5, 0.1]:
                 for s in segments:
                     if s.speaker != spk:
                         continue
-                    is_overlapped = False
-                    for o_start, o_end in overlap_ranges:
-                        if not (s.end <= o_start or s.start >= o_end):
-                            is_overlapped = True
-                            break
-                            
-                    if not is_overlapped and (s.end - s.start) >= dur_thresh:
-                        clean_clips.append(s)
+                        
+                    # Find clean sub-segments within this segment
+                    curr_start = s.start
+                    sub_segments = []
+                    
+                    # Sort overlaps that intersect this segment
+                    intersecting_overlaps = sorted(
+                        [o for o in overlap_ranges if not (s.end <= o[0] or s.start >= o[1])],
+                        key=lambda x: x[0]
+                    )
+                    
+                    for o_start, o_end in intersecting_overlaps:
+                        if curr_start < o_start:
+                            sub_segments.append((curr_start, o_start))
+                        curr_start = max(curr_start, o_end)
+                        
+                    if curr_start < s.end:
+                        sub_segments.append((curr_start, s.end))
+                        
+                    for sub_start, sub_end in sub_segments:
+                        if (sub_end - sub_start) >= dur_thresh:
+                            # We store an object that has start and end attributes to mimic Segment
+                            class CleanClip:
+                                def __init__(self, start, end):
+                                    self.start = start
+                                    self.end = end
+                            clean_clips.append(CleanClip(sub_start, sub_end))
                 
                 if clean_clips:
                     break # Found clips, stop lowering threshold
