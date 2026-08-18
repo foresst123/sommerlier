@@ -28,6 +28,7 @@ def parse_args():
     parser.add_argument("--LLM", default="case_0", type=str, help="LLM refinement case")
     parser.add_argument("--initprompt", action="store_true", help="Use initial prompt for LLM")
     parser.add_argument("--env", default="kaggle", type=str, help="Environment profile name in config.json")
+    parser.add_argument("--stop_after", type=str, choices=["diarization", "separation", "music_removal", "asr", "captioning"], help="Stop pipeline gracefully after this stage")
     return parser.parse_args()
 
 # ==========================================

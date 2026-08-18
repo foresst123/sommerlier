@@ -50,6 +50,10 @@ class PipelineService:
             self.model_loader.unload("diarizer")
             self.model_loader.unload("vad")
             
+        if getattr(args, "stop_after", None) == "diarization":
+            if self.logger: self.logger.info("Stopping pipeline after diarization as requested by --stop_after.")
+            return None
+            
         # 3. Speech Separation (Overlap)
         if checkpoint.exists("separation"):
             if self.logger: self.logger.info("Loading Separation from checkpoint")
@@ -62,6 +66,10 @@ class PipelineService:
         if self.model_loader:
             self.model_loader.unload("separator")
             self.model_loader.unload("embedder")
+            
+        if getattr(args, "stop_after", None) == "separation":
+            if self.logger: self.logger.info("Stopping pipeline after separation as requested by --stop_after.")
+            return None
             
         # 4. Background Music Removal
         if checkpoint.exists("music_removal"):
@@ -76,6 +84,10 @@ class PipelineService:
             self.model_loader.unload("panns")
             self.model_loader.unload("demucs")
             
+        if getattr(args, "stop_after", None) == "music_removal":
+            if self.logger: self.logger.info("Stopping pipeline after music_removal as requested by --stop_after.")
+            return None
+            
         # 5. ASR Ensemble (MoE)
         if checkpoint.exists("asr"):
             if self.logger: self.logger.info("Loading ASR from checkpoint")
@@ -86,6 +98,10 @@ class PipelineService:
             if self.logger: self.logger.info(f"[DEBUG] ASR returned {len(transcripts)} transcripts")
             checkpoint.save("asr", transcripts)
             
+        if getattr(args, "stop_after", None) == "asr":
+            if self.logger: self.logger.info("Stopping pipeline after asr as requested by --stop_after.")
+            return transcripts
+            
         # 6. Qwen3-Omni Captioning
         if getattr(args, "qwen3omni", False):
             if checkpoint.exists("captioning"):
@@ -95,6 +111,10 @@ class PipelineService:
                 enhanced_audio_dict = {s.index: s.enhanced_audio for s in enhanced_segments if s.enhanced_audio is not None}
                 transcripts = self.caption_svc.add_captions(transcripts, audio_data, enhanced_audio_dict)
                 checkpoint.save("captioning", transcripts)
+                
+        if getattr(args, "stop_after", None) == "captioning":
+            if self.logger: self.logger.info("Stopping pipeline after captioning as requested by --stop_after.")
+            return transcripts
                 
         # 7. LLM Refinement
         if getattr(args, "llm_refinement", False):
