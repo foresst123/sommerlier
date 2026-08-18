@@ -76,6 +76,7 @@ from services.diarization_refinement_service import DiarizationRefinementService
 from services.export_service import ExportService
 from services.pipeline_service import PipelineService
 from services.qwen3_worker_service import Qwen3WorkerService
+from services.diarizen_worker_service import DiarizenWorkerService
 
 def main():
         
@@ -103,11 +104,25 @@ def main():
         qwen3_service = Qwen3WorkerService(qwen3_env_bin, qwen3_worker_script, device_id=args.gpu_2, logger=logger)
         qwen3_service.start()
 
+    # 1b. Start DiariZen Worker (if dia3 is not used)
+    diarizen_service = None
+    if not args.dia3:
+        diarizen_env_bin = os.environ.get("DIARIZEN_PYTHON")
+        if not diarizen_env_bin:
+            # Fallback checks
+            if os.path.exists("../../diarizen_env/bin/python"):
+                diarizen_env_bin = "../../diarizen_env/bin/python"
+            else:
+                diarizen_env_bin = "../diarizen_env/bin/python"
+        diarizen_worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diarizen_worker.py")
+        diarizen_service = DiarizenWorkerService(diarizen_env_bin, diarizen_worker_script, device_id=args.gpu_1, logger=logger)
+        diarizen_service.start()
+
     try:
         # 2. Load Models
         model_loader = ModelLoader(config, args, logger=logger)
         model_loader.load_base_models()
-        model_loader.load_diarization_models()
+        model_loader.load_diarization_models(diarizen_service)
         model_loader.load_separation_models()
         model_loader.load_music_models()
         model_loader.load_asr_models(qwen3_service)
@@ -158,6 +173,8 @@ def main():
     finally:
         if qwen3_service:
             qwen3_service.stop()
+        if diarizen_service:
+            diarizen_service.stop()
         logger.info("Pipeline execution finished.")
 
 if __name__ == "__main__":

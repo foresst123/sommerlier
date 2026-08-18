@@ -33,8 +33,8 @@ class ModelLoader:
         if self.logger: self.logger.info(f"Loading Base models on {self.device_1}")
         self.models["vad"] = SileroVAD(device=self.device_1)
         
-    def load_diarization_models(self):
-        """Load Pyannote/Sortformer based on args."""
+    def load_diarization_models(self, diarizen_service=None):
+        """Load Pyannote/DiariZen based on args."""
         if self.args.dia3:
             if self.logger: self.logger.info(f"Loading Pyannote Diarization on {self.device_1}")
             self.models["diarizer"] = PyannoteDiarizer(
@@ -43,8 +43,8 @@ class ModelLoader:
                 use_community=True
             )
         else:
-            if self.logger: self.logger.info(f"Loading DiariZen WavLM-Large on {self.device_2}")
-            self.models["diarizer"] = DiariZenDiarizer(device=self.device_2)
+            if self.logger: self.logger.info(f"Connecting to DiariZen worker on {self.device_2}")
+            self.models["diarizer"] = DiariZenDiarizer(process=diarizen_service.process if diarizen_service else None)
             
         # Embedder is needed for cross-chunk diarization fusion AND SR-CorrNet speaker identification
         if self.logger: self.logger.info(f"Loading Pyannote Embedder on {self.device_1}")
