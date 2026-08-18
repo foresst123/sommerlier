@@ -18,39 +18,61 @@ def apply_sortformer_segment_padding(df: pd.DataFrame, pad_onset: float = 0.0, p
     df["end"] = df[["start", "end"]].max(axis=1)
     return df
 
-def cut_by_speaker_label(vad_list: list, merge_gap: float = 0.5, min_segment_length: float = 3.0, max_segment_length: float = 30.0, logger=None) -> list:
-    """Merge and trim VAD segments by speaker labels."""
-    updated_list = []
-    for idx, vad in enumerate(vad_list):
-        last_start_time = updated_list[-1]["start"] if updated_list else None
-        last_end_time = updated_list[-1]["end"] if updated_list else None
-        last_speaker = updated_list[-1]["speaker"] if updated_list else None
+def cut_by_speaker_label(vad_list: list, merge_gap: float = 0.5, min_segment_length: float = 0.2, max_segment_length: float = 30.0, logger=None) -> list:
+    """Merge and trim VAD segments by speaker labels robustly."""
+    if not vad_list:
+        return []
 
-        if vad["end"] - vad["start"] >= max_segment_length:
-            current_start = vad["start"]
-            segment_end = vad["end"]
+    # Phase 1: Group by speaker and merge gaps
+    speaker_tracks = {}
+    for vad in vad_list:
+        spk = vad["speaker"]
+        if spk not in speaker_tracks:
+            speaker_tracks[spk] = []
+        speaker_tracks[spk].append(vad.copy())
+
+    merged_list = []
+    for spk, tracks in speaker_tracks.items():
+        tracks.sort(key=lambda x: x["start"])
+        spk_merged = []
+        for vad in tracks:
+            if not spk_merged:
+                spk_merged.append(vad)
+                continue
+            
+            last_vad = spk_merged[-1]
+            gap = vad["start"] - last_vad["end"]
+            merged_dur = max(last_vad["end"], vad["end"]) - min(last_vad["start"], vad["start"])
+            
+            if gap <= merge_gap and merged_dur <= max_segment_length:
+                last_vad["end"] = max(last_vad["end"], vad["end"])
+                last_vad["start"] = min(last_vad["start"], vad["start"])
+            else:
+                spk_merged.append(vad)
+        merged_list.extend(spk_merged)
+
+    # Re-sort all merged tracks by start time
+    merged_list.sort(key=lambda x: x["start"])
+
+    # Phase 2: Split any segment strictly larger than max_segment_length
+    final_split = []
+    for vad in merged_list:
+        if vad["end"] - vad["start"] > max_segment_length:
             if logger:
                 logger.warning(f"cut_by_speaker_label > segment longer than {max_segment_length}s, force trimming")
-            while segment_end - current_start >= max_segment_length:
-                vad["end"] = current_start + max_segment_length
-                updated_list.append(vad)
-                vad = vad.copy()
-                current_start += max_segment_length
-                vad["start"] = current_start
-                vad["end"] = segment_end
-            updated_list.append(vad)
-            continue
-
-        if last_speaker is None or last_speaker != vad["speaker"] or vad["end"] - vad["start"] >= min_segment_length:
-            updated_list.append(vad)
-            continue
-
-        if vad["start"] - last_end_time >= merge_gap or vad["end"] - last_start_time >= max_segment_length:
-            updated_list.append(vad)
+            curr_start = vad["start"]
+            while curr_start < vad["end"]:
+                chunk_end = min(curr_start + max_segment_length, vad["end"])
+                new_vad = vad.copy()
+                new_vad["start"] = curr_start
+                new_vad["end"] = chunk_end
+                final_split.append(new_vad)
+                curr_start = chunk_end
         else:
-            updated_list[-1]["end"] = vad["end"]
+            final_split.append(vad)
 
-    filter_list = [vad for vad in updated_list if vad["end"] - vad["start"] >= min_segment_length]
+    # Phase 3: Filter out ultra-short segments
+    filter_list = [v for v in final_split if (v["end"] - v["start"]) >= min_segment_length]
     return filter_list
 
 def deduplicate_segments_by_index(segments: list, logger=None) -> list:
