@@ -45,10 +45,9 @@ def load_model(config_path=None, env_name="kaggle"):
         except Exception as e:
             print(json.dumps({"error": f"Failed to parse config: {str(e)}"}), flush=True)
 
-    pipeline = DiariZenPipeline.from_pretrained(
-        "BUT-FIT/diarizen-wavlm-large-s80-md-v2",
-        config_parse=config_parse
-    )
+    pipeline = DiariZenPipeline.from_pretrained("BUT-FIT/diarizen-wavlm-large-s80-md-v2")
+    if config_parse:
+        pipeline.instantiate(config_parse)
     pipeline.to(device)
 
     print(json.dumps({"status": "ready", "device": str(device)}), flush=True)
