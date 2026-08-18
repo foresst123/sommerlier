@@ -4,6 +4,7 @@ from typing import Dict, Any
 
 from models.whisper_wrapper import WhisperASR
 from models.phowhisper import PhoWhisperASR
+from models.silero_vad import SileroVAD
 from models.pyannote import PyannoteDiarizer
 from models.diarizen_model import DiariZenDiarizer
 from models.pyannote_embedding import PyannoteEmbedder
