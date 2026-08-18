@@ -66,7 +66,9 @@ class ModelLoader:
         if getattr(self.args, "panns", False):
             if self.logger: self.logger.info("Loading PANNS detector")
             self.models["panns"] = PANNSDetector(device=str(self.device_1))
-            self.models["demucs"] = DemucsRemover(device=str(self.device_1))
+            
+            demucs_cfg = self.config.get("environments", {}).get(self.args.env, {}).get("models", {}).get("demucs", {})
+            self.models["demucs"] = DemucsRemover(device=str(self.device_1), **demucs_cfg)
             
     def load_asr_models(self, qwen3_service: Qwen3WorkerService = None):
         """Load ASR models (Whisper, PhoWhisper, Qwen3)."""
@@ -76,9 +78,11 @@ class ModelLoader:
         
         if getattr(self.args, "ASRMoE", False) and getattr(self.args, "lang", "vi") == "vi":
             if self.logger: self.logger.info(f"Loading Whisper on {self.device_1}")
+            
+            whisper_cfg = self.config.get("environments", {}).get(self.args.env, {}).get("models", {}).get("whisper", {})
             self.models["whisper"] = WhisperASR(
-                model_size=getattr(self.args, "model_size", "large-v3-turbo"),
-                device=self.device_1
+                device=self.device_1,
+                **whisper_cfg
             )
             if qwen3_service:
                 if self.logger: self.logger.info("Connecting to Qwen3 worker")

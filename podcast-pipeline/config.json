@@ -4,32 +4,87 @@
         "supported": [
           "en", "ko", "ja", "zh", "es", "fr", "de", "it", "pt", "ru", "ar", "hi"
         ]
-      },
+    },
     "entrypoint": {
         "input_folder_path": "audio_pipeline/test",
         "SAMPLE_RATE": 16000
-    },
-    "separate": {
-        "step1": {
-            "model_path": "audio_pipeline/checkpoints/UVR-MDX-NET-Inst_HQ_3.onnx",
-            "denoise": true,
-            "margin": 44100,
-            "chunks": 15,
-            "n_fft": 6144,
-            "dim_t": 8,
-            "dim_f": 3072
-        }
     },
     "huggingface_token": "hf_XXXXXXXXXXXXXXXXXXXXXXXX",
     "environments": {
         "kaggle": {
             "offline_mode": false,
-            "use_bf16": false
+            "gpu_1": 0,
+            "gpu_2": 1,
+            "pipeline": {
+                "merge_gap": 2.0,
+                "seg_th": 0.11,
+                "min_cluster_size": 11,
+                "clust_th": 0.5
+            },
+            "models": {
+                "whisper": {
+                    "model_size": "large-v3-turbo",
+                    "compute_type": "float16",
+                    "batch_size": 16
+                },
+                "qwen3": {
+                    "batch_size": 4,
+                    "use_flash_attention": false,
+                    "torch_dtype": "float16"
+                },
+                "diarizen": {
+                    "batch_size": 32,
+                    "seg_duration": 16,
+                    "segmentation_step": 0.1,
+                    "apply_median_filtering": true,
+                    "clustering_method": "VBxClustering",
+                    "min_speakers": 1,
+                    "max_speakers": 20,
+                    "ahc_threshold": 0.6
+                },
+                "demucs": {
+                    "segment": 10,
+                    "overlap": 0.1
+                }
+            }
         },
-        "h100": {
+        "notebook": {
             "offline_mode": true,
-            "use_bf16": true,
-            "offline_weights_dir": "./offline_weights"
+            "offline_weights_dir": "./offline_weights",
+            "gpu_1": 0,
+            "gpu_2": 0,
+            "pipeline": {
+                "merge_gap": 2.0,
+                "seg_th": 0.11,
+                "min_cluster_size": 11,
+                "clust_th": 0.5
+            },
+            "models": {
+                "whisper": {
+                    "model_size": "large-v3-turbo",
+                    "compute_type": "bfloat16",
+                    "batch_size": 64
+                },
+                "qwen3": {
+                    "batch_size": 16,
+                    "use_flash_attention": true,
+                    "torch_dtype": "bfloat16"
+                },
+                "diarizen": {
+                    "batch_size": 128,
+                    "seg_duration": 16,
+                    "segmentation_step": 0.1,
+                    "apply_median_filtering": true,
+                    "clustering_method": "VBxClustering",
+                    "min_speakers": 1,
+                    "max_speakers": 20,
+                    "ahc_threshold": 0.6
+                },
+                "demucs": {
+                    "segment": 20,
+                    "overlap": 0.25
+                }
+            }
         }
     }
 }

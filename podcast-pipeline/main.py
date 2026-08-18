@@ -21,10 +21,6 @@ def parse_args():
     parser.add_argument("--sortformer_pad_onset", default=0.0, type=float, help="Sortformer start padding")
     parser.add_argument("--sortformer_pad_offset", default=0.0, type=float, help="Sortformer end padding")
     parser.add_argument("--vad", action="store_true", help="Enable VAD")
-    parser.add_argument("--merge_gap", default=2.0, type=float, help="Gap threshold for merging segments")
-    parser.add_argument("--seg_th", default=0.11, type=float, help="Segmentation threshold")
-    parser.add_argument("--min_cluster_size", default=11, type=int, help="Minimum cluster size")
-    parser.add_argument("--clust_th", default=0.5, type=float, help="Clustering threshold")
     parser.add_argument("--LLM", default="case_0", type=str, help="LLM refinement case")
     parser.add_argument("--initprompt", action="store_true", help="Use initial prompt for LLM")
     parser.add_argument("--env", default="kaggle", type=str, help="Environment profile name in config.json")
@@ -40,6 +36,16 @@ with open(args.config, 'r', encoding='utf-8') as f:
     config = json.load(f)
     
 env_profile = config.get("environments", {}).get(args.env, {})
+
+# Inject config parameters into args dynamically
+pipeline_cfg = env_profile.get("pipeline", {})
+for k, v in pipeline_cfg.items():
+    setattr(args, k, v)
+    
+if "gpu_1" in env_profile:
+    args.gpu_1 = env_profile["gpu_1"]
+if "gpu_2" in env_profile:
+    args.gpu_2 = env_profile["gpu_2"]
 
 if env_profile.get("offline_mode", False):
     os.environ["HF_HUB_OFFLINE"] = "1"
@@ -102,7 +108,7 @@ def main():
             else:
                 qwen3_env_bin = "../qwen3_env/bin/python"
         qwen3_worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qwen3_worker.py")
-        qwen3_service = Qwen3WorkerService(qwen3_env_bin, qwen3_worker_script, device_id=args.gpu_2, logger=logger)
+        qwen3_service = Qwen3WorkerService(qwen3_env_bin, qwen3_worker_script, device_id=args.gpu_2, logger=logger, env_name=args.env, config_path=args.config)
         qwen3_service.start()
 
     # 1b. Start DiariZen Worker (if dia3 is not used)
@@ -116,7 +122,7 @@ def main():
             else:
                 diarizen_env_bin = "../diarizen_env/bin/python"
         diarizen_worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diarizen_worker.py")
-        diarizen_service = DiarizenWorkerService(diarizen_env_bin, diarizen_worker_script, device_id=args.gpu_1, logger=logger)
+        diarizen_service = DiarizenWorkerService(diarizen_env_bin, diarizen_worker_script, device_id=args.gpu_1, logger=logger, env_name=args.env, config_path=args.config)
         diarizen_service.start()
 
     try:

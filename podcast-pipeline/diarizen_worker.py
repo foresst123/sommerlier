@@ -19,18 +19,36 @@ import os
 import torch
 import soundfile as sf
 import warnings
+import argparse
 
 warnings.filterwarnings("ignore")
 
-def load_model():
-    """Load DiariZen WavLM-Large s80-md-v2."""
+def load_model(config_path=None, env_name="kaggle"):
+    """Load DiariZen WavLM-Large s80-md-v2 with custom config."""
     from diarizen.pipelines.inference import DiariZenPipeline
     
     device = torch.device("cuda:0") # CUDA_VISIBLE_DEVICES remaps physical GPU → cuda:0
 
     print(json.dumps({"status": "loading", "model": "BUT-FIT/diarizen-wavlm-large-s80-md-v2"}), flush=True)
 
-    pipeline = DiariZenPipeline.from_pretrained("BUT-FIT/diarizen-wavlm-large-s80-md-v2")
+    config_parse = None
+    if config_path and os.path.exists(config_path):
+        try:
+            with open(config_path, 'r') as f:
+                cfg = json.load(f)
+            diar_cfg = cfg.get("environments", {}).get(env_name, {}).get("models", {}).get("diarizen", {})
+            if diar_cfg:
+                config_parse = {
+                    "inference": {"args": diar_cfg},
+                    "clustering": {"args": {"method": diar_cfg.get("clustering_method", "VBxClustering"), **diar_cfg}}
+                }
+        except Exception as e:
+            print(json.dumps({"error": f"Failed to parse config: {str(e)}"}), flush=True)
+
+    pipeline = DiariZenPipeline.from_pretrained(
+        "BUT-FIT/diarizen-wavlm-large-s80-md-v2",
+        config_parse=config_parse
+    )
     pipeline.to(device)
 
     print(json.dumps({"status": "ready", "device": str(device)}), flush=True)
@@ -40,21 +58,9 @@ def load_model():
 def diarize(pipeline, audio_path):
     """Run DiariZen inference on an audio file."""
     try:
-        # Load audio using soundfile (ensure it's 16kHz)
-        audio_data, sr = sf.read(audio_path, dtype="float32")
-        if sr != 16000:
-            import librosa
-            audio_data = librosa.resample(audio_data, orig_sr=sr, target_sr=16000)
-            
-        # Convert to torch tensor with shape (1, T)
-        waveform = torch.from_numpy(audio_data).unsqueeze(0)
-        
-        audio_input = {
-            "waveform": waveform,
-            "sample_rate": 16000
-        }
-
-        diar_out = pipeline(audio_input)
+        # Pass the audio path directly to the pipeline. 
+        # Pyannote/DiariZen handles loading and resampling internally.
+        diar_out = pipeline(audio_path)
         
         annotation = (
             diar_out.speaker_diarization
@@ -77,8 +83,13 @@ def diarize(pipeline, audio_path):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="config.json")
+    parser.add_argument("--env", default="kaggle")
+    args = parser.parse_args()
+
     try:
-        pipeline, device = load_model()
+        pipeline, device = load_model(args.config, args.env)
     except Exception as e:
         print(json.dumps({"error": f"Failed to load model: {str(e)}"}), flush=True)
         sys.exit(1)

@@ -4,18 +4,20 @@ from models.whisper import load_asr_model
 
 class WhisperASR:
     """Wrapper for the Whisper ASR model."""
-    def __init__(self, model_size="large-v3-turbo", device=None):
+    def __init__(self, model_size="large-v3-turbo", device=None, compute_type=None, batch_size=16):
         if device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = device
             
+        self.batch_size = batch_size
         device_index = 0
         if isinstance(self.device, torch.device) and self.device.index is not None:
             device_index = self.device.index
             
-        use_bf16 = os.environ.get("SOMMELIER_USE_BF16") == "1"
-        compute_type = "bfloat16" if use_bf16 else "float16"
+        if compute_type is None:
+            use_bf16 = os.environ.get("SOMMELIER_USE_BF16") == "1"
+            compute_type = "bfloat16" if use_bf16 else "float16"
         if self.device.type != "cuda": compute_type = "int8"
             
         self.model = load_asr_model(
@@ -29,13 +31,14 @@ class WhisperASR:
             threads=4
         )
 
-    def transcribe(self, audio_16k, dummy_vad, language="en", batch_size=1):
+    def transcribe(self, audio_16k, dummy_vad, language="en", batch_size=None):
         """Transcribe an audio segment."""
         # The underlying model is a VadFreeFasterWhisperPipeline
+        bs = batch_size if batch_size is not None else self.batch_size
         result = self.model.transcribe(
             audio_16k,
             dummy_vad,
-            batch_size=batch_size,
+            batch_size=bs,
             language=language,
             print_progress=False
         )

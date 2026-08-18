@@ -11,11 +11,13 @@ from pathlib import Path
 class DemucsRemover:
     """Wrapper for Demucs htdemucs to remove background music."""
     
-    def __init__(self, device: str = None):
+    def __init__(self, device: str = None, segment: int = 10, overlap: float = 0.1):
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
             self.device = device
+        self.segment = segment
+        self.overlap = overlap
             
     def separate_full(self, audio_array: np.ndarray, sample_rate: int) -> np.ndarray:
         """Run Demucs on the entire audio to obtain vocal stem."""
@@ -32,6 +34,8 @@ class DemucsRemover:
                 sys.executable, "-m", "demucs.separate",
                 "-n", "htdemucs",
                 "--two-stems", "vocals",
+                "--segment", str(self.segment),
+                "--overlap", str(self.overlap),
                 "-d", self.device,
                 "-o", demucs_output_dir,
                 temp_input,

@@ -19,9 +19,10 @@ import os
 import numpy as np
 import torch
 import soundfile as sf
+import argparse
 
 
-def load_model():
+def load_model(config_path=None, env_name="kaggle"):
     """Load Qwen3-ASR model and processor."""
     from transformers import AutoProcessor, AutoModelForMultimodalLM
 
@@ -30,15 +31,31 @@ def load_model():
 
     print(json.dumps({"status": "loading", "model": model_name}), flush=True)
 
-    import os
-    use_bf16 = os.environ.get("SOMMELIER_USE_BF16") == "1"
+    qwen_cfg = {}
+    if config_path and os.path.exists(config_path):
+        try:
+            with open(config_path, 'r') as f:
+                cfg = json.load(f)
+            qwen_cfg = cfg.get("environments", {}).get(env_name, {}).get("models", {}).get("qwen3", {})
+        except Exception as e:
+            print(json.dumps({"error": f"Failed to parse config: {str(e)}"}), flush=True)
+
+    dtype_str = qwen_cfg.get("torch_dtype", "float16")
+    use_bf16 = dtype_str == "bfloat16" or os.environ.get("SOMMELIER_USE_BF16") == "1"
     dtype = torch.bfloat16 if use_bf16 else torch.float16
+    use_flash_attention = qwen_cfg.get("use_flash_attention", False)
 
     processor = AutoProcessor.from_pretrained(model_name)
+    model_kwargs = {
+        "device_map": {"": device},
+        "torch_dtype": dtype
+    }
+    if use_flash_attention:
+        model_kwargs["attn_implementation"] = "flash_attention_2"
+        
     model = AutoModelForMultimodalLM.from_pretrained(
         model_name,
-        device_map={"": device},
-        torch_dtype=dtype
+        **model_kwargs
     )
     
     # Ép kiểu toàn bộ model một cách triệt để
@@ -66,8 +83,7 @@ def transcribe(model, processor, device, audio_path, language="vi"):
         ]
 
         text = processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
-        use_bf16 = os.environ.get("SOMMELIER_USE_BF16") == "1"
-        dtype = torch.bfloat16 if use_bf16 else torch.float16
+        dtype = model.dtype
         inputs = processor(text=text, audio=audio_data, return_tensors="pt", sampling_rate=16000).to(device, dtype)
 
         with torch.no_grad():
@@ -84,7 +100,12 @@ def transcribe(model, processor, device, audio_path, language="vi"):
 
 
 def main():
-    model, processor, device = load_model()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="config.json")
+    parser.add_argument("--env", default="kaggle")
+    args = parser.parse_args()
+
+    model, processor, device = load_model(args.config, args.env)
 
     # Read commands from stdin, one JSON per line
     for line in sys.stdin:

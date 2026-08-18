@@ -5,10 +5,12 @@ import time
 class Qwen3WorkerService:
     """Manages the lifecycle of the isolated Qwen3-ASR worker process."""
     
-    def __init__(self, python_env_path: str, worker_script_path: str, device_id: int = 1, logger=None):
+    def __init__(self, python_env_path: str, worker_script_path: str, device_id: int = 1, logger=None, env_name: str = "kaggle", config_path: str = "config.json"):
         self.python_env_path = python_env_path
         self.worker_script_path = worker_script_path
         self.device_id = device_id
+        self.env_name = env_name
+        self.config_path = config_path
         self.process = None
         self.logger = logger
         
@@ -24,7 +26,7 @@ class Qwen3WorkerService:
             self.logger.info(f"Starting Qwen3-ASR worker subprocess on CUDA_VISIBLE_DEVICES={self.device_id}")
             
         self.process = subprocess.Popen(
-            [self.python_env_path, self.worker_script_path],
+            [self.python_env_path, self.worker_script_path, "--config", self.config_path, "--env", self.env_name],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

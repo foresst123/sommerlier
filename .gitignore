@@ -46,3 +46,4 @@ vi_audio_output
 test_dir
 vi_audio_output(2)
 vi_audio_output copy
+test_env
