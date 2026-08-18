@@ -72,9 +72,9 @@ def diarize(pipeline, audio_path):
         if annotation is not None:
             for turn, _, speaker in annotation.itertracks(yield_label=True):
                 segments.append({
-                    "start": turn.start,
-                    "end": turn.end,
-                    "speaker": speaker
+                    "start": float(turn.start),
+                    "end": float(turn.end),
+                    "speaker": str(speaker)
                 })
                 
         return segments
