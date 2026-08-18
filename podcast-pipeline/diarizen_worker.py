@@ -50,7 +50,7 @@ def load_model(config_path=None, env_name="kaggle"):
             # Overwrite other internal config variables if needed without calling instantiate()
             if hasattr(pipeline, '_segmentation') and hasattr(pipeline._segmentation, 'step'):
                 pipeline._segmentation.step = diar_cfg.get("segmentation_step", 0.1)
-
+                
         except Exception as e:
             print(json.dumps({"error": f"Failed to apply config overrides: {str(e)}"}), flush=True)
 

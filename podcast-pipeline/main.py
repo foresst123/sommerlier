@@ -13,7 +13,7 @@ def parse_args():
     parser.add_argument("--gpu_2", default=1, type=int, help="GPU for PhoWhisper/Sortformer/Qwen3")
     parser.add_argument("--lang", default="vi", help="Language code")
     parser.add_argument("--ASRMoE", action="store_true", help="Enable MoE ASR")
-    parser.add_argument("--dia3", action="store_true", help="Use Pyannote community model (default is Sortformer if false)")
+    parser.add_argument("--dia3", action="store_true", help="Use Pyannote community model (default is DiariZen if false)")
     parser.add_argument("--tse", action="store_true", help="Enable Target Speaker Extraction (TSE) for overlapping speech")
     parser.add_argument("--panns", action="store_true", help="Enable background music removal")
     parser.add_argument("--qwen3omni", action="store_true", help="Enable Qwen3-Omni audio captioning")

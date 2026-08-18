@@ -124,7 +124,7 @@ class PipelineService:
         # 8. Export Results
         save_path = getattr(args, "save_path", "./output")
         if save_path == "./output":
-            suffix = "dia3" if getattr(args, "dia3", False) else "ori"
+            suffix = "pyannote" if getattr(args, "dia3", False) else "diarizen"
             do_vad = getattr(args, "vad", False)
             merge_gap = getattr(args, "merge_gap", 2.0)
             seg_th = getattr(args, "seg_th", 0.11)
@@ -146,7 +146,7 @@ class PipelineService:
         
         metadata = {
             "audio_file": os.path.basename(audio_path),
-            "diarization_model": "pyannote3" if getattr(args, "dia3", False) else "pyannote",
+            "diarization_model": "pyannote" if getattr(args, "dia3", False) else "diarizen",
             "asr_models": ["whisper", "phowhisper", "qwen3"] if getattr(args, "ASRMoE", False) else ["whisper"],
             "panns_enabled": getattr(args, "panns", False),
             "vad_enabled": getattr(args, "vad", False),
@@ -158,6 +158,23 @@ class PipelineService:
         self.export_svc.export_json(transcripts, os.path.join(save_path, f"{base_name}.json"), metadata=metadata)
         self.export_svc.export_srt(transcripts, os.path.join(save_path, f"{base_name}.srt"))
         self.export_svc.export_mp3_segments(transcripts, audio_data, save_path, base_name)
+        
+        # [Added Feature] Dump intermediate Diarization and Separation results to the final folder for comparison
+        import json
+        try:
+            with open(os.path.join(save_path, f"{base_name}_intermediate_diarization.json"), "w", encoding="utf-8") as f:
+                json.dump([seg.__dict__ for seg in diarization_result.segments], f, ensure_ascii=False, indent=2)
+            
+            with open(os.path.join(save_path, f"{base_name}_intermediate_separation.json"), "w", encoding="utf-8") as f:
+                # enhanced_segments might contain large numpy arrays, so we exclude 'enhanced_audio' from the dump
+                sep_data = []
+                for s in enhanced_segments:
+                    s_dict = s.__dict__.copy()
+                    s_dict.pop('enhanced_audio', None)
+                    sep_data.append(s_dict)
+                json.dump(sep_data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            if self.logger: self.logger.error(f"Failed to export intermediate results: {e}")
         
         if self.logger: self.logger.info(f"Pipeline completed successfully. Results saved to {save_path}")
         return transcripts
