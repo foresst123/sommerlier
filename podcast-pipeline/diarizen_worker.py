@@ -31,23 +31,7 @@ def load_model(config_path=None, env_name="kaggle"):
 
     print(json.dumps({"status": "loading", "model": "BUT-FIT/diarizen-wavlm-large-s80-md-v2"}), flush=True)
 
-    config_parse = None
-    if config_path and os.path.exists(config_path):
-        try:
-            with open(config_path, 'r') as f:
-                cfg = json.load(f)
-            diar_cfg = cfg.get("environments", {}).get(env_name, {}).get("models", {}).get("diarizen", {})
-            if diar_cfg:
-                config_parse = {
-                    "inference": {"args": diar_cfg},
-                    "clustering": {"args": {"method": diar_cfg.get("clustering_method", "VBxClustering"), **diar_cfg}}
-                }
-        except Exception as e:
-            print(json.dumps({"error": f"Failed to parse config: {str(e)}"}), flush=True)
-
     pipeline = DiariZenPipeline.from_pretrained("BUT-FIT/diarizen-wavlm-large-s80-md-v2")
-    if config_parse:
-        pipeline.instantiate(config_parse)
     pipeline.to(device)
 
     print(json.dumps({"status": "ready", "device": str(device)}), flush=True)
