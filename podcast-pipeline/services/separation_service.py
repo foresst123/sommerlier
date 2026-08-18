@@ -1,67 +1,117 @@
-import torch
+import numpy as np
 import librosa
-from typing import List, Tuple
+from typing import List, Dict, Tuple
 from schemas.audio import AudioData
 from schemas.segment import Segment, EnhancedSegment
 from algorithms.diarization.overlap import detect_overlapping_segments
-from algorithms.separation.postprocess import match_target_amplitude
 
-class SeparationService:
-    """Detects overlapping speech and separates them using SR-CorrNet."""
+class TargetExtractionService:
+    """
+    Replaces SeparationService. Uses Target Speaker Extraction (TSE) to isolate overlapping speech.
+    Preserves backchannels natively using enrollment profiles and context windows.
+    """
     
-    def __init__(self, separator, embedder, logger=None):
-        self.separator = separator
-        self.embedder = embedder
+    def __init__(self, tse_model, logger=None):
+        self.tse_model = tse_model
         self.logger = logger
-        self.min_embed_duration = 0.5
         
-    def _identify_speaker(self, audio_segment, sample_rate, ref_embeddings, candidate_labels):
-        if not self.embedder: return candidate_labels[0] if candidate_labels else None
+    def mine_enrollments(self, segments: List[Segment], audio: AudioData, min_dur: float = 2.0, top_k: int = 5) -> Dict[str, List[np.ndarray]]:
+        """
+        Component 1: Extract clean, non-overlapping segments for each speaker to serve as TSE enrollments.
+        """
+        if self.logger: self.logger.info("Mining enrollments for Target Speaker Extraction...")
         
-        if sample_rate != 16000:
-            audio_16k = librosa.resample(audio_segment, orig_sr=sample_rate, target_sr=16000)
-        else:
-            audio_16k = audio_segment
-            
-        if len(audio_16k) / 16000 < self.min_embed_duration:
-            return candidate_labels[0] if candidate_labels else None
-            
-        try:
-            # Model expects (batch, channel, samples) -> unsqueeze twice
-            audio_tensor = torch.tensor(audio_16k, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(self.embedder.inference.device)
-            with torch.inference_mode():
-                # Use model directly to get torch tensor, then squeeze to 1D
-                embedding = self.embedder.model(audio_tensor).squeeze()
+        # Convert to dicts for overlap detection
+        seg_dicts = [{"start": s.start, "end": s.end, "speaker": s.speaker, "index": s.index} for s in segments]
+        
+        # We need to find segments that DO NOT overlap with anything else.
+        # A simple way is to use detect_overlapping_segments and exclude them.
+        overlaps = detect_overlapping_segments(seg_dicts, overlap_threshold=0.1)
+        overlap_ranges = [(o["overlap_start"], o["overlap_end"]) for o in overlaps]
+        
+        enrollments = {}
+        sr = audio.sample_rate
+        waveform = audio.waveform
+        
+        for spk in set(s.speaker for s in segments):
+            clean_clips = []
+            # Dynamic fallback: try 2.0s, then 1.0s, then 0.5s, then 0.0s
+            for dur_thresh in [2.0, 1.0, 0.5, 0.0]:
+                for s in segments:
+                    if s.speaker != spk:
+                        continue
+                    is_overlapped = False
+                    for o_start, o_end in overlap_ranges:
+                        if not (s.end <= o_start or s.start >= o_end):
+                            is_overlapped = True
+                            break
+                            
+                    if not is_overlapped and (s.end - s.start) >= dur_thresh:
+                        clean_clips.append(s)
                 
-            best_speaker = None
-            best_sim = -1.0
+                if clean_clips:
+                    break # Found clips, stop lowering threshold
             
-            for spk in candidate_labels:
-                if spk in ref_embeddings:
-                    ref_emb = ref_embeddings[spk]
-                    # ref_emb is already a 1D numpy array from centroids
-                    ref_tensor = torch.tensor(ref_emb, dtype=torch.float32).to(self.embedder.inference.device)
-                    
-                    sim = torch.nn.functional.cosine_similarity(
-                        embedding,
-                        ref_tensor,
-                        dim=0
-                    ).item()
-                    
-                    if sim > best_sim:
-                        best_sim = sim
-                        best_speaker = spk
-            return best_speaker
-        except Exception:
-            return candidate_labels[0] if candidate_labels else None
+            # Sort by duration descending
+            clean_clips.sort(key=lambda x: x.end - x.start, reverse=True)
+            top_clips = clean_clips[:top_k]
+            
+            enrollments[spk] = []
+            for c in top_clips:
+                start_f = int(c.start * sr)
+                end_f = int(c.end * sr)
+                enrollments[spk].append(waveform[start_f:end_f].copy())
+                
+        return enrollments
 
-    def process_overlaps(self, segments: List[Segment], audio: AudioData, overlap_threshold: float = 1.0) -> List[EnhancedSegment]:
-        if not self.separator:
+    def _compute_itc(self, track_audio: np.ndarray) -> float:
+        """Stub for Intra-Track Consistency."""
+        # TODO: Implement WeSpeaker embedding cosine similarity
+        return 0.5
+
+    def _compute_itd(self, track_a: np.ndarray, track_b: np.ndarray) -> float:
+        """Stub for Inter-Track Distinctiveness."""
+        # TODO: Implement 1 - Cosine Similarity between A and B
+        return 0.9
+        
+    def _compute_energy(self, track_audio: np.ndarray) -> float:
+        """Compute signal energy (RMS)."""
+        if len(track_audio) == 0: return 0.0
+        return float(np.sqrt(np.mean(track_audio**2)))
+
+    def _cross_fade(self, orig_audio: np.ndarray, new_audio: np.ndarray, fade_samples: int) -> np.ndarray:
+        """Smoothly replace a portion of orig_audio with new_audio using Hanning crossfade."""
+        result = orig_audio.copy()
+        limit = min(len(orig_audio), len(new_audio))
+        fade_samples = min(fade_samples, limit // 2)
+        if fade_samples <= 0 or limit == 0:
+            result[:limit] = new_audio[:limit]
+            return result
+            
+        # Create Hanning window for fading
+        fade_in = np.hanning(2 * fade_samples)[:fade_samples]
+        fade_out = 1.0 - fade_in
+        
+        # Crossfade start
+        result[:fade_samples] = orig_audio[:fade_samples] * fade_out + new_audio[:fade_samples] * fade_in
+        
+        # Replace middle
+        mid_limit = limit - fade_samples
+        result[fade_samples:mid_limit] = new_audio[fade_samples:mid_limit]
+        
+        # Crossfade end
+        result[mid_limit:limit] = orig_audio[mid_limit:limit] * fade_in + new_audio[mid_limit:limit] * fade_out
+        return result
+        
+    def process_overlaps(self, segments: List[Segment], audio: AudioData, overlap_threshold: float = 0.1) -> List[EnhancedSegment]:
+        """
+        Process overlapping regions using TSE, Context Windows, and Confidence Gating.
+        """
+        if not self.tse_model:
             return [EnhancedSegment(**s.__dict__) for s in segments]
             
-        if self.logger: self.logger.info("Processing overlapping segments with SR-CorrNet")
+        if self.logger: self.logger.info("Processing overlaps with Target Speaker Extraction (TSE)")
         
-        # Convert to dict for algorithm
         seg_dicts = [{"start": s.start, "end": s.end, "speaker": s.speaker, "index": s.index} for s in segments]
         overlapping_pairs = detect_overlapping_segments(seg_dicts, overlap_threshold=overlap_threshold, logger=self.logger)
         
@@ -69,68 +119,143 @@ class SeparationService:
             return [EnhancedSegment(**s.__dict__) for s in segments]
             
         enhanced_segments = [EnhancedSegment(**s.__dict__) for s in segments]
-        # Initialize enhanced_audio with the full original segment audio
         sr = audio.sample_rate
         waveform = audio.waveform
+        total_len = len(waveform)
+        
+        # Initialize enhanced_audio
         for enh_seg in enhanced_segments:
             start_f = int(enh_seg.start * sr)
             end_f = int(enh_seg.end * sr)
             enh_seg.enhanced_audio = waveform[start_f:end_f].copy()
+            
+        # Component 1: Mine Enrollments
+        enrollments = self.mine_enrollments(segments, audio, min_dur=2.0, top_k=5)
         
-        # Build reference embeddings
-        ref_embeddings = {}
-        if self.embedder:
-            from algorithms.diarization.fusion import _compute_chunk_speaker_centroids
-            import pandas as pd
-            df = pd.DataFrame(seg_dicts)
-            ref_embeddings = _compute_chunk_speaker_centroids(df, {"waveform": waveform, "sample_rate": sr}, self.embedder.inference)
-            
         from tqdm import tqdm
-        for pair in tqdm(overlapping_pairs, desc="[SR-CorrNet]", leave=True):
+        for pair in tqdm(overlapping_pairs, desc="[TSE Extractor]", leave=True):
             seg1, seg2 = pair["seg1"], pair["seg2"]
-            start_sec = pair["overlap_start"]
-            end_sec = pair["overlap_end"]
+            overlap_start = pair["overlap_start"]
+            overlap_end = pair["overlap_end"]
             
-            start_frame = int(start_sec * sr)
-            end_frame = int(end_sec * sr)
-            mixed_audio = waveform[start_frame:end_frame]
+            # Component 2: Context Window (±1.5s)
+            ctx_pad = 1.5
+            ctx_start = max(0.0, overlap_start - ctx_pad)
+            ctx_end = min(total_len / sr, overlap_end + ctx_pad)
             
-            src1, src2 = self.separator.separate(mixed_audio, sr)
+            ctx_start_f = int(ctx_start * sr)
+            ctx_end_f = int(ctx_end * sr)
+            context_audio = waveform[ctx_start_f:ctx_end_f].copy()
             
-            # Amplitude matching
-            src1 = match_target_amplitude(src1, mixed_audio)
-            src2 = match_target_amplitude(src2, mixed_audio)
+            target_A = seg1["speaker"]
+            target_B = seg2["speaker"]
             
-            # Identify
-            candidates = [seg1["speaker"], seg2["speaker"]]
-            id_1 = self._identify_speaker(src1, sr, ref_embeddings, candidates)
-            id_2 = seg1["speaker"] if id_1 == seg2["speaker"] else seg2["speaker"]
+            # Ensure we have enrollments
+            if target_A not in enrollments or target_B not in enrollments or not enrollments[target_A] or not enrollments[target_B]:
+                continue
+                
+            # Component 3: TSE Engine
+            track_A_ctx = self.tse_model.extract_speaker(context_audio, enrollments[target_A], sample_rate=sr)
+            track_B_ctx = self.tse_model.extract_speaker(context_audio, enrollments[target_B], sample_rate=sr)
             
-            # Splice separated audio back into enhanced_segments at the correct relative offset
+            # Crop the ±1.5s padding to extract just the overlap core
+            pad_start_frames = int((overlap_start - ctx_start) * sr)
+            pad_end_frames = int((ctx_end - overlap_end) * sr)
+            
+            core_len = int((overlap_end - overlap_start) * sr)
+            track_A_core = track_A_ctx[pad_start_frames : pad_start_frames + core_len]
+            track_B_core = track_B_ctx[pad_start_frames : pad_start_frames + core_len]
+            
+            # Component 4: Quality Control
+            itc_A = self._compute_itc(track_A_core)
+            itd = self._compute_itd(track_A_core, track_B_core)
+            
+            # 4.1 Energy-based Confidence (Heuristic)
+            energy_A = self._compute_energy(track_A_core)
+            energy_B = self._compute_energy(track_B_core)
+            total_energy = energy_A + energy_B + 1e-8
+            energy_ratio_A = energy_A / total_energy
+            
+            # 4.2 Context Gap Flagging (Heuristic cho Backchannel)
+            sorted_segs = sorted(segments, key=lambda x: x.start)
+            def get_gap_to_last_turn(speaker: str, current_start: float) -> float:
+                gap = float('inf')
+                for s in reversed(sorted_segs):
+                    if s.speaker == speaker and s.end <= current_start + 0.1:
+                        gap = current_start - s.end
+                        break # Found the most recent turn
+                return gap
+                
+            gap_A = get_gap_to_last_turn(target_A, overlap_start)
+            is_backchannel = (overlap_end - overlap_start) < 1.5
+            
+            flagged = False
+            if itc_A < 0.35 or itd < 0.85:
+                flagged = True
+                if self.logger: self.logger.warning(f"TSE QC failed (ITC/ITD) at {overlap_start}s.")
+            elif is_backchannel and gap_A > 2.0:
+                flagged = True
+                if self.logger: self.logger.warning(f"TSE QC failed (Context Gap > 2s for backchannel) at {overlap_start}s.")
+                
+            if flagged:
+                # Fallback: Strict Discarding. Replace extracted track with silence to preserve SDLM quality
+                if self.logger: self.logger.warning(f"Discarding failed extraction for overlap at {overlap_start}s.")
+                track_A_core = np.zeros_like(track_A_core)
+                track_B_core = np.zeros_like(track_B_core)
+            
+            # Component 5: Splice with Cross-fade (20ms fade = 320 samples at 16kHz)
+            fade_samples = int(0.02 * sr)
             for enh_seg in enhanced_segments:
-                if enh_seg.index == seg1["index"] and enh_seg.speaker == id_1:
-                    rel_start = start_frame - int(enh_seg.start * sr)
-                    limit = min(len(src1), len(enh_seg.enhanced_audio[rel_start:]))
+                if enh_seg.index == seg1["index"]:
+                    rel_start = int((overlap_start - enh_seg.start) * sr)
+                    limit = min(len(track_A_core), len(enh_seg.enhanced_audio[rel_start:]))
                     if limit > 0:
-                        enh_seg.enhanced_audio[rel_start:rel_start+limit] = src1[:limit]
-                        enh_seg.srcorrnet = True
-                elif enh_seg.index == seg2["index"] and enh_seg.speaker == id_1:
-                    rel_start = start_frame - int(enh_seg.start * sr)
-                    limit = min(len(src1), len(enh_seg.enhanced_audio[rel_start:]))
+                        enh_seg.enhanced_audio[rel_start:rel_start+limit] = self._cross_fade(
+                            enh_seg.enhanced_audio[rel_start:rel_start+limit], track_A_core[:limit], fade_samples
+                        )
+                        enh_seg.srcorrnet = True # Flag indicating it was processed
+                elif enh_seg.index == seg2["index"]:
+                    rel_start = int((overlap_start - enh_seg.start) * sr)
+                    limit = min(len(track_B_core), len(enh_seg.enhanced_audio[rel_start:]))
                     if limit > 0:
-                        enh_seg.enhanced_audio[rel_start:rel_start+limit] = src1[:limit]
+                        enh_seg.enhanced_audio[rel_start:rel_start+limit] = self._cross_fade(
+                            enh_seg.enhanced_audio[rel_start:rel_start+limit], track_B_core[:limit], fade_samples
+                        )
                         enh_seg.srcorrnet = True
-                elif enh_seg.index == seg1["index"] and enh_seg.speaker == id_2:
-                    rel_start = start_frame - int(enh_seg.start * sr)
-                    limit = min(len(src2), len(enh_seg.enhanced_audio[rel_start:]))
-                    if limit > 0:
-                        enh_seg.enhanced_audio[rel_start:rel_start+limit] = src2[:limit]
-                        enh_seg.srcorrnet = True
-                elif enh_seg.index == seg2["index"] and enh_seg.speaker == id_2:
-                    rel_start = start_frame - int(enh_seg.start * sr)
-                    limit = min(len(src2), len(enh_seg.enhanced_audio[rel_start:]))
-                    if limit > 0:
-                        enh_seg.enhanced_audio[rel_start:rel_start+limit] = src2[:limit]
-                        enh_seg.srcorrnet = True
-                    
+                        
         return enhanced_segments
+
+    def export_sdlm_dual_channel(self, enhanced_segments: List[EnhancedSegment], audio_duration: float, sr: int = 16000) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Component 6: Export Dual-Channel Audio for SDLM training.
+        Reconstructs the full timeline into two continuous tracks (Track 0, Track 1) from the separated segments.
+        """
+        total_samples = int(audio_duration * sr)
+        track_0 = np.zeros(total_samples, dtype=np.float32)
+        track_1 = np.zeros(total_samples, dtype=np.float32)
+        
+        # Identify the two speakers. Sort alphabetically to assign Track 0 and Track 1 consistently.
+        speakers = sorted(list(set(s.speaker for s in enhanced_segments)))
+        if not speakers:
+            return track_0, track_1
+            
+        spk_0 = speakers[0]
+        spk_1 = speakers[1] if len(speakers) > 1 else None
+        
+        for seg in enhanced_segments:
+            start_idx = int(seg.start * sr)
+            end_idx = start_idx + len(seg.enhanced_audio)
+            
+            # Ensure we don't exceed buffer bounds
+            if end_idx > total_samples:
+                audio_to_paste = seg.enhanced_audio[:total_samples - start_idx]
+                end_idx = total_samples
+            else:
+                audio_to_paste = seg.enhanced_audio
+                
+            if seg.speaker == spk_0:
+                track_0[start_idx:end_idx] = audio_to_paste
+            elif seg.speaker == spk_1:
+                track_1[start_idx:end_idx] = audio_to_paste
+                
+        return track_0, track_1

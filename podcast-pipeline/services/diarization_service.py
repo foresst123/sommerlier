@@ -28,123 +28,50 @@ class DiarizationService:
         self.logger = logger
         
     def prepare_chunks(self, audio: AudioData, max_duration: float = 120.0, min_silence: float = 0.5) -> Tuple[List[DiarizationChunk], str]:
-        """Split long audio using silence from VAD."""
-        waveform = audio.waveform
-        sr = audio.sample_rate
-        
-        if self.vad_model:
-            def vad_func(wf, srate):
-                return self.vad_model.get_speech_timestamps(wf, sampling_rate=srate)
-            total_duration, silence_intervals = build_silence_intervals(waveform, sr, vad_func, min_silence)
-        else:
-            total_duration = len(waveform) / sr
-            silence_intervals = [(0.0, total_duration)]
-            
-        chunk_ranges = build_chunk_ranges(total_duration, silence_intervals, max_duration)
-        
-        epsilon = 1e-3
-        normalized_audio = audio.audio_segment
-        temp_dir = tempfile.mkdtemp(prefix="pre_diar_")
-        
-        if len(chunk_ranges) == 1 and chunk_ranges[0][0] <= epsilon and abs(chunk_ranges[0][1] - total_duration) <= epsilon:
-            temp_path = os.path.join(temp_dir, "full_audio.wav")
-            normalized_audio.set_channels(1).export(temp_path, format="wav", parameters=["-ac", "1"])
-            return [DiarizationChunk(path=temp_path, offset=0.0, duration=total_duration)], temp_dir
-
-        normalized_audio = normalized_audio.set_channels(1)
-        chunk_entries = []
-        for idx, (start_sec, end_sec) in enumerate(chunk_ranges):
-            start_ms = max(0, int(round(start_sec * 1000)))
-            end_ms = max(start_ms, int(round(end_sec * 1000)))
-            chunk_audio = normalized_audio[start_ms:end_ms]
-            chunk_path = os.path.join(temp_dir, f"chunk_{idx:03d}.wav")
-            chunk_audio.export(chunk_path, format="wav", parameters=["-ac", "1"])
-            chunk_entries.append(DiarizationChunk(path=chunk_path, offset=start_sec, duration=end_sec - start_sec))
-            
+        """Deprecated. Returns a single dummy chunk since diarization now processes the full audio natively."""
         if self.logger:
-            self.logger.info(f"Chunked audio into {len(chunk_entries)} pieces for Diarization")
-            
-        return chunk_entries, temp_dir
+            self.logger.info("Chunking bypassed. Diarization will process the full audio natively.")
+        return [DiarizationChunk(path="memory", offset=0.0, duration=audio.duration)], ""
         
     def run_diarization(self, chunks: List[DiarizationChunk], audio: AudioData, args: Any) -> DiarizationResult:
-        """Run diarization model on all chunks, apply padding/fusion, and return unified segments."""
+        """Run diarization model on the full audio natively."""
         is_diarizen = not getattr(args, "dia3", False)
-        chunk_frames = []
         import pandas as pd
+        import torch
         
+        # Prepare memory tensor for pipeline
+        audio_input = {
+            "waveform": torch.from_numpy(audio.waveform).unsqueeze(0),
+            "sample_rate": audio.sample_rate
+        }
+        
+        if self.logger:
+            self.logger.info(f"Running diarization on the full audio file natively (Duration: {audio.duration:.2f}s)...")
+            
         if is_diarizen:
-            # DiariZen
-            from tqdm import tqdm
-            for chunk in tqdm(chunks, desc="[DiariZen] Phân rã", leave=True):
-                diar_out = self.diarizer.diarize(chunk.path)
-                data = []
-                annotation = (
-                    diar_out.speaker_diarization
-                    if hasattr(diar_out, "speaker_diarization")
-                    else diar_out
-                )
-                if annotation is not None:
-                    try:
-                        for turn, _, speaker in annotation.itertracks(yield_label=True):
-                            data.append({
-                                "start": turn.start + chunk.offset,
-                                "end": turn.end + chunk.offset,
-                                "speaker": speaker
-                            })
-                    except Exception as e:
-                        if self.logger: self.logger.error(f"Error iterating diarization result: {e}")
-                df = pd.DataFrame(data) if data else pd.DataFrame(columns=["start", "end", "speaker"])
-                chunk_frames.append(df)
-
+            diar_out = self.diarizer.diarize(audio_input)
         else:
-            # Pyannote
-            from tqdm import tqdm
-            for chunk in tqdm(chunks, desc="[Pyannote] Phân rã", leave=True):
-                # Dùng num_speakers=2 thay vì max_speakers=2 để khóa chính xác 2 người (đạt accuracy tốt nhất)
-                diar_out = self.diarizer.diarize(chunk.path, num_speakers=2)
-                data = []
-                # Mirror original code: community-1 model wraps result in object with
-                # .speaker_diarization attribute. Must check this first before treating
-                # result as bare Annotation.
-                annotation = (
-                    diar_out.speaker_diarization
-                    if hasattr(diar_out, "speaker_diarization")
-                    else diar_out
-                )
-                if annotation is not None:
-                    try:
-                        for turn, _, speaker in annotation.itertracks(yield_label=True):
-                            data.append({
-                                "start": turn.start + chunk.offset,
-                                "end": turn.end + chunk.offset,
-                                "speaker": speaker
-                            })
-                    except Exception as e:
-                        if self.logger: self.logger.error(f"Error iterating diarization result: {e}")
-                df = pd.DataFrame(data) if data else pd.DataFrame(columns=["start", "end", "speaker"])
-                chunk_frames.append(df)
-
-                
-        # Cross-chunk fusion
-        if len(chunks) > 1 and self.embedder:
-            speaker_link_threshold = getattr(args, "speaker_link_threshold", 0.49)
-            aligned_frames = align_speakers_across_chunks(
-                chunk_frames, 
-                {"waveform": audio.waveform, "sample_rate": audio.sample_rate},
-                self.embedder.inference,
-                similarity_threshold=speaker_link_threshold,
-                logger=self.logger
-            )
-        else:
-            aligned_frames = chunk_frames
+            diar_out = self.diarizer.diarize(audio_input, num_speakers=2)
             
-        # Combine
-        valid_dfs = [df for df in aligned_frames if not df.empty]
-        combined_df = pd.concat(valid_dfs, ignore_index=True) if valid_dfs else pd.DataFrame(columns=["start", "end", "speaker"])
+        data = []
+        annotation = (
+            diar_out.speaker_diarization
+            if hasattr(diar_out, "speaker_diarization")
+            else diar_out
+        )
         
-        if combined_df.empty:
-            return DiarizationResult(segments=[], num_speakers=0, method="sortformer" if is_sortformer else "pyannote")
-            
+        if annotation is not None:
+            try:
+                for turn, _, speaker in annotation.itertracks(yield_label=True):
+                    data.append({
+                        "start": turn.start,
+                        "end": turn.end,
+                        "speaker": speaker
+                    })
+            except Exception as e:
+                if self.logger: self.logger.error(f"Error iterating diarization result: {e}")
+                
+        combined_df = pd.DataFrame(data) if data else pd.DataFrame(columns=["start", "end", "speaker"])
         combined_df = combined_df.sort_values("start").reset_index(drop=True)
         
         # Apply VAD to split long continuous segments if VAD is available
