@@ -53,12 +53,13 @@ class ModelLoader:
             device=self.device_1
         )
             
-    def load_separation_models(self):
+    def load_separation_models(self, sidon_service=None):
         """Load Target Speaker Extractor (TSE) if enabled."""
         if getattr(self.args, "tse", False):
             if self.logger: self.logger.info(f"Loading Target Speaker Extractor on {self.device_1}")
             self.models["separator"] = TargetSpeakerExtractor(
-                device=self.device_1
+                device=self.device_1,
+                process=sidon_service.process if sidon_service else None
             )
             
     def load_music_models(self):

@@ -84,6 +84,7 @@ from services.export_service import ExportService
 from services.pipeline_service import PipelineService
 from services.qwen3_worker_service import Qwen3WorkerService
 from services.diarizen_worker_service import DiarizenWorkerService
+from services.sidon_worker_service import SidonWorkerService
 
 def main():
         
@@ -124,13 +125,19 @@ def main():
         diarizen_worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diarizen_worker.py")
         diarizen_service = DiarizenWorkerService(diarizen_env_bin, diarizen_worker_script, device_id=args.gpu_1, logger=logger, env_name=args.env, config_path=args.config)
         diarizen_service.start()
+        
+    # 1c. Start Sidon Worker (if TSE enabled)
+    sidon_service = None
+    if args.tse:
+        sidon_service = SidonWorkerService(config, args, logger)
+        sidon_service.start()
 
     try:
         # 2. Load Models
         model_loader = ModelLoader(config, args, logger=logger)
         model_loader.load_base_models()
         model_loader.load_diarization_models(diarizen_service)
-        model_loader.load_separation_models()
+        model_loader.load_separation_models(sidon_service)
         model_loader.load_music_models()
         model_loader.load_asr_models(qwen3_service)
         model_loader.load_caption_model()
@@ -182,6 +189,8 @@ def main():
             qwen3_service.stop()
         if diarizen_service:
             diarizen_service.stop()
+        if sidon_service:
+            sidon_service.stop()
         logger.info("Pipeline execution finished.")
 
 if __name__ == "__main__":

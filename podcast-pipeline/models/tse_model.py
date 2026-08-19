@@ -9,53 +9,21 @@ import torch.nn.functional as F
 class TargetSpeakerExtractor:
     """
     Dialogue Separation + ECAPA Speaker Matching.
-    (Not pure TSE. Uses DialogueSidon to separate 2 speakers, then ECAPA-TDNN to identify the target).
+    Uses SidonWorker for separation and ECAPA-TDNN natively for verification.
     """
     
-    def __init__(self, device: torch.device, checkpoint_path: str = None):
+    def __init__(self, device: torch.device, process=None, checkpoint_path: str = None):
         self.device = device
-        self.sidon_model = None
+        self.process = process
         self.classifier = None
         self.target_embed_cache: Dict[str, torch.Tensor] = {}
         
-        # Default checkpoint path if not provided
-        if not checkpoint_path:
-            tse_path = os.environ.get("TSE_PATH", os.path.join(os.path.dirname(__file__), "..", "tse_model"))
-            self.checkpoint_path = os.path.join(tse_path, "weights", "dialogue_sidon.ckpt")
-        else:
-            self.checkpoint_path = checkpoint_path
-            
         self._load_model()
         
     def _load_model(self):
-        print(f"[TSE Model] Initializing Dialogue Separation + ECAPA-TDNN on {self.device}...")
+        print(f"[TSE Model] Initializing ECAPA-TDNN on {self.device}...")
         
-        # 1. Load DialogueSidon
-        try:
-            from sidon.lightning import DialogueSidonDiffusionLightningModule
-        except ImportError:
-            raise ImportError(
-                "DialogueSidon is not installed! "
-                "Please run: git clone https://github.com/sarulab-speech/Sidon.git && pip install -e Sidon"
-            )
-            
-        if not os.path.exists(self.checkpoint_path):
-            raise FileNotFoundError(
-                f"DialogueSidon checkpoint not found at {self.checkpoint_path}. "
-                "Please download the correct .ckpt weights."
-            )
-            
-        try:
-            self.sidon_model = DialogueSidonDiffusionLightningModule.load_from_checkpoint(
-                self.checkpoint_path, 
-                map_location=self.device
-            )
-            self.sidon_model.eval()
-            print("[TSE Model] DialogueSidon loaded successfully.")
-        except Exception as e:
-            raise RuntimeError(f"Failed to load DialogueSidon checkpoint: {e}")
-
-        # 2. Load ECAPA-TDNN for Speaker Verification
+        # Load ECAPA-TDNN for Speaker Verification
         try:
             from speechbrain.inference.speaker import EncoderClassifier
             tse_path = os.environ.get("TSE_PATH", os.path.join(os.path.dirname(__file__), "..", "tse_model"))
@@ -103,42 +71,76 @@ class TargetSpeakerExtractor:
 
     def separate_two_speakers(self, mixture_audio: np.ndarray, enroll_A: List[np.ndarray], enroll_B: List[np.ndarray], sample_rate: int = 16000, id_A: Optional[str] = None, id_B: Optional[str] = None):
         """
-        Runs BSS once, then uses ECAPA to map the 2 output tracks to Speaker A and Speaker B.
+        Runs BSS once (via Worker), then uses ECAPA to map the 2 output tracks to Speaker A and B.
         Returns: (track_A, track_B, sim_A, sim_B)
         """
-        if not self.sidon_model or not self.classifier:
-            raise RuntimeError("Models are not fully loaded. Cannot perform separation.")
+        if not self.classifier:
+            raise RuntimeError("ECAPA is not loaded.")
+        if not self.process:
+            raise RuntimeError("Sidon worker process is not connected.")
             
         if len(mixture_audio) == 0:
             raise ValueError("Input mixture_audio is empty.")
 
         target_sr = 16000
         import torchaudio.functional as F_audio
+        import tempfile
+        import json
+        import uuid
         
-        mix_tensor = torch.from_numpy(mixture_audio).float().unsqueeze(0).to(self.device)
-
-        # --- 1-Pass BSS with DialogueSidon ---
+        req_id = str(uuid.uuid4())
+        
+        # Save mixture to temp npy
+        fd, temp_path = tempfile.mkstemp(suffix=".npy")
+        os.close(fd)
+        
+        np.save(temp_path, mixture_audio)
+        
+        # Call worker
+        req = {
+            "id": req_id,
+            "audio_path": temp_path,
+            "sample_rate": sample_rate
+        }
+        
+        self.process.stdin.write(json.dumps(req) + "\n")
+        self.process.stdin.flush()
+        
+        resp = None
+        while True:
+            line = self.process.stdout.readline()
+            if not line:
+                raise RuntimeError("Sidon worker crashed or closed stdout")
+            
+            line_str = line.strip()
+            if not line_str:
+                continue
+                
+            try:
+                parsed = json.loads(line_str)
+                if parsed.get("id") == req_id:
+                    resp = parsed
+                    break
+            except Exception:
+                pass
+                
+        if resp.get("error"):
+            raise RuntimeError(f"Sidon worker error: {resp.get('error')}")
+            
+        # Load results
+        track_1_16k_np = np.load(resp["track_1_path"])
+        track_2_16k_np = np.load(resp["track_2_path"])
+        
+        # Clean up temp files
         try:
-            from sidon.infer import run_separation_chunked
-        except ImportError:
-            raise ImportError("Could not import sidon.infer.run_separation_chunked. Ensure Sidon is correctly installed.")
-
-        with torch.inference_mode():
-            # Sidon's run_separation_chunked handles resampling, chunking, latent prediction, permutation, and VAE decode.
-            est_sources, out_sr = run_separation_chunked(
-                model=self.sidon_model,
-                wav=mix_tensor,
-                sample_rate=sample_rate,
-                num_steps=30,
-                chunk_seconds=20.0,
-                overlap_seconds=5.0
-            )
-            # est_sources shape is [2, T_total]
-            if est_sources.ndim == 2 and est_sources.shape[0] == 2:
-                track_1_16k = est_sources[0]
-                track_2_16k = est_sources[1]
-            else:
-                raise ValueError(f"Unexpected DialogueSidon output shape: {est_sources.shape}")
+            os.remove(temp_path)
+            os.remove(resp["track_1_path"])
+            os.remove(resp["track_2_path"])
+        except Exception:
+            pass
+            
+        track_1_16k = torch.from_numpy(track_1_16k_np).to(self.device)
+        track_2_16k = torch.from_numpy(track_2_16k_np).to(self.device)
 
         # --- ECAPA-TDNN Matching ---
         embed_A = self._get_target_embedding(enroll_A, id_A, sample_rate)
