@@ -67,7 +67,15 @@ class DiariZenClient:
                         # Use carriage return to overwrite the same line
                         print(f"\r[DiariZenClient] {resp['progress']}", end="", flush=True)
                         continue # Keep listening for the final segments response
-                    
+
+                    # Warnings and status lines precede the real answer; treating
+                    # them as the response would discard the segments (or the
+                    # error that explains their absence).
+                    if "segments" not in resp and "error" not in resp:
+                        note = resp.get("warning") or resp.get("status") or line_str
+                        print(f"[DiariZenClient] {note}", flush=True)
+                        continue
+
                     # Print a newline once we get the final response so subsequent logs don't overwrite the progress
                     print()
                     break # Successfully parsed final output

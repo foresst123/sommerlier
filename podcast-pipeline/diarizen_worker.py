@@ -88,26 +88,44 @@ def _apply_diarizen_config(pipeline, diar_cfg):
         # already-built sliding window here would desync the segmentation model.
         ignored.append("seg_duration (constructor-time only, cannot be set post-load)")
 
-    # Clustering knobs live on pipeline.clustering when the chosen clusterer
-    # exposes them; names differ between DiariZen releases, so probe rather than
-    # assume, and say so when the probe fails.
+    # DiariZen keeps its clustering knobs in a config dict (see the
+    # "clustering: {args: {method, min_speakers, max_speakers, ahc_threshold...}}"
+    # block it logs at load time), while other builds expose them as attributes.
+    # Try the dict first, then attributes, and report when neither works.
     clustering = getattr(pipeline, "clustering", None)
+    clustering_cfg = None
+    for holder in (clustering, pipeline):
+        for attr in ("args", "config", "_config"):
+            candidate = getattr(holder, attr, None) if holder is not None else None
+            if isinstance(candidate, dict):
+                clustering_cfg = candidate
+                break
+        if clustering_cfg is not None:
+            break
+
     clustering_map = {
-        "ahc_threshold": ("threshold",),
+        "ahc_threshold": ("ahc_threshold", "threshold"),
         "apply_median_filtering": ("apply_median_filtering",),
-        "min_speakers": ("min_num_speakers", "min_speakers"),
-        "max_speakers": ("max_num_speakers", "max_speakers"),
+        "min_speakers": ("min_speakers", "min_num_speakers"),
+        "max_speakers": ("max_speakers", "max_num_speakers"),
     }
-    for cfg_key, attr_names in clustering_map.items():
+    for cfg_key, names in clustering_map.items():
         if cfg_key not in diar_cfg:
             continue
         value = diar_cfg[cfg_key]
-        target = next((a for a in attr_names if clustering is not None and hasattr(clustering, a)), None)
-        if target:
-            setattr(clustering, target, value)
-            applied.append(f"clustering.{target}={value}")
+
+        key = next((n for n in names if clustering_cfg is not None and n in clustering_cfg), None)
+        if key is not None:
+            clustering_cfg[key] = value
+            applied.append(f"clustering.args.{key}={value}")
+            continue
+
+        attr = next((n for n in names if clustering is not None and hasattr(clustering, n)), None)
+        if attr is not None:
+            setattr(clustering, attr, value)
+            applied.append(f"clustering.{attr}={value}")
         else:
-            ignored.append(f"{cfg_key} (no matching attribute on pipeline.clustering)")
+            ignored.append(f"{cfg_key} (no matching key or attribute on pipeline.clustering)")
 
     if "clustering_method" in diar_cfg:
         requested = str(diar_cfg["clustering_method"])
@@ -167,20 +185,21 @@ def diarize(pipeline, audio_path, speaker_bounds=None):
     try:
         # Pass the audio path directly to the pipeline.
         # Pyannote/DiariZen handles loading and resampling internally.
-        # Speaker bounds are pipeline call arguments, not constructor ones; older
-        # DiariZen builds reject them, so fall back to an unbounded call.
+        # DiariZen takes speaker bounds through its clustering config, not as
+        # call arguments, and rejects them with assorted exception types, so a
+        # failed attempt must never cost us the diarization itself.
         kwargs = {k: v for k, v in (speaker_bounds or {}).items() if v is not None}
-        try:
-            diar_out = pipeline(audio_path, **kwargs) if kwargs else pipeline(audio_path)
-        except TypeError as e:
-            if kwargs:
+        if kwargs:
+            try:
+                diar_out = pipeline(audio_path, **kwargs)
+            except Exception as e:
                 print(json.dumps({
-                    "warning": f"Pipeline rejected speaker bounds {sorted(kwargs)}: {e}. "
-                               "Running unbounded."
+                    "warning": f"Pipeline rejected speaker bounds {sorted(kwargs)} "
+                               f"({type(e).__name__}: {e}); running unbounded."
                 }), flush=True)
                 diar_out = pipeline(audio_path)
-            else:
-                raise
+        else:
+            diar_out = pipeline(audio_path)
         
         annotation = (
             diar_out.speaker_diarization

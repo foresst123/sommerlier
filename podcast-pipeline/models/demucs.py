@@ -30,6 +30,15 @@ class DemucsRemover:
         model = get_model("htdemucs")
         model.to(self.device)
         model.eval()
+
+        # htdemucs is a bag of sub-models; its transformer cannot exceed the
+        # segment length it was trained on, so only shrink, never grow.
+        if self.segment:
+            for sub in getattr(model, "models", [model]):
+                current = getattr(sub, "segment", None)
+                if current and self.segment < current:
+                    sub.segment = self.segment
+
         self._model = model
         self._vocals_index = model.sources.index("vocals")
         if self.logger:
@@ -38,6 +47,7 @@ class DemucsRemover:
 
     def _separate(self, audio_array: np.ndarray, sample_rate: int):
         """Return the vocal stem for ``audio_array`` at ``sample_rate``."""
+        import torchaudio.functional as AF
         from demucs.apply import apply_model
 
         model = self._get_model()
@@ -48,25 +58,27 @@ class DemucsRemover:
         if audio.size == 0:
             return None
 
-        # Demucs is trained at its own rate on stereo input.
         wav = torch.from_numpy(audio).to(self.device)
         if sample_rate != model.samplerate:
-            import torchaudio.functional as AF
             wav = AF.resample(wav, sample_rate, model.samplerate)
+        resampled_len = wav.shape[-1]
 
+        # htdemucs expects (batch, channels, time) at its own channel count.
         wav = wav.unsqueeze(0).repeat(model.audio_channels, 1)
 
-        # apply_model normalises internally against the reference statistics.
+        # Demucs normalises against the mixture's own statistics.
         ref = wav.mean(0)
         mean, std = ref.mean(), ref.std().clamp_min(1e-8)
         wav = (wav - mean) / std
 
         with torch.no_grad():
+            # `segment` is a property of the model (htdemucs bakes its training
+            # segment into the transformer), so set it there rather than passing
+            # it to apply_model, which would fight the model's own chunking.
             sources = apply_model(
                 model,
                 wav.unsqueeze(0),
                 device=self.device,
-                segment=self.segment,
                 overlap=self.overlap,
                 progress=False,
             )[0]
@@ -74,8 +86,15 @@ class DemucsRemover:
         vocals = sources[self._vocals_index] * std + mean
         vocals = vocals.mean(0)
 
+        # apply_model can return a slightly different length than it was given.
+        if vocals.shape[-1] != resampled_len:
+            vocals = vocals[..., :resampled_len]
+            if vocals.shape[-1] < resampled_len:
+                vocals = torch.nn.functional.pad(
+                    vocals, (0, resampled_len - vocals.shape[-1])
+                )
+
         if sample_rate != model.samplerate:
-            import torchaudio.functional as AF
             vocals = AF.resample(vocals, model.samplerate, sample_rate)
 
         vocals = vocals.detach().cpu().numpy().astype(np.float32)

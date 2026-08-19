@@ -49,23 +49,30 @@ class DiarizationService:
         if self.logger:
             self.logger.info(f"Running diarization on the full audio file natively (Duration: {audio.duration:.2f}s)...")
             
-        # Both backends get the same speaker bounds so switching --dia3 does not
-        # silently change how many speakers the run may find.
+        # Both backends read the same bounds from config, but they take them at
+        # different points: DiariZen applies them to its clustering config when
+        # the worker loads the model, so passing them again per call makes the
+        # pipeline raise. Only pyannote accepts them as call arguments.
         num_speakers = self.diarizer_config.get("num_speakers")
         min_speakers = self.diarizer_config.get("min_speakers")
         max_speakers = self.diarizer_config.get("max_speakers")
 
-        if self.logger:
-            self.logger.info(
-                f"Diarizing with speaker bounds num={num_speakers} min={min_speakers} max={max_speakers}"
+        if is_diarizen:
+            if self.logger:
+                self.logger.info("Diarizing with DiariZen (speaker bounds applied via worker config)")
+            diar_out = self.diarizer.diarize(audio_input)
+        else:
+            if self.logger:
+                self.logger.info(
+                    f"Diarizing with pyannote, speaker bounds num={num_speakers} "
+                    f"min={min_speakers} max={max_speakers}"
+                )
+            diar_out = self.diarizer.diarize(
+                audio_input,
+                num_speakers=num_speakers,
+                min_speakers=min_speakers,
+                max_speakers=max_speakers,
             )
-
-        diar_out = self.diarizer.diarize(
-            audio_input,
-            num_speakers=num_speakers,
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
-        )
             
         data = []
         annotation = (

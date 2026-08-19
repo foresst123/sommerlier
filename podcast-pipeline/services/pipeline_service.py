@@ -44,6 +44,16 @@ class PipelineService:
             chunks, _ = self.diarization_svc.prepare_chunks(audio_data)
             diarization_result = self.diarization_svc.run_diarization(chunks, audio_data, args)
             if self.logger: self.logger.info(f"[DEBUG] Diarization returned {len(diarization_result.segments)} segments via {diarization_result.method}")
+
+            # Everything downstream is per-segment, so an empty result silently
+            # produces an empty transcript that still reports success.
+            if not diarization_result.segments:
+                raise RuntimeError(
+                    f"Diarization ({diarization_result.method}) produced no segments for "
+                    f"{audio_path}. Check the worker log above for the underlying error; "
+                    "continuing would write an empty transcript."
+                )
+
             checkpoint.save("diarization", diarization_result)
             
         if self.model_loader:
