@@ -21,6 +21,17 @@ import torch
 import soundfile as sf
 import argparse
 
+import warnings
+warnings.filterwarnings("ignore")
+
+if hasattr(torch, "torch_version") and hasattr(torch.serialization, "add_safe_globals"):
+    torch.serialization.add_safe_globals([torch.torch_version.TorchVersion])
+    
+_original_load = torch.load
+def _patched_load(*args, **kwargs):
+    kwargs["weights_only"] = False
+    return _original_load(*args, **kwargs)
+torch.load = _patched_load
 
 def load_model(config_path=None, env_name="kaggle"):
     """Load Qwen3-ASR model and processor."""
