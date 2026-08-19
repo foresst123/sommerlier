@@ -25,6 +25,14 @@ def serve():
 
     device = torch.device(args.device)
     
+    # Fix SpeechBrain 1.1.0 logger bug where it tries to setLevel("20")
+    import logging
+    logging.addLevelName(10, "10")
+    logging.addLevelName(20, "20")
+    logging.addLevelName(30, "30")
+    logging.addLevelName(40, "40")
+    logging.addLevelName(50, "50")
+    
     # Load model
     try:
         from sidon.model.dialogue_sidion.lightning_module import DialogueSidonDiffusionLightningModule
