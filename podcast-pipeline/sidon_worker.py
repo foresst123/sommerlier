@@ -35,15 +35,14 @@ def serve():
     
     # Load model
     try:
-        from sidon.model.dialogue_sidion.lightning_module import DialogueSidonDiffusionLightningModule
-        from sidon_infer import run_separation_chunked
+        from sidon_infer import run_separation_chunked, load_models
     except ImportError as e:
         print(json.dumps({"status": "error", "message": f"Sidon not installed or import failed: {str(e)}"}), flush=True)
         sys.exit(1)
 
     try:
-        model = DialogueSidonDiffusionLightningModule.load_from_checkpoint(args.model_path, map_location=device)
-        model.eval()
+        # Pre-load models (downloads .pt2 from HF Hub if not cached)
+        load_models(device)
         print(json.dumps({"status": "ready"}), flush=True)
     except Exception as e:
         print(json.dumps({"status": "error", "message": str(e)}), flush=True)
@@ -76,12 +75,10 @@ def serve():
 
                 with torch.inference_mode():
                     est_sources, out_sr = run_separation_chunked(
-                        model=model,
                         wav=mix_tensor,
                         sample_rate=sample_rate,
                         num_steps=30,
-                        chunk_seconds=20.0,
-                        overlap_seconds=5.0
+                        device=device
                     )
                 
                 # est_sources shape: (2, T)
