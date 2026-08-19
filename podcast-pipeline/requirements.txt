@@ -19,6 +19,7 @@ pydub==0.25.1
 julius==0.2.7
 numba==0.61.2
 transformers==4.53.0
+accelerate>=0.30.0
 huggingface-hub==0.9.8
 g2pk
 jamo

@@ -4,6 +4,7 @@ import numpy as np
 from typing import List
 from schemas.audio import AudioData
 from schemas.transcript import TranscriptSegment
+from schemas.segment import EnhancedSegment
 from pydub import AudioSegment as PydubAudioSegment
 
 class ExportService:
@@ -22,6 +23,21 @@ class ExportService:
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
             
+    def export_separated_audio(self, enhanced_segments: List[EnhancedSegment], sample_rate: int, save_dir: str):
+        import soundfile as sf
+        separated_dir = os.path.join(save_dir, "separation")
+        os.makedirs(separated_dir, exist_ok=True)
+        
+        if self.logger: self.logger.info(f"Exporting separation audio to {separated_dir}")
+        for seg in enhanced_segments:
+            if seg.enhanced_audio is not None:
+                # Save as WAV for higher quality instead of MP3 (which requires pydub encoding)
+                file_path = os.path.join(separated_dir, f"{seg.index}_{seg.speaker}_separated.wav")
+                try:
+                    sf.write(file_path, seg.enhanced_audio, sample_rate)
+                except Exception as e:
+                    if self.logger: self.logger.warning(f"Failed to export separated audio for {seg.index}: {e}")
+
     def export_mp3_segments(self, segments: List[TranscriptSegment], audio: AudioData, save_dir: str, audio_name: str):
         segments_dir = os.path.join(save_dir, audio_name)
         os.makedirs(segments_dir, exist_ok=True)

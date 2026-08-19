@@ -159,6 +159,9 @@ class PipelineService:
         self.export_svc.export_srt(transcripts, os.path.join(save_path, f"{base_name}.srt"))
         self.export_svc.export_mp3_segments(transcripts, audio_data, save_path, base_name)
         
+        # Xuất loạt audio đã tách ra thư mục `separation`
+        self.export_svc.export_separated_audio(enhanced_segments, audio_data.sample_rate, save_path)
+        
         # [Added Feature] Dump intermediate Diarization and Separation results to the final folder for comparison
         import json
         try:
