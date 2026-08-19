@@ -19,7 +19,7 @@ qwen3_env/
 
 # Jupyter Notebook
 .ipynb_checkpoints
-*.ipynb
+# *.ipynb
 
 # Project specific caches and outputs
 .cache/
