@@ -103,10 +103,10 @@ def serve():
                 np.save(out_path_2, track_2)
 
                 resp = {
-                    "id": req_id, 
+                    "id": req_id,
                     "track_1_path": out_path_1,
                     "track_2_path": out_path_2,
-                    "target_sr": 16000
+                    "target_sr": int(out_sr)
                 }
                 print(json.dumps(resp), flush=True)
 

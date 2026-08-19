@@ -23,45 +23,108 @@ import argparse
 
 warnings.filterwarnings("ignore")
 
-# PyTorch 2.6+ defaults to weights_only=True, which breaks Pyannote/DiariZen models containing TorchVersion
-if hasattr(torch, "torch_version") and hasattr(torch.serialization, "add_safe_globals"):
-    torch.serialization.add_safe_globals([torch.torch_version.TorchVersion])
-    
-# Alternatively, we can monkey-patch torch.load to always use weights_only=False
-_original_load = torch.load
-def _patched_load(*args, **kwargs):
-    kwargs["weights_only"] = False
-    return _original_load(*args, **kwargs)
-torch.load = _patched_load
+# This worker runs under its own virtualenv, so the pipeline package is not on
+# the path by default.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from utils.torch_compat import install_torch_load_shim
+
+install_torch_load_shim()
+
+def _load_diarizen_config(config_path, env_name):
+    """Read the diarizen block out of the environment profile."""
+    if not (config_path and os.path.exists(config_path)):
+        return {}
+    try:
+        with open(config_path, 'r') as f:
+            cfg = json.load(f)
+        return cfg.get("environments", {}).get(env_name, {}).get("models", {}).get("diarizen", {})
+    except Exception as e:
+        print(json.dumps({"error": f"Failed to read config: {str(e)}"}), flush=True)
+        return {}
+
+
+def _apply_diarizen_config(pipeline, diar_cfg):
+    """Apply the config keys DiariZen actually honours, reporting the rest.
+
+    Keys the pipeline cannot express are echoed back as warnings instead of
+    being silently dropped, so tuning a value that has no effect is visible.
+    """
+    applied, ignored = [], []
+
+    if "batch_size" in diar_cfg:
+        bs = int(diar_cfg["batch_size"])
+        for attr in ("segmentation_batch_size", "embedding_batch_size"):
+            if hasattr(pipeline, attr):
+                setattr(pipeline, attr, bs)
+                applied.append(f"{attr}={bs}")
+            else:
+                ignored.append(f"batch_size (pipeline has no {attr})")
+
+    if "segmentation_step" in diar_cfg:
+        step = float(diar_cfg["segmentation_step"])
+        if hasattr(pipeline, "_segmentation") and hasattr(pipeline._segmentation, "step"):
+            pipeline._segmentation.step = step
+            applied.append(f"segmentation_step={step}")
+        else:
+            ignored.append("segmentation_step (pipeline._segmentation.step absent)")
+
+    if "seg_duration" in diar_cfg:
+        # seg_duration is consumed by from_pretrained/instantiate; mutating the
+        # already-built sliding window here would desync the segmentation model.
+        ignored.append("seg_duration (constructor-time only, cannot be set post-load)")
+
+    # Clustering knobs live on pipeline.clustering when the chosen clusterer
+    # exposes them; names differ between DiariZen releases, so probe rather than
+    # assume, and say so when the probe fails.
+    clustering = getattr(pipeline, "clustering", None)
+    clustering_map = {
+        "ahc_threshold": ("threshold",),
+        "apply_median_filtering": ("apply_median_filtering",),
+        "min_speakers": ("min_num_speakers", "min_speakers"),
+        "max_speakers": ("max_num_speakers", "max_speakers"),
+    }
+    for cfg_key, attr_names in clustering_map.items():
+        if cfg_key not in diar_cfg:
+            continue
+        value = diar_cfg[cfg_key]
+        target = next((a for a in attr_names if clustering is not None and hasattr(clustering, a)), None)
+        if target:
+            setattr(clustering, target, value)
+            applied.append(f"clustering.{target}={value}")
+        else:
+            ignored.append(f"{cfg_key} (no matching attribute on pipeline.clustering)")
+
+    if "clustering_method" in diar_cfg:
+        requested = str(diar_cfg["clustering_method"])
+        actual = type(clustering).__name__ if clustering is not None else "unknown"
+        if requested.lower() not in actual.lower():
+            ignored.append(
+                f"clustering_method={requested} (pipeline was built with {actual}; "
+                "the clusterer is fixed at from_pretrained time)"
+            )
+        else:
+            applied.append(f"clustering_method={actual}")
+
+    if applied:
+        print(json.dumps({"config_applied": applied}), flush=True)
+    if ignored:
+        print(json.dumps({"config_ignored": ignored}), flush=True)
+
 
 def load_model(config_path=None, env_name="kaggle"):
     """Load DiariZen WavLM-Large s80-md-v2 with custom config."""
     from diarizen.pipelines.inference import DiariZenPipeline
-    
+
     device = torch.device("cuda:0") # CUDA_VISIBLE_DEVICES remaps physical GPU → cuda:0
 
     print(json.dumps({"status": "loading", "model": "BUT-FIT/diarizen-wavlm-large-s80-md-v2"}), flush=True)
 
     pipeline = DiariZenPipeline.from_pretrained("BUT-FIT/diarizen-wavlm-large-s80-md-v2")
 
-    if config_path and os.path.exists(config_path):
+    diar_cfg = _load_diarizen_config(config_path, env_name)
+    if diar_cfg:
         try:
-            with open(config_path, 'r') as f:
-                cfg = json.load(f)
-            diar_cfg = cfg.get("environments", {}).get(env_name, {}).get("models", {}).get("diarizen", {})
-            
-            # Apply batch size dynamically if present
-            if "batch_size" in diar_cfg:
-                bs = int(diar_cfg["batch_size"])
-                if hasattr(pipeline, 'segmentation_batch_size'):
-                    pipeline.segmentation_batch_size = bs
-                if hasattr(pipeline, 'embedding_batch_size'):
-                    pipeline.embedding_batch_size = bs
-                    
-            # Overwrite other internal config variables if needed without calling instantiate()
-            if hasattr(pipeline, '_segmentation') and hasattr(pipeline._segmentation, 'step'):
-                pipeline._segmentation.step = diar_cfg.get("segmentation_step", 0.1)
-                
+            _apply_diarizen_config(pipeline, diar_cfg)
         except Exception as e:
             print(json.dumps({"error": f"Failed to apply config overrides: {str(e)}"}), flush=True)
 
@@ -84,12 +147,25 @@ def load_model(config_path=None, env_name="kaggle"):
     return pipeline, device
 
 
-def diarize(pipeline, audio_path):
+def diarize(pipeline, audio_path, speaker_bounds=None):
     """Run DiariZen inference on an audio file."""
     try:
-        # Pass the audio path directly to the pipeline. 
+        # Pass the audio path directly to the pipeline.
         # Pyannote/DiariZen handles loading and resampling internally.
-        diar_out = pipeline(audio_path)
+        # Speaker bounds are pipeline call arguments, not constructor ones; older
+        # DiariZen builds reject them, so fall back to an unbounded call.
+        kwargs = {k: v for k, v in (speaker_bounds or {}).items() if v is not None}
+        try:
+            diar_out = pipeline(audio_path, **kwargs) if kwargs else pipeline(audio_path)
+        except TypeError as e:
+            if kwargs:
+                print(json.dumps({
+                    "warning": f"Pipeline rejected speaker bounds {sorted(kwargs)}: {e}. "
+                               "Running unbounded."
+                }), flush=True)
+                diar_out = pipeline(audio_path)
+            else:
+                raise
         
         annotation = (
             diar_out.speaker_diarization
@@ -151,7 +227,12 @@ def main():
             print(json.dumps({"error": f"audio file not found: {audio_path}"}), flush=True)
             continue
 
-        segments = diarize(pipeline, audio_path)
+        speaker_bounds = {
+            "num_speakers": request.get("num_speakers"),
+            "min_speakers": request.get("min_speakers"),
+            "max_speakers": request.get("max_speakers"),
+        }
+        segments = diarize(pipeline, audio_path, speaker_bounds)
         if isinstance(segments, str) and segments.startswith("[ERROR]"):
             print(json.dumps({"error": segments}), flush=True)
         else:

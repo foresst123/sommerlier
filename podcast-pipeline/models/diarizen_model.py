@@ -9,24 +9,29 @@ class DiariZenClient:
     def __init__(self, process):
         self.process = process
         
-    def diarize(self, audio_input: dict):
+    def diarize(self, audio_input: dict, num_speakers=None, min_speakers=None, max_speakers=None):
         """Send audio to worker and get segments."""
         if not self.process:
             return None
-            
+
         waveform = audio_input["waveform"]
         sample_rate = audio_input["sample_rate"]
-        
+
         # Write to a temporary file
         fd, temp_path = tempfile.mkstemp(suffix=".wav")
         os.close(fd)
-        
+
         try:
             # Waveform shape is (1, T) or (T,). soundfile expects (T,) or (T, 1)
             audio_data = waveform.squeeze().cpu().numpy()
             sf.write(temp_path, audio_data, sample_rate)
-            
+
             req = {"audio_path": temp_path}
+            for key, value in (("num_speakers", num_speakers),
+                               ("min_speakers", min_speakers),
+                               ("max_speakers", max_speakers)):
+                if value is not None:
+                    req[key] = int(value)
             self.process.stdin.write(json.dumps(req) + "\n")
             self.process.stdin.flush()
             

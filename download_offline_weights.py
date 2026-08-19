@@ -113,26 +113,14 @@ def download_models(token=None):
     except Exception as e:
         print(f"    -> Lỗi tải NeMo Sortformer: {e}. Có thể bỏ qua nếu dùng Pyannote.")
 
-    # 8. Download SR-CorrNet (Clone repo & HF weights)
-    print(f"\n[+] Đang tải mô hình: SR-CorrNet (Code & Weights)...")
+    # 8. Download DialogueSidon (TSE separator used by sidon_worker.py)
+    print(f"\n[+] Đang tải mô hình: DialogueSidon (TSE)...")
     try:
-        import subprocess
-        srcorrnet_dir = os.path.join(base_dir, "srcorrnet")
-        if not os.path.exists(srcorrnet_dir):
-            subprocess.run(["git", "clone", "https://github.com/dmlguq456/SR_CorrNet_SS.git", srcorrnet_dir], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        
-        # Download model.pt from HF to the correct folder
-        weight_dir = os.path.join(srcorrnet_dir, "models/SR_CorrNet_L_WSJ0/log/pretrain_weights")
-        os.makedirs(weight_dir, exist_ok=True)
-        hf_hub_download(
-            repo_id="shinuh/sr-corrnet-ss-1ch-wsj-fix-2spk-l-dm", 
-            filename="model.pt", 
-            local_dir=weight_dir,
-            local_dir_use_symlinks=False
-        )
+        for filename in ["ssl_encoder.pt2", "diffusion_head.pt2", "vae_decoder.pt2", "metadata.json"]:
+            hf_hub_download(repo_id="sarulab-speech/DialogueSidon", filename=filename)
         print(f"    -> Xong!")
     except Exception as e:
-        print(f"    -> Lỗi tải SR-CorrNet: {e}")
+        print(f"    -> Lỗi tải DialogueSidon: {e}")
 
     print(f"\n=====================================================")
     print(f"TẢI HOÀN TẤT! Toàn bộ models đã nằm trong: {base_dir}")
@@ -141,7 +129,6 @@ def download_models(token=None):
     print(f"export TORCH_HOME=\"{torch_cache}\"")
     print(f"export HOME=\"{base_dir}\"  # Dành cho PANNS")
     print(f"export XDG_CACHE_HOME=\"{base_dir}\"  # Dành cho NeMo")
-    print(f"export SRCORRNET_PATH=\"{srcorrnet_dir}\"  # Dành cho SR-CorrNet")
     print(f"=====================================================")
 
 if __name__ == "__main__":

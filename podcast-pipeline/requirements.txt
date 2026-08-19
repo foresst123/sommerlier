@@ -20,7 +20,9 @@ julius==0.2.7
 numba==0.61.2
 transformers==4.53.0
 accelerate>=0.30.0
-huggingface-hub==0.9.8
+# transformers 4.53, pyannote.audio 4.0.7 and whisperx 3.8.6 all require >=0.30
+huggingface-hub==0.33.4
+diffusers>=0.31.0
 g2pk
 jamo
 nltk==3.9.1

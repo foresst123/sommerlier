@@ -31,10 +31,15 @@ class PyannoteDiarizer:
                     
         self.pipeline.instantiate(default_params)
             
-    def diarize(self, audio_path: str, max_speakers: int = None, num_speakers: int = None):
+    def diarize(self, audio_path, num_speakers: int = None, min_speakers: int = None, max_speakers: int = None):
         """Run diarization on audio file."""
+        # An exact count and a range are mutually exclusive in pyannote.
         if num_speakers is not None:
             return self.pipeline(audio_path, num_speakers=num_speakers)
+
+        bounds = {}
+        if min_speakers is not None:
+            bounds["min_speakers"] = min_speakers
         if max_speakers is not None:
-            return self.pipeline(audio_path, max_speakers=max_speakers)
-        return self.pipeline(audio_path)
+            bounds["max_speakers"] = max_speakers
+        return self.pipeline(audio_path, **bounds) if bounds else self.pipeline(audio_path)

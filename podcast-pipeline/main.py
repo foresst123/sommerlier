@@ -88,6 +88,12 @@ if env_profile.get("use_bf16", False):
 # ==========================================
 # 2. DELAYED IMPORTS
 # ==========================================
+from utils.torch_compat import install_torch_load_shim
+
+# Must run before any model module imports torch and loads a checkpoint.
+install_torch_load_shim()
+
+from utils.worker_env import resolve_worker_python
 from services.model_loader import ModelLoader
 from services.audio_service import AudioService
 from services.diarization_service import DiarizationService
@@ -108,16 +114,6 @@ def main():
     logger.info(f"Starting Sommelier Pipeline for Job: {args.job_id}")
 
     import torch
-    
-    # PyTorch 2.6+ defaults to weights_only=True, which can break many HuggingFace and legacy models
-    if hasattr(torch, "torch_version") and hasattr(torch.serialization, "add_safe_globals"):
-        torch.serialization.add_safe_globals([torch.torch_version.TorchVersion])
-        
-    _original_load = torch.load
-    def _patched_load(*args, **kwargs):
-        kwargs["weights_only"] = False
-        return _original_load(*args, **kwargs)
-    torch.load = _patched_load
 
     if torch.cuda.is_available() and torch.cuda.device_count() == 1:
         logger.info(f"Only 1 GPU detected. Overriding gpu_2 ({args.gpu_2}) to use gpu_1 ({args.gpu_1}).")
@@ -128,15 +124,7 @@ def main():
     # 1. Start Qwen3 Worker (if MoE enabled)
     qwen3_service = None
     if args.ASRMoE:
-        qwen3_env_bin = os.environ.get("QWEN3_PYTHON")
-        if not qwen3_env_bin:
-            # Fallback checks: try ../ and ../../ and Kaggle temp dir
-            if os.path.exists("/kaggle/temp/qwen3_env/bin/python"):
-                qwen3_env_bin = "/kaggle/temp/qwen3_env/bin/python"
-            elif os.path.exists("../../qwen3_env/bin/python"):
-                qwen3_env_bin = "../../qwen3_env/bin/python"
-            else:
-                qwen3_env_bin = "../qwen3_env/bin/python"
+        qwen3_env_bin = resolve_worker_python("qwen3", config=config, env_profile=env_profile, logger=logger)
         qwen3_worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qwen3_worker.py")
         qwen3_service = Qwen3WorkerService(qwen3_env_bin, qwen3_worker_script, device_id=args.gpu_2, logger=logger, env_name=args.env, config_path=args.config)
         qwen3_service.start()
@@ -144,15 +132,7 @@ def main():
     # 1b. Start DiariZen Worker (if dia3 is not used)
     diarizen_service = None
     if not args.dia3:
-        diarizen_env_bin = os.environ.get("DIARIZEN_PYTHON")
-        if not diarizen_env_bin:
-            # Fallback checks
-            if os.path.exists("/kaggle/temp/diarizen_env/bin/python"):
-                diarizen_env_bin = "/kaggle/temp/diarizen_env/bin/python"
-            elif os.path.exists("../../diarizen_env/bin/python"):
-                diarizen_env_bin = "../../diarizen_env/bin/python"
-            else:
-                diarizen_env_bin = "../diarizen_env/bin/python"
+        diarizen_env_bin = resolve_worker_python("diarizen", config=config, env_profile=env_profile, logger=logger)
         diarizen_worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diarizen_worker.py")
         diarizen_service = DiarizenWorkerService(diarizen_env_bin, diarizen_worker_script, device_id=args.gpu_1, logger=logger, env_name=args.env, config_path=args.config)
         diarizen_service.start()
@@ -179,7 +159,8 @@ def main():
             diarizer=model_loader.get("diarizer"),
             vad_model=model_loader.get("vad"),
             embedder=model_loader.get("embedder"),
-            logger=logger
+            logger=logger,
+            diarizer_config=env_profile.get("models", {}).get("diarizen", {})
         )
         separation_svc = TargetExtractionService(
             tse_model=model_loader.get("separator"),
@@ -196,7 +177,9 @@ def main():
             qwen3=model_loader.get("qwen3"),
             logger=logger,
             model_loader=model_loader,
-            qwen3_service=qwen3_service
+            qwen3_service=qwen3_service,
+            language=args.lang,
+            batch_size=env_profile.get("models", {}).get("qwen3", {}).get("batch_size", 4)
         )
         caption_svc = CaptionService(
             captioner=model_loader.get("captioner"),

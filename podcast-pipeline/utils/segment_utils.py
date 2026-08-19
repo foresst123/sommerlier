@@ -1,5 +1,4 @@
 import pandas as pd
-import librosa
 
 def apply_sortformer_segment_padding(df: pd.DataFrame, pad_onset: float = 0.0, pad_offset: float = 0.0, audio_duration: float = None) -> pd.DataFrame:
     """Shift diarization segment boundaries (frame-level tweak)."""

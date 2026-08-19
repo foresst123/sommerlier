@@ -69,7 +69,7 @@ class ModelLoader:
             self.models["panns"] = PANNSDetector(device=str(self.device_1))
             
             demucs_cfg = self.config.get("environments", {}).get(self.args.env, {}).get("models", {}).get("demucs", {})
-            self.models["demucs"] = DemucsRemover(device=str(self.device_1), **demucs_cfg)
+            self.models["demucs"] = DemucsRemover(device=str(self.device_1), logger=self.logger, **demucs_cfg)
             
     def load_asr_models(self, qwen3_service: Qwen3WorkerService = None):
         """Load ASR models (Whisper, PhoWhisper, Qwen3)."""

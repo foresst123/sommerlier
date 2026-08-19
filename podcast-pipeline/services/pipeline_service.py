@@ -147,7 +147,8 @@ class PipelineService:
         metadata = {
             "audio_file": os.path.basename(audio_path),
             "diarization_model": "pyannote" if getattr(args, "dia3", False) else "diarizen",
-            "asr_models": ["whisper", "phowhisper", "qwen3"] if getattr(args, "ASRMoE", False) else ["whisper"],
+            # Report what actually ran, not what the flags requested.
+            "asr_models": self.asr_svc.active_models(),
             "panns_enabled": getattr(args, "panns", False),
             "vad_enabled": getattr(args, "vad", False),
             "tse_enabled": getattr(args, "tse", False),

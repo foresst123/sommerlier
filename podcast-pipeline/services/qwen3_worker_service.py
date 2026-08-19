@@ -1,62 +1,16 @@
-import os
-import subprocess
-import time
+from services.base_worker_service import WorkerProcessService
 
-class Qwen3WorkerService:
+
+class Qwen3WorkerService(WorkerProcessService):
     """Manages the lifecycle of the isolated Qwen3-ASR worker process."""
-    
-    def __init__(self, python_env_path: str, worker_script_path: str, device_id: int = 1, logger=None, env_name: str = "kaggle", config_path: str = "config.json"):
-        self.python_env_path = python_env_path
-        self.worker_script_path = worker_script_path
-        self.device_id = device_id
-        self.env_name = env_name
-        self.config_path = config_path
-        self.process = None
-        self.logger = logger
-        
-    def start(self):
-        """Spawns the worker subprocess and waits for readiness."""
-        if self.process is not None:
-            return
-            
-        env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = str(self.device_id)
-        
-        if self.logger:
-            self.logger.info(f"Starting Qwen3-ASR worker subprocess on CUDA_VISIBLE_DEVICES={self.device_id}")
-            
-        self.process = subprocess.Popen(
-            [self.python_env_path, self.worker_script_path, "--config", self.config_path, "--env", self.env_name],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            env=env
+
+    def __init__(self, python_env_path: str, worker_script_path: str, device_id: int = 1,
+                 logger=None, env_name: str = "kaggle", config_path: str = "config.json"):
+        super().__init__(
+            name="Qwen3-ASR",
+            python_bin=python_env_path,
+            worker_script=worker_script_path,
+            extra_args=["--config", config_path, "--env", env_name],
+            device_id=device_id,
+            logger=logger,
         )
-        
-        # Wait for "READY" signal
-        ready = False
-        for _ in range(60): # timeout 60s
-            line = self.process.stdout.readline()
-            if not line:
-                break
-            if "ready" in line.lower():
-                ready = True
-                break
-            
-        if not ready:
-            err = self.process.stderr.read()
-            if self.logger:
-                self.logger.error(f"Qwen3 worker failed to start: {err}")
-            self.stop()
-            raise RuntimeError(f"Qwen3-ASR worker did not start. Err: {err}")
-            
-    def stop(self):
-        """Terminates the worker process safely."""
-        if self.process:
-            self.process.terminate()
-            self.process.wait()
-            self.process = None
-            if self.logger:
-                self.logger.info("Qwen3-ASR worker terminated.")

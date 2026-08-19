@@ -78,10 +78,21 @@ def load_model(config_path=None, env_name="kaggle"):
     return model, processor, device
 
 
+def _read_audio(audio_path):
+    """Load a request's audio as float32 mono at 16 kHz.
+
+    The pipeline already holds 16 kHz float32 in memory, so it hands over a .npy
+    dump and skips the WAV encode/decode round trip entirely.
+    """
+    if audio_path.endswith(".npy"):
+        return np.load(audio_path).astype("float32"), 16000
+    return sf.read(audio_path, dtype="float32")
+
+
 def transcribe(model, processor, device, audio_path, language="vi"):
     """Run Qwen3-ASR inference on an audio file."""
     try:
-        audio_data, sr = sf.read(audio_path, dtype="float32")
+        audio_data, sr = _read_audio(audio_path)
         if sr != 16000:
             import librosa
             audio_data = librosa.resample(audio_data, orig_sr=sr, target_sr=16000)

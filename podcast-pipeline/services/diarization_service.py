@@ -21,11 +21,12 @@ from algorithms.diarization.overlap import detect_overlapping_segments
 class DiarizationService:
     """Handles audio chunking, model inference (Pyannote/Sortformer), and cross-chunk fusion."""
     
-    def __init__(self, diarizer, vad_model=None, embedder=None, logger=None):
+    def __init__(self, diarizer, vad_model=None, embedder=None, logger=None, diarizer_config=None):
         self.diarizer = diarizer
         self.vad_model = vad_model
         self.embedder = embedder
         self.logger = logger
+        self.diarizer_config = diarizer_config or {}
         
     def prepare_chunks(self, audio: AudioData, max_duration: float = 120.0, min_silence: float = 0.5) -> Tuple[List[DiarizationChunk], str]:
         """Deprecated. Returns a single dummy chunk since diarization now processes the full audio natively."""
@@ -48,10 +49,23 @@ class DiarizationService:
         if self.logger:
             self.logger.info(f"Running diarization on the full audio file natively (Duration: {audio.duration:.2f}s)...")
             
-        if is_diarizen:
-            diar_out = self.diarizer.diarize(audio_input)
-        else:
-            diar_out = self.diarizer.diarize(audio_input, num_speakers=2)
+        # Both backends get the same speaker bounds so switching --dia3 does not
+        # silently change how many speakers the run may find.
+        num_speakers = self.diarizer_config.get("num_speakers")
+        min_speakers = self.diarizer_config.get("min_speakers")
+        max_speakers = self.diarizer_config.get("max_speakers")
+
+        if self.logger:
+            self.logger.info(
+                f"Diarizing with speaker bounds num={num_speakers} min={min_speakers} max={max_speakers}"
+            )
+
+        diar_out = self.diarizer.diarize(
+            audio_input,
+            num_speakers=num_speakers,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+        )
             
         data = []
         annotation = (

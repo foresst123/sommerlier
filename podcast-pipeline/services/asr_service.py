@@ -9,21 +9,43 @@ from algorithms.asr.rover import RoverEnsembler
 class ASRService:
     """Coordinates MoE ASR models and ROVER ensemble."""
     
-    def __init__(self, whisper, phowhisper, qwen3, logger=None, model_loader=None, qwen3_service=None):
+    def __init__(self, whisper, phowhisper, qwen3, logger=None, model_loader=None, qwen3_service=None,
+                 language: str = "vi", batch_size: int = 4):
         self.whisper = whisper
         self.phowhisper = phowhisper
         self.qwen3 = qwen3
         self.logger = logger
         self.model_loader = model_loader
         self.qwen3_service = qwen3_service
-        
-    def _run_whisper(self, audio_16k, dummy_vad, language="vi"):
+        self.language = language
+        self.batch_size = batch_size
+
+        if not self.whisper and self.logger:
+            self.logger.warning(
+                "Whisper is not loaded (requires --ASRMoE with --lang vi); "
+                "ROVER will vote without it."
+            )
+        if not self.qwen3 and self.logger:
+            self.logger.warning("Qwen3-ASR is not loaded; ROVER will vote without it.")
+
+    def active_models(self) -> List[str]:
+        """Names of the ASR models actually available for this run."""
+        names = []
+        if self.whisper: names.append("whisper")
+        if self.phowhisper: names.append("phowhisper")
+        if self.qwen3: names.append("qwen3")
+        return names
+
+    def _run_whisper(self, audio_16k, dummy_vad, language=None):
+        if not self.whisper:
+            return "", None, []
+        language = language or self.language
         try:
             res = self.whisper.transcribe(audio_16k, dummy_vad, language=language)
             return res.get("text", ""), res.get("language", language), res.get("words", [])
         except Exception as e:
             if self.logger: self.logger.error(f"Whisper error: {e}")
-            return "", "en", []
+            return "", None, []
 
     def _run_phowhisper(self, audio_16k):
         if not self.phowhisper: return ""
@@ -35,20 +57,35 @@ class ASRService:
 
     def _run_qwen3(self, audio_16k, chunk_index: str, tmp_dir: str):
         if not self.qwen3: return ""
+        path = None
         try:
-            import os, soundfile as sf
-            path = os.path.join(tmp_dir, f"qwen3_{chunk_index}.wav")
-            sf.write(path, audio_16k, 16000)
+            import os
+            import numpy as np
+            # The audio is already float32 @ 16 kHz here; a .npy dump lets the
+            # worker memory-map it instead of decoding a WAV per segment.
+            path = os.path.join(tmp_dir, f"qwen3_{chunk_index}.npy")
+            np.save(path, np.ascontiguousarray(audio_16k, dtype=np.float32))
             text = self.qwen3.transcribe(path)
             if not text and self.logger:
                 self.logger.warning(f"Qwen3 returned empty for chunk {chunk_index}")
-            if os.path.exists(path): os.remove(path)
             return text
         except Exception as e:
             if self.logger: self.logger.error(f"Qwen3 error: {e}")
             return ""
+        finally:
+            if path:
+                import os
+                try:
+                    if os.path.exists(path): os.remove(path)
+                except OSError:
+                    pass
 
     def _run_whisper_batch(self, audios_16k: list, dummy_vads: list, callback=None) -> list:
+        if not self.whisper:
+            if callback:
+                for _ in audios_16k: callback()
+            return [("", None, [])] * len(audios_16k)
+
         results = []
         for a, v in zip(audios_16k, dummy_vads):
             results.append(self._run_whisper(a, v))
@@ -59,11 +96,14 @@ class ASRService:
 
     def _run_phowhisper_batch(self, audios_16k: list, callback=None) -> list:
         if not self.phowhisper:
+            if callback:
+                for _ in audios_16k: callback()
             return [""] * len(audios_16k)
         try:
-            # Reduced batch_size from 16 to 4 to prevent CUDA OOM on 15GB GPU 
-            # since Qwen3 is also occupying ~10GB on the same GPU.
-            res = self.phowhisper.transcribe_batch(audios_16k, batch_size=4, logger=self.logger, callback=callback)
+            # Batch size is kept modest because Qwen3 shares the GPU.
+            res = self.phowhisper.transcribe_batch(
+                audios_16k, batch_size=self.batch_size, logger=self.logger, callback=callback
+            )
             if getattr(self, "model_loader", None):
                 self.model_loader.unload("phowhisper")
             return res
@@ -72,12 +112,17 @@ class ASRService:
             return [""] * len(audios_16k)
 
     def _run_qwen3_batch(self, audios_16k: list, chunk_indices: list, tmp_dir: str, callback=None) -> list:
+        if not self.qwen3:
+            if callback:
+                for _ in audios_16k: callback()
+            return [""] * len(audios_16k)
+
         results = []
         for a, idx in zip(audios_16k, chunk_indices):
             results.append(self._run_qwen3(a, idx, tmp_dir))
             if callback: callback()
-        if getattr(self, "qwen3_service", None):
-            self.qwen3_service.stop()
+        # The worker is owned by main.py's finally block; stopping it here would
+        # leave a dead Popen behind that a second process() call would write to.
         return results
 
     def process(self, segments: List[EnhancedSegment], audio: AudioData, enable_word_timestamps: bool = False) -> List[TranscriptSegment]:
@@ -188,7 +233,9 @@ class ASRService:
                 text_whisper=t_whisper,
                 text_phowhisper=t_pho,
                 text_qwen3=t_qwen,
-                language=lang,
+                # Only Whisper detects language; without it, report the requested
+                # language rather than inventing one.
+                language=lang or self.language,
                 demucs=seg.demucs,
                 tse=seg.tse,
                 words=words if enable_word_timestamps else None

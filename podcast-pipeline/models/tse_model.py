@@ -13,12 +13,21 @@ class TargetSpeakerExtractor:
     """
     
     def __init__(self, device: torch.device, process=None, checkpoint_path: str = None):
+        import tempfile
+
         self.device = device
         self.process = process
         self.classifier = None
         self.target_embed_cache: Dict[str, torch.Tensor] = {}
-        
+        self._temp_dir = tempfile.mkdtemp(prefix="tse_exchange_")
+        self._req_counter = 0
+
         self._load_model()
+
+    def close(self):
+        """Remove the scratch directory used to exchange arrays with the worker."""
+        import shutil
+        shutil.rmtree(self._temp_dir, ignore_errors=True)
         
     def _load_model(self):
         print(f"[TSE Model] Initializing ECAPA-TDNN on {self.device}...")
@@ -82,63 +91,72 @@ class TargetSpeakerExtractor:
         if len(mixture_audio) == 0:
             raise ValueError("Input mixture_audio is empty.")
 
-        target_sr = 16000
         import torchaudio.functional as F_audio
-        import tempfile
         import json
-        import uuid
-        
-        req_id = str(uuid.uuid4())
-        
-        # Save mixture to temp npy
-        fd, temp_path = tempfile.mkstemp(suffix=".npy")
-        os.close(fd)
-        
-        np.save(temp_path, mixture_audio)
-        
-        # Call worker
-        req = {
-            "id": req_id,
-            "audio_path": temp_path,
-            "sample_rate": sample_rate
-        }
-        
-        self.process.stdin.write(json.dumps(req) + "\n")
-        self.process.stdin.flush()
-        
-        resp = None
-        while True:
-            line = self.process.stdout.readline()
-            if not line:
-                raise RuntimeError("Sidon worker crashed or closed stdout")
-            
-            line_str = line.strip()
-            if not line_str:
-                continue
-                
-            try:
-                parsed = json.loads(line_str)
-                if parsed.get("id") == req_id:
-                    resp = parsed
-                    break
-            except Exception:
-                pass
-                
-        if resp.get("error"):
-            raise RuntimeError(f"Sidon worker error: {resp.get('error')}")
-            
-        # Load results
-        track_1_np = np.load(resp["track_1_path"])
-        track_2_np = np.load(resp["track_2_path"])
-        
-        # Clean up temp files
+
+        self._req_counter += 1
+        req_id = str(self._req_counter)
+
+        # One reusable scratch dir instead of mkstemp per overlap; the exchange
+        # runs thousands of times on a full podcast.
+        temp_path = os.path.join(self._temp_dir, f"mix_{req_id}.npy")
+        np.save(temp_path, np.ascontiguousarray(mixture_audio, dtype=np.float32))
+
+        produced_paths = [temp_path]
         try:
-            os.remove(temp_path)
-            os.remove(resp["track_1_path"])
-            os.remove(resp["track_2_path"])
-        except Exception:
-            pass
-            
+            req = {
+                "id": req_id,
+                "audio_path": temp_path,
+                "sample_rate": sample_rate
+            }
+
+            self.process.stdin.write(json.dumps(req) + "\n")
+            self.process.stdin.flush()
+
+            resp = None
+            while True:
+                line = self.process.stdout.readline()
+                if not line:
+                    raise RuntimeError("Sidon worker crashed or closed stdout")
+
+                line_str = line.strip()
+                if not line_str:
+                    continue
+
+                try:
+                    parsed = json.loads(line_str)
+                    if parsed.get("id") == req_id:
+                        resp = parsed
+                        break
+                except Exception:
+                    pass
+
+            for key in ("track_1_path", "track_2_path"):
+                if resp.get(key):
+                    produced_paths.append(resp[key])
+
+            if resp.get("error"):
+                raise RuntimeError(f"Sidon worker error: {resp.get('error')}")
+
+            # The separator decodes to its own native rate (DialogueSidon's VAE
+            # decoder emits 24 kHz), which is independent of the pipeline's rate.
+            # Trusting the rate the worker reports is what keeps ECAPA and the
+            # resample-back honest.
+            target_sr = int(resp.get("target_sr") or sample_rate)
+
+            # Load results
+            track_1_np = np.load(resp["track_1_path"])
+            track_2_np = np.load(resp["track_2_path"])
+        finally:
+            # Always clean up, including on worker errors, so a long run does not
+            # accumulate one leaked .npy per failed overlap.
+            for path in produced_paths:
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except OSError:
+                    pass
+
         track_1_tensor = torch.from_numpy(track_1_np).to(self.device)
         track_2_tensor = torch.from_numpy(track_2_np).to(self.device)
 

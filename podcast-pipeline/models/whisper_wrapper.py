@@ -44,8 +44,7 @@ class WhisperASR:
             print_progress=False
         )
         
-        # Result format should mimic what main_original_ASR_MoE.py expects:
-        # result is typically a dict with "segments", "language"
+        # whisperx returns a dict with "segments" and "language".
         text = ""
         words = []
         det_lang = language

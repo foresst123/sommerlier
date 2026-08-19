@@ -3,15 +3,37 @@ import os
 import argparse
 from pydub import AudioSegment
 
-def extract_dialogue_clips(json_path: str, audio_path: str, output_dir: str, min_turns: int = 5, max_silence: float = 3.0):
+def load_segments(json_path: str):
+    """Đọc danh sách segment từ file JSON của pipeline.
+
+    Pipeline xuất {"metadata": ..., "segments": [...]}, còn các bản dump trung
+    gian là list thuần, nên chấp nhận cả hai dạng.
+    """
+    with open(json_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    if isinstance(data, dict):
+        segments = data.get("segments")
+        if segments is None:
+            raise ValueError(
+                f"{json_path} là JSON object nhưng không có khoá 'segments'. "
+                f"Các khoá hiện có: {sorted(data)}"
+            )
+        return segments
+    if isinstance(data, list):
+        return data
+    raise ValueError(f"{json_path} phải là list segment hoặc object có 'segments'.")
+
+
+def extract_dialogue_clips(json_path: str, audio_path: str, output_dir: str, min_turns: int = 5,
+                           max_silence: float = 3.0, pan_stereo: bool = False):
     """
     Tự động quét file JSON tìm các đoạn hội thoại "ping-pong" (luân phiên 2 người nói)
     và dùng pydub để cắt file Audio gốc thành các clip ngắn.
     """
     print(f"Loading JSON: {json_path}")
-    with open(json_path, 'r', encoding='utf-8') as f:
-        segments = json.load(f)
-        
+    segments = load_segments(json_path)
+
     if not segments:
         print("JSON trống!")
         return
@@ -19,14 +41,14 @@ def extract_dialogue_clips(json_path: str, audio_path: str, output_dir: str, min
     # Thuật toán Gom nhóm (Sliding Window)
     clips = []
     current_clip = [segments[0]]
-    
+
     for i in range(1, len(segments)):
         prev_seg = segments[i-1]
         curr_seg = segments[i]
-        
+
         # Kiểm tra khoảng lặng giữa 2 câu
         silence_gap = curr_seg['start'] - prev_seg['end']
-        
+
         # Nếu đổi người nói VÀ khoảng lặng không quá lớn -> Cùng 1 đoạn hội thoại
         if curr_seg['speaker'] != prev_seg['speaker'] and silence_gap <= max_silence:
             current_clip.append(curr_seg)
@@ -34,14 +56,20 @@ def extract_dialogue_clips(json_path: str, audio_path: str, output_dir: str, min
             # Nếu người nói không đổi (nói 1 lèo quá dài) hoặc khoảng lặng quá lớn -> Cắt Block
             if len(current_clip) >= min_turns:
                 clips.append(current_clip)
-            
-            # Khởi tạo Block mới
-            current_clip = [curr_seg]
-            
+
+            # Khởi tạo Block mới. Nếu chỉ vì cùng người nói (không phải do lặng
+            # quá lâu) thì prev_seg vẫn thuộc mạch hội thoại mới, giữ lại để clip
+            # không bị cụt đầu.
+            same_speaker_break = curr_seg['speaker'] == prev_seg['speaker']
+            if same_speaker_break and silence_gap <= max_silence:
+                current_clip = [prev_seg, curr_seg]
+            else:
+                current_clip = [curr_seg]
+
     # Chốt Block cuối cùng nếu vòng lặp kết thúc
     if len(current_clip) >= min_turns:
         clips.append(current_clip)
-        
+
     print(f"Tìm thấy {len(clips)} phân đoạn hội thoại đạt chuẩn (>= {min_turns} lượt lời)!")
     
     if not clips:
@@ -69,7 +97,7 @@ def extract_dialogue_clips(json_path: str, audio_path: str, output_dir: str, min
         
         print(f"Đang cắt Clip {idx+1}: Từ {start_time_sec:.1f}s đến {end_time_sec:.1f}s ...")
         
-        if args.pan_stereo:
+        if pan_stereo:
             # Tạo một track im lặng làm nền
             clip_duration_ms = end_ms - start_ms
             final_mix = AudioSegment.silent(duration=clip_duration_ms, frame_rate=audio.frame_rate)
@@ -115,6 +143,12 @@ if __name__ == "__main__":
     parser.add_argument("--out", default="./viral_clips", help="Thư mục chứa các clip xuất ra")
     parser.add_argument("--turns", type=int, default=5, help="Số lượt lời qua lại tối thiểu để tạo thành 1 clip")
     parser.add_argument("--pan_stereo", action="store_true", help="Bật hiệu ứng âm thanh ASMR: Speaker 1 tai trái, Speaker 2 tai phải")
+    parser.add_argument("--max_silence", type=float, default=3.0, help="Khoảng lặng tối đa (giây) giữa 2 lượt lời trong cùng một clip")
     args = parser.parse_args()
-    
-    extract_dialogue_clips(args.json, args.audio, args.out, min_turns=args.turns)
+
+    extract_dialogue_clips(
+        args.json, args.audio, args.out,
+        min_turns=args.turns,
+        max_silence=args.max_silence,
+        pan_stereo=args.pan_stereo,
+    )

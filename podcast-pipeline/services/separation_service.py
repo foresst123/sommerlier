@@ -1,3 +1,4 @@
+import bisect
 import numpy as np
 import librosa
 from typing import List, Dict, Tuple
@@ -32,63 +33,60 @@ class TargetExtractionService:
         enrollments = {}
         sr = audio.sample_rate
         waveform = audio.waveform
-        
+
+        # Sorting once lets a single sweep find each segment's intersecting
+        # overlaps, instead of rescanning the full overlap list per segment.
+        overlap_ranges.sort(key=lambda x: x[0])
+        overlap_starts = [o[0] for o in overlap_ranges]
+
+        # The clean sub-segments of a segment do not depend on the duration
+        # threshold, only the filter over them does. Compute them once.
+        clean_by_speaker: Dict[str, List[Tuple[float, float]]] = {}
+        for s in segments:
+            curr_start = s.start
+            sub_segments = []
+
+            # Overlaps starting at or after s.end cannot intersect it.
+            end_idx = bisect.bisect_left(overlap_starts, s.end)
+            for o_start, o_end in overlap_ranges[:end_idx]:
+                if o_end <= s.start:
+                    continue
+                if curr_start < o_start:
+                    sub_segments.append((curr_start, o_start))
+                curr_start = max(curr_start, o_end)
+
+            if curr_start < s.end:
+                sub_segments.append((curr_start, s.end))
+
+            clean_by_speaker.setdefault(s.speaker, []).extend(sub_segments)
+
         for spk in set(s.speaker for s in segments):
+            candidates = clean_by_speaker.get(spk, [])
             clean_clips = []
             for dur_thresh in [min_dur, min_dur / 2, 0.5, 0.1]:
-                for s in segments:
-                    if s.speaker != spk:
-                        continue
-                        
-                    # Find clean sub-segments within this segment
-                    curr_start = s.start
-                    sub_segments = []
-                    
-                    # Sort overlaps that intersect this segment
-                    intersecting_overlaps = sorted(
-                        [o for o in overlap_ranges if not (s.end <= o[0] or s.start >= o[1])],
-                        key=lambda x: x[0]
-                    )
-                    
-                    for o_start, o_end in intersecting_overlaps:
-                        if curr_start < o_start:
-                            sub_segments.append((curr_start, o_start))
-                        curr_start = max(curr_start, o_end)
-                        
-                    if curr_start < s.end:
-                        sub_segments.append((curr_start, s.end))
-                        
-                    for sub_start, sub_end in sub_segments:
-                        if (sub_end - sub_start) >= dur_thresh:
-                            # We store an object that has start and end attributes to mimic Segment
-                            class CleanClip:
-                                def __init__(self, start, end):
-                                    self.start = start
-                                    self.end = end
-                            clean_clips.append(CleanClip(sub_start, sub_end))
-                
+                clean_clips = [c for c in candidates if (c[1] - c[0]) >= dur_thresh]
                 if clean_clips:
-                    break # Found clips, stop lowering threshold
-            
+                    break  # Found clips, stop lowering threshold
+
+            if not clean_clips and self.logger:
+                self.logger.warning(
+                    f"No clean (non-overlapping) audio found for speaker {spk}; "
+                    "TSE will skip every overlap involving them."
+                )
+
             # Sort by duration descending
-            clean_clips.sort(key=lambda x: x.end - x.start, reverse=True)
-            top_clips = clean_clips[:top_k]
-            
+            clean_clips.sort(key=lambda c: c[1] - c[0], reverse=True)
+
             enrollments[spk] = []
-            for c in top_clips:
-                start_f = int(c.start * sr)
-                end_f = int(c.end * sr)
+            for start, end in clean_clips[:top_k]:
+                start_f = int(start * sr)
+                end_f = int(end * sr)
                 enrollments[spk].append(waveform[start_f:end_f].copy())
-                
+
         return enrollments
 
     # Removed mock _compute_itc and _compute_itd as they are replaced by real sim_A, sim_B from tse_model
         
-    def _compute_energy(self, track_audio: np.ndarray) -> float:
-        """Compute signal energy (RMS)."""
-        if len(track_audio) == 0: return 0.0
-        return float(np.sqrt(np.mean(track_audio**2)))
-
     def _cross_fade(self, orig_audio: np.ndarray, new_audio: np.ndarray, fade_samples: int) -> np.ndarray:
         """Smoothly replace a portion of orig_audio with new_audio using Hanning crossfade."""
         result = orig_audio.copy()
@@ -141,7 +139,11 @@ class TargetExtractionService:
             
         # Component 1: Mine Enrollments
         enrollments = self.mine_enrollments(segments, audio, min_dur=2.0, top_k=5)
-        
+
+        # Indices are unique after split_long_segments, so one lookup table beats
+        # rescanning every segment per overlap pair.
+        seg_by_index = {s.index: s for s in enhanced_segments}
+
         from tqdm import tqdm
         for pair in tqdm(overlapping_pairs, desc="[TSE Extractor]", leave=True):
             seg1, seg2 = pair["seg1"], pair["seg2"]
@@ -176,40 +178,57 @@ class TargetExtractionService:
             
             # Crop the ±1.5s padding to extract just the overlap core
             pad_start_frames = int((overlap_start - ctx_start) * sr)
-            pad_end_frames = int((ctx_end - overlap_end) * sr)
-            
             core_len = int((overlap_end - overlap_start) * sr)
+
+            # A track shorter than the nominal core would silently yield a short
+            # slice, leaving part of the overlap unprocessed while still flagged
+            # as separated. Detect that instead of hiding it.
+            available = min(len(track_A_ctx), len(track_B_ctx)) - pad_start_frames
+            if available < core_len:
+                if available <= 0:
+                    if self.logger:
+                        self.logger.warning(
+                            f"TSE returned too little audio for overlap at {overlap_start:.2f}s; skipping."
+                        )
+                    continue
+                if self.logger:
+                    self.logger.warning(
+                        f"TSE track shorter than overlap core at {overlap_start:.2f}s "
+                        f"({available} < {core_len} samples); splicing what is available."
+                    )
+                core_len = available
+
             track_A_core = track_A_ctx[pad_start_frames : pad_start_frames + core_len]
             track_B_core = track_B_ctx[pad_start_frames : pad_start_frames + core_len]
-            
+
             # Component 4: Quality Control
-            
+
             # 4.1 Check real ECAPA matching scores (Intra-Track Consistency equivalent)
             if sim_A < 0.25 or sim_B < 0.25:
                 if self.logger: self.logger.warning(f"TSE QC failed (Low ECAPA similarity A:{sim_A:.2f} B:{sim_B:.2f}) at {overlap_start}s.")
                 if self.logger: self.logger.warning(f"Discarding failed extraction for overlap at {overlap_start}s. Retaining original mixture.")
                 continue
-            
-            # Component 5: Splice with Cross-fade (20ms fade = 320 samples at 16kHz)
+
+            # Component 5: Splice with Cross-fade (20ms fade)
             fade_samples = int(0.02 * sr)
-            for enh_seg in enhanced_segments:
-                if enh_seg.index == seg1["index"]:
-                    rel_start = int((overlap_start - enh_seg.start) * sr)
-                    limit = min(len(track_A_core), len(enh_seg.enhanced_audio[rel_start:]))
-                    if limit > 0:
-                        enh_seg.enhanced_audio[rel_start:rel_start+limit] = self._cross_fade(
-                            enh_seg.enhanced_audio[rel_start:rel_start+limit], track_A_core[:limit], fade_samples
-                        )
-                        enh_seg.tse = True # Flag indicating it was processed
-                elif enh_seg.index == seg2["index"]:
-                    rel_start = int((overlap_start - enh_seg.start) * sr)
-                    limit = min(len(track_B_core), len(enh_seg.enhanced_audio[rel_start:]))
-                    if limit > 0:
-                        enh_seg.enhanced_audio[rel_start:rel_start+limit] = self._cross_fade(
-                            enh_seg.enhanced_audio[rel_start:rel_start+limit], track_B_core[:limit], fade_samples
-                        )
-                        enh_seg.tse = True
-                        
+            for seg_dict, track_core in ((seg1, track_A_core), (seg2, track_B_core)):
+                enh_seg = seg_by_index.get(seg_dict["index"])
+                if enh_seg is None:
+                    continue
+
+                rel_start = int((overlap_start - enh_seg.start) * sr)
+                if rel_start < 0:
+                    continue
+
+                limit = min(len(track_core), len(enh_seg.enhanced_audio) - rel_start)
+                if limit <= 0:
+                    continue
+
+                enh_seg.enhanced_audio[rel_start:rel_start + limit] = self._cross_fade(
+                    enh_seg.enhanced_audio[rel_start:rel_start + limit], track_core[:limit], fade_samples
+                )
+                enh_seg.tse = True  # Flag indicating it was processed
+
         return enhanced_segments
 
     def export_sdlm_dual_channel(self, enhanced_segments: List[EnhancedSegment], audio_duration: float, sr: int) -> Tuple[np.ndarray, np.ndarray]:
