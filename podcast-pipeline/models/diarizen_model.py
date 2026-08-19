@@ -3,6 +3,11 @@ import tempfile
 import os
 import soundfile as sf
 
+# DiariZen's EEND component is WavLM Large, and its clustering comes from
+# pyannote; both are 16 kHz models.
+DIARIZATION_SAMPLE_RATE = 16000
+
+
 class DiariZenClient:
     """Interface to communicate with the standalone diarizen_worker process."""
     
@@ -24,6 +29,17 @@ class DiariZenClient:
         try:
             # Waveform shape is (1, T) or (T,). soundfile expects (T,) or (T, 1)
             audio_data = waveform.squeeze().cpu().numpy()
+
+            # WavLM and pyannote clustering both operate at 16 kHz, and the
+            # pipeline would resample internally anyway. Doing it here keeps the
+            # temp WAV 33% smaller and saves a redundant conversion.
+            if sample_rate != DIARIZATION_SAMPLE_RATE:
+                import librosa
+                audio_data = librosa.resample(
+                    audio_data, orig_sr=sample_rate, target_sr=DIARIZATION_SAMPLE_RATE
+                )
+                sample_rate = DIARIZATION_SAMPLE_RATE
+
             sf.write(temp_path, audio_data, sample_rate)
 
             req = {"audio_path": temp_path}
