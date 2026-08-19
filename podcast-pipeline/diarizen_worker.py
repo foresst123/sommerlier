@@ -23,10 +23,25 @@ import argparse
 
 warnings.filterwarnings("ignore")
 
-# This worker runs under its own virtualenv, so the pipeline package is not on
-# the path by default.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from utils.torch_compat import install_torch_load_shim
+
+def install_torch_load_shim():
+    """Force torch.load back to weights_only=False for pickled checkpoints.
+
+    Duplicated from utils/torch_compat.py on purpose: this worker runs in its
+    own virtualenv, and putting podcast-pipeline on sys.path to share the helper
+    would shadow any 'utils'/'models' package DiariZen depends on.
+    """
+    if hasattr(torch, "torch_version") and hasattr(torch.serialization, "add_safe_globals"):
+        torch.serialization.add_safe_globals([torch.torch_version.TorchVersion])
+
+    original_load = torch.load
+
+    def _patched_load(*args, **kwargs):
+        kwargs["weights_only"] = False
+        return original_load(*args, **kwargs)
+
+    torch.load = _patched_load
+
 
 install_torch_load_shim()
 

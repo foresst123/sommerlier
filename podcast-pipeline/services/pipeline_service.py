@@ -118,8 +118,11 @@ class PipelineService:
                 
         # 7. LLM Refinement
         if getattr(args, "llm_refinement", False):
-            prompt = getattr(args, "llm_prompt", "")
-            transcripts = self.refinement_svc.refine(transcripts, prompt)
+            # None keeps the service's built-in fusion prompt; only an explicit
+            # override replaces it.
+            transcripts = self.refinement_svc.refine(
+                transcripts, getattr(args, "llm_prompt", None) or None
+            )
             
         # 8. Export Results
         save_path = getattr(args, "save_path", "./output")

@@ -1,4 +1,10 @@
-"""Compatibility shims for PyTorch behaviour that differs across versions."""
+"""Compatibility shims for PyTorch behaviour that differs across versions.
+
+Used by the main pipeline. The worker scripts each carry their own copy of the
+shim because they run in separate virtualenvs, where importing from here would
+require putting podcast-pipeline on sys.path and shadowing common package names
+like 'utils' and 'models'.
+"""
 
 _PATCHED = False
 

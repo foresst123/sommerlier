@@ -19,7 +19,9 @@ torch.load = _patched_load
 
 def serve():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_path", type=str, required=True)
+    # Weights come from the DialogueSidon HF repo via sidon_infer.load_models;
+    # accepted for backwards compatibility but unused.
+    parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--device", type=str, default="cuda:0")
     args = parser.parse_args()
 
