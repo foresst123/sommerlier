@@ -28,6 +28,7 @@ class WhisperASR:
             language=None, # Will auto-detect or be overridden during transcribe
             vad_model=None,
             vad_options=None,
+            asr_options={"initial_prompt": "Đây là hội thoại tự nhiên."},
             threads=4
         )
 

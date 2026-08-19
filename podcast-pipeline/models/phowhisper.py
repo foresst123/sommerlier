@@ -27,6 +27,7 @@ class PhoWhisperASR:
             language="vi",
             vad_model=None,
             vad_options=None,
+            asr_options={"initial_prompt": "Đây là hội thoại tự nhiên."},
             threads=4
         )
     

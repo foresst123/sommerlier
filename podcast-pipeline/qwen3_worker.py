@@ -87,9 +87,10 @@ def transcribe(model, processor, device, audio_path, language="vi"):
             audio_data = librosa.resample(audio_data, orig_sr=sr, target_sr=16000)
 
         conversation = [
+            {"role": "system", "content": "You are a highly accurate Vietnamese ASR system. Transcribe the audio precisely. Maintain natural punctuation and capitalization. Ignore background noise, music, and do not hallucinate content if the audio is silent or unintelligible."},
             {"role": "user", "content": [
                 {"type": "audio", "audio_url": "dummy"},
-                {"type": "text", "text": f"Transcribe the audio in Vietnamese."},
+                {"type": "text", "text": "Transcription in Vietnamese."},
             ]}
         ]
 
