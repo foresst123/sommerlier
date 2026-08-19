@@ -128,8 +128,8 @@ class TargetSpeakerExtractor:
             raise RuntimeError(f"Sidon worker error: {resp.get('error')}")
             
         # Load results
-        track_1_16k_np = np.load(resp["track_1_path"])
-        track_2_16k_np = np.load(resp["track_2_path"])
+        track_1_np = np.load(resp["track_1_path"])
+        track_2_np = np.load(resp["track_2_path"])
         
         # Clean up temp files
         try:
@@ -139,15 +139,15 @@ class TargetSpeakerExtractor:
         except Exception:
             pass
             
-        track_1_16k = torch.from_numpy(track_1_16k_np).to(self.device)
-        track_2_16k = torch.from_numpy(track_2_16k_np).to(self.device)
+        track_1_tensor = torch.from_numpy(track_1_np).to(self.device)
+        track_2_tensor = torch.from_numpy(track_2_np).to(self.device)
 
         # --- ECAPA-TDNN Matching ---
         embed_A = self._get_target_embedding(enroll_A, id_A, sample_rate)
         embed_B = self._get_target_embedding(enroll_B, id_B, sample_rate)
         
-        emb_1 = F.normalize(self._get_embedding(track_1_16k.cpu().numpy(), target_sr), p=2, dim=0)
-        emb_2 = F.normalize(self._get_embedding(track_2_16k.cpu().numpy(), target_sr), p=2, dim=0)
+        emb_1 = F.normalize(self._get_embedding(track_1_tensor.cpu().numpy(), target_sr), p=2, dim=0)
+        emb_2 = F.normalize(self._get_embedding(track_2_tensor.cpu().numpy(), target_sr), p=2, dim=0)
         
         # Calculate matching scores for all combinations
         score_1A = torch.dot(embed_A, emb_1).item()
@@ -157,20 +157,20 @@ class TargetSpeakerExtractor:
         
         # Determine assignment (Max Bipartite Matching for 2x2)
         if (score_1A + score_2B) > (score_2A + score_1B):
-            out_A_16k, out_B_16k = track_1_16k, track_2_16k
+            out_A_tensor, out_B_tensor = track_1_tensor, track_2_tensor
             sim_A, sim_B = score_1A, score_2B
         else:
-            out_A_16k, out_B_16k = track_2_16k, track_1_16k
+            out_A_tensor, out_B_tensor = track_2_tensor, track_1_tensor
             sim_A, sim_B = score_2A, score_1B
             
         # --- Resample back to original sample rate ---
-        def restore_track(track_tensor_16k):
+        def restore_track(track_tensor_in):
             if sample_rate != target_sr:
-                track_tensor = F_audio.resample(track_tensor_16k.unsqueeze(0).cpu(), target_sr, sample_rate).squeeze(0)
+                track_tensor_out = F_audio.resample(track_tensor_in.unsqueeze(0).cpu(), target_sr, sample_rate).squeeze(0)
             else:
-                track_tensor = track_tensor_16k.cpu()
+                track_tensor_out = track_tensor_in.cpu()
                 
-            track_np = track_tensor.numpy()
+            track_np = track_tensor_out.numpy()
             orig_len = len(mixture_audio)
             
             if len(track_np) > orig_len:
@@ -179,4 +179,4 @@ class TargetSpeakerExtractor:
                 track_np = np.pad(track_np, (0, orig_len - len(track_np)))
             return track_np
             
-        return restore_track(out_A_16k), restore_track(out_B_16k), sim_A, sim_B
+        return restore_track(out_A_tensor), restore_track(out_B_tensor), sim_A, sim_B

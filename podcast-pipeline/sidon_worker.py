@@ -86,9 +86,14 @@ def serve():
                     track_1 = est_sources[0].cpu().numpy()
                     track_2 = est_sources[1].cpu().numpy()
                     
-                    # Normalize output amplitude to match enrollments and prevent ECAPA energy floor clipping
-                    track_1 = np.clip(track_1 / max(np.abs(track_1).max(), 1e-6) * 0.9, -1.0, 1.0)
-                    track_2 = np.clip(track_2 / max(np.abs(track_2).max(), 1e-6) * 0.9, -1.0, 1.0)
+                    # Print original peak amplitude for debugging ECAPA issues
+                    raw_peak = max(np.abs(track_1).max(), np.abs(track_2).max())
+                    print(f"[SidonWorker] Raw output peak amplitude = {raw_peak:.6f}", file=sys.stderr)
+                    
+                    # Joint normalization to preserve energy correlation between speakers
+                    global_max = max(raw_peak, 1e-6)
+                    track_1 = np.clip(track_1 / global_max * 0.9, -1.0, 1.0)
+                    track_2 = np.clip(track_2 / global_max * 0.9, -1.0, 1.0)
                 else:
                     raise ValueError(f"Unexpected DialogueSidon output shape: {est_sources.shape}")
                 

@@ -184,30 +184,9 @@ class TargetExtractionService:
             
             # Component 4: Quality Control
             
-            # 4.1 Energy computation removed (relying entirely on ECAPA similarity for QC)
-            sorted_segs = sorted(segments, key=lambda x: x.start)
-            def get_gap_to_last_turn(speaker: str, current_start: float) -> float:
-                gap = float('inf')
-                for s in reversed(sorted_segs):
-                    if s.speaker == speaker and s.end <= current_start + 0.1:
-                        gap = current_start - s.end
-                        break # Found the most recent turn
-                return gap
-                
-            gap_A = get_gap_to_last_turn(target_A, overlap_start)
-            is_backchannel = (overlap_end - overlap_start) < 1.5
-            
-            flagged = False
-            # Check real ECAPA matching scores (Intra-Track Consistency equivalent)
-            if sim_A < 0.35 or sim_B < 0.35:
-                flagged = True
+            # 4.1 Check real ECAPA matching scores (Intra-Track Consistency equivalent)
+            if sim_A < 0.25 or sim_B < 0.25:
                 if self.logger: self.logger.warning(f"TSE QC failed (Low ECAPA similarity A:{sim_A:.2f} B:{sim_B:.2f}) at {overlap_start}s.")
-            elif is_backchannel and gap_A > 2.0:
-                flagged = True
-                if self.logger: self.logger.warning(f"TSE QC failed (Context Gap > 2s for backchannel) at {overlap_start}s.")
-                
-            if flagged:
-                # Fallback: Skip TSE injection. The enhanced_audio buffer already contains the original mixture.
                 if self.logger: self.logger.warning(f"Discarding failed extraction for overlap at {overlap_start}s. Retaining original mixture.")
                 continue
             
