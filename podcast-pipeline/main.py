@@ -34,7 +34,23 @@ args = parse_args()
 
 with open(args.config, 'r', encoding='utf-8') as f:
     config = json.load(f)
-    
+
+# --- Fetch HuggingFace Token from Environment or Kaggle Secrets ---
+hf_token = os.environ.get("HUGGINGFACE_TOKEN") or os.environ.get("HF_TOKEN")
+if not hf_token:
+    try:
+        from kaggle_secrets import UserSecretsClient
+        user_secrets = UserSecretsClient()
+        hf_token = user_secrets.get_secret("HUGGINGFACE_TOKEN")
+        if not hf_token:
+            hf_token = user_secrets.get_secret("HF_TOKEN")
+    except Exception:
+        pass
+
+if hf_token:
+    config["huggingface_token"] = hf_token
+# ------------------------------------------------------------------
+
 env_profile = config.get("environments", {}).get(args.env, {})
 
 # Inject config parameters into args dynamically
