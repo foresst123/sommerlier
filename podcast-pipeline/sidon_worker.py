@@ -17,9 +17,9 @@ def serve():
     
     # Load model
     try:
-        from sidon.lightning import DialogueSidonDiffusionLightningModule
+        from sidon.model.dialogue_sidion.lightning_module import DialogueSidonDiffusionLightningModule
         from sidon.infer import run_separation_chunked
-    except ImportError:
+    except ImportError as e:
         print(json.dumps({"status": "error", "message": "Sidon not installed in this environment"}), flush=True)
         sys.exit(1)
 
