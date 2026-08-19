@@ -23,6 +23,18 @@ import argparse
 
 warnings.filterwarnings("ignore")
 
+# PyTorch 2.6+ defaults to weights_only=True, which breaks Pyannote/DiariZen models containing TorchVersion
+if hasattr(torch, "torch_version") and hasattr(torch.serialization, "add_safe_globals"):
+    torch.serialization.add_safe_globals([torch.torch_version.TorchVersion])
+    
+# Alternatively, we can monkey-patch torch.load to always use weights_only=False
+_original_load = torch.load
+def _patched_load(*args, **kwargs):
+    if "weights_only" not in kwargs:
+        kwargs["weights_only"] = False
+    return _original_load(*args, **kwargs)
+torch.load = _patched_load
+
 def load_model(config_path=None, env_name="kaggle"):
     """Load DiariZen WavLM-Large s80-md-v2 with custom config."""
     from diarizen.pipelines.inference import DiariZenPipeline

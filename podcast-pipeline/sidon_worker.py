@@ -7,6 +7,17 @@ import traceback
 import argparse
 import torchaudio.functional as F_audio
 
+# PyTorch 2.6+ defaults to weights_only=True, which can break loading checkpoints containing TorchVersion
+if hasattr(torch, "torch_version") and hasattr(torch.serialization, "add_safe_globals"):
+    torch.serialization.add_safe_globals([torch.torch_version.TorchVersion])
+    
+_original_load = torch.load
+def _patched_load(*args, **kwargs):
+    if "weights_only" not in kwargs:
+        kwargs["weights_only"] = False
+    return _original_load(*args, **kwargs)
+torch.load = _patched_load
+
 def serve():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, required=True)

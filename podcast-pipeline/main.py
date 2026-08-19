@@ -92,6 +92,18 @@ def main():
     logger.info(f"Starting Sommelier Pipeline for Job: {args.job_id}")
 
     import torch
+    
+    # PyTorch 2.6+ defaults to weights_only=True, which can break many HuggingFace and legacy models
+    if hasattr(torch, "torch_version") and hasattr(torch.serialization, "add_safe_globals"):
+        torch.serialization.add_safe_globals([torch.torch_version.TorchVersion])
+        
+    _original_load = torch.load
+    def _patched_load(*args, **kwargs):
+        if "weights_only" not in kwargs:
+            kwargs["weights_only"] = False
+        return _original_load(*args, **kwargs)
+    torch.load = _patched_load
+
     if torch.cuda.is_available() and torch.cuda.device_count() == 1:
         logger.info(f"Only 1 GPU detected. Overriding gpu_2 ({args.gpu_2}) to use gpu_1 ({args.gpu_1}).")
         args.gpu_2 = args.gpu_1
