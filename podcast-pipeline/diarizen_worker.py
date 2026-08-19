@@ -76,10 +76,24 @@ def _apply_diarizen_config(pipeline, diar_cfg):
                 ignored.append(f"batch_size (pipeline has no {attr})")
 
     if "segmentation_step" in diar_cfg:
-        step = float(diar_cfg["segmentation_step"])
-        if hasattr(pipeline, "_segmentation") and hasattr(pipeline._segmentation, "step"):
-            pipeline._segmentation.step = step
-            applied.append(f"segmentation_step={step}")
+        ratio = float(diar_cfg["segmentation_step"])
+        segmentation = getattr(pipeline, "_segmentation", None)
+        if segmentation is not None and hasattr(segmentation, "step"):
+            # pyannote's Inference.step is a hop in SECONDS (its own default is
+            # 0.1 * duration), while DiariZen's config expresses it as a ratio of
+            # the window. Writing the ratio straight in gives a 0.05s hop across
+            # a 16s window -- 99.7% overlap and ~32x the chunks for no gain.
+            window = float(getattr(segmentation, "duration", 0.0) or 0.0)
+            if window > 0.0 and 0.0 < ratio <= 1.0:
+                step_seconds = ratio * window
+                segmentation.step = step_seconds
+                applied.append(
+                    f"segmentation_step={ratio} -> {step_seconds:.2f}s hop over {window:.0f}s window"
+                )
+            else:
+                # Either the window is unknown or the value is already seconds.
+                segmentation.step = ratio
+                applied.append(f"segmentation_step={ratio}s (absolute)")
         else:
             ignored.append("segmentation_step (pipeline._segmentation.step absent)")
 
@@ -88,44 +102,35 @@ def _apply_diarizen_config(pipeline, diar_cfg):
         # already-built sliding window here would desync the segmentation model.
         ignored.append("seg_duration (constructor-time only, cannot be set post-load)")
 
-    # DiariZen keeps its clustering knobs in a config dict (see the
-    # "clustering: {args: {method, min_speakers, max_speakers, ahc_threshold...}}"
-    # block it logs at load time), while other builds expose them as attributes.
-    # Try the dict first, then attributes, and report when neither works.
+    # DiariZenPipeline.__init__ copies these out of its config onto itself
+    # (self.min_speakers / self.max_speakers feed the clustering call, and
+    # self.apply_median_filtering gates the median filter over segmentations),
+    # so they are set on the pipeline, not on pipeline.clustering.
     clustering = getattr(pipeline, "clustering", None)
-    clustering_cfg = None
-    for holder in (clustering, pipeline):
-        for attr in ("args", "config", "_config"):
-            candidate = getattr(holder, attr, None) if holder is not None else None
-            if isinstance(candidate, dict):
-                clustering_cfg = candidate
-                break
-        if clustering_cfg is not None:
-            break
-
-    clustering_map = {
-        "ahc_threshold": ("ahc_threshold", "threshold"),
-        "apply_median_filtering": ("apply_median_filtering",),
-        "min_speakers": ("min_speakers", "min_num_speakers"),
-        "max_speakers": ("max_speakers", "max_num_speakers"),
-    }
-    for cfg_key, names in clustering_map.items():
+    pipeline_attrs = ("min_speakers", "max_speakers", "apply_median_filtering")
+    for cfg_key in pipeline_attrs:
         if cfg_key not in diar_cfg:
             continue
         value = diar_cfg[cfg_key]
+        if hasattr(pipeline, cfg_key):
+            setattr(pipeline, cfg_key, value)
+            applied.append(f"{cfg_key}={value}")
+        else:
+            ignored.append(f"{cfg_key} (pipeline has no such attribute)")
 
-        key = next((n for n in names if clustering_cfg is not None and n in clustering_cfg), None)
-        if key is not None:
-            clustering_cfg[key] = value
-            applied.append(f"clustering.args.{key}={value}")
-            continue
-
-        attr = next((n for n in names if clustering is not None and hasattr(clustering, n)), None)
+    # ahc_threshold lives on the clustering object itself.
+    if "ahc_threshold" in diar_cfg:
+        value = diar_cfg["ahc_threshold"]
+        attr = next(
+            (n for n in ("ahc_threshold", "threshold")
+             if clustering is not None and hasattr(clustering, n)),
+            None,
+        )
         if attr is not None:
             setattr(clustering, attr, value)
             applied.append(f"clustering.{attr}={value}")
         else:
-            ignored.append(f"{cfg_key} (no matching key or attribute on pipeline.clustering)")
+            ignored.append("ahc_threshold (no matching attribute on pipeline.clustering)")
 
     if "clustering_method" in diar_cfg:
         requested = str(diar_cfg["clustering_method"])
@@ -137,6 +142,18 @@ def _apply_diarizen_config(pipeline, diar_cfg):
             )
         else:
             applied.append(f"clustering_method={actual}")
+
+    # A too-small hop is not an error, just ruinously slow, so say so up front
+    # rather than letting the user discover it from the chunk counter.
+    segmentation = getattr(pipeline, "_segmentation", None)
+    step = float(getattr(segmentation, "step", 0.0) or 0.0)
+    window = float(getattr(segmentation, "duration", 0.0) or 0.0)
+    if step > 0.0 and window > 0.0 and step < 0.05 * window:
+        print(json.dumps({
+            "warning": f"segmentation hop {step:.2f}s over a {window:.0f}s window is "
+                       f"{100 * (1 - step / window):.1f}% overlap; expect very slow "
+                       "segmentation. Values around 0.1 (10%) are typical."
+        }), flush=True)
 
     if applied:
         print(json.dumps({"config_applied": applied}), flush=True)
