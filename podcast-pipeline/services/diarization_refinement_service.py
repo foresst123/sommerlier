@@ -39,7 +39,7 @@ class DiarizationRefinementService:
         if self.logger: self.logger.info("Running LLM Refinement on all segments...")
         
         from tqdm import tqdm
-        for seg in tqdm(segments, desc="[LLM] Đang tinh chỉnh câu"):
+        for i, seg in enumerate(tqdm(segments, desc="[LLM] Đang tinh chỉnh câu")):
             w_text = seg.text_whisper or ""
             p_text = seg.text_phowhisper or ""
             q_text = seg.text_qwen3 or ""
@@ -110,7 +110,9 @@ class DiarizationRefinementService:
                 "hoàn chỉnh, ưu tiên giữ nguyên từ đệm/từ ngắn tương xứng với thời lượng.\n"
                 "C3 (Trạng thái hội thoại) — Nếu là 'CÓ (Đang tranh lời/Nói đè)': Âm thanh rất ồn "
                 "và ASR thường xuyên nghe sai lệch. Bạn được phép BẢO THỦ HƠN, ưu tiên chọn lọc "
-                "những từ chung nhất giữa 3 bản, loại bỏ các từ vô nghĩa hoặc tạp âm.\n\n"
+                "những từ chung nhất giữa 3 bản, loại bỏ các từ vô nghĩa hoặc tạp âm.\n"
+                "C4 (Lặp từ) — LỖI RẤT PHỔ BIẾN CẦN TRÁNH: Đôi khi các bản dịch ASR bị lặp từ ở cuối câu "
+                "(ví dụ: 'gì hết. gì hết.'). BẠN PHẢI TỰ ĐỘNG CẮT BỎ CÁC TỪ BỊ LẶP LẠI VÔ NGHĨA NÀY.\n\n"
 
                 "### ĐỊNH DẠNG ĐẦU RA (bắt buộc tuân thủ nghiêm ngặt)\n"
                 "- Chỉ xuất ra transcript tiếng Việt cuối cùng, không kèm gì khác.\n"
@@ -121,12 +123,14 @@ class DiarizationRefinementService:
             )
             
             is_overlap = "CÓ (Đang tranh lời/Nói đè)" if getattr(seg, 'tse', False) else "KHÔNG (Độc thoại)"
+            prev_text = segments[i-1].text if i > 0 else "[Bắt đầu hội thoại]"
             
             user_msg = (
                 f"Thông tin Ngữ cảnh:\n"
                 f"- Người đang nói: {seg.speaker}\n"
                 f"- Thời gian: {seg.start:.2f}s - {seg.end:.2f}s\n"
                 f"- Trạng thái hội thoại: {is_overlap}\n"
+                f"- Câu liền trước (Context): {prev_text}\n"
                 f"---\n"
                 f"Bản dịch 1 (Whisper): {w_text}\n"
                 f"Bản dịch 2 (PhoWhisper): {p_text}\n"
@@ -148,7 +152,8 @@ class DiarizationRefinementService:
                         **inputs,
                         max_new_tokens=150,
                         temperature=0.0,
-                        do_sample=False
+                        do_sample=False,
+                        repetition_penalty=1.2
                     )
                     generated_ids = [
                         output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, generated_ids)
