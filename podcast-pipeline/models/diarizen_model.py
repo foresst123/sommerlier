@@ -80,7 +80,9 @@ class DiariZenClient:
                     print()
                     break # Successfully parsed final output
                 except json.JSONDecodeError:
-                    print(f"[DiariZenClient] Ignoring stdout noise: {line_str}", flush=True)
+                    # DiariZen prints plain-text stage markers ("Extracting
+                    # segmentations.", "Clustering.") alongside its JSON.
+                    print(f"[DiariZenClient] {line_str}", flush=True)
                     continue
 
             if resp is None:

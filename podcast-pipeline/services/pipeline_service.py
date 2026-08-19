@@ -14,9 +14,10 @@ class PipelineService:
                  asr_svc, 
                  caption_svc, 
                  refinement_svc, 
-                 export_svc, 
+                 export_svc,
                  logger=None,
-                 model_loader=None):
+                 model_loader=None,
+                 worker_services=None):
         self.audio_svc = audio_svc
         self.diarization_svc = diarization_svc
         self.separation_svc = separation_svc
@@ -27,7 +28,24 @@ class PipelineService:
         self.export_svc = export_svc
         self.logger = logger
         self.model_loader = model_loader
-        
+        # {"diarizen": svc, "sidon": svc, ...} so each worker's VRAM can be
+        # released as soon as its stage is done rather than at process exit.
+        self.worker_services = worker_services or {}
+
+    def _release_worker(self, name: str):
+        """Stop a worker subprocess now that its stage is finished."""
+        service = self.worker_services.get(name)
+        if not service or getattr(service, "process", None) is None:
+            return
+        if self.logger:
+            self.logger.info(f"Releasing {name} worker (stage complete, freeing VRAM)")
+        try:
+            service.stop()
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"Failed to stop {name} worker: {e}")
+
+
     def run(self, args: Any, config: dict, audio_path: str):
         job_id = getattr(args, "job_id", "default_job")
         cache_dir = getattr(args, "cache_dir", "cache")
@@ -59,7 +77,9 @@ class PipelineService:
         if self.model_loader:
             self.model_loader.unload("diarizer")
             self.model_loader.unload("vad")
-            
+        # Unloading the client does not touch the subprocess holding the weights.
+        self._release_worker("diarizen")
+
         if getattr(args, "stop_after", None) == "diarization":
             if self.logger: self.logger.info("Stopping pipeline after diarization as requested by --stop_after.")
             return None
@@ -76,7 +96,8 @@ class PipelineService:
         if self.model_loader:
             self.model_loader.unload("separator")
             self.model_loader.unload("embedder")
-            
+        self._release_worker("sidon")
+
         if getattr(args, "stop_after", None) == "separation":
             if self.logger: self.logger.info("Stopping pipeline after separation as requested by --stop_after.")
             return None
