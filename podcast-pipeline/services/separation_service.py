@@ -35,7 +35,7 @@ class TargetExtractionService:
         
         for spk in set(s.speaker for s in segments):
             clean_clips = []
-            for dur_thresh in [2.0, 1.0, 0.5, 0.1]:
+            for dur_thresh in [min_dur, min_dur / 2, 0.5, 0.1]:
                 for s in segments:
                     if s.speaker != spk:
                         continue
@@ -82,15 +82,7 @@ class TargetExtractionService:
                 
         return enrollments
 
-    def _compute_itc(self, track_audio: np.ndarray) -> float:
-        """Stub for Intra-Track Consistency."""
-        # TODO: Implement WeSpeaker embedding cosine similarity
-        return 0.5
-
-    def _compute_itd(self, track_a: np.ndarray, track_b: np.ndarray) -> float:
-        """Stub for Inter-Track Distinctiveness."""
-        # TODO: Implement 1 - Cosine Similarity between A and B
-        return 0.9
+    # Removed mock _compute_itc and _compute_itd as they are replaced by real sim_A, sim_B from tse_model
         
     def _compute_energy(self, track_audio: np.ndarray) -> float:
         """Compute signal energy (RMS)."""
@@ -172,9 +164,15 @@ class TargetExtractionService:
             if target_A not in enrollments or target_B not in enrollments or not enrollments[target_A] or not enrollments[target_B]:
                 continue
                 
-            # Component 3: TSE Engine
-            track_A_ctx = self.tse_model.extract_speaker(context_audio, enrollments[target_A], sample_rate=sr)
-            track_B_ctx = self.tse_model.extract_speaker(context_audio, enrollments[target_B], sample_rate=sr)
+            # Component 3: TSE Engine (1-Pass Separation)
+            track_A_ctx, track_B_ctx, sim_A, sim_B = self.tse_model.separate_two_speakers(
+                context_audio, 
+                enroll_A=enrollments[target_A], 
+                enroll_B=enrollments[target_B], 
+                sample_rate=sr, 
+                id_A=target_A, 
+                id_B=target_B
+            )
             
             # Crop the ±1.5s padding to extract just the overlap core
             pad_start_frames = int((overlap_start - ctx_start) * sr)
@@ -185,16 +183,8 @@ class TargetExtractionService:
             track_B_core = track_B_ctx[pad_start_frames : pad_start_frames + core_len]
             
             # Component 4: Quality Control
-            itc_A = self._compute_itc(track_A_core)
-            itd = self._compute_itd(track_A_core, track_B_core)
             
-            # 4.1 Energy-based Confidence (Heuristic)
-            energy_A = self._compute_energy(track_A_core)
-            energy_B = self._compute_energy(track_B_core)
-            total_energy = energy_A + energy_B + 1e-8
-            energy_ratio_A = energy_A / total_energy
-            
-            # 4.2 Context Gap Flagging (Heuristic cho Backchannel)
+            # 4.1 Energy computation removed (relying entirely on ECAPA similarity for QC)
             sorted_segs = sorted(segments, key=lambda x: x.start)
             def get_gap_to_last_turn(speaker: str, current_start: float) -> float:
                 gap = float('inf')
@@ -208,18 +198,18 @@ class TargetExtractionService:
             is_backchannel = (overlap_end - overlap_start) < 1.5
             
             flagged = False
-            if itc_A < 0.35 or itd < 0.85:
+            # Check real ECAPA matching scores (Intra-Track Consistency equivalent)
+            if sim_A < 0.35 or sim_B < 0.35:
                 flagged = True
-                if self.logger: self.logger.warning(f"TSE QC failed (ITC/ITD) at {overlap_start}s.")
+                if self.logger: self.logger.warning(f"TSE QC failed (Low ECAPA similarity A:{sim_A:.2f} B:{sim_B:.2f}) at {overlap_start}s.")
             elif is_backchannel and gap_A > 2.0:
                 flagged = True
                 if self.logger: self.logger.warning(f"TSE QC failed (Context Gap > 2s for backchannel) at {overlap_start}s.")
                 
             if flagged:
-                # Fallback: Strict Discarding. Replace extracted track with silence to preserve SDLM quality
-                if self.logger: self.logger.warning(f"Discarding failed extraction for overlap at {overlap_start}s.")
-                track_A_core = np.zeros_like(track_A_core)
-                track_B_core = np.zeros_like(track_B_core)
+                # Fallback: Skip TSE injection. The enhanced_audio buffer already contains the original mixture.
+                if self.logger: self.logger.warning(f"Discarding failed extraction for overlap at {overlap_start}s. Retaining original mixture.")
+                continue
             
             # Component 5: Splice with Cross-fade (20ms fade = 320 samples at 16kHz)
             fade_samples = int(0.02 * sr)
@@ -231,7 +221,7 @@ class TargetExtractionService:
                         enh_seg.enhanced_audio[rel_start:rel_start+limit] = self._cross_fade(
                             enh_seg.enhanced_audio[rel_start:rel_start+limit], track_A_core[:limit], fade_samples
                         )
-                        enh_seg.srcorrnet = True # Flag indicating it was processed
+                        enh_seg.tse = True # Flag indicating it was processed
                 elif enh_seg.index == seg2["index"]:
                     rel_start = int((overlap_start - enh_seg.start) * sr)
                     limit = min(len(track_B_core), len(enh_seg.enhanced_audio[rel_start:]))
@@ -239,14 +229,15 @@ class TargetExtractionService:
                         enh_seg.enhanced_audio[rel_start:rel_start+limit] = self._cross_fade(
                             enh_seg.enhanced_audio[rel_start:rel_start+limit], track_B_core[:limit], fade_samples
                         )
-                        enh_seg.srcorrnet = True
+                        enh_seg.tse = True
                         
         return enhanced_segments
 
-    def export_sdlm_dual_channel(self, enhanced_segments: List[EnhancedSegment], audio_duration: float, sr: int = 16000) -> Tuple[np.ndarray, np.ndarray]:
+    def export_sdlm_dual_channel(self, enhanced_segments: List[EnhancedSegment], audio_duration: float, sr: int) -> Tuple[np.ndarray, np.ndarray]:
         """
         Component 6: Export Dual-Channel Audio for SDLM training.
         Reconstructs the full timeline into two continuous tracks (Track 0, Track 1) from the separated segments.
+        Uses additive mixing to preserve overlapping segments belonging to the same speaker.
         """
         total_samples = int(audio_duration * sr)
         track_0 = np.zeros(total_samples, dtype=np.float32)
@@ -257,10 +248,16 @@ class TargetExtractionService:
         if not speakers:
             return track_0, track_1
             
+        if len(speakers) > 2:
+            if self.logger: self.logger.warning(f"export_sdlm_dual_channel: Expected 2 speakers, found {len(speakers)}. Extra speakers will be ignored.")
+            
         spk_0 = speakers[0]
         spk_1 = speakers[1] if len(speakers) > 1 else None
         
         for seg in enhanced_segments:
+            if seg.speaker not in [spk_0, spk_1]:
+                continue
+                
             start_idx = int(seg.start * sr)
             end_idx = start_idx + len(seg.enhanced_audio)
             
@@ -271,9 +268,14 @@ class TargetExtractionService:
             else:
                 audio_to_paste = seg.enhanced_audio
                 
+            # Additive mixing to preserve same-speaker overlaps
             if seg.speaker == spk_0:
-                track_0[start_idx:end_idx] = audio_to_paste
+                track_0[start_idx:end_idx] += audio_to_paste
             elif seg.speaker == spk_1:
-                track_1[start_idx:end_idx] = audio_to_paste
+                track_1[start_idx:end_idx] += audio_to_paste
                 
+        # Clip to prevent clipping distortion if additive mixing exceeded [-1.0, 1.0]
+        np.clip(track_0, -1.0, 1.0, out=track_0)
+        np.clip(track_1, -1.0, 1.0, out=track_1)
+        
         return track_0, track_1

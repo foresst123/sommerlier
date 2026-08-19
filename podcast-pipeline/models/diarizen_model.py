@@ -31,7 +31,7 @@ class DiariZenClient:
             self.process.stdin.flush()
             
             resp = None
-            for _ in range(10000): # large number to accommodate long audio progress events and noise
+            while True:
                 resp_line = self.process.stdout.readline()
                 if not resp_line:
                     break
@@ -76,7 +76,7 @@ class DiariZenClient:
                             
                 return DummyAnnotation(resp["segments"])
             else:
-                print(f"[DiariZenClient] Worker error: {resp.get('error', resp_line)}", flush=True)
+                print(f"[DiariZenClient] Worker error: {resp.get('error', 'Unknown worker error')}", flush=True)
                 return None
         except Exception as e:
             print(f"[DiariZenClient] Exception in diarize: {e}", flush=True)

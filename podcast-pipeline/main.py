@@ -62,7 +62,7 @@ if env_profile.get("offline_mode", False):
     os.environ["TORCH_HOME"] = os.path.join(offline_dir, "torch")
     os.environ["XDG_CACHE_HOME"] = offline_dir
     os.environ["HOME"] = offline_dir  # For PANNS
-    os.environ["SRCORRNET_PATH"] = os.path.join(offline_dir, "srcorrnet")
+    os.environ["TSE_PATH"] = os.path.join(offline_dir, "tse_model")
     print(f"[*] Running in Offline Mode (env: {args.env}). Using weights from: {offline_dir}")
     
 if env_profile.get("use_bf16", False):

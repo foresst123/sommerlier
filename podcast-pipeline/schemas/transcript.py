@@ -23,6 +23,6 @@ class TranscriptSegment:
     text_qwen3: str
     language: str
     demucs: bool                  # Đã qua Demucs?
-    srcorrnet: bool               # Đã qua SR-CorrNet?
+    tse: bool                     # Đã qua TSE?
     qwen3omni_caption: Optional[str] = None # Caption từ Qwen3-Omni (optional)
     words: Optional[List[Dict[str, Any]]] = None # Word-level timestamps (optional)

@@ -190,7 +190,7 @@ class ASRService:
                 text_qwen3=t_qwen,
                 language=lang,
                 demucs=seg.demucs,
-                srcorrnet=seg.srcorrnet,
+                tse=seg.tse,
                 words=words if enable_word_timestamps else None
             ))
 

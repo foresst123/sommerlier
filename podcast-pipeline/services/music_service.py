@@ -26,8 +26,8 @@ class MusicService:
         
         from tqdm import tqdm
         for seg in tqdm(segments, desc="[PANNs+Demucs]", leave=True):
-            # Check if it was already processed by SR-CorrNet, which also inherently isolates voice
-            if seg.srcorrnet:
+            # Check if it was already processed by TSE, which also inherently isolates voice
+            if seg.tse:
                 seg.demucs = False
                 continue
                 

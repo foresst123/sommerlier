@@ -11,6 +11,6 @@ class Segment:
 
 @dataclass
 class EnhancedSegment(Segment):
-    enhanced_audio: Optional[np.ndarray] = None  # Audio đã qua SR-CorrNet
-    srcorrnet: bool = False                      # Có được tách bởi SR-CorrNet không
+    enhanced_audio: Optional[np.ndarray] = None  # Audio đã qua TSE
+    tse: bool = False                            # Có được xử lý bởi TSE không
     demucs: bool = False                         # Có được xử lý bởi Demucs không
