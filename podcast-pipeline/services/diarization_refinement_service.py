@@ -82,7 +82,9 @@ FUSION_SYSTEM_PROMPT = (
 class DiarizationRefinementService:
     """Uses a local LLM (Qwen) to refine speaker labels and text based on dialogue context."""
 
-    def __init__(self, logger=None, batch_size: int = 8):
+    # The ~1200-token system prompt dominates each sequence, so even a modest
+    # batch builds a large KV cache; 2 fits alongside the ASR models on a T4.
+    def __init__(self, logger=None, batch_size: int = 2):
         self.logger = logger
         self.model = None
         self.tokenizer = None
@@ -159,43 +161,90 @@ class DiarizationRefinementService:
         tokenizer.padding_side = "left"
 
         from tqdm import tqdm
+        refined_count = 0
+        failed_count = 0
         try:
-            for start in tqdm(range(0, len(pending), self.batch_size), desc="[LLM] Đang tinh chỉnh câu"):
-                batch = pending[start:start + self.batch_size]
-                texts = [
-                    tokenizer.apply_chat_template(
-                        [{"role": "system", "content": system_prompt},
-                         {"role": "user", "content": user_msg}],
-                        tokenize=False, add_generation_prompt=True
-                    )
-                    for _, user_msg in batch
-                ]
+            with tqdm(total=len(pending), desc="[LLM] Đang tinh chỉnh câu") as bar:
+                start = 0
+                while start < len(pending):
+                    size = min(self.batch_size, len(pending) - start)
+                    batch = pending[start:start + size]
+                    ok, count = self._refine_batch(batch, system_prompt)
 
-                try:
-                    inputs = tokenizer(texts, return_tensors="pt", padding=True).to(self.model.device)
+                    # A batch that does not fit is halved rather than dropped:
+                    # the whole refinement stage silently no-ops otherwise.
+                    while not ok and len(batch) > 1:
+                        size = max(1, len(batch) // 2)
+                        if self.logger:
+                            self.logger.info(f"Retrying LLM refinement with batch size {size}")
+                        batch = pending[start:start + size]
+                        ok, count = self._refine_batch(batch, system_prompt)
 
-                    with torch.no_grad():
-                        generated_ids = self.model.generate(
-                            **inputs,
-                            max_new_tokens=150,
-                            do_sample=False,
-                            repetition_penalty=1.2,
-                            pad_token_id=tokenizer.pad_token_id,
-                        )
+                    if ok:
+                        refined_count += count
+                    else:
+                        failed_count += len(batch)
 
-                    prompt_len = inputs.input_ids.shape[1]
-                    decoded = tokenizer.batch_decode(
-                        generated_ids[:, prompt_len:], skip_special_tokens=True
-                    )
-                    for (seg, _), refined_text in zip(batch, decoded):
-                        refined_text = refined_text.strip()
-                        if refined_text:
-                            seg.text = refined_text
-                except Exception as e:
-                    indices = ", ".join(seg.index for seg, _ in batch)
-                    if self.logger:
-                        self.logger.warning(f"LLM failed on segments [{indices}]: {e}")
+                    start += len(batch)
+                    bar.update(len(batch))
         finally:
             tokenizer.padding_side = original_padding_side
 
+        if self.logger:
+            if failed_count:
+                self.logger.warning(
+                    f"LLM refinement: {refined_count} segments refined, "
+                    f"{failed_count} left unrefined (original ROVER text kept)"
+                )
+            else:
+                self.logger.info(f"LLM refinement: {refined_count} segments refined")
+
         return segments
+
+    def _refine_batch(self, batch, system_prompt):
+        """Refine one batch in place. Returns (succeeded, refined_count)."""
+        tokenizer = self.tokenizer
+        texts = [
+            tokenizer.apply_chat_template(
+                [{"role": "system", "content": system_prompt},
+                 {"role": "user", "content": user_msg}],
+                tokenize=False, add_generation_prompt=True
+            )
+            for _, user_msg in batch
+        ]
+
+        try:
+            inputs = tokenizer(texts, return_tensors="pt", padding=True).to(self.model.device)
+
+            with torch.no_grad():
+                generated_ids = self.model.generate(
+                    **inputs,
+                    max_new_tokens=150,
+                    do_sample=False,
+                    repetition_penalty=1.2,
+                    pad_token_id=tokenizer.pad_token_id,
+                )
+
+            prompt_len = inputs.input_ids.shape[1]
+            decoded = tokenizer.batch_decode(
+                generated_ids[:, prompt_len:], skip_special_tokens=True
+            )
+            count = 0
+            for (seg, _), refined_text in zip(batch, decoded):
+                refined_text = refined_text.strip()
+                if refined_text:
+                    seg.text = refined_text
+                    count += 1
+            return True, count
+
+        except torch.cuda.OutOfMemoryError as e:
+            torch.cuda.empty_cache()
+            if self.logger:
+                indices = ", ".join(seg.index for seg, _ in batch)
+                self.logger.warning(f"LLM out of memory on [{indices}] (batch {len(batch)}): {e}")
+            return False, 0
+        except Exception as e:
+            if self.logger:
+                indices = ", ".join(seg.index for seg, _ in batch)
+                self.logger.warning(f"LLM failed on segments [{indices}]: {e}")
+            return False, 0

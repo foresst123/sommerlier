@@ -128,7 +128,10 @@ class PipelineService:
             transcripts = self.asr_svc.process(enhanced_segments, audio_data)
             if self.logger: self.logger.info(f"[DEBUG] ASR returned {len(transcripts)} transcripts")
             checkpoint.save("asr", transcripts)
-            
+
+        # The Qwen3 worker is done; the refinement LLM needs its ~4.7GB.
+        self._release_worker("qwen3")
+
         if getattr(args, "stop_after", None) == "asr":
             if self.logger: self.logger.info("Stopping pipeline after asr as requested by --stop_after.")
             return transcripts
