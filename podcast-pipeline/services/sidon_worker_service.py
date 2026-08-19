@@ -21,11 +21,15 @@ class SidonWorkerService:
         
         # Check if Kaggle or other env has sidon_env
         sidon_env = os.path.join(base_dir, "..", "sidon_env")
-        if not os.path.exists(sidon_env):
-            # Try to fall back to a local venv or system python if sidon_env not found
-            python_bin = "python3" 
-        else:
+        temp_sidon_env = "/kaggle/temp/sidon_env"
+        
+        if os.path.exists(temp_sidon_env):
+            python_bin = os.path.join(temp_sidon_env, "bin", "python")
+        elif os.path.exists(sidon_env):
             python_bin = os.path.join(sidon_env, "bin", "python")
+        else:
+            # Try to fall back to a local venv or system python if sidon_env not found
+            python_bin = "python3"
             
         worker_script = os.path.join(base_dir, "sidon_worker.py")
         

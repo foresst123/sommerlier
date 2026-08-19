@@ -103,8 +103,10 @@ def main():
     if args.ASRMoE:
         qwen3_env_bin = os.environ.get("QWEN3_PYTHON")
         if not qwen3_env_bin:
-            # Fallback checks: try ../ and ../../
-            if os.path.exists("../../qwen3_env/bin/python"):
+            # Fallback checks: try ../ and ../../ and Kaggle temp dir
+            if os.path.exists("/kaggle/temp/qwen3_env/bin/python"):
+                qwen3_env_bin = "/kaggle/temp/qwen3_env/bin/python"
+            elif os.path.exists("../../qwen3_env/bin/python"):
                 qwen3_env_bin = "../../qwen3_env/bin/python"
             else:
                 qwen3_env_bin = "../qwen3_env/bin/python"
@@ -118,7 +120,9 @@ def main():
         diarizen_env_bin = os.environ.get("DIARIZEN_PYTHON")
         if not diarizen_env_bin:
             # Fallback checks
-            if os.path.exists("../../diarizen_env/bin/python"):
+            if os.path.exists("/kaggle/temp/diarizen_env/bin/python"):
+                diarizen_env_bin = "/kaggle/temp/diarizen_env/bin/python"
+            elif os.path.exists("../../diarizen_env/bin/python"):
                 diarizen_env_bin = "../../diarizen_env/bin/python"
             else:
                 diarizen_env_bin = "../diarizen_env/bin/python"
