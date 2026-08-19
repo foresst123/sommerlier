@@ -39,6 +39,22 @@ class SidonWorkerService:
         tse_path = os.environ.get("TSE_PATH", os.path.join(base_dir, "..", "tse_model"))
         checkpoint_path = os.path.join(tse_path, "weights", "dialogue_sidon.ckpt")
         
+        # Auto-discover checkpoint on Kaggle if not found in default path
+        if not os.path.exists(checkpoint_path):
+            fallback_paths = [
+                "/kaggle/temp/tse_model/weights/dialogue_sidon.ckpt",
+                "/kaggle/temp/dialogue_sidon.ckpt",
+                "/kaggle/working/tse_model/weights/dialogue_sidon.ckpt",
+                "/kaggle/working/sommerlier/tse_model/weights/dialogue_sidon.ckpt",
+                "/kaggle/input/dialogue-sidon/dialogue_sidon.ckpt",
+                "/kaggle/input/sidon-weights/dialogue_sidon.ckpt",
+                "/kaggle/input/tse-model/weights/dialogue_sidon.ckpt"
+            ]
+            for p in fallback_paths:
+                if os.path.exists(p):
+                    checkpoint_path = p
+                    break
+        
         if self.logger: self.logger.info(f"Starting Sidon worker on GPU {self.args.gpu_1}...")
         
         cmd = [
