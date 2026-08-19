@@ -85,6 +85,10 @@ def serve():
                 if est_sources.ndim == 2 and est_sources.shape[0] == 2:
                     track_1 = est_sources[0].cpu().numpy()
                     track_2 = est_sources[1].cpu().numpy()
+                    
+                    # Normalize output amplitude to match enrollments and prevent ECAPA energy floor clipping
+                    track_1 = np.clip(track_1 / max(np.abs(track_1).max(), 1e-6) * 0.9, -1.0, 1.0)
+                    track_2 = np.clip(track_2 / max(np.abs(track_2).max(), 1e-6) * 0.9, -1.0, 1.0)
                 else:
                     raise ValueError(f"Unexpected DialogueSidon output shape: {est_sources.shape}")
                 
