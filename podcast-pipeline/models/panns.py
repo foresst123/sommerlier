@@ -9,8 +9,14 @@ class PANNSDetector:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
             self.device = device
-            
-        self.model = AudioTagging(checkpoint_path=None, device=self.device)
+
+        # panns_inference compares `device == "cuda"` exactly, so an indexed
+        # string like "cuda:0" silently falls back to CPU ("Using CPU." in its
+        # own log). It then wraps the model in DataParallel across every visible
+        # GPU, so the index cannot be honoured anyway -- pin the device with
+        # CUDA_VISIBLE_DEVICES if placement matters.
+        panns_device = "cuda" if str(self.device).startswith("cuda") else "cpu"
+        self.model = AudioTagging(checkpoint_path=None, device=panns_device)
         
     def detect_music(self, audio_array, sample_rate: int = 32000, threshold: float = 0.5) -> tuple:
         """Detect if music is present in audio."""
