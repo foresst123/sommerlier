@@ -28,7 +28,23 @@ class WhisperASR:
             language=None, # Will auto-detect or be overridden during transcribe
             vad_model=None,
             vad_options=None,
-            asr_options={"initial_prompt": "Đây là hội thoại tự nhiên."},
+            # Only the settings that differ from whisperx's defaults; the rest
+            # (no_speech_threshold, condition_on_previous_text, ...) are already
+            # what we want.
+            asr_options={
+                # No initial_prompt: on the sub-second backchannels this pipeline
+                # cares about, priming the decoder makes it complete the prompt
+                # instead of transcribing, which is where the "Hẹn gặp lại các
+                # bạn..." outros came from.
+                "initial_prompt": None,
+                # Greedy only. Temperature fallback re-rolls a clip that failed
+                # its quality thresholds, and on near-silence each retry is
+                # another chance to invent an outro.
+                "temperatures": [0.0],
+                # Treat a shorter run of silence as suspicious than the 2.0s
+                # default, since backchannel gaps are brief.
+                "hallucination_silence_threshold": 1.0,
+            },
             threads=4
         )
 

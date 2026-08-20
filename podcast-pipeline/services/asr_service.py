@@ -5,6 +5,7 @@ from schemas.audio import AudioData
 from schemas.segment import EnhancedSegment
 from schemas.transcript import TranscriptSegment
 from algorithms.asr.rover import RoverEnsembler
+from algorithms.asr.hallucination import filter_short_segment_outputs
 
 class ASRService:
     """Coordinates MoE ASR models and ROVER ensemble."""
@@ -212,12 +213,41 @@ class ASRService:
 
         # 3. Zip and vote
         from tqdm import tqdm
+        hallucinations_dropped = 0
         for i, seg in enumerate(tqdm(valid_segments, desc="[ROVER] Bầu chọn", leave=True)):
             t_whisper, lang, words = whisper_results[i]
             t_pho = pho_results[i]
             t_qwen = qwen_results[i]
+            duration = seg.end - seg.start
 
-            final_text = rover.align_and_vote([t_whisper, t_qwen, t_pho])
+            # ROVER anchors its alignment on the first transcript, so a Whisper
+            # hallucination on a backchannel does not merely get a vote -- it
+            # becomes the skeleton every other model is aligned against. Drop
+            # bad candidates before voting rather than after.
+            candidates = [t_whisper, t_qwen, t_pho]
+            cleaned = filter_short_segment_outputs(
+                candidates, duration, logger=self.logger, segment_id=seg.index
+            )
+            hallucinations_dropped += sum(
+                1 for before, after in zip(candidates, cleaned) if before != after
+            )
+            # The blanked values are also what gets exported per model: a
+            # hallucination is not evidence of what Whisper heard, and leaving
+            # it in text_whisper would poison anything training off these fields.
+            t_whisper, t_qwen, t_pho = cleaned
+
+            # ROVER aligns everything against its first entry, so the anchor has
+            # to be a transcript we still trust. Whisper stays the anchor -- it
+            # is the strongest model when it behaves -- unless this segment is
+            # exactly where it misbehaved and got blanked above. Reordering
+            # unconditionally on short clips measurably degraded segments where
+            # Whisper was fine.
+            if t_whisper:
+                order = [t_whisper, t_qwen, t_pho]
+            else:
+                order = [t_pho, t_qwen, t_whisper]
+
+            final_text = rover.align_and_vote(order)
 
             if enable_word_timestamps and words:
                 for w in words:
@@ -241,7 +271,12 @@ class ASRService:
                 words=words if enable_word_timestamps else None
             ))
 
-        if self.logger: self.logger.info(f"ASR completed: {len(results)} transcripts produced")
+        if self.logger:
+            self.logger.info(f"ASR completed: {len(results)} transcripts produced")
+            if hallucinations_dropped:
+                self.logger.info(
+                    f"Discarded {hallucinations_dropped} hallucinated ASR outputs before voting"
+                )
         import shutil
         shutil.rmtree(tmp_dir, ignore_errors=True)
         return results

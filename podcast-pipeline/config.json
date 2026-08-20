@@ -46,8 +46,8 @@
                 "diarizen": {
                     "batch_size": 12,
                     "seg_duration": 16,
-                    "segmentation_step": 0.1,
-                    "apply_median_filtering": true,
+                    "segmentation_step": 0.05,
+                    "apply_median_filtering": false,
                     "clustering_method": "VBxClustering",
                     "min_speakers": 1,
                     "max_speakers": 20,
@@ -84,8 +84,8 @@
                 "diarizen": {
                     "batch_size": 128,
                     "seg_duration": 16,
-                    "segmentation_step": 0.1,
-                    "apply_median_filtering": true,
+                    "segmentation_step": 0.05,
+                    "apply_median_filtering": false,
                     "clustering_method": "VBxClustering",
                     "min_speakers": 1,
                     "max_speakers": 20,
