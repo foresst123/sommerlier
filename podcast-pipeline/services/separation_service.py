@@ -212,27 +212,45 @@ class TargetExtractionService:
         return enrollments
 
     def _cross_fade(self, orig_audio: np.ndarray, new_audio: np.ndarray, fade_samples: int) -> np.ndarray:
-        """Smoothly replace a portion of orig_audio with new_audio using Hanning crossfade."""
+        """Replace a portion of orig_audio with new_audio, crossfading the joins.
+
+        The ramps are equal-power (sin/cos) rather than linear. Two uncorrelated
+        signals -- which separated speech and the original mixture are -- sum in
+        power, not amplitude, so complementary linear ramps drop the level to
+        0.71 amplitude / 0.51 power halfway through the fade. That audible dip
+        lands on a fixed 20ms at each end, which is 16.7% of a 0.24s backchannel
+        and leaves an already-short clip quieter exactly where ASR needs it.
+
+        The fade also shrinks with the clip so a short splice is not mostly
+        ramp: a 0.24s core keeps at least three quarters of its length at full
+        strength.
+        """
         result = orig_audio.copy()
         limit = min(len(orig_audio), len(new_audio))
-        fade_samples = min(fade_samples, limit // 2)
-        if fade_samples <= 0 or limit == 0:
+        if limit == 0:
+            return result
+
+        # Never spend more than an eighth of the splice on each ramp.
+        fade_samples = min(fade_samples, limit // 8)
+        if fade_samples <= 0:
             result[:limit] = new_audio[:limit]
             return result
-            
-        # Create Hanning window for fading
-        fade_in = np.hanning(2 * fade_samples)[:fade_samples]
-        fade_out = 1.0 - fade_in
-        
-        # Crossfade start
-        result[:fade_samples] = orig_audio[:fade_samples] * fade_out + new_audio[:fade_samples] * fade_in
-        
-        # Replace middle
+
+        t = np.linspace(0.0, 1.0, fade_samples, endpoint=False, dtype=np.float32)
+        ramp_in = np.sin(t * (np.pi / 2.0))
+        ramp_out = np.cos(t * (np.pi / 2.0))
+
+        # Fade from the original into the separated track.
+        result[:fade_samples] = (orig_audio[:fade_samples] * ramp_out
+                                 + new_audio[:fade_samples] * ramp_in)
+
+        # Full-strength separated audio in the middle.
         mid_limit = limit - fade_samples
         result[fade_samples:mid_limit] = new_audio[fade_samples:mid_limit]
-        
-        # Crossfade end
-        result[mid_limit:limit] = orig_audio[mid_limit:limit] * fade_in + new_audio[mid_limit:limit] * fade_out
+
+        # And back out to the original.
+        result[mid_limit:limit] = (orig_audio[mid_limit:limit] * ramp_in
+                                   + new_audio[mid_limit:limit] * ramp_out)
         return result
             # ------------------------------------------------------------------
     # Window construction
