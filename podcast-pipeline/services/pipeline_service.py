@@ -183,6 +183,8 @@ class PipelineService:
         
         metadata = {
             "audio_file": os.path.basename(audio_path),
+            # Stem without extension: what downstream readers key results on.
+            "audio_name": base_name,
             "diarization_model": "pyannote" if getattr(args, "dia3", False) else "diarizen",
             # Report what actually ran, not what the flags requested.
             "asr_models": self.asr_svc.active_models(),
