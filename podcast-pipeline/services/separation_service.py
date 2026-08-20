@@ -71,6 +71,7 @@ class TargetExtractionService:
         self.sims = []
         self.overlap_durations = []
         self.failures = []          # (start, end, speaker, reason, detail)
+        self._dump_warned = False
 
     # ------------------------------------------------------------------
     def _fail(self, enh_seg, start, end, reason, detail=""):
@@ -445,20 +446,34 @@ class TargetExtractionService:
         return jobs
 
     # ------------------------------------------------------------------
-    def _dump_failed(self, tag, mixture, track_1, track_2, sr):
+    def _dump_tracks(self, subdir, tag, mixture, track_1, track_2, sr):
+        """Write the mixture and both separated tracks for one job.
+
+        Listening to these is the only way to tell a real separation failure
+        from a mis-calibrated QC threshold, so successful jobs are dumped too,
+        not just failures.
+        """
         if not (TSE_DUMP_FAILED and self.dump_dir):
             return
         try:
             import soundfile as sf
-            d = os.path.join(self.dump_dir, "failed")
+            d = os.path.join(self.dump_dir, subdir)
             os.makedirs(d, exist_ok=True)
             sf.write(os.path.join(d, f"{tag}_mix.wav"), mixture, sr)
             if track_1 is not None:
                 sf.write(os.path.join(d, f"{tag}_trackA.wav"), track_1, sr)
                 sf.write(os.path.join(d, f"{tag}_trackB.wav"), track_2, sr)
         except Exception as e:
-            if self.logger:
-                self.logger.debug(f"[TSE] could not dump failed clip {tag}: {e}")
+            # Warn once rather than per clip: a missing soundfile or a read-only
+            # output dir would otherwise disable the audit trail in silence.
+            if self.logger and not self._dump_warned:
+                self._dump_warned = True
+                self.logger.warning(
+                    f"[TSE] track dumps disabled: {type(e).__name__}: {e}"
+                )
+
+    def _dump_failed(self, tag, mixture, track_1, track_2, sr):
+        self._dump_tracks("failed", tag, mixture, track_1, track_2, sr)
 
     # ------------------------------------------------------------------
     def process_overlaps(self, segments: List[Segment], audio: AudioData, overlap_threshold: float = 0.1) -> List[EnhancedSegment]:
@@ -585,6 +600,22 @@ class TargetExtractionService:
                 self._dump_failed(f"{job_lo:.2f}_{spk_a}_{spk_b}", window_audio, track_A, track_B, sr)
                 continue
 
+            # Audit trail for the jobs that succeeded: what the separator was
+            # given, what it returned, and how each track scored.
+            if self.logger:
+                who = ", ".join(
+                    f"{spk}=" + (f"{sim:.2f}" if sim is not None else "not-A")
+                    for spk, (_, sim) in accepted.items()
+                )
+                self.logger.info(
+                    f"[TSE:sep] {win_lo:.2f}-{win_hi:.2f}s ({win_hi - win_lo:.1f}s window) "
+                    f"anchor={anchor} solo_a={sum(b - a for a, b in solo_a):.1f}s "
+                    f"solo_b={sum(b - a for a, b in solo_b):.1f}s | accepted: {who}"
+                    + (f" | rejected: {sorted(rejected)}" if rejected else "")
+                )
+            self._dump_tracks("separated", f"{job_lo:.2f}_{spk_a}_{spk_b}",
+                              window_audio, track_A, track_B, sr)
+
             fade_samples = int(0.02 * sr)
             for p in plist:
                 ov_lo, ov_hi = p["overlap_start"], p["overlap_end"]
@@ -619,6 +650,13 @@ class TargetExtractionService:
                     enh.tse_spans.append((ov_lo, ov_lo + limit / sr,
                                           float(sim) if sim is not None else -1.0))
                     self.stats["spliced"] += 1
+                    if self.logger:
+                        self.logger.info(
+                            f"[TSE:splice] seg {sd['index']} spk={spk} "
+                            f"{ov_lo:.2f}-{ov_lo + limit / sr:.2f}s "
+                            f"({limit / sr:.2f}s) sim="
+                            + (f"{sim:.2f}" if sim is not None else "not-A")
+                        )
 
         pbar.close()
         self._report_stats()
