@@ -84,7 +84,7 @@ class DiarizationRefinementService:
 
     # The ~1200-token system prompt dominates each sequence, so even a modest
     # batch builds a large KV cache; 2 fits alongside the ASR models on a T4.
-    def __init__(self, logger=None, batch_size: int = 8):
+    def __init__(self, logger=None, batch_size: int = 4):
         self.logger = logger
         self.model = None
         self.tokenizer = None
