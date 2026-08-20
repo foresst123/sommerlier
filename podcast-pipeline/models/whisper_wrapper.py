@@ -4,7 +4,7 @@ from models.whisper import load_asr_model
 
 class WhisperASR:
     """Wrapper for the Whisper ASR model."""
-    def __init__(self, model_size="large-v3-turbo", device=None, compute_type=None, batch_size=16):
+    def __init__(self, model_size="large-v3", device=None, compute_type=None, batch_size=16):
         if device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
