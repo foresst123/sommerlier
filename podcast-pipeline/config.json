@@ -27,7 +27,7 @@
             "gpu_1": 0,
             "gpu_2": 1,
             "pipeline": {
-                "merge_gap": 2.0,
+                "merge_gap": 1.0,
                 "seg_th": 0.11,
                 "min_cluster_size": 11,
                 "clust_th": 0.5
@@ -65,7 +65,7 @@
             "gpu_1": 0,
             "gpu_2": 0,
             "pipeline": {
-                "merge_gap": 2.0,
+                "merge_gap": 1.0,
                 "seg_th": 0.11,
                 "min_cluster_size": 11,
                 "clust_th": 0.5

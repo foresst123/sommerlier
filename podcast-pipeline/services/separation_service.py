@@ -12,7 +12,10 @@ from algorithms.diarization.overlap import detect_overlapping_segments
 # Sidon processes 20s chunks (CHUNK_SECONDS in sidon_infer.py). Start there and
 # only grow when the window does not yet contain enough solo speech to score.
 TSE_WINDOW_TARGET = float(os.environ.get("TSE_WINDOW_TARGET", "20.0"))
-TSE_WINDOW_MAX = float(os.environ.get("TSE_WINDOW_MAX", "40.0"))
+# 40s left a real case 3.3s short of the interrupting speaker's nearest
+# turn. Sidon chunks internally at 20s, so a longer window costs stitching
+# passes rather than memory.
+TSE_WINDOW_MAX = float(os.environ.get("TSE_WINDOW_MAX", "48.0"))
 TSE_WINDOW_GROW = float(os.environ.get("TSE_WINDOW_GROW", "4.0"))
 # Voiced solo audio one speaker needs for ECAPA to produce a usable embedding.
 TSE_MIN_SOLO = float(os.environ.get("TSE_MIN_SOLO", "2.0"))
@@ -322,17 +325,82 @@ class TargetExtractionService:
             if dur_a >= TSE_MIN_SOLO and dur_b >= TSE_MIN_SOLO:
                 anchor = spk_a if dur_a >= dur_b else spk_b
                 return (lo, hi, solo_a, solo_b, anchor), None
-            if best_single is None and (dur_a >= TSE_MIN_SOLO or dur_b >= TSE_MIN_SOLO):
-                best_single = (lo, hi, solo_a, solo_b, spk_a if dur_a >= dur_b else spk_b)
+            # Keep the *best* single-speaker window, not the first one found.
+            # Recording only the first froze the initial 20s window and made
+            # every subsequent growth step pointless, which is why widening the
+            # search never actually recovered the second speaker.
+            if dur_a >= TSE_MIN_SOLO or dur_b >= TSE_MIN_SOLO:
+                weaker = min(dur_a, dur_b)
+                if best_single is None or weaker > best_single[0]:
+                    best_single = (
+                        weaker,
+                        (lo, hi, solo_a, solo_b, spk_a if dur_a >= dur_b else spk_b),
+                    )
 
             if (hi - lo) >= TSE_WINDOW_MAX or (lo <= 0.0 and hi >= total_dur):
                 break
-            grow = min(TSE_WINDOW_GROW, (TSE_WINDOW_MAX - (hi - lo)) / 2.0)
-            lo, hi = max(0.0, lo - grow), min(total_dur, hi + grow)
+
+            # Grow toward whichever speaker still lacks solo audio, instead of
+            # padding both sides equally. A backchannel sits inside a long turn
+            # by the other speaker, so the symmetric window spends its whole
+            # budget on audio that speaker already has plenty of: on this
+            # corpus, 40s centred gave 0.00s of solo for the interrupting
+            # speaker, while the same 40s pushed toward their nearest turn gave
+            # 18.94s.
+            need = None
+            if dur_a < TSE_MIN_SOLO and dur_b >= TSE_MIN_SOLO:
+                need = spk_a
+            elif dur_b < TSE_MIN_SOLO and dur_a >= TSE_MIN_SOLO:
+                need = spk_b
+            elif dur_a < TSE_MIN_SOLO and dur_b < TSE_MIN_SOLO:
+                need = spk_a if dur_a <= dur_b else spk_b
+
+            budget = min(2.0 * TSE_WINDOW_GROW, TSE_WINDOW_MAX - (hi - lo))
+            left_room, right_room = lo, total_dur - hi
+
+            # bias is the share of the step to spend on the right: 0.0 means
+            # grow left only, 1.0 right only, 0.5 split evenly.
+            bias = self._growth_bias(by_spk, need, lo, hi) if need else 0.5
+            take_right = min(right_room, budget * bias)
+            take_left = min(left_room, budget * (1.0 - bias))
+            # Only spill onto the other side once the preferred one is exhausted
+            # (it hit the file edge). Splitting the remainder unconditionally
+            # would spend budget away from the speaker we are trying to reach.
+            spare = budget - take_left - take_right
+            if spare > 0:
+                if bias >= 0.5:
+                    take_left = min(left_room, take_left + spare)
+                else:
+                    take_right = min(right_room, take_right + spare)
+
+            if take_left <= 0.0 and take_right <= 0.0:
+                break
+            lo, hi = max(0.0, lo - take_left), min(total_dur, hi + take_right)
 
         if best_single is not None:
-            return best_single, None
+            return best_single[1], None
         return None, "no_window"
+
+    @staticmethod
+    def _growth_bias(by_spk, spk, lo, hi) -> float:
+        """How strongly to grow right rather than left to reach `spk`.
+
+        Returns 1.0 to spend the whole step on the right, 0.0 on the left, and
+        0.5 when neither side is closer (or the speaker is unreachable).
+        """
+        ivals = by_spk.get(spk) or []
+        left = [b for a, b in ivals if b <= lo]
+        right = [a for a, b in ivals if a >= hi]
+        dist_left = lo - max(left) if left else float("inf")
+        dist_right = min(right) - hi if right else float("inf")
+
+        if dist_left == float("inf") and dist_right == float("inf"):
+            return 0.5
+        if dist_right < dist_left:
+            return 1.0
+        if dist_left < dist_right:
+            return 0.0
+        return 0.5
 
     @staticmethod
     def _to_samples(spans, window_lo, sr, n_samples):
