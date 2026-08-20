@@ -5,83 +5,36 @@ import torch
 # Hoisted out of the per-segment loop: this is ~1200 constant tokens that would
 # otherwise be rebuilt and re-tokenized for every single segment.
 FUSION_SYSTEM_PROMPT = (
-    "### VAI TRÒ\n"
-    "Bạn là hệ thống hợp nhất (fusion) 3 bản transcript ASR tiếng Việt của CÙNG một đoạn "
-    "audio hội thoại/podcast, thành 1 bản transcript duy nhất chính xác nhất.\n"
-    "Bạn KHÔNG nghe được audio. Mọi quyết định chỉ được dựa trên bằng chứng có trong "
-    "3 bản transcript đầu vào, không dùng kiến thức ngoài.\n\n"
+    "Bạn hợp nhất 3 bản transcript ASR tiếng Việt của CÙNG một đoạn audio thành "
+    "1 bản duy nhất. Bạn không nghe được audio, chỉ có 3 bản text.\n\n"
 
-    "### THỨ TỰ ƯU TIÊN (khi các mục tiêu xung đột, ưu tiên mục có số nhỏ hơn)\n"
-    "1. Trung thực với nội dung có bằng chứng — không bịa, không suy diễn.\n"
-    "2. Không hallucination (đặc biệt: outro, quảng cáo, câu lặp vô nghĩa).\n"
-    "3. Đúng từ, tên riêng, số liệu, thuật ngữ.\n"
-    "4. Giữ đúng ý nghĩa gốc của câu nói.\n"
-    "5. Giữ khẩu ngữ tự nhiên (không văn phong hóa).\n"
-    "6. Thêm dấu câu để dễ đọc (không đổi nghĩa).\n"
-    "KHÔNG ưu tiên câu văn hay/mượt nếu điều đó đổi nội dung.\n\n"
+    "### NGUYÊN TẮC GỐC\n"
+    "Mỗi từ trong kết quả PHẢI xuất hiện trong ít nhất 1 trong 3 bản. "
+    "Bạn CHỌN giữa các bản, không VIẾT LẠI. Khi phân vân, chọn phương án "
+    "ít thay đổi nhất.\n\n"
 
-    "### QUY TẮC CHỌN GIỮA 3 BẢN (áp dụng cho từng cụm từ/câu khác biệt)\n"
-    "R1 — Không mặc định bản xuất hiện nhiều (2/3) là đúng. Đánh giá theo độ hợp lý ngữ "
-    "cảnh, không theo số phiếu.\n"
-    "R2 — Một từ chỉ có ở 1 bản vẫn được chọn nếu nó khớp ngữ cảnh và nghe hợp lý hơn 2 "
-    "bản còn lại.\n"
-    "R3 — Không được ghép nửa câu bản A + nửa câu bản B thành câu mới nếu không bản nào "
-    "chứa nguyên cụm đó.\n"
-    "R4 — Câu chưa trọn nghĩa trong cả 3 bản thì giữ nguyên trạng thái chưa trọn nghĩa, "
-    "không tự hoàn thiện cho \"nghe xuôi\".\n"
-    "R5 — Khi không đủ căn cứ để quyết định, luôn chọn phương án ít suy diễn nhất "
-    "(bảo thủ), không đoán cho đẹp câu.\n\n"
+    "### CÁCH CHỌN\n"
+    "1. Chỗ cả 3 bản giống nhau: giữ nguyên.\n"
+    "2. Chỗ khác nhau: chọn bản nghe hợp lý nhất trong mạch câu. Không đếm "
+    "phiếu máy móc — 1 bản đúng vẫn thắng 2 bản sai.\n"
+    "3. Tên riêng, số liệu: chọn bản rõ nghĩa nhất. Không tự sửa theo hiểu "
+    "biết của bạn.\n"
+    "4. Câu dở dang trong cả 3 bản: giữ dở dang. Không viết tiếp cho trọn ý.\n"
+    "5. Từ bị lặp liền kề do lỗi ASR (ví dụ 'gì hết. gì hết.'): giữ lại một lần.\n\n"
 
-    "### CHỐNG HALLUCINATION (bắt buộc kiểm tra)\n"
-    "H1 — Nếu chỉ 1/3 bản có nội dung dạng: mời subscribe, cảm ơn theo dõi, chào tạm biệt, "
-    "quảng cáo, kêu gọi hành động không liên quan -> xoá, coi là hallucination.\n"
-    "H2 — Nếu 1 bản có nội dung còn 2 bản kia trống/im lặng -> nghi ngờ mạnh là "
-    "hallucination, mặc định không giữ trừ khi nội dung đó rất ngắn và hợp lý với mạch câu "
-    "ngay trước/sau.\n"
-    "H3 — Không thêm tên người, địa danh, công ty, số liệu, sự kiện không xuất hiện trong "
-    "bất kỳ bản nào, kể cả khi bạn 'biết' nó đúng ngoài đời thực.\n"
-    "H4 — Mỗi từ trong bản output cuối cùng phải truy được về ít nhất 1 trong 3 bản input.\n\n"
+    "### GIỮ NGUYÊN VĂN NÓI\n"
+    "Đây là hội thoại tự nhiên. Giữ từ đệm (ừ, à, ờ, thì, mà, kiểu như), giữ "
+    "đại từ nhân xưng đúng như trong bản gốc, không thay bằng từ trang trọng "
+    "hơn. Chỉ thêm dấu câu để dễ đọc.\n\n"
 
-    "### TÊN RIÊNG & THUẬT NGỮ\n"
-    "- Nếu 1 bản cho tên riêng/thuật ngữ có nghĩa, rõ ràng, còn 2 bản kia cho phiên âm vô "
-    "nghĩa -> ưu tiên bản có nghĩa.\n"
-    "- Không tự đoán hoặc sửa tên riêng nếu cả 3 bản đều không rõ ràng.\n\n"
-
-    "### SỐ LIỆU (số, ngày, giờ, %, tiền, năm, phiên bản)\n"
-    "- Giữ đúng số liệu có bằng chứng rõ nhất trong 3 bản.\n"
-    "- Không tự sửa số liệu chỉ vì thấy 'hợp lý hơn'.\n"
-    "- Nếu 3 bản mâu thuẫn số liệu và không rõ bản nào đúng -> chọn bản có vẻ ít lỗi ASR "
-    "nhất, tuyệt đối không bịa giá trị mới không có trong cả 3 bản.\n\n"
-
-    "### VĂN PHONG\n"
-    "- Đây là hội thoại nói tự nhiên, không phải văn viết. Giữ nguyên từ đệm khẩu ngữ "
-    "(ừ, à, ờ, ừm, thì, mà, kiểu như...) trừ khi rõ ràng là rác/lỗi ASR.\n"
-    "- Không paraphrase, không thay từ khẩu ngữ bằng từ trang trọng hơn.\n"
-    "- Chỉ thêm dấu câu (. , ? ...) để dễ đọc, dấu câu không được tạo thêm nghĩa mới.\n\n"
-
-    "### TẬN DỤNG THÔNG TIN NGỮ CẢNH (BẮT BUỘC)\n"
-    "C1 (Người đang nói) — Giữ nguyên đại từ nhân xưng đúng như trong 3 bản dịch. "
-    "Không đổi 'anh' thành 'tôi' hay ngược lại.\n"
-    "C2 (Thời gian) — Nếu thời gian ngắn (ví dụ: < 1s), đừng cố ghép thành một câu dài "
-    "hoàn chỉnh, ưu tiên giữ nguyên từ đệm/từ ngắn tương xứng với thời lượng.\n"
-    "C3 (Trạng thái hội thoại) — Nếu là 'CÓ (Đang tranh lời/Nói đè)': Âm thanh rất ồn "
-    "và ASR thường xuyên nghe sai lệch. Bạn được phép BẢO THỦ HƠN, ưu tiên chọn lọc "
-    "những từ chung nhất giữa 3 bản, loại bỏ các từ vô nghĩa hoặc tạp âm.\n"
-    "C4 (Lặp từ) — LỖI RẤT PHỔ BIẾN CẦN TRÁNH: Đôi khi các bản dịch ASR bị lặp từ ở cuối câu "
-    "(ví dụ: 'gì hết. gì hết.'). BẠN PHẢI TỰ ĐỘNG CẮT BỎ CÁC TỪ BỊ LẶP LẠI VÔ NGHĨA NÀY.\n\n"
-
-    "### ĐỊNH DẠNG ĐẦU RA (bắt buộc tuân thủ nghiêm ngặt)\n"
-    "- Chỉ xuất ra transcript tiếng Việt cuối cùng, không kèm gì khác.\n"
-    "- TUYỆT ĐỐI KHÔNG nhận xét về đoạn text. Không viết 'Quảng cáo', "
-    "'nên cắt bỏ', 'đây là hallucination', 'không có nội dung' hay bất kỳ "
-    "đánh giá nào. Nếu bạn cho rằng đoạn này là quảng cáo hay vô nghĩa, "
-    "vẫn phải xuất ra transcript của nó, không phải nhận xét của bạn.\n"
-    "- Chỉ dùng nội dung có trong 3 bản dịch của CHÍNH đoạn này. Không thêm "
-    "câu từ đoạn khác, không tự viết tiếp cho đủ ý.\n"
-    "- Không giải thích lý do, không liệt kê phương án, không viết 'có thể là', "
-    "'không chắc chắn'.\n"
-    "- Không đặt trong dấu ngoặc kép, không dùng Markdown, không tiêu đề.\n"
-    "- Không thêm tiền tố như 'Kết quả:', 'Transcript:', 'Output:'.\n"
+    "### ĐẦU RA\n"
+    "Chỉ xuất transcript tiếng Việt của đoạn này, không gì khác.\n"
+    "- Không nhận xét, không đánh giá, không giải thích. Nếu bạn nghĩ đoạn này "
+    "là quảng cáo, vô nghĩa hay bị lỗi, bạn VẪN xuất transcript của nó. "
+    "Việc lọc bỏ do hệ thống khác làm, không phải việc của bạn.\n"
+    "- Không thêm tiền tố ('Kết quả:', 'Transcript:'), không ngoặc kép, "
+    "không Markdown.\n"
+    "- Nếu cả 3 bản đều trống, xuất ra chuỗi rỗng.\n"
 )
 
 
@@ -127,20 +80,25 @@ class DiarizationRefinementService:
         it cannot borrow.
         """
         seg = segments[i]
-        is_overlap = "CÓ (Đang tranh lời/Nói đè)" if getattr(seg, 'tse', False) else "KHÔNG (Độc thoại)"
+        duration = seg.end - seg.start
+
+        # Duration is the one contextual fact worth stating: it tells the model
+        # whether a long transcript is plausible at all. A 0.24s clip cannot
+        # hold a sentence, and saying so is cheaper than a rule about it.
+        note = ""
+        if duration < 1.0:
+            note = (f"\nĐoạn này chỉ dài {duration:.2f} giây — nhiều nhất là "
+                    f"một vài từ. Bản dịch nào dài hơn thế là ASR bịa, bỏ qua.\n")
+        elif getattr(seg, 'tse', False):
+            note = ("\nĐoạn này có hai người nói chồng lên nhau, ASR dễ nghe sai. "
+                    "Ưu tiên phần cả 3 bản đồng ý.\n")
 
         return (
-            f"Thông tin Ngữ cảnh:\n"
-            f"- Người đang nói: {seg.speaker}\n"
-            f"- Thời lượng: {seg.end - seg.start:.2f} giây\n"
-            f"- Trạng thái hội thoại: {is_overlap}\n"
-            f"---\n"
-            f"Bản dịch 1 (Whisper): {seg.text_whisper or ''}\n"
-            f"Bản dịch 2 (PhoWhisper): {seg.text_phowhisper or ''}\n"
-            f"Bản dịch 3 (Qwen3-ASR): {seg.text_qwen3 or ''}\n\n"
-            f"Chỉ xuất ra transcript tiếng Việt của đoạn này. "
-            f"Không giải thích, không nhận xét, không thêm nhãn.\n"
-            f"Câu hoàn chỉnh:"
+            f"Bản 1: {seg.text_whisper or ''}\n"
+            f"Bản 2: {seg.text_phowhisper or ''}\n"
+            f"Bản 3: {seg.text_qwen3 or ''}\n"
+            f"{note}"
+            f"\nTranscript hợp nhất:"
         )
 
     def refine(self, segments: List[TranscriptSegment], prompt: str = None) -> List[TranscriptSegment]:
