@@ -150,10 +150,29 @@ class TargetExtractionService:
             overlap_start = pair["overlap_start"]
             overlap_end = pair["overlap_end"]
             
-            # Component 2: Context Window (±1.5s)
-            ctx_pad = 1.5
-            ctx_start = max(0.0, overlap_start - ctx_pad)
-            ctx_end = min(total_len / sr, overlap_end + ctx_pad)
+            # Component 2: Context Window (ÉP TỐI THIỂU 10 GIÂY CHO SIDON)
+            core_duration = overlap_end - overlap_start
+            min_context = 10.0
+            
+            if core_duration < min_context:
+                # Nếu lõi ngắn hơn 10s, chia đều padding ra 2 bên
+                pad_needed = min_context - core_duration
+                pad_left = pad_needed / 2.0
+                pad_right = pad_needed / 2.0
+            else:
+                # Nếu lõi đã dài hơn 10s, cộng thêm chút đệm an toàn
+                pad_left = 1.5
+                pad_right = 1.5
+                
+            ctx_start = max(0.0, overlap_start - pad_left)
+            ctx_end = min(total_len / sr, overlap_end + pad_right)
+            
+            # Thuật toán bù trừ: Nếu chạm viền file mà chưa đủ 10s, mượn thời gian của bên còn lại
+            if (ctx_end - ctx_start) < min_context and (total_len / sr) >= min_context:
+                if ctx_start == 0.0:
+                    ctx_end = min(total_len / sr, min_context)
+                elif ctx_end == (total_len / sr):
+                    ctx_start = max(0.0, ctx_end - min_context)
             
             ctx_start_f = int(ctx_start * sr)
             ctx_end_f = int(ctx_end * sr)
@@ -173,12 +192,14 @@ class TargetExtractionService:
                 enroll_B=enrollments[target_B], 
                 sample_rate=sr, 
                 id_A=target_A, 
-                id_B=target_B
+                id_B=target_B,
+                eval_pad_start_sec=(overlap_start - ctx_start),  # Cho ECAPA biết offset
+                eval_core_len_sec=core_duration                  # Cho ECAPA biết độ dài đoạn overlap
             )
             
-            # Crop the ±1.5s padding to extract just the overlap core
+            # Crop the padding to extract just the overlap core
             pad_start_frames = int((overlap_start - ctx_start) * sr)
-            core_len = int((overlap_end - overlap_start) * sr)
+            core_len = int(core_duration * sr)
 
             # A track shorter than the nominal core would silently yield a short
             # slice, leaving part of the overlap unprocessed while still flagged
@@ -201,10 +222,9 @@ class TargetExtractionService:
             track_A_core = track_A_ctx[pad_start_frames : pad_start_frames + core_len]
             track_B_core = track_B_ctx[pad_start_frames : pad_start_frames + core_len]
 
-            # Component 4: Quality Control
-
-            # 4.1 Check real ECAPA matching scores (Intra-Track Consistency equivalent)
-            if sim_A < 0.25 or sim_B < 0.25:
+            # Component 4: Quality Control (ÉP NGƯỠNG XUỐNG 0.2)
+            # Check real ECAPA matching scores (Intra-Track Consistency equivalent)
+            if sim_A < 0.2 or sim_B < 0.2:
                 if self.logger: self.logger.warning(f"TSE QC failed (Low ECAPA similarity A:{sim_A:.2f} B:{sim_B:.2f}) at {overlap_start}s.")
                 if self.logger: self.logger.warning(f"Discarding failed extraction for overlap at {overlap_start}s. Retaining original mixture.")
                 continue
@@ -230,7 +250,7 @@ class TargetExtractionService:
                 enh_seg.tse = True  # Flag indicating it was processed
 
         return enhanced_segments
-
+   
     def export_sdlm_dual_channel(self, enhanced_segments: List[EnhancedSegment], audio_duration: float, sr: int) -> Tuple[np.ndarray, np.ndarray]:
         """
         Component 6: Export Dual-Channel Audio for SDLM training.

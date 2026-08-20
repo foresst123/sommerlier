@@ -78,7 +78,7 @@ class TargetSpeakerExtractor:
             
         return target_embed
 
-    def separate_two_speakers(self, mixture_audio: np.ndarray, enroll_A: List[np.ndarray], enroll_B: List[np.ndarray], sample_rate: int = 16000, id_A: Optional[str] = None, id_B: Optional[str] = None):
+    def separate_two_speakers(self, mixture_audio: np.ndarray, enroll_A: List[np.ndarray], enroll_B: List[np.ndarray], sample_rate: int = 16000, id_A: Optional[str] = None, id_B: Optional[str] = None, eval_pad_start_sec: float = 0.0, eval_core_len_sec: float = 0.0):
         """
         Runs BSS once (via Worker), then uses ECAPA to map the 2 output tracks to Speaker A and B.
         Returns: (track_A, track_B, sim_A, sim_B)
@@ -160,12 +160,31 @@ class TargetSpeakerExtractor:
         track_1_tensor = torch.from_numpy(track_1_np).to(self.device)
         track_2_tensor = torch.from_numpy(track_2_np).to(self.device)
 
+        # ---------------------------------------------------------
+        # BẢN VÁ CHẤT LƯỢNG CAO: CẮT LÕI (CORE OVERLAP) ĐỂ ECAPA CHẤM ĐIỂM
+        # ---------------------------------------------------------
+        if eval_core_len_sec > 0:
+            start_idx = int(eval_pad_start_sec * target_sr)
+            end_idx = start_idx + int(eval_core_len_sec * target_sr)
+            
+            # Khóa an toàn: Đảm bảo index không vượt quá giới hạn của mảng (ngăn lỗi Out of Bounds)
+            max_len = track_1_tensor.shape[0]
+            start_idx = max(0, min(start_idx, max_len - 1))
+            end_idx = max(start_idx + 1, min(end_idx, max_len))
+            
+            eval_t1 = track_1_tensor[start_idx:end_idx]
+            eval_t2 = track_2_tensor[start_idx:end_idx]
+        else:
+            eval_t1 = track_1_tensor
+            eval_t2 = track_2_tensor
+
         # --- ECAPA-TDNN Matching ---
         embed_A = self._get_target_embedding(enroll_A, id_A, sample_rate)
         embed_B = self._get_target_embedding(enroll_B, id_B, sample_rate)
         
-        emb_1 = F.normalize(self._get_embedding(track_1_tensor.cpu().numpy(), target_sr), p=2, dim=0)
-        emb_2 = F.normalize(self._get_embedding(track_2_tensor.cpu().numpy(), target_sr), p=2, dim=0)
+        # Đưa đoạn lõi (eval_t1, eval_t2) vào lấy Embedding để loại bỏ nhiễu từ khoảng lặng
+        emb_1 = F.normalize(self._get_embedding(eval_t1.cpu().numpy(), target_sr), p=2, dim=0)
+        emb_2 = F.normalize(self._get_embedding(eval_t2.cpu().numpy(), target_sr), p=2, dim=0)
         
         # Calculate matching scores for all combinations
         score_1A = torch.dot(embed_A, emb_1).item()
@@ -174,6 +193,7 @@ class TargetSpeakerExtractor:
         score_2B = torch.dot(embed_B, emb_2).item()
         
         # Determine assignment (Max Bipartite Matching for 2x2)
+        # LƯU Ý: Vẫn gán out_A_tensor và out_B_tensor bằng track đầy đủ (10s), chỉ dùng điểm từ lõi để quyết định
         if (score_1A + score_2B) > (score_2A + score_1B):
             out_A_tensor, out_B_tensor = track_1_tensor, track_2_tensor
             sim_A, sim_B = score_1A, score_2B

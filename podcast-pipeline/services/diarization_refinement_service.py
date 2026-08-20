@@ -84,7 +84,7 @@ class DiarizationRefinementService:
 
     # The ~1200-token system prompt dominates each sequence, so even a modest
     # batch builds a large KV cache; 2 fits alongside the ASR models on a T4.
-    def __init__(self, logger=None, batch_size: int = 2):
+    def __init__(self, logger=None, batch_size: int = 8):
         self.logger = logger
         self.model = None
         self.tokenizer = None
@@ -125,7 +125,9 @@ class DiarizationRefinementService:
             f"Bản dịch 1 (Whisper): {seg.text_whisper or ''}\n"
             f"Bản dịch 2 (PhoWhisper): {seg.text_phowhisper or ''}\n"
             f"Bản dịch 3 (Qwen3-ASR): {seg.text_qwen3 or ''}\n\n"
-            f"Dựa vào luật và ngữ cảnh, câu hoàn chỉnh là:"
+            f"LƯU Ý TỐI QUAN TRỌNG: 'Câu liền trước' chỉ dùng để hiểu ngữ cảnh xưng hô. "
+            f"TUYỆT ĐỐI KHÔNG copy lại 'Câu liền trước' vào kết quả.\n"
+            f"Dựa vào luật và 3 bản dịch, câu hoàn chỉnh là:"
         )
 
     def refine(self, segments: List[TranscriptSegment], prompt: str = None) -> List[TranscriptSegment]:
@@ -221,6 +223,9 @@ class DiarizationRefinementService:
                     **inputs,
                     max_new_tokens=150,
                     do_sample=False,
+                    temperature=None,  
+                    top_p=None,        
+                    top_k=None,
                     repetition_penalty=1.2,
                     pad_token_id=tokenizer.pad_token_id,
                 )
