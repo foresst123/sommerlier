@@ -60,8 +60,8 @@ FUSION_SYSTEM_PROMPT = (
     "- Chỉ thêm dấu câu (. , ? ...) để dễ đọc, dấu câu không được tạo thêm nghĩa mới.\n\n"
 
     "### TẬN DỤNG THÔNG TIN NGỮ CẢNH (BẮT BUỘC)\n"
-    "C1 (Người đang nói) — Phải duy trì ĐẠI TỪ NHÂN XƯNG (anh/tôi/chị/em/mình) thống nhất. "
-    "Cùng một Speaker không thể xưng 'tôi' ở câu này và 'bạn' ở câu ngay sau.\n"
+    "C1 (Người đang nói) — Giữ nguyên đại từ nhân xưng đúng như trong 3 bản dịch. "
+    "Không đổi 'anh' thành 'tôi' hay ngược lại.\n"
     "C2 (Thời gian) — Nếu thời gian ngắn (ví dụ: < 1s), đừng cố ghép thành một câu dài "
     "hoàn chỉnh, ưu tiên giữ nguyên từ đệm/từ ngắn tương xứng với thời lượng.\n"
     "C3 (Trạng thái hội thoại) — Nếu là 'CÓ (Đang tranh lời/Nói đè)': Âm thanh rất ồn "
@@ -72,6 +72,12 @@ FUSION_SYSTEM_PROMPT = (
 
     "### ĐỊNH DẠNG ĐẦU RA (bắt buộc tuân thủ nghiêm ngặt)\n"
     "- Chỉ xuất ra transcript tiếng Việt cuối cùng, không kèm gì khác.\n"
+    "- TUYỆT ĐỐI KHÔNG nhận xét về đoạn text. Không viết 'Quảng cáo', "
+    "'nên cắt bỏ', 'đây là hallucination', 'không có nội dung' hay bất kỳ "
+    "đánh giá nào. Nếu bạn cho rằng đoạn này là quảng cáo hay vô nghĩa, "
+    "vẫn phải xuất ra transcript của nó, không phải nhận xét của bạn.\n"
+    "- Chỉ dùng nội dung có trong 3 bản dịch của CHÍNH đoạn này. Không thêm "
+    "câu từ đoạn khác, không tự viết tiếp cho đủ ý.\n"
     "- Không giải thích lý do, không liệt kê phương án, không viết 'có thể là', "
     "'không chắc chắn'.\n"
     "- Không đặt trong dấu ngoặc kép, không dùng Markdown, không tiêu đề.\n"
@@ -111,23 +117,30 @@ class DiarizationRefinementService:
             if self.logger: self.logger.error(f"Failed to load LLM: {e}")
             
     def _build_user_message(self, segments, i) -> str:
+        """Build the fusion request for one segment.
+
+        The previous segment's text is deliberately absent. It was supplied as
+        pronoun context, guarded by a "TUYỆT ĐỐI KHÔNG copy" warning, and the
+        model copied it anyway: 5 of 8 damaged segments in the last run carried
+        a neighbouring segment's words, including one where speaker 1's speech
+        was emitted under speaker 2's label. Text the model cannot see is text
+        it cannot borrow.
+        """
         seg = segments[i]
         is_overlap = "CÓ (Đang tranh lời/Nói đè)" if getattr(seg, 'tse', False) else "KHÔNG (Độc thoại)"
-        prev_text = segments[i-1].text if i > 0 else "[Bắt đầu hội thoại]"
 
         return (
             f"Thông tin Ngữ cảnh:\n"
             f"- Người đang nói: {seg.speaker}\n"
-            f"- Thời gian: {seg.start:.2f}s - {seg.end:.2f}s\n"
+            f"- Thời lượng: {seg.end - seg.start:.2f} giây\n"
             f"- Trạng thái hội thoại: {is_overlap}\n"
-            f"- Câu liền trước (Context): {prev_text}\n"
             f"---\n"
             f"Bản dịch 1 (Whisper): {seg.text_whisper or ''}\n"
             f"Bản dịch 2 (PhoWhisper): {seg.text_phowhisper or ''}\n"
             f"Bản dịch 3 (Qwen3-ASR): {seg.text_qwen3 or ''}\n\n"
-            f"LƯU Ý TỐI QUAN TRỌNG: 'Câu liền trước' chỉ dùng để hiểu ngữ cảnh xưng hô. "
-            f"TUYỆT ĐỐI KHÔNG copy lại 'Câu liền trước' vào kết quả.\n"
-            f"Dựa vào luật và 3 bản dịch, câu hoàn chỉnh là:"
+            f"Chỉ xuất ra transcript tiếng Việt của đoạn này. "
+            f"Không giải thích, không nhận xét, không thêm nhãn.\n"
+            f"Câu hoàn chỉnh:"
         )
 
     def refine(self, segments: List[TranscriptSegment], prompt: str = None) -> List[TranscriptSegment]:

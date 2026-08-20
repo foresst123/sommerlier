@@ -5,7 +5,12 @@ from schemas.audio import AudioData
 from schemas.segment import EnhancedSegment
 from schemas.transcript import TranscriptSegment
 from algorithms.asr.rover import RoverEnsembler
+import numpy as np
 from algorithms.asr.hallucination import filter_short_segment_outputs
+
+# Segments shorter than this are padded with surrounding audio before ASR.
+CONTEXT_PAD_BELOW = 2.0
+CONTEXT_PAD_SECONDS = 2.0
 
 class ASRService:
     """Coordinates MoE ASR models and ROVER ensemble."""
@@ -138,19 +143,46 @@ class ASRService:
 
         valid_segments = []
         audios_16k = []
+        core_audios_16k = []
         dummy_vads = []
         chunk_indices = []
 
         sr = audio.sample_rate
 
         # 1. Prepare data
+        total_samples = len(audio.waveform)
         for seg in segments:
+            # Short segments get surrounding audio as context. Whisper pads its
+            # input to 30s regardless, so a 0.24s backchannel arrives as 99.2%
+            # silence and the decoder fills that void with training-set
+            # boilerplate ("Hẹn gặp lại các bạn..."). Real audio either side
+            # gives it something to condition on. The VAD range below still
+            # marks only the segment itself, so the extra audio informs the
+            # encoder without being transcribed.
+            pad = CONTEXT_PAD_SECONDS if (seg.end - seg.start) < CONTEXT_PAD_BELOW else 0.0
+
+            start_frame = int(seg.start * sr)
+            end_frame = int(seg.end * sr)
+            pad_frames = int(pad * sr)
+            lo = max(0, start_frame - pad_frames)
+            hi = min(total_samples, end_frame + pad_frames)
+
             if seg.enhanced_audio is not None:
-                raw_audio = seg.enhanced_audio
+                core = seg.enhanced_audio
+                if pad > 0:
+                    # Pad from the mixture: the separated track only covers the
+                    # segment, and its neighbours belong to the other speaker
+                    # anyway -- which is exactly the context that tells the
+                    # decoder a conversation is happening here.
+                    raw_audio = np.concatenate([
+                        audio.waveform[lo:start_frame], core, audio.waveform[end_frame:hi]])
+                    lead = (start_frame - lo) / sr
+                else:
+                    raw_audio = core
+                    lead = 0.0
             else:
-                start_frame = int(seg.start * sr)
-                end_frame = int(seg.end * sr)
-                raw_audio = audio.waveform[start_frame:end_frame]
+                raw_audio = audio.waveform[lo:hi]
+                lead = (start_frame - lo) / sr
 
             if len(raw_audio) == 0:
                 if self.logger: self.logger.warning(f"Segment {seg.index} has empty audio, skipping")
@@ -161,13 +193,24 @@ class ASRService:
             else:
                 audio_16k = raw_audio
 
-            if len(audio_16k) < 160:
-                if self.logger: self.logger.warning(f"Segment {seg.index} too short ({len(audio_16k)} samples), skipping")
+            core_len = (end_frame - start_frame) / sr
+            if core_len * 16000 < 160:
+                if self.logger: self.logger.warning(f"Segment {seg.index} too short ({core_len:.3f}s), skipping")
                 continue
+
+            # Only whisperx honours an explicit VAD range, so only it can be
+            # given padded audio and told which part to transcribe. PhoWhisper
+            # builds its own full-span range and the Qwen3 worker takes a bare
+            # array, so both would transcribe the padding as if it were the
+            # segment. They keep the unpadded audio.
+            i0 = int(lead * 16000)
+            core_16k = audio_16k[i0:i0 + int(core_len * 16000)] if lead > 0 else audio_16k
 
             valid_segments.append(seg)
             audios_16k.append(audio_16k)
-            dummy_vads.append([{"start": 0.0, "end": len(audio_16k) / 16000}])
+            core_audios_16k.append(core_16k)
+            # Transcribe only the segment, not the padding.
+            dummy_vads.append([{"start": lead, "end": min(lead + core_len, len(audio_16k) / 16000)}])
             chunk_indices.append(seg.index)
 
         if not valid_segments:
@@ -201,8 +244,8 @@ class ASRService:
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
             fw = executor.submit(self._run_whisper_batch, audios_16k, dummy_vads, cb_whisper)
-            fp = executor.submit(self._run_phowhisper_batch, audios_16k, cb_pho)
-            fq = executor.submit(self._run_qwen3_batch, audios_16k, chunk_indices, tmp_dir, cb_qwen)
+            fp = executor.submit(self._run_phowhisper_batch, core_audios_16k, cb_pho)
+            fq = executor.submit(self._run_qwen3_batch, core_audios_16k, chunk_indices, tmp_dir, cb_qwen)
 
             whisper_results = fw.result()
             pho_results = fp.result()
