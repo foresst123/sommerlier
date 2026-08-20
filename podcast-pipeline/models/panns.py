@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 from panns_inference import AudioTagging
 
@@ -30,7 +31,15 @@ class PANNSDetector:
             
         if len(audio_array.shape) > 1:
             audio_array = audio_array.mean(axis=1) if audio_array.shape[1] == 2 else audio_array
-            
+
+        # Unlike the ASR and separation models, PANNs applies no input
+        # normalization of its own, so its tagging confidence tracks absolute
+        # level. Scale to a consistent peak here rather than depending on how
+        # loud the source happened to be.
+        peak = float(np.max(np.abs(audio_array))) if audio_array.size else 0.0
+        if peak > 0:
+            audio_array = (audio_array / peak) * 0.9
+
         clipwise_output, _ = self.model.inference(audio_array[None, :])
         
         music_idx = None

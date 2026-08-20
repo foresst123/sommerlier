@@ -29,6 +29,19 @@ def set_logger(log_instance):
     logger = log_instance
 
 
+def normalize_token(token: str) -> str:
+    """Fold a token to its comparison form.
+
+    PhoWhisper emits no capitals at all while Whisper capitalizes every
+    sentence, so "Mình" and "mình" would count as different words and split the
+    vote at exactly the sentence boundaries. Case and trailing punctuation are
+    presentation, not content: compare without them, but always emit the
+    original token so the winning model's capitalization and punctuation
+    survive.
+    """
+    return token.lower().strip(".,?!;:\"'()[]…").strip()
+
+
 class RoverEnsembler:
     """
     ROVER (Recognizer Output Voting Error Reduction) ensemble implementation.
@@ -50,7 +63,13 @@ class RoverEnsembler:
             List of aligned (base_token, candidate_token) tuples.
             Unmatched positions are represented as None.
         """
-        matcher = SequenceMatcher(None, base_tokens, candidate_tokens)
+        # Match on the folded forms so casing/punctuation differences do not
+        # look like substitutions; the pairs still carry the original tokens.
+        matcher = SequenceMatcher(
+            None,
+            [normalize_token(t) for t in base_tokens],
+            [normalize_token(t) for t in candidate_tokens],
+        )
         aligned_pairs = []
 
         for opcode, i1, i2, j1, j2 in matcher.get_opcodes():
@@ -181,20 +200,28 @@ class RoverEnsembler:
             if not candidates:
                 continue
 
-            # Vote
-            votes = collections.Counter(candidates)
-            best_word, count = votes.most_common(1)[0]
+            # Vote on the folded forms so "Mình"/"mình" count as one word, then
+            # emit an original token from the winning group -- preferring the
+            # base model's spelling, which carries the sentence capitalization.
+            votes = collections.Counter(normalize_token(c) for c in candidates)
+            best_key, count = votes.most_common(1)[0]
+            winners = [c for c in candidates if normalize_token(c) == best_key]
 
-            # Accept if 2 or more agree, otherwise use base (Whisper)
+            base_word = padded_sequences[0][pos]
+            base_is_winner = (
+                base_word is not None
+                and base_word != ""
+                and normalize_token(base_word) == best_key
+            )
+
+            # Accept if 2 or more agree, otherwise fall back to the base model.
             if count >= 2:
-                final_output.append(best_word)
+                final_output.append(base_word if base_is_winner else winners[0])
             else:
-                # Prefer base
-                base_word = padded_sequences[0][pos]
                 if base_word is not None and base_word != "":
                     final_output.append(base_word)
                 else:
-                    final_output.append(best_word)
+                    final_output.append(winners[0])
 
         result = " ".join(final_output)
 

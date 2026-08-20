@@ -27,7 +27,14 @@ class PhoWhisperASR:
             language="vi",
             vad_model=None,
             vad_options=None,
-            asr_options={"initial_prompt": "Đây là hội thoại tự nhiên."},
+            # Same reasoning as the Whisper wrapper: priming the decoder makes
+            # it complete the prompt rather than transcribe on short clips, and
+            # temperature fallback re-rolls near-silence into invented text.
+            asr_options={
+                "initial_prompt": None,
+                "temperatures": [0.0],
+                "hallucination_silence_threshold": 1.0,
+            },
             threads=4
         )
     
