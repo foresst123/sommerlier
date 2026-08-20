@@ -593,7 +593,10 @@ class TargetExtractionService:
 
             if strict:
                 keep = np.ones(end_idx - start_idx, dtype=bool)
-                for a, b, _reason, _detail in seg.tse_failed_spans:
+                # getattr, not seg.tse_failed_spans: a checkpoint pickled before
+                # this field existed restores an object without it, and pickle
+                # does not backfill dataclass defaults.
+                for a, b, _reason, _detail in getattr(seg, "tse_failed_spans", ()):
                     i = max(start_idx, int(a * sr)) - start_idx
                     j = min(end_idx, int(b * sr)) - start_idx
                     if j > i:

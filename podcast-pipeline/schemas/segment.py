@@ -24,6 +24,17 @@ class EnhancedSegment(Segment):
     # a span in neither means some code path discarded it silently.
     tse_failed_spans: List[Tuple[float, float, str, str]] = field(default_factory=list)
 
+
+    def __setstate__(self, state):
+        # Checkpoints are pickled, and pickle restores __dict__ directly without
+        # applying dataclass defaults. A checkpoint written before these fields
+        # existed restores an object missing them, so a resumed run would crash
+        # on the first append. Backfill instead of forcing a checkpoint wipe.
+        self.__dict__.update(state)
+        for name in ("tse_spans", "tse_failed_spans"):
+            if not hasattr(self, name):
+                setattr(self, name, [])
+
     @property
     def tse_status(self) -> str:
         if not self.tse_spans and not self.tse_failed_spans:

@@ -236,3 +236,26 @@ def test_sdlm_mask_uses_failed_spans():
     t0, _ = svc.export_sdlm_dual_channel(out, 60.0, SR, strict=True)
     lo, hi = int(14.0 * SR), int(14.4 * SR)
     assert np.allclose(t0[lo:hi], 0.0)
+
+
+def test_old_checkpoint_unpickles_without_new_fields():
+    """Resuming a run checkpointed before tse_spans/tse_failed_spans existed.
+
+    Pickle restores __dict__ directly and does not apply dataclass defaults, so
+    without __setstate__ the first append raises AttributeError mid-pipeline.
+    """
+    import pickle
+    from schemas.segment import EnhancedSegment
+
+    seg = EnhancedSegment(index="00001", start=0.0, end=1.0, speaker="SPEAKER_00")
+    del seg.__dict__["tse_spans"]
+    del seg.__dict__["tse_failed_spans"]
+
+    loaded = pickle.loads(pickle.dumps(seg))
+    loaded.tse_failed_spans.append((0.0, 1.0, "qc_sim", "sim=0.10"))
+    assert loaded.tse_status == "failed"
+
+    svc = TargetExtractionService(FakeTSE(), logger=None)
+    loaded.enhanced_audio = np.ones(SR, dtype=np.float32)
+    t0, _ = svc.export_sdlm_dual_channel([loaded], 2.0, SR, strict=True)
+    assert np.allclose(t0[:SR], 0.0), "failed span must still be masked after unpickling"
