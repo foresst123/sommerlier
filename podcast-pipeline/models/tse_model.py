@@ -6,6 +6,12 @@ import librosa
 from typing import Dict, List, Tuple, Union, Optional
 import torch.nn.functional as F
 
+# Below this RMS a probe region carries no speech, only the separator's noise
+# floor. Measured: a correctly-empty track sat at 3e-5 while a track holding the
+# speaker sat at 1.2e-1, four orders of magnitude apart.
+ABS_SILENCE_RMS = 1e-3
+
+
 class TargetSpeakerExtractor:
     """
     Dialogue Separation + ECAPA Speaker Matching.
@@ -85,7 +91,7 @@ class TargetSpeakerExtractor:
 
     @staticmethod
     def _gather_probe(track: np.ndarray, spans, sr: int, floor_db: float = -40.0,
-                      min_voiced_sec: float = 0.30):
+                      min_voiced_sec: float = 0.30, abs_floor_rms: float = ABS_SILENCE_RMS):
         """Concatenate `spans` of `track`, keeping only frames above an energy floor.
 
         Returns None when there is too little voiced audio to trust, which means
@@ -106,7 +112,17 @@ class TargetSpeakerExtractor:
         n = seg.size // frame
         frames = seg[: n * frame].reshape(n, frame)
         rms = np.sqrt((frames ** 2).mean(axis=1) + 1e-12)
-        ref = np.percentile(rms, 95) + 1e-12
+
+        # An absolute floor first. The relative test below rescales by the
+        # track's own 95th percentile, so a track that is silent here -- because
+        # the separator correctly put this speaker on the *other* track -- still
+        # passes every frame and yields an embedding built from noise. That
+        # score then competes in the A/B assignment and can invert it.
+        ref_abs = float(np.percentile(rms, 95))
+        if ref_abs < abs_floor_rms:
+            return None
+
+        ref = ref_abs + 1e-12
         keep = 20.0 * np.log10(rms / ref) > floor_db
         if keep.sum() * frame < min_voiced_sec * sr:
             return None
