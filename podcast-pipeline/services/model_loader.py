@@ -43,7 +43,9 @@ class ModelLoader:
                 use_community=True
             )
         else:
-            if self.logger: self.logger.info(f"Connecting to DiariZen worker on {self.device_2}")
+            # main.py spawns the DiariZen worker with device_id=args.gpu_1, so
+            # device_1 is where it actually lives. The old message said device_2.
+            if self.logger: self.logger.info(f"Connecting to DiariZen worker on {self.device_1}")
             self.models["diarizer"] = DiariZenDiarizer(process=diarizen_service.process if diarizen_service else None)
             
         # Embedder is needed for cross-chunk diarization fusion AND SR-CorrNet speaker identification

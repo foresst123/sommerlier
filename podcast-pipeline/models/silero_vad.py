@@ -6,6 +6,8 @@
 #
 # Note: This code has been modified to fit the context of this repository.
 
+import os
+
 import librosa
 import torch
 import numpy as np
@@ -45,21 +47,34 @@ class SileroVAD:
             # Monkey-patch onnxruntime.InferenceSession to use providers by default
             original_init = onnxruntime.InferenceSession.__init__
 
-            def patched_init(self, path_or_bytes, sess_options=None, providers=providers, **kwargs):
-                original_init(self, path_or_bytes, sess_options=sess_options, providers=providers, **kwargs)
+            def patched_init(self, path_or_bytes, sess_options=None, **kwargs):
+                # setdefault, not an override: a caller that passes its own
+                # providers should keep them.
+                kwargs.setdefault("providers", providers)
+                original_init(self, path_or_bytes, sess_options=sess_options, **kwargs)
 
             onnxruntime.InferenceSession.__init__ = patched_init
 
-            vad_model, utils = torch.hub.load(
-                repo_or_dir="snakers4/silero-vad" if not local else "vad/silero-vad",
-                model=model,
-                force_reload=False,
-                onnx=True,
-                source="github" if not local else "local",
-            )
-
-            # Restore original __init__
-            onnxruntime.InferenceSession.__init__ = original_init
+            try:
+                vad_model, utils = torch.hub.load(
+                    # Pinned: an unpinned master can change the hub entrypoint
+                    # signature and break the pipeline with no local change.
+                    # Keep SILERO_VAD_REV in sync with download_offline_weights.py.
+                    repo_or_dir=(
+                        os.environ.get("SILERO_VAD_REV", "snakers4/silero-vad:v5.1")
+                        if not local else "vad/silero-vad"
+                    ),
+                    model=model,
+                    force_reload=False,
+                    onnx=True,
+                    trust_repo=True,
+                    source="github" if not local else "local",
+                )
+            finally:
+                # Restore unconditionally: without this, a failure inside
+                # torch.hub.load left every later InferenceSession in the process
+                # forced onto the CUDA provider.
+                onnxruntime.InferenceSession.__init__ = original_init
 
             self.vad_model = vad_model
             (get_speech_timestamps, _, _, _, _) = utils

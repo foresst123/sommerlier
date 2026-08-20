@@ -127,7 +127,7 @@ def main():
         qwen3_env_bin = resolve_worker_python("qwen3", config=config, env_profile=env_profile, logger=logger)
         qwen3_worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qwen3_worker.py")
         qwen3_service = Qwen3WorkerService(qwen3_env_bin, qwen3_worker_script, device_id=args.gpu_2, logger=logger, env_name=args.env, config_path=args.config)
-        qwen3_service.start()
+        qwen3_service.spawn()
 
     # 1b. Start DiariZen Worker (if dia3 is not used)
     diarizen_service = None
@@ -135,13 +135,19 @@ def main():
         diarizen_env_bin = resolve_worker_python("diarizen", config=config, env_profile=env_profile, logger=logger)
         diarizen_worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diarizen_worker.py")
         diarizen_service = DiarizenWorkerService(diarizen_env_bin, diarizen_worker_script, device_id=args.gpu_1, logger=logger, env_name=args.env, config_path=args.config)
-        diarizen_service.start()
+        diarizen_service.spawn()
         
     # 1c. Start Sidon Worker (if TSE enabled)
     sidon_service = None
     if args.tse:
         sidon_service = SidonWorkerService(config, args, logger)
-        sidon_service.start()
+        sidon_service.spawn()
+
+    # 1d. Join. All three were spawned above without blocking, so total startup
+    # is now bounded by the slowest worker rather than the sum of all three.
+    for _svc in (qwen3_service, diarizen_service, sidon_service):
+        if _svc is not None:
+            _svc.wait_ready()
 
     try:
         # 2. Load Models

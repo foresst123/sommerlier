@@ -92,6 +92,20 @@ class WorkerProcessService:
         return [self.python_bin, self.worker_script] + self.extra_args
 
     def start(self):
+        """Spawn and block until ready. Kept for callers that want the old flow."""
+        self.spawn()
+        self.wait_ready()
+
+    def spawn(self):
+        """Launch the subprocess without waiting for its ready handshake.
+
+        Split out of start() so several workers can be launched at once and
+        joined afterwards; starting them one at a time serialised ~100s of model
+        loading. stderr is drained by a daemon thread from this point on, but
+        nothing reads stdout until wait_ready(), so a worker that writes more
+        than the pipe buffer (~64KB) before signalling ready would block. All
+        current workers stay well under that.
+        """
         if self.process is not None:
             return
 
@@ -127,6 +141,10 @@ class WorkerProcessService:
         )
         self._stderr_thread.start()
 
+    def wait_ready(self):
+        """Block until the worker signals ready. Safe to call once per spawn."""
+        if self.process is None:
+            raise RuntimeError(f"{self.name} worker was never spawned")
         self._wait_for_ready()
 
     def _wait_for_ready(self):

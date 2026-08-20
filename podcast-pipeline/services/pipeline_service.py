@@ -89,6 +89,10 @@ class PipelineService:
             if self.logger: self.logger.info("Loading Separation from checkpoint")
             enhanced_segments = checkpoint.load("separation")
         else:
+            # Failed clips are dumped next to the outputs so the QC thresholds
+            # can be judged by ear rather than only from counters.
+            self.separation_svc.dump_dir = os.path.join(
+                os.path.dirname(audio_path), "_final", "separation")
             enhanced_segments = self.separation_svc.process_overlaps(diarization_result.segments, audio_data)
             if self.logger: self.logger.info(f"[DEBUG] After Separation: {len(enhanced_segments)} segments")
             checkpoint.save("separation", enhanced_segments)
@@ -180,6 +184,9 @@ class PipelineService:
             
         os.makedirs(save_path, exist_ok=True)
         base_name = os.path.splitext(os.path.basename(audio_path))[0]
+
+        if hasattr(self.separation_svc, "write_report"):
+            self.separation_svc.write_report(save_path, base_name)
         
         metadata = {
             "audio_file": os.path.basename(audio_path),

@@ -3,7 +3,7 @@ import sys
 import torch
 import numpy as np
 import librosa
-from typing import Dict, List, Union, Optional
+from typing import Dict, List, Tuple, Union, Optional
 import torch.nn.functional as F
 
 class TargetSpeakerExtractor:
@@ -65,7 +65,12 @@ class TargetSpeakerExtractor:
         enroll_embeddings = []
         for e in enrollment_audios:
             if len(e) > 0:
-                enroll_embeddings.append(self._get_embedding(e, sample_rate))
+                # Normalize each clip before averaging: raw ECAPA embeddings have
+                # length-dependent norms, so the longest clip would otherwise
+                # dominate the centroid.
+                enroll_embeddings.append(
+                    F.normalize(self._get_embedding(e, sample_rate), p=2, dim=0)
+                )
                 
         if not enroll_embeddings:
             raise ValueError(f"No valid enrollment audios provided for target {target_id}")
@@ -78,10 +83,53 @@ class TargetSpeakerExtractor:
             
         return target_embed
 
-    def separate_two_speakers(self, mixture_audio: np.ndarray, enroll_A: List[np.ndarray], enroll_B: List[np.ndarray], sample_rate: int = 16000, id_A: Optional[str] = None, id_B: Optional[str] = None, eval_pad_start_sec: float = 0.0, eval_core_len_sec: float = 0.0):
+    @staticmethod
+    def _gather_probe(track: np.ndarray, spans, sr: int, floor_db: float = -40.0,
+                      min_voiced_sec: float = 0.30):
+        """Concatenate `spans` of `track`, keeping only frames above an energy floor.
+
+        Returns None when there is too little voiced audio to trust, which means
+        "this speaker is not present here" -- a different outcome from
+        "extraction failed", and the caller must not conflate the two.
         """
-        Runs BSS once (via Worker), then uses ECAPA to map the 2 output tracks to Speaker A and B.
-        Returns: (track_A, track_B, sim_A, sim_B)
+        if not spans:
+            return None
+        pieces = [track[max(0, a):min(len(track), b)] for a, b in spans]
+        pieces = [pc for pc in pieces if pc.size]
+        if not pieces:
+            return None
+        seg = np.concatenate(pieces)
+
+        frame = max(1, int(0.02 * sr))
+        if seg.size < frame * 2:
+            return seg if seg.size else None
+        n = seg.size // frame
+        frames = seg[: n * frame].reshape(n, frame)
+        rms = np.sqrt((frames ** 2).mean(axis=1) + 1e-12)
+        ref = np.percentile(rms, 95) + 1e-12
+        keep = 20.0 * np.log10(rms / ref) > floor_db
+        if keep.sum() * frame < min_voiced_sec * sr:
+            return None
+        return frames[keep].reshape(-1)
+
+    def separate_two_speakers(self, mixture_audio: np.ndarray, enroll_A: List[np.ndarray], enroll_B: List[np.ndarray], sample_rate: int = 16000, id_A: Optional[str] = None, id_B: Optional[str] = None, probe_A: Optional[List[Tuple[int, int]]] = None, probe_B: Optional[List[Tuple[int, int]]] = None, core_range: Optional[Tuple[int, int]] = None):
+        """Run blind separation, then map the two output tracks onto A and B.
+
+        probe_A / probe_B: (start, end) sample ranges within mixture_audio where
+        that speaker is known to speak ALONE. Assignment and the returned
+        similarities are measured there.
+
+        Scoring on the overlap core instead (the previous eval_pad_start_sec /
+        eval_core_len_sec path) is what drove sim_A from 0.46 to -0.07: ECAPA
+        pools statistics over time and cannot form an embedding from ~0.2s.
+        Solo regions are seconds long, so the same model works normally there.
+
+        core_range: overlap core in mixture samples, used only by the "not-A"
+        relative test for a speaker that has no solo region.
+
+        Returns (track_A, track_B, sim_A, sim_B, diag). A sim is None when that
+        speaker had too little voiced audio in its probe to judge; diag carries
+        the numbers the caller needs for the not-A decision.
         """
         if not self.classifier:
             raise RuntimeError("ECAPA is not loaded.")
@@ -160,48 +208,61 @@ class TargetSpeakerExtractor:
         track_1_tensor = torch.from_numpy(track_1_np).to(self.device)
         track_2_tensor = torch.from_numpy(track_2_np).to(self.device)
 
-        # ---------------------------------------------------------
-        # BẢN VÁ CHẤT LƯỢNG CAO: CẮT LÕI (CORE OVERLAP) ĐỂ ECAPA CHẤM ĐIỂM
-        # ---------------------------------------------------------
-        if eval_core_len_sec > 0:
-            start_idx = int(eval_pad_start_sec * target_sr)
-            end_idx = start_idx + int(eval_core_len_sec * target_sr)
-            
-            # Khóa an toàn: Đảm bảo index không vượt quá giới hạn của mảng (ngăn lỗi Out of Bounds)
-            max_len = track_1_tensor.shape[0]
-            start_idx = max(0, min(start_idx, max_len - 1))
-            end_idx = max(start_idx + 1, min(end_idx, max_len))
-            
-            eval_t1 = track_1_tensor[start_idx:end_idx]
-            eval_t2 = track_2_tensor[start_idx:end_idx]
-        else:
-            eval_t1 = track_1_tensor
-            eval_t2 = track_2_tensor
-
-        # --- ECAPA-TDNN Matching ---
+        # --- ECAPA matching, measured on the caller's probe spans ---
         embed_A = self._get_target_embedding(enroll_A, id_A, sample_rate)
         embed_B = self._get_target_embedding(enroll_B, id_B, sample_rate)
-        
-        # Đưa đoạn lõi (eval_t1, eval_t2) vào lấy Embedding để loại bỏ nhiễu từ khoảng lặng
-        emb_1 = F.normalize(self._get_embedding(eval_t1.cpu().numpy(), target_sr), p=2, dim=0)
-        emb_2 = F.normalize(self._get_embedding(eval_t2.cpu().numpy(), target_sr), p=2, dim=0)
-        
-        # Calculate matching scores for all combinations
-        score_1A = torch.dot(embed_A, emb_1).item()
-        score_2A = torch.dot(embed_A, emb_2).item()
-        score_1B = torch.dot(embed_B, emb_1).item()
-        score_2B = torch.dot(embed_B, emb_2).item()
-        
-        # Determine assignment (Max Bipartite Matching for 2x2)
-        # LƯU Ý: Vẫn gán out_A_tensor và out_B_tensor bằng track đầy đủ (10s), chỉ dùng điểm từ lõi để quyết định
-        if (score_1A + score_2B) > (score_2A + score_1B):
+
+        # Probes arrive in mixture samples; the separator decodes at its own rate.
+        scale = target_sr / float(sample_rate)
+        def _rescale(spans):
+            if not spans:
+                return None
+            return [(int(a * scale), int(b * scale)) for a, b in spans]
+
+        span_A = _rescale(probe_A) or [(0, len(track_1_np))]
+        span_B = _rescale(probe_B) or [(0, len(track_1_np))]
+
+        def _score(track_np, spans, target_embed):
+            probe = self._gather_probe(track_np, spans, target_sr)
+            if probe is None:
+                return None
+            emb = F.normalize(self._get_embedding(probe, target_sr), p=2, dim=0)
+            return float(torch.dot(target_embed, emb))
+
+        s_1A, s_2A = _score(track_1_np, span_A, embed_A), _score(track_2_np, span_A, embed_A)
+        s_1B, s_2B = _score(track_1_np, span_B, embed_B), _score(track_2_np, span_B, embed_B)
+
+        def _n(x):
+            # A missing score must not win the comparison by default.
+            return -1.0 if x is None else x
+
+        if (_n(s_1A) + _n(s_2B)) >= (_n(s_2A) + _n(s_1B)):
             out_A_tensor, out_B_tensor = track_1_tensor, track_2_tensor
-            sim_A, sim_B = score_1A, score_2B
+            out_A_np, out_B_np = track_1_np, track_2_np
+            sim_A, sim_B = s_1A, s_2B
         else:
             out_A_tensor, out_B_tensor = track_2_tensor, track_1_tensor
-            sim_A, sim_B = score_2A, score_1B
-            
-        # --- Resample back to original sample rate ---
+            out_A_np, out_B_np = track_2_np, track_1_np
+            sim_A, sim_B = s_2A, s_1B
+
+        # Diagnostics for the "not-A" test: when one speaker has no solo region,
+        # asking "is this track B?" is unanswerable on a 0.2s core, but asking
+        # "is this track a duplicate of A?" only needs a relative comparison,
+        # which survives a bad absolute embedding.
+        diag = {"anchor_self": None, "anchor_other": None, "other_rms": None}
+        if core_range is not None:
+            c0, c1 = int(core_range[0] * scale), int(core_range[1] * scale)
+            c0, c1 = max(0, c0), min(len(out_A_np), c1)
+            if c1 > c0:
+                core_other = out_B_np[c0:c1]
+                diag["other_rms"] = float(np.sqrt((core_other ** 2).mean() + 1e-12))
+                anchor_embed = embed_A if sim_A is not None else embed_B
+                for key, arr in (("anchor_self", out_A_np[c0:c1]), ("anchor_other", core_other)):
+                    pr = self._gather_probe(arr, [(0, len(arr))], target_sr, min_voiced_sec=0.05)
+                    if pr is not None:
+                        e = F.normalize(self._get_embedding(pr, target_sr), p=2, dim=0)
+                        diag[key] = float(torch.dot(anchor_embed, e))
+
         def restore_track(track_tensor_in):
             if sample_rate != target_sr:
                 track_tensor_out = F_audio.resample(track_tensor_in.unsqueeze(0).cpu(), target_sr, sample_rate).squeeze(0)
@@ -217,4 +278,4 @@ class TargetSpeakerExtractor:
                 track_np = np.pad(track_np, (0, orig_len - len(track_np)))
             return track_np
             
-        return restore_track(out_A_tensor), restore_track(out_B_tensor), sim_A, sim_B
+        return restore_track(out_A_tensor), restore_track(out_B_tensor), sim_A, sim_B, diag

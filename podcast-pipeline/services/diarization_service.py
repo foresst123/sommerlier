@@ -28,6 +28,22 @@ class DiarizationService:
         self.logger = logger
         self.diarizer_config = diarizer_config or {}
         
+    def _log_segment_stats(self, stage: str, seg_list: list):
+        """One line per pipeline stage so segment loss can be attributed."""
+        if not self.logger:
+            return
+        if not seg_list:
+            self.logger.info(f"[DIAR:{stage}] 0 segments")
+            return
+        durs = sorted(s["end"] - s["start"] for s in seg_list)
+        n = len(durs)
+        speakers = len({s.get("speaker") for s in seg_list})
+        self.logger.info(
+            f"[DIAR:{stage}] n={n} speakers={speakers} | "
+            f"dur min={durs[0]:.2f} p50={durs[n // 2]:.2f} max={durs[-1]:.2f} | "
+            f"<0.5s={sum(d < 0.5 for d in durs)} <0.2s={sum(d < 0.2 for d in durs)}"
+        )
+
     def prepare_chunks(self, audio: AudioData, max_duration: float = 120.0, min_silence: float = 0.5) -> Tuple[List[DiarizationChunk], str]:
         """Deprecated. Returns a single dummy chunk since diarization now processes the full audio natively."""
         if self.logger:
@@ -94,6 +110,11 @@ class DiarizationService:
                 
         combined_df = pd.DataFrame(data) if data else pd.DataFrame(columns=["start", "end", "speaker"])
         combined_df = combined_df.sort_values("start").reset_index(drop=True)
+
+        # The exported *_intermediate_diarization.json is written after VAD, merge
+        # and split, so it cannot show whether a low segment count came from the
+        # diarizer or from cut_by_speaker_label. Log both ends.
+        self._log_segment_stats("raw", df_to_list(combined_df))
         
         # Apply VAD to split long continuous segments if VAD is available
         if getattr(args, "vad", False) and self.vad_model:
@@ -104,10 +125,13 @@ class DiarizationService:
             
         # Apply merge and smooth logic
         merge_gap = getattr(args, "merge_gap", 2.0)
+        self._log_segment_stats("post-vad", raw_list)
         smoothed_list = cut_by_speaker_label(raw_list, merge_gap=merge_gap, logger=self.logger)
+        self._log_segment_stats(f"post-merge(gap={merge_gap})", smoothed_list)
         
         # Split segments that are too long
         final_list = split_long_segments(smoothed_list, max_duration=30.0)
+        self._log_segment_stats("post-split", final_list)
         
         # Build schemas
         final_segments = []

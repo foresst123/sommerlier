@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import torch
 from panns_inference import AudioTagging
@@ -17,7 +19,22 @@ class PANNSDetector:
         # GPU, so the index cannot be honoured anyway -- pin the device with
         # CUDA_VISIBLE_DEVICES if placement matters.
         panns_device = "cuda" if str(self.device).startswith("cuda") else "cpu"
-        self.model = AudioTagging(checkpoint_path=None, device=panns_device)
+
+        # checkpoint_path=None makes panns_inference re-download Cnn14 (312MB from
+        # Zenodo, ~5 min on Kaggle) on every run. PANNS_CHECKPOINT lets the caller
+        # point at a pre-staged copy; None keeps the old download behaviour.
+        checkpoint_path = os.environ.get("PANNS_CHECKPOINT") or None
+        self.model = AudioTagging(checkpoint_path=checkpoint_path, device=panns_device)
+
+        # AudioTagging wraps the model in DataParallel across every visible GPU
+        # (it prints "GPU number: 2"). Inference here always runs with batch size
+        # 1, so the second replica never receives a sample -- it only burns VRAM
+        # on the GPU hosting the Qwen3/Demucs workers and adds scatter/gather
+        # overhead. Unwrap it and pin the module to the requested device.
+        inner = getattr(self.model, "model", None)
+        if isinstance(inner, torch.nn.DataParallel):
+            self.model.model = inner.module.to(self.device)
+            self.model.device = self.device
         
     def detect_music(self, audio_array, sample_rate: int = 32000, threshold: float = 0.5) -> tuple:
         """Detect if music is present in audio."""

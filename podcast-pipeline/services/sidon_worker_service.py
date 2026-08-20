@@ -32,7 +32,15 @@ class SidonWorkerService(WorkerProcessService):
             ready_timeout=1800.0,
         )
 
-    def start(self):
+    def spawn(self):
+        # Guard lives on spawn(), not start(): callers that spawn/wait_ready
+        # separately would otherwise bypass it and launch the worker with
+        # --tse off.
         if not getattr(self.args, "tse", False):
             return
-        super().start()
+        super().spawn()
+
+    def wait_ready(self):
+        if self.process is None:
+            return
+        super().wait_ready()
