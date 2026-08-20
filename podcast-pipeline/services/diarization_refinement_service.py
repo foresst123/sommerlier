@@ -1,9 +1,17 @@
 from typing import List
+from difflib import SequenceMatcher
+from algorithms.asr.rover import normalize_token
 from schemas.transcript import TranscriptSegment
 import torch
 
 # Hoisted out of the per-segment loop: this is ~1200 constant tokens that would
 # otherwise be rebuilt and re-tokenized for every single segment.
+# Below this word-level similarity to every input transcript, the refinement is
+# discarded. 0.5 keeps genuine cleanups (punctuation, a corrected word) while
+# rejecting output that came from somewhere else.
+ACCEPT_SIMILARITY = 0.5
+
+
 FUSION_SYSTEM_PROMPT = (
     "Bạn hợp nhất 3 bản transcript ASR tiếng Việt của CÙNG một đoạn audio thành "
     "1 bản duy nhất. Bạn không nghe được audio, chỉ có 3 bản text.\n\n"
@@ -48,6 +56,7 @@ class DiarizationRefinementService:
         self.model = None
         self.tokenizer = None
         self.batch_size = batch_size
+        self.rejected = 0
         # Qwen2.5-3B is extremely fast, smart enough for this task, and only takes ~6GB VRAM
         self.model_name = "Qwen/Qwen2.5-3B-Instruct"
         
@@ -69,6 +78,46 @@ class DiarizationRefinementService:
         except Exception as e:
             if self.logger: self.logger.error(f"Failed to load LLM: {e}")
             
+    def _accept(self, seg, refined: str) -> bool:
+        """Whether the model's output is a fusion of this segment's transcripts.
+
+        A prompt cannot guarantee behaviour, and the failures it lets through
+        are the expensive kind: a segment that carries a neighbour's words is a
+        mislabelled training example, worse than an unpolished one. Compare the
+        result against the three inputs and keep the ROVER text when it does not
+        resemble any of them.
+        """
+        sources = [t for t in (seg.text_whisper, seg.text_phowhisper, seg.text_qwen3)
+                   if t and t.strip()]
+        if not sources:
+            return False
+
+        # Compare on folded tokens. Punctuation is exactly what refinement is
+        # supposed to add, and on a one-word backchannel it is the whole
+        # difference: "Ừ?" against "Ừ" scores 0.0 as raw words and would reject
+        # every corrected backchannel in the corpus.
+        def fold(text):
+            return [normalize_token(w) for w in text.split() if normalize_token(w)]
+
+        target = fold(refined)
+        if not target:
+            return False
+        best = max(SequenceMatcher(None, target, fold(t)).ratio() for t in sources)
+        if best >= ACCEPT_SIMILARITY:
+            return True
+
+        # Length alone catches the "borrowed a neighbour's turn" case even when
+        # wording overlaps: fusing three transcripts cannot double the longest.
+        longest = max(len(t.split()) for t in sources)
+        reason = ("too dissimilar" if len(refined.split()) <= longest * 1.5
+                  else "much longer than any input")
+        if self.logger:
+            self.logger.warning(
+                f"[LLM] rejected refinement for segment {seg.index} ({reason}, "
+                f"sim={best:.2f}); keeping ROVER text"
+            )
+        return False
+
     def _build_user_message(self, segments, i) -> str:
         """Build the fusion request for one segment.
 
@@ -164,13 +213,15 @@ class DiarizationRefinementService:
             tokenizer.padding_side = original_padding_side
 
         if self.logger:
+            tail = f", {self.rejected} rejected as unfaithful" if self.rejected else ""
             if failed_count:
                 self.logger.warning(
                     f"LLM refinement: {refined_count} segments refined, "
-                    f"{failed_count} left unrefined (original ROVER text kept)"
+                    f"{failed_count} left unrefined (original ROVER text kept){tail}"
                 )
             else:
-                self.logger.info(f"LLM refinement: {refined_count} segments refined")
+                self.logger.info(
+                    f"LLM refinement: {refined_count} segments refined{tail}")
 
         return segments
 
@@ -208,9 +259,13 @@ class DiarizationRefinementService:
             count = 0
             for (seg, _), refined_text in zip(batch, decoded):
                 refined_text = refined_text.strip()
-                if refined_text:
-                    seg.text = refined_text
-                    count += 1
+                if not refined_text:
+                    continue
+                if not self._accept(seg, refined_text):
+                    self.rejected += 1
+                    continue
+                seg.text = refined_text
+                count += 1
             return True, count
 
         except torch.cuda.OutOfMemoryError as e:
