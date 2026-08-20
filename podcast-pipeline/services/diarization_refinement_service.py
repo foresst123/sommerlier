@@ -1,5 +1,6 @@
 from typing import List
 from difflib import SequenceMatcher
+from algorithms.asr.hallucination import foreign_script_ratio
 from algorithms.asr.rover import normalize_token
 from schemas.transcript import TranscriptSegment
 import torch
@@ -90,6 +91,19 @@ class DiarizationRefinementService:
         sources = [t for t in (seg.text_whisper, seg.text_phowhisper, seg.text_qwen3)
                    if t and t.strip()]
         if not sources:
+            return False
+
+        # A whole-text similarity check cannot see a local insert: one segment
+        # came back with a Chinese translation spliced into the middle of an
+        # otherwise faithful 145-word Vietnamese sentence and still scored 0.77.
+        # Vietnamese is Latin script, so any foreign-script run the inputs did
+        # not contain is the model writing rather than choosing.
+        if foreign_script_ratio(refined) > foreign_script_ratio(" ".join(sources)) + 0.01:
+            if self.logger:
+                self.logger.warning(
+                    f"[LLM] rejected refinement for segment {seg.index} "
+                    f"(introduced non-Latin script); keeping ROVER text"
+                )
             return False
 
         # Compare on folded tokens. Punctuation is exactly what refinement is

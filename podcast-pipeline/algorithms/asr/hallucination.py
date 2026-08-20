@@ -30,6 +30,43 @@ _BOILERPLATE_PATTERNS = [
     r"^\s*(hết|the end)\s*[\.!]?\s*$",
 ]
 
+# Vietnamese is written in Latin script. Any run of CJK, Cyrillic, Thai, Hangul
+# or kana is either a decoder that drifted into another language or a homoglyph
+# the tokenizer preferred over its Latin twin ("câу" with a Cyrillic у).
+_FOREIGN_SCRIPT = re.compile(
+    "["
+    "\u4e00-\u9fff"      # CJK unified
+    "\u3400-\u4dbf"      # CJK extension A
+    "\u3040-\u30ff"      # hiragana + katakana
+    "\uac00-\ud7af"      # hangul
+    "\u0400-\u04ff"      # cyrillic
+    "\u0e00-\u0e7f"      # thai
+    "\u0600-\u06ff"      # arabic
+    "]"
+)
+
+
+def foreign_script_ratio(text: str) -> float:
+    """Share of the non-space characters written in a non-Latin script."""
+    body = [c for c in text if not c.isspace()]
+    if not body:
+        return 0.0
+    return sum(1 for c in body if _FOREIGN_SCRIPT.match(c)) / len(body)
+
+
+def strip_foreign_runs(text: str) -> str:
+    """Drop stretches of non-Latin script, keeping the Vietnamese around them.
+
+    A whole sentence in Chinese is the model translating rather than
+    transcribing; a lone Cyrillic letter inside a Vietnamese word is a
+    homoglyph. Both are removed, and the surrounding text survives.
+    """
+    cleaned = _FOREIGN_SCRIPT.sub("", text)
+    # Punctuation that belonged to the removed run would otherwise be stranded.
+    cleaned = re.sub(r"[，。、；：！？]+", " ", cleaned)
+    return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+
 def _strip_accents(text: str) -> str:
     """Fold Vietnamese diacritics so a mis-accented hallucination still matches."""
     decomposed = unicodedata.normalize("NFD", text)
@@ -88,6 +125,11 @@ def is_hallucination(text: str, duration: float = None) -> bool:
     if is_boilerplate(text) or is_repetition(text):
         return True
 
+    # A transcript that is mostly another script is not this audio. Below that
+    # share the text is salvageable, and strip_foreign_runs() cleans it instead.
+    if foreign_script_ratio(text) > 0.30:
+        return True
+
     if duration and duration > 0:
         # Vietnamese speech tops out around 7-8 syllables/second; anything past
         # double that did not come from the audio.
@@ -110,6 +152,15 @@ def filter_short_segment_outputs(texts, duration, trusted_index=None, logger=Non
         if trusted_index is not None and i == trusted_index:
             cleaned.append(text)
             continue
+
+        # Salvage first: a Vietnamese sentence with a stray Cyrillic letter or a
+        # short Chinese insert is worth keeping once the foreign run is gone.
+        stripped = strip_foreign_runs(text)
+        if stripped != text and stripped:
+            if logger:
+                where = f" in segment {segment_id}" if segment_id else ""
+                logger.info(f"Stripped foreign-script run{where}: {text[:50]!r}")
+            text = stripped
 
         if is_hallucination(text, duration):
             if logger:
