@@ -6,6 +6,28 @@ import librosa
 from typing import Dict, List, Tuple, Union, Optional
 import torch.nn.functional as F
 
+# Sidon advances by CHUNK_SECONDS - OVERLAP_SECONDS (20 - 5) between chunks, so
+# a seam falls every 15s, not every 20s. Walking the repair on 20s blocks put
+# the boundaries out of phase with the seams and left a block holding both a
+# correct and an inverted stretch, which one flip cannot fix.
+STITCH_CHUNK_SEC = 15.0
+# Correlation advantage the swapped ordering must show before a block is
+# flipped, so near-ties on quiet audio are left alone.
+STITCH_SWAP_MARGIN = 0.05
+
+
+def _corr(x: np.ndarray, y: np.ndarray) -> float:
+    """Zero-mean correlation of two equal-length signals, 0.0 when either is flat."""
+    if x.size == 0 or y.size == 0:
+        return 0.0
+    x = x - x.mean()
+    y = y - y.mean()
+    denom = float(np.linalg.norm(x) * np.linalg.norm(y))
+    if denom < 1e-12:
+        return 0.0
+    return float(np.dot(x, y) / denom)
+
+
 # Below this RMS a probe region carries no speech, only the separator's noise
 # floor. Measured: a correctly-empty track sat at 3e-5 while a track holding the
 # speaker sat at 1.2e-1, four orders of magnitude apart.
@@ -88,6 +110,64 @@ class TargetSpeakerExtractor:
             self.target_embed_cache[target_id] = target_embed
             
         return target_embed
+
+    def _repair_chunk_swaps(self, track_1: np.ndarray, track_2: np.ndarray, sr: int,
+                            embed_A, embed_B, chunk_sec: float = STITCH_CHUNK_SEC):
+        """Undo channel inversions the separator introduced between its chunks.
+
+        Sidon separates in fixed-length chunks and keeps channel order across
+        them by correlating their overlap. When that overlap holds only one
+        voice, the correlation cannot tell the orderings apart and every chunk
+        after the bad seam comes back inverted -- a track that is clean
+        everywhere yet carries the wrong speaker in part of its span, which the
+        A/B assignment cannot express because it picks one orientation for the
+        whole window.
+
+        Correlating the stitched output against itself does not detect this:
+        different blocks hold different words, so their correlation is ~0
+        regardless of ordering (measured: |r| < 0.03 either way). Score each
+        block against the two enrollment embeddings instead and keep the
+        orientation that matches them, which is what the speakers' identity --
+        not their waveform -- actually distinguishes.
+
+        Returns the repaired pair and the number of blocks flipped.
+        """
+        n = min(len(track_1), len(track_2))
+        block = max(1, int(chunk_sec * sr))
+        if n <= block or embed_A is None or embed_B is None:
+            return track_1, track_2, 0
+
+        out_1 = track_1[:n].copy()
+        out_2 = track_2[:n].copy()
+        flips = 0
+
+        for start in range(0, n, block):
+            end = min(start + block, n)
+            seg_1, seg_2 = out_1[start:end], out_2[start:end]
+
+            e1 = self._block_embedding(seg_1, sr)
+            e2 = self._block_embedding(seg_2, sr)
+            if e1 is None or e2 is None:
+                # One side is silent here, so this block says nothing about
+                # ordering. Leaving it alone is right: flipping on a missing
+                # score is how the noise-probe bug inverted assignments.
+                continue
+
+            direct = float(torch.dot(embed_A, e1)) + float(torch.dot(embed_B, e2))
+            swapped = float(torch.dot(embed_A, e2)) + float(torch.dot(embed_B, e1))
+            if swapped > direct + STITCH_SWAP_MARGIN:
+                out_1[start:end] = track_2[start:end]
+                out_2[start:end] = track_1[start:end]
+                flips += 1
+
+        return out_1, out_2, flips
+
+    def _block_embedding(self, block: np.ndarray, sr: int):
+        """Normalized ECAPA embedding for one block, or None if it holds no speech."""
+        probe = self._gather_probe(block, [(0, len(block))], sr, min_voiced_sec=0.30)
+        if probe is None:
+            return None
+        return F.normalize(self._get_embedding(probe, sr), p=2, dim=0)
 
     @staticmethod
     def _gather_probe(track: np.ndarray, spans, sr: int, floor_db: float = -40.0,
@@ -227,6 +307,17 @@ class TargetSpeakerExtractor:
         # --- ECAPA matching, measured on the caller's probe spans ---
         embed_A = self._get_target_embedding(enroll_A, id_A, sample_rate)
         embed_B = self._get_target_embedding(enroll_B, id_B, sample_rate)
+
+        # Repair chunk-seam inversions before scoring. The assignment below
+        # picks one orientation for the whole window, so a track that flips
+        # speakers midway cannot be labelled correctly at any price.
+        track_1_np, track_2_np, n_flips = self._repair_chunk_swaps(
+            track_1_np, track_2_np, target_sr, embed_A, embed_B)
+        if n_flips:
+            track_1_tensor = torch.from_numpy(track_1_np).to(self.device)
+            track_2_tensor = torch.from_numpy(track_2_np).to(self.device)
+            print(f"[TSE Model] repaired {n_flips} chunk-seam channel swap(s)",
+                  file=sys.stderr)
 
         # Probes arrive in mixture samples; the separator decodes at its own rate.
         scale = target_sr / float(sample_rate)
