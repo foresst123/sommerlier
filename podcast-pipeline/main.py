@@ -115,7 +115,7 @@ from utils.torch_compat import install_torch_load_shim
 # Must run before any model module imports torch and loads a checkpoint.
 install_torch_load_shim()
 
-from utils.batch import audio_duration, find_audio_files, plan_batches, run_batch_by_stage
+from utils.batch import audio_duration, find_audio_files, find_name_collisions, plan_batches, run_batch_by_stage
 from utils.worker_env import resolve_worker_python
 from services.model_loader import ModelLoader
 from services.audio_service import AudioService
@@ -247,6 +247,16 @@ def main():
                     f"No audio files in {args.audio_dir} (looked for {', '.join(exts)})")
         else:
             paths = [args.audio]
+
+        collisions = find_name_collisions(paths)
+        if collisions:
+            logger.error(
+                "These files share a basename and would write to the same output "
+                "directory, silently overwriting each other:")
+            for stem, group in collisions.items():
+                logger.error(f"  {stem}: " + ", ".join(os.path.basename(g) for g in group))
+            logger.error("Rename them or move them apart, then re-run.")
+            return
 
         batches = plan_batches(paths, max_hours, logger=logger)
         total_hours = sum(audio_duration(p) for p in paths) / 3600.0

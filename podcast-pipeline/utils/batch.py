@@ -44,6 +44,21 @@ def find_audio_files(directory: str, extensions) -> list:
     )
 
 
+def find_name_collisions(paths) -> dict:
+    """Files that share a basename, keyed by that name.
+
+    Output directories are named after the audio's stem, so `talk.mp3` and
+    `talk.wav` in the same folder resolve to one directory and the second run
+    overwrites the first. Detected up front because the loss is silent: the
+    pipeline reports success for both.
+    """
+    import collections
+    by_stem = collections.defaultdict(list)
+    for p in paths:
+        by_stem[os.path.splitext(os.path.basename(p))[0]].append(p)
+    return {stem: group for stem, group in by_stem.items() if len(group) > 1}
+
+
 def plan_batches(paths, max_hours: float, logger=None):
     """Split `paths` into runs whose total duration stays under `max_hours`.
 

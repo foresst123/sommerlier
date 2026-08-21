@@ -58,10 +58,51 @@ class PipelineService:
                 self.logger.warning(f"Failed to stop {name} worker: {e}")
 
 
+    def _resolve_output_dir(self, args, audio_path: str) -> str:
+        """The single place that decides where one file's outputs live.
+
+        Every file gets its own directory, whether or not --save_path was given.
+        The old code only built a per-file path when save_path was left at the
+        literal default, so passing --save_path made a whole batch share one
+        directory -- and export_separated_audio, which names its files
+        "{index}_{speaker}_separated.wav" with an index that restarts at 00000
+        per audio, then overwrote the previous file's audio with no warning.
+
+        Returning a path that always ends in the audio's name is what keeps that
+        collision impossible: every later export is relative to this directory.
+        """
+        audio_name = os.path.splitext(os.path.basename(audio_path))[0]
+        save_path = getattr(args, "save_path", None) or "./output"
+
+        if save_path == "./output":
+            suffix = "pyannote" if getattr(args, "dia3", False) else "diarizen"
+            root = os.path.join(
+                os.path.dirname(audio_path), "_final",
+                f"-tse-{getattr(args, 'tse', False)}"
+                f"-demucs-{getattr(args, 'panns', False)}"
+                f"-vad-{getattr(args, 'vad', False)}"
+                f"-diaModel-{suffix}-initPrompt-True"
+                f"-merge_gap-{getattr(args, 'merge_gap', 2.0)}"
+                f"-seg_th-{getattr(args, 'seg_th', 0.11)}"
+                f"-cl_min-{getattr(args, 'min_cluster_size', 11)}"
+                f"-cl-th-{getattr(args, 'clust_th', 0.5)}"
+                f"-LLM-{getattr(args, 'LLM', 'case_0')}",
+            )
+        else:
+            root = save_path
+
+        return os.path.join(root, audio_name)
+
     def run(self, args: Any, config: dict, audio_path: str):
         # Scope the checkpoint to this audio file. Sharing one job_id across a
         # batch would make the second file load the first file's diarization and
         # emit its transcript -- the checkpoint exists, so nothing recomputes.
+        # Resolved once, at the top: the separation dump needs it long before
+        # the export stage does, and computing it twice is how they drifted apart.
+        output_dir = self._resolve_output_dir(args, audio_path)
+        if self.logger:
+            self.logger.info(f"Outputs for this file: {output_dir}")
+
         base_job = getattr(args, "job_id", "default_job")
         job_id = f"{base_job}_{os.path.splitext(os.path.basename(audio_path))[0]}"
         cache_dir = getattr(args, "cache_dir", "cache")
@@ -184,25 +225,7 @@ class PipelineService:
 
         
         # 8. Export Results
-        save_path = getattr(args, "save_path", "./output")
-        if save_path == "./output":
-            suffix = "pyannote" if getattr(args, "dia3", False) else "diarizen"
-            do_vad = getattr(args, "vad", False)
-            merge_gap = getattr(args, "merge_gap", 2.0)
-            seg_th = getattr(args, "seg_th", 0.11)
-            min_cluster = getattr(args, "min_cluster_size", 11)
-            clust_th = getattr(args, "clust_th", 0.5)
-            llm = getattr(args, "LLM", "case_0")
-            
-            base_dir = os.path.dirname(audio_path)
-            audio_name = os.path.splitext(os.path.basename(audio_path))[0]
-            
-            save_path = os.path.join(
-                base_dir, "_final",
-                f"-tse-{getattr(args, 'tse', False)}-demucs-{getattr(args, 'panns', False)}-vad-{do_vad}-diaModel-{suffix}-initPrompt-True-merge_gap-{merge_gap}-seg_th-{seg_th}-cl_min-{min_cluster}-cl-th-{clust_th}-LLM-{llm}",
-                audio_name
-            )
-            
+        save_path = output_dir
         os.makedirs(save_path, exist_ok=True)
         base_name = os.path.splitext(os.path.basename(audio_path))[0]
 
