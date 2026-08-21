@@ -30,6 +30,14 @@ def parse_args():
     parser.add_argument("--LLM", default="case_0", type=str, help="LLM refinement case")
     parser.add_argument("--initprompt", action="store_true", help="Use initial prompt for LLM")
     parser.add_argument("--env", default="kaggle", type=str, help="Environment profile name in config.json")
+    parser.add_argument("--by_stage", action="store_true",
+                        help="Run each stage across the whole batch before the next "
+                             "stage, instead of the whole pipeline per file. Loads "
+                             "each model once per batch rather than once per file.")
+    parser.add_argument("--only_batch", type=int, default=None,
+                        help="Run only this batch number (1-based) and exit. Lets a "
+                             "directory larger than max_hours be finished across "
+                             "several sessions without exceeding a runtime limit.")
     parser.add_argument("--keep_models", action="store_true",
                         help="Keep models in VRAM between stages instead of unloading them. "
                              "Saves reload time when processing many files, at the cost of a "
@@ -107,7 +115,7 @@ from utils.torch_compat import install_torch_load_shim
 # Must run before any model module imports torch and loads a checkpoint.
 install_torch_load_shim()
 
-from utils.batch import audio_duration, find_audio_files, plan_batches
+from utils.batch import audio_duration, find_audio_files, plan_batches, run_batch_by_stage
 from utils.worker_env import resolve_worker_python
 from services.model_loader import ModelLoader
 from services.audio_service import AudioService
@@ -246,12 +254,27 @@ def main():
             f"Processing {len(paths)} file(s), {total_hours:.2f}h total, "
             f"in {len(batches)} run(s) of up to {max_hours}h")
 
+        if args.only_batch is not None:
+            if not (1 <= args.only_batch <= len(batches)):
+                logger.error(f"--only_batch {args.only_batch} is outside 1..{len(batches)}")
+                return
+            selected = [(args.only_batch, batches[args.only_batch - 1])]
+            logger.info(f"Running batch {args.only_batch}/{len(batches)} only")
+        else:
+            selected = list(enumerate(batches, start=1))
+
         failures = []
         done = 0
-        for bi, batch in enumerate(batches, start=1):
+        for bi, batch in selected:
             batch_hours = sum(audio_duration(p) for p in batch) / 3600.0
             logger.info(f"--- Batch {bi}/{len(batches)}: "
                         f"{len(batch)} file(s), {batch_hours:.2f}h ---")
+
+            if args.by_stage:
+                failures.extend(run_batch_by_stage(pipeline, args, config, batch, logger=logger))
+                done += len(batch)
+                continue
+
             for path in batch:
                 done += 1
                 logger.info(f"[{done}/{len(paths)}] Running pipeline on audio: {path}")

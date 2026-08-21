@@ -93,3 +93,65 @@ def plan_batches(paths, max_hours: float, logger=None):
     if current:
         batches.append(current)
     return batches
+
+
+# Stage order must match the pipeline's own sequence; `None` means "run to the
+# end", which covers refinement and export.
+PIPELINE_STAGES = ("diarization", "separation", "music_removal", "asr", "captioning", None)
+
+
+def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELINE_STAGES):
+    """Run one stage across every file before moving to the next stage.
+
+    File-major order reloads each model once per file. Stage-major loads the
+    diarizer once, runs all five files, frees it, then loads the separator. The
+    pipeline already checkpoints per stage and per file, so each pass resumes
+    from the previous pass's output rather than recomputing.
+
+    Returns a list of (path, error) for files that failed.
+    """
+    import copy
+    import os
+
+    failures = {}
+    original_stop = getattr(args, "stop_after", None)
+
+    for stage in stages:
+        if stage is not None and original_stop is not None:
+            # The caller asked to stop early; do not run past their request.
+            if _stage_index(stage) > _stage_index(original_stop):
+                break
+
+        label = stage or "refinement+export"
+        pending = [p for p in batch if p not in failures]
+        if not pending:
+            break
+        if logger:
+            logger.info(f"=== Stage '{label}': {len(pending)} file(s) ===")
+
+        stage_args = copy.copy(args)
+        stage_args.stop_after = stage
+
+        for i, path in enumerate(pending, start=1):
+            if logger:
+                logger.info(f"[{label} {i}/{len(pending)}] {os.path.basename(path)}")
+            try:
+                pipeline.run(stage_args, config, path)
+            except Exception as e:
+                # A file that dies in diarization must not be retried in every
+                # later stage, and must not stop its neighbours.
+                if logger:
+                    logger.error(f"Failed on {path} during {label}: {type(e).__name__}: {e}")
+                failures[path] = f"{label}: {type(e).__name__}: {e}"
+
+        if stage is not None and original_stop == stage:
+            break
+
+    return list(failures.items())
+
+
+def _stage_index(stage) -> int:
+    try:
+        return PIPELINE_STAGES.index(stage)
+    except ValueError:
+        return len(PIPELINE_STAGES)

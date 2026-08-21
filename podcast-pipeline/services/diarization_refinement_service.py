@@ -1,3 +1,4 @@
+import os
 from typing import List
 from difflib import SequenceMatcher
 from algorithms.asr.hallucination import foreign_script_ratio
@@ -58,8 +59,20 @@ class DiarizationRefinementService:
         self.tokenizer = None
         self.batch_size = batch_size
         self.rejected = 0
-        # Qwen2.5-3B is extremely fast, smart enough for this task, and only takes ~6GB VRAM
-        self.model_name = "Qwen/Qwen2.5-3B-Instruct"
+        # Qwen3.5-9B is the strongest sub-10B model available and covers 201
+        # languages against Qwen2.5's 29, which matters for Vietnamese.
+        #
+        # UNVERIFIED ON THIS HARDWARE. Three things can bite on a T4 (Turing):
+        #   - ~18GB in fp16 does not fit 16GB; it needs Q8 (~9.6GB) or Q6 (~7.4GB),
+        #     and Turing lacks the fast int4/int8 kernels, so quantised may be
+        #     SLOWER than fp16 rather than faster.
+        #   - Gated DeltaNet needs recent transformers; an older one raises
+        #     KeyError on the model type. Upgrading it inside sommelier_env risks
+        #     the speechbrain/pyannote pins.
+        #   - It is a vision-language model; AutoModelForCausalLM may not be the
+        #     right class.
+        # Set SOMMELIER_LLM to fall back without editing code.
+        self.model_name = os.environ.get("SOMMELIER_LLM", "Qwen/Qwen3.5-9B")
         
     def _load_model(self):
         if self.model is not None:
