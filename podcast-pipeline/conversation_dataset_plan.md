@@ -1,3 +1,12 @@
+đo SI-SDR / SIR / SAR,
+Asteroid
+
+các vấn đề cần xử lý:
++ đo chất lượng đoạn sau khi tách
++ tăng cường chất lượng diarization cụ thể phần phân cách giữa các speaker 
++ hậu xử lý phục hồi âm thanh 
++ thử đẩy lên mô hình 9 tỉ tham số qwen 3.5 để cải thiện asr 
++ dữ liệu đầu ra đang lưu không đúng file+ không đúng thư mục cần sửa 
 # Kiến Trúc Hệ Thống Lọc & Xây Dựng Conversation Dataset (Podcast Pipeline)
 
 Tài liệu này mô tả chi tiết kiến trúc và quy trình (pipeline) để chuyển đổi kết quả ASR thô thành một tập dữ liệu hội thoại (Conversation Dataset) đạt chuẩn công nghiệp (Production-grade), phục vụ cho việc huấn luyện các mô hình AI giọng nói (Voice AI / Emotional TTS / Voice Cloning).

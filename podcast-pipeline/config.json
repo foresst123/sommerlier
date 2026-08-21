@@ -34,12 +34,12 @@
             },
             "models": {
                 "whisper": {
-                    "model_size": "large-v3-turbo",
+                    "model_size": "large-v3",
                     "compute_type": "float16",
                     "batch_size": 16
                 },
                 "qwen3": {
-                    "batch_size": 4,
+                    "batch_size": 6,
                     "use_flash_attention": false,
                     "torch_dtype": "float16"
                 },
