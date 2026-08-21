@@ -4,7 +4,13 @@ import os
 from utils.logger import Logger
 def parse_args():
     parser = argparse.ArgumentParser(description="Sommelier ASR Pipeline")
-    parser.add_argument("--audio", required=True, help="Path to input audio file")
+    parser.add_argument("--audio", help="Path to a single input audio file")
+    parser.add_argument("--audio_dir",
+                        help="Directory of audio files to process in one run. Files are "
+                             "grouped into batches under batch.max_hours_per_run from "
+                             "config.json; each still writes its own output folder.")
+    parser.add_argument("--max_hours", type=float,
+                        help="Override batch.max_hours_per_run for this run.")
     parser.add_argument("--config", default="config.json", help="Path to config file")
     parser.add_argument("--job_id", default="default", help="Job ID for checkpointing")
     parser.add_argument("--cache_dir", default="cache", help="Cache directory")
@@ -35,6 +41,10 @@ def parse_args():
 # 1. EARLY ENVIRONMENT SETUP (PRE-IMPORT)
 # ==========================================
 args = parse_args()
+
+if not args.audio and not args.audio_dir:
+    parser_error = "one of --audio or --audio_dir is required"
+    raise SystemExit(f"main.py: error: {parser_error}")
 
 with open(args.config, 'r', encoding='utf-8') as f:
     config = json.load(f)
@@ -97,6 +107,7 @@ from utils.torch_compat import install_torch_load_shim
 # Must run before any model module imports torch and loads a checkpoint.
 install_torch_load_shim()
 
+from utils.batch import audio_duration, find_audio_files, plan_batches
 from utils.worker_env import resolve_worker_python
 from services.model_loader import ModelLoader
 from services.audio_service import AudioService
@@ -211,8 +222,52 @@ def main():
             }
         )
         
-        logger.info(f"Running pipeline on audio: {args.audio}")
-        pipeline.run(args, config, args.audio)
+        # One worker set serves the whole batch: loading models per file cost
+        # ~64s each, which dominates once a run holds more than a couple of
+        # files. Each file still gets its own output folder and its own
+        # checkpoint scope.
+        batch_cfg = config.get("batch", {})
+        max_hours = args.max_hours if args.max_hours is not None else \
+            float(batch_cfg.get("max_hours_per_run", 5.0))
+
+        if args.audio_dir:
+            exts = batch_cfg.get("audio_extensions",
+                                 [".mp3", ".wav", ".m4a", ".flac", ".opus", ".ogg", ".aac"])
+            paths = find_audio_files(args.audio_dir, exts)
+            if not paths:
+                raise RuntimeError(
+                    f"No audio files in {args.audio_dir} (looked for {', '.join(exts)})")
+        else:
+            paths = [args.audio]
+
+        batches = plan_batches(paths, max_hours, logger=logger)
+        total_hours = sum(audio_duration(p) for p in paths) / 3600.0
+        logger.info(
+            f"Processing {len(paths)} file(s), {total_hours:.2f}h total, "
+            f"in {len(batches)} run(s) of up to {max_hours}h")
+
+        failures = []
+        done = 0
+        for bi, batch in enumerate(batches, start=1):
+            batch_hours = sum(audio_duration(p) for p in batch) / 3600.0
+            logger.info(f"--- Batch {bi}/{len(batches)}: "
+                        f"{len(batch)} file(s), {batch_hours:.2f}h ---")
+            for path in batch:
+                done += 1
+                logger.info(f"[{done}/{len(paths)}] Running pipeline on audio: {path}")
+                try:
+                    pipeline.run(args, config, path)
+                except Exception as e:
+                    # One bad file must not cost the rest of a five-hour run.
+                    logger.error(f"Failed on {path}: {type(e).__name__}: {e}")
+                    failures.append((path, f"{type(e).__name__}: {e}"))
+
+        if failures:
+            logger.warning(f"{len(failures)}/{len(paths)} file(s) failed:")
+            for path, err in failures:
+                logger.warning(f"  {os.path.basename(path)}: {err}")
+        else:
+            logger.info(f"All {len(paths)} file(s) completed")
 
     finally:
         if qwen3_service:

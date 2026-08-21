@@ -97,5 +97,17 @@
                 }
             }
         }
+    },
+    "batch": {
+        "max_hours_per_run": 5.0,
+        "audio_extensions": [
+            ".mp3",
+            ".wav",
+            ".m4a",
+            ".flac",
+            ".opus",
+            ".ogg",
+            ".aac"
+        ]
     }
 }

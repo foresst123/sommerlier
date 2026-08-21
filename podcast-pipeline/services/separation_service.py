@@ -73,6 +73,18 @@ class TargetExtractionService:
         self.failures = []          # (start, end, speaker, reason, detail)
         self._dump_warned = False
 
+    def reset_stats(self):
+        """Clear per-file counters.
+
+        The service instance is reused across a batch, so without this the
+        second file's [TSE] summary and _tse_report.json would report the
+        running total rather than that file.
+        """
+        self.stats = collections.Counter()
+        self.sims = []
+        self.overlap_durations = []
+        self.failures = []
+
     # ------------------------------------------------------------------
     def _fail(self, enh_seg, start, end, reason, detail=""):
         """Record a span that stayed as raw mixture, and why."""

@@ -79,6 +79,10 @@ class DiarizationRefinementService:
         except Exception as e:
             if self.logger: self.logger.error(f"Failed to load LLM: {e}")
             
+    def reset_stats(self):
+        """Clear per-file counters; the instance is reused across a batch."""
+        self.rejected = 0
+
     def unload(self):
         """Release the refinement model and its VRAM.
 

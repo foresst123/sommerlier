@@ -59,9 +59,19 @@ class PipelineService:
 
 
     def run(self, args: Any, config: dict, audio_path: str):
-        job_id = getattr(args, "job_id", "default_job")
+        # Scope the checkpoint to this audio file. Sharing one job_id across a
+        # batch would make the second file load the first file's diarization and
+        # emit its transcript -- the checkpoint exists, so nothing recomputes.
+        base_job = getattr(args, "job_id", "default_job")
+        job_id = f"{base_job}_{os.path.splitext(os.path.basename(audio_path))[0]}"
         cache_dir = getattr(args, "cache_dir", "cache")
         checkpoint = CheckpointManager(cache_dir, job_id)
+
+        # Services are constructed once and reused for every file in a batch.
+        for svc in (self.separation_svc, self.refinement_svc):
+            reset = getattr(svc, "reset_stats", None)
+            if reset:
+                reset()
         
         # 1. Audio Preprocessing
         audio_data = self.audio_svc.load_audio(audio_path, target_sr=24000)
