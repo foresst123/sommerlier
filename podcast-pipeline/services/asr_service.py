@@ -16,7 +16,7 @@ class ASRService:
     """Coordinates MoE ASR models and ROVER ensemble."""
     
     def __init__(self, whisper, phowhisper, qwen3, logger=None, model_loader=None, qwen3_service=None,
-                 language: str = "vi", batch_size: int = 4):
+                 language: str = "vi", batch_size: int = 4, keep_models: bool = False):
         self.whisper = whisper
         self.phowhisper = phowhisper
         self.qwen3 = qwen3
@@ -25,6 +25,7 @@ class ASRService:
         self.qwen3_service = qwen3_service
         self.language = language
         self.batch_size = batch_size
+        self.keep_models = keep_models
 
         if not self.whisper and self.logger:
             self.logger.warning(
@@ -96,7 +97,7 @@ class ASRService:
         for a, v in zip(audios_16k, dummy_vads):
             results.append(self._run_whisper(a, v))
             if callback: callback()
-        if getattr(self, "model_loader", None):
+        if getattr(self, "model_loader", None) and not self.keep_models:
             self.model_loader.unload("whisper")
         return results
 
@@ -110,7 +111,7 @@ class ASRService:
             res = self.phowhisper.transcribe_batch(
                 audios_16k, batch_size=self.batch_size, logger=self.logger, callback=callback
             )
-            if getattr(self, "model_loader", None):
+            if getattr(self, "model_loader", None) and not self.keep_models:
                 self.model_loader.unload("phowhisper")
             return res
         except Exception as e:

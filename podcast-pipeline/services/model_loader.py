@@ -79,6 +79,15 @@ class ModelLoader:
             
     def load_asr_models(self, qwen3_service: Qwen3WorkerService = None):
         """Load ASR models (Whisper, PhoWhisper, Qwen3)."""
+        # --stop_after names the last stage to run, so anything that halts
+        # before ASR must not pay for a 3GB model it will never call.
+        stop_after = getattr(self.args, "stop_after", None)
+        if stop_after in ("diarization", "separation", "music_removal"):
+            if self.logger:
+                self.logger.info(
+                    f"Skipping ASR models (--stop_after {stop_after} runs before ASR)")
+            return
+
         if self.logger: self.logger.info(f"Loading PhoWhisper on {self.device_1}")
         self.models["phowhisper"] = PhoWhisperASR(device=self.device_1)
 

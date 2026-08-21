@@ -32,6 +32,18 @@ class PipelineService:
         # released as soon as its stage is done rather than at process exit.
         self.worker_services = worker_services or {}
 
+    def _free(self, args, *model_names):
+        """Unload finished models unless the caller asked to keep them.
+
+        --keep_models trades peak VRAM for reload time: worth it when several
+        files run back to back on a GPU with room for everything, wrong when
+        the models only fit because each stage releases the last.
+        """
+        if getattr(args, "keep_models", False) or not self.model_loader:
+            return
+        for name in model_names:
+            self.model_loader.unload(name)
+
     def _release_worker(self, name: str):
         """Stop a worker subprocess now that its stage is finished."""
         service = self.worker_services.get(name)
@@ -74,9 +86,7 @@ class PipelineService:
 
             checkpoint.save("diarization", diarization_result)
             
-        if self.model_loader:
-            self.model_loader.unload("diarizer")
-            self.model_loader.unload("vad")
+        self._free(args, "diarizer", "vad")
         # Unloading the client does not touch the subprocess holding the weights.
         self._release_worker("diarizen")
 
@@ -98,9 +108,7 @@ class PipelineService:
             if self.logger: self.logger.info(f"[DEBUG] After Separation: {len(enhanced_segments)} segments")
             checkpoint.save("separation", enhanced_segments)
             
-        if self.model_loader:
-            self.model_loader.unload("separator")
-            self.model_loader.unload("embedder")
+        self._free(args, "separator", "embedder")
         self._release_worker("sidon")
 
         if getattr(args, "stop_after", None) == "separation":
@@ -116,9 +124,7 @@ class PipelineService:
             if self.logger: self.logger.info(f"[DEBUG] After Music Removal: {len(enhanced_segments)} segments")
             checkpoint.save("music_removal", enhanced_segments)
             
-        if self.model_loader:
-            self.model_loader.unload("panns")
-            self.model_loader.unload("demucs")
+        self._free(args, "panns", "demucs")
             
         if getattr(args, "stop_after", None) == "music_removal":
             if self.logger: self.logger.info("Stopping pipeline after music_removal as requested by --stop_after.")
@@ -162,7 +168,11 @@ class PipelineService:
             transcripts = self.refinement_svc.refine(
                 transcripts, getattr(args, "llm_prompt", None) or None
             )
-            
+            # Export needs no GPU, and a following file needs this memory.
+            if not getattr(args, "keep_models", False):
+                self.refinement_svc.unload()
+
+        
         # 8. Export Results
         save_path = getattr(args, "save_path", "./output")
         if save_path == "./output":

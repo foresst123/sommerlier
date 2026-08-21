@@ -79,6 +79,27 @@ class DiarizationRefinementService:
         except Exception as e:
             if self.logger: self.logger.error(f"Failed to load LLM: {e}")
             
+    def unload(self):
+        """Release the refinement model and its VRAM.
+
+        Nothing freed it before, so a ~6.2GB bf16 model sat in VRAM from the
+        first refinement until the process exited. That is invisible when one
+        file is processed and then the process ends, and costly when several
+        files run back to back and every later stage competes for what this
+        stage is no longer using.
+        """
+        if self.model is None and self.tokenizer is None:
+            return
+        self.model = None
+        self.tokenizer = None
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        if self.logger:
+            self.logger.info("Unloaded refinement LLM from VRAM")
+
     def _accept(self, seg, refined: str) -> bool:
         """Whether the model's output is a fusion of this segment's transcripts.
 

@@ -24,6 +24,10 @@ def parse_args():
     parser.add_argument("--LLM", default="case_0", type=str, help="LLM refinement case")
     parser.add_argument("--initprompt", action="store_true", help="Use initial prompt for LLM")
     parser.add_argument("--env", default="kaggle", type=str, help="Environment profile name in config.json")
+    parser.add_argument("--keep_models", action="store_true",
+                        help="Keep models in VRAM between stages instead of unloading them. "
+                             "Saves reload time when processing many files, at the cost of a "
+                             "higher peak: only use it when the GPU has room for every model at once.")
     parser.add_argument("--stop_after", type=str, choices=["diarization", "separation", "music_removal", "asr", "captioning"], help="Stop pipeline gracefully after this stage")
     return parser.parse_args()
 
@@ -185,7 +189,8 @@ def main():
             model_loader=model_loader,
             qwen3_service=qwen3_service,
             language=args.lang,
-            batch_size=env_profile.get("models", {}).get("qwen3", {}).get("batch_size", 4)
+            batch_size=env_profile.get("models", {}).get("qwen3", {}).get("batch_size", 4),
+            keep_models=args.keep_models
         )
         caption_svc = CaptionService(
             captioner=model_loader.get("captioner"),
