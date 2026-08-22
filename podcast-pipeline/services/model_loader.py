@@ -90,8 +90,15 @@ class ModelLoader:
                     f"Skipping ASR models (--stop_after {stop_after} runs before ASR)")
             return
 
-        if self.logger: self.logger.info(f"Loading PhoWhisper on {self.device_1}")
-        self.models["phowhisper"] = PhoWhisperASR(device=self.device_1)
+        # PhoWhisper goes on GPU 2, not alongside everything else. GPU 1 already
+        # hosts the DiariZen worker, the embedder, ECAPA, the Sidon worker and
+        # Whisper; adding a second 3.1GB model there took the card to ~15.2GB
+        # against a 14.56GB T4, and the first thing to ask for memory afterwards
+        # was diarization. It failed on chunk 0 with DiariZen reporting
+        # "batch_size (12) is probably too large" -- a misleading message, since
+        # that batch needs under 1GB. The card was simply already full.
+        if self.logger: self.logger.info(f"Loading PhoWhisper on {self.device_2}")
+        self.models["phowhisper"] = PhoWhisperASR(device=self.device_2)
 
         
         if getattr(self.args, "ASRMoE", False) and getattr(self.args, "lang", "vi") == "vi":
