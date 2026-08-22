@@ -117,6 +117,65 @@ def test_refinement_records_what_the_llm_rewrote(tmp_path):
         (tmp_path / "05_refinement" / "stats.json").read_text())["segments_changed"] == 1
 
 
+def test_rewriting_most_segments_is_not_itself_a_warning(tmp_path):
+    """Vietnamese ASR arrives unpunctuated and stuttering, so a good pass edits
+    nearly everything. A real run rewrote 171/200 while dropping 3.9% of the
+    words -- almost all of it stutter removal."""
+    # Punctuation and diacritics on most rows, a stutter removed on one of
+    # them: 1 word out of 100, close to the 3.9% the real run measured.
+    before = [_Seg(index=str(i), text="cai nay la mot cau day du") for i in range(20)]
+    after = [_Seg(index=str(i), text="Cái này là một câu đầy đủ.") for i in range(20)]
+    before[0] = _Seg(index="0", text="cai nay la la mot cau day du")
+    so = StageOutputService(str(tmp_path))
+    so.write_refinement(after, before=before)
+
+    stats = json.loads((tmp_path / "05_refinement" / "stats.json").read_text())
+    assert stats["segments_changed"] == 20
+    assert "warnings" not in stats
+
+
+def test_bulk_word_deletion_is_flagged(tmp_path):
+    before = [_Seg(index=str(i), text="mot hai ba bon nam sau bay tam") for i in range(10)]
+    after = [_Seg(index=str(i), text="mot hai") for i in range(10)]
+    so = StageOutputService(str(tmp_path))
+    so.write_refinement(after, before=before)
+
+    stats = json.loads((tmp_path / "05_refinement" / "stats.json").read_text())
+    assert stats["word_drop_pct"] > 15.0
+    assert any("removed" in w for w in stats["warnings"])
+
+
+def test_short_pauses_do_not_count_against_coverage():
+    """merge_gap=0.3 leaves every inter-phrase pause unlabelled; a real run read
+    79.1% coverage with 184 of 196 gaps under a second. That is breathing room,
+    not missing speech."""
+    segs, t = [], 0.0
+    for i in range(60):
+        segs.append(_Seg(index=str(i).zfill(5), start=t, end=t + 4.0,
+                         speaker="1" if i % 2 else "2"))
+        segs.append(_Seg(index=f"b{i}", start=t + 1.5, end=t + 2.1,
+                         speaker="2" if i % 2 else "1"))
+        t += 4.6                      # 0.6s unlabelled between every turn
+    stats = StageOutputService.segment_stats(segs, t)
+
+    assert stats["coverage_pct"] < 90.0            # would have warned before
+    assert stats["unlabelled_gaps"]["short_count"] > 50
+    assert stats["unlabelled_gaps"]["long_count"] == 0
+    assert not any("gap" in w for w in stats.get("warnings", []))
+
+
+def test_a_long_unlabelled_stretch_is_still_flagged():
+    segs = [_Seg(index="0", start=0.0, end=20.0, speaker="1"),
+            _Seg(index="1", start=8.0, end=9.0, speaker="2"),
+            _Seg(index="2", start=60.0, end=80.0, speaker="2"),
+            _Seg(index="3", start=68.0, end=69.0, speaker="1")]
+    stats = StageOutputService.segment_stats(segs, 80.0)
+
+    assert stats["unlabelled_gaps"]["long_count"] == 1
+    assert stats["unlabelled_gaps"]["longest"] == 40.0
+    assert any("unlabelled gaps" in w for w in stats["warnings"])
+
+
 def test_disabling_stage_output_writes_nothing(tmp_path):
     so = StageOutputService(str(tmp_path), enabled=False)
     so.write_diarization(_turns(), 60.0)

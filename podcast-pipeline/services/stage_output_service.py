@@ -32,8 +32,49 @@ OVERLAP_PCT_MIN = 3.0
 OVERLAP_PCT_MAX = 25.0
 # Below this, one speaker is being absorbed into the other's turns.
 SPEAKER_BALANCE_MIN = 10.0
-# Diarization that labels less than this is dropping speech on the floor.
-COVERAGE_PCT_MIN = 80.0
+# Coverage is measured as unlabelled *long* gaps, not as total silence. A
+# conversation is mostly short pauses between phrases, and a small merge_gap
+# leaves every one of them unlabelled: a real run at merge_gap=0.3 reported
+# 79.1% coverage, of which 184 of 196 gaps were under a second -- ordinary
+# breathing room, not lost speech. Only a gap long enough to hold a sentence
+# suggests the diarizer actually dropped something.
+LONG_GAP_SEC = 2.0
+LONG_GAP_PCT_MAX = 10.0
+
+# Refinement legitimately shortens text -- it deletes ASR stutters and
+# hallucinated boilerplate. Losing this much of what it touched is past that.
+WORD_DROP_PCT_MAX = 15.0
+
+
+def _gap_profile(merged, span) -> dict:
+    """Unlabelled stretches, split by whether they could hold speech.
+
+    Short gaps are what a conversation is made of -- the pause between phrases,
+    a breath -- and they multiply as merge_gap shrinks, so their total says
+    nothing about whether the diarizer missed anything. Gaps long enough to
+    hold a sentence do.
+    """
+    if not merged or not span:
+        return {"long_count": 0, "long_seconds": 0.0, "long_pct": 0.0,
+                "short_count": 0, "longest": 0.0}
+
+    gaps = []
+    if merged[0][0] > 0.1:
+        gaps.append(merged[0][0])
+    for a, b in zip(merged, merged[1:]):
+        if b[0] - a[1] > 0.1:
+            gaps.append(b[0] - a[1])
+    if span - merged[-1][1] > 0.1:
+        gaps.append(span - merged[-1][1])
+
+    long_gaps = [g for g in gaps if g >= LONG_GAP_SEC]
+    return {
+        "long_count": len(long_gaps),
+        "long_seconds": round(sum(long_gaps), 1),
+        "long_pct": round(100.0 * sum(long_gaps) / span, 1),
+        "short_count": len(gaps) - len(long_gaps),
+        "longest": round(max(gaps), 1) if gaps else 0.0,
+    }
 
 
 def _as_dict(obj) -> dict:
@@ -140,6 +181,7 @@ class StageOutputService:
             "overlap": {"seconds": round(overlap, 2),
                         "pct_of_audio": round(100.0 * overlap / span, 2) if span else 0.0},
             "coverage_pct": round(100.0 * labelled / span, 1) if span else None,
+            "unlabelled_gaps": _gap_profile(merged, span),
         }
 
         w = []
@@ -157,8 +199,12 @@ class StageOutputService:
             lo = min(stats["speaker_share_pct"].values())
             if lo < SPEAKER_BALANCE_MIN:
                 w.append(f"speaker share is {lo}%: one speaker may be absorbed into the other")
-        if stats["coverage_pct"] is not None and stats["coverage_pct"] < COVERAGE_PCT_MIN:
-            w.append(f"only {stats['coverage_pct']}% of the audio carries a label")
+        gaps = stats["unlabelled_gaps"]
+        if gaps["long_pct"] > LONG_GAP_PCT_MAX:
+            w.append(
+                f"{gaps['long_pct']}% of the audio sits in unlabelled gaps longer "
+                f"than {LONG_GAP_SEC}s ({gaps['long_count']} of them, worst "
+                f"{gaps['longest']}s): speech the diarizer did not label")
         if w:
             stats["warnings"] = w
         return stats
@@ -279,10 +325,24 @@ class StageOutputService:
                 if old is not None and old != new:
                     changes.append({"index": d.get("index"), "before": old, "after": new})
             stats["segments_changed"] = len(changes)
-            # A refinement pass that rewrites nearly everything is not refining.
-            if transcripts and len(changes) / len(transcripts) > 0.5:
+
+            # Counting rewritten segments does not separate repair from damage.
+            # Vietnamese ASR output arrives with no punctuation and frequent
+            # stutters, so a good pass touches most of it: a real run rewrote
+            # 171 of 200, and inspection showed 42% punctuation only, 18%
+            # removing ASR repetitions, and the rest genuine corrections
+            # ("miệt danh" -> "biệt danh"). What would signal damage is words
+            # disappearing in bulk, so that is what is measured.
+            words_before = sum(len(c["before"].split()) for c in changes)
+            words_after = sum(len(c["after"].split()) for c in changes)
+            drop_pct = (100.0 * (words_before - words_after) / words_before
+                        if words_before else 0.0)
+            stats["word_drop_pct"] = round(drop_pct, 1)
+            if drop_pct > WORD_DROP_PCT_MAX:
                 stats.setdefault("warnings", []).append(
-                    f"the LLM rewrote {len(changes)}/{len(transcripts)} segments")
+                    f"refinement removed {drop_pct:.1f}% of the words it touched "
+                    f"({words_before - words_after} of {words_before}): check "
+                    "05_refinement/changes.json for deleted content")
             extra = {"changes.json": changes}
         return self._finish("refinement", "transcripts.json", transcripts, stats, extra)
 
