@@ -220,7 +220,8 @@ def main():
             captioner=model_loader.get("captioner"),
             logger=logger
         )
-        refinement_svc = DiarizationRefinementService(logger=logger)
+        refinement_cfg = env_profile.get("models", {}).get("refinement", {})
+        refinement_svc = DiarizationRefinementService(logger=logger, **refinement_cfg)
         export_svc = ExportService(logger=logger)
 
         # 4. Orchestrate via PipelineService

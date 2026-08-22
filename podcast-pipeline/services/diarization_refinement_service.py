@@ -53,26 +53,25 @@ class DiarizationRefinementService:
 
     # The ~1200-token system prompt dominates each sequence, so even a modest
     # batch builds a large KV cache; 2 fits alongside the ASR models on a T4.
-    def __init__(self, logger=None, batch_size: int = 4):
+    def __init__(self, logger=None, batch_size: int = 4, model_name: str = None):
         self.logger = logger
         self.model = None
         self.tokenizer = None
         self.batch_size = batch_size
         self.rejected = 0
-        # Qwen3.5-9B is the strongest sub-10B model available and covers 201
-        # languages against Qwen2.5's 29, which matters for Vietnamese.
+        # Qwen2.5-3B-Instruct: ~6.2GB in bf16, which leaves room on a 14.5GB T4
+        # for whatever else is resident, and it is what produced the refinement
+        # results this pipeline has actually been measured on (0 of 36 segments
+        # damaged on the last full run).
         #
-        # UNVERIFIED ON THIS HARDWARE. Three things can bite on a T4 (Turing):
-        #   - ~18GB in fp16 does not fit 16GB; it needs Q8 (~9.6GB) or Q6 (~7.4GB),
-        #     and Turing lacks the fast int4/int8 kernels, so quantised may be
-        #     SLOWER than fp16 rather than faster.
-        #   - Gated DeltaNet needs recent transformers; an older one raises
-        #     KeyError on the model type. Upgrading it inside sommelier_env risks
-        #     the speechbrain/pyannote pins.
-        #   - It is a vision-language model; AutoModelForCausalLM may not be the
-        #     right class.
-        # Set SOMMELIER_LLM to fall back without editing code.
-        self.model_name = os.environ.get("SOMMELIER_LLM", "Qwen/Qwen3.5-9B")
+        # A 9B model was set here previously on the argument that it covers more
+        # languages. It does not fit: ~18GB in bf16 against 14.5GB of card, so
+        # device_map="auto" would silently spill it to CPU and refinement would
+        # crawl rather than fail. Anything larger needs its VRAM checked on the
+        # target hardware first, not reasoned about from the model card.
+        # SOMMELIER_LLM still overrides without a code change.
+        self.model_name = (model_name or os.environ.get(
+            "SOMMELIER_LLM", "Qwen/Qwen2.5-3B-Instruct"))
         
     def _load_model(self):
         if self.model is not None:
@@ -90,8 +89,19 @@ class DiarizationRefinementService:
             self.model.eval()
             if self.logger: self.logger.info("LLM loaded successfully.")
         except Exception as e:
-            if self.logger: self.logger.error(f"Failed to load LLM: {e}")
-            
+            # Do not swallow this. refine() treats a missing model as "nothing
+            # to do" and hands the transcripts straight back, so a failed load
+            # used to look exactly like a successful no-op run: the stage logged
+            # an error, the pipeline carried on, and the output was silently
+            # un-refined. Raising here means the run stops at the point the
+            # problem is still visible.
+            msg = (f"Failed to load refinement LLM {self.model_name}: {e}. "
+                   "Set SOMMELIER_LLM to a model that fits this GPU, or drop "
+                   "--llm_refinement to skip the stage deliberately.")
+            if self.logger:
+                self.logger.error(msg)
+            raise RuntimeError(msg) from e
+
     def reset_stats(self):
         """Clear per-file counters; the instance is reused across a batch."""
         self.rejected = 0

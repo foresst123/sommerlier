@@ -61,6 +61,10 @@
                 "demucs": {
                     "segment": 10,
                     "overlap": 0.1
+                },
+                "refinement": {
+                    "model_name": "Qwen/Qwen2.5-3B-Instruct",
+                    "batch_size": 2
                 }
             }
         },
@@ -104,6 +108,10 @@
                 "demucs": {
                     "segment": 20,
                     "overlap": 0.25
+                },
+                "refinement": {
+                    "model_name": "Qwen/Qwen2.5-3B-Instruct",
+                    "batch_size": 4
                 }
             }
         }
