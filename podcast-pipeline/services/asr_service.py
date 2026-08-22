@@ -7,6 +7,7 @@ from schemas.transcript import TranscriptSegment
 from algorithms.asr.rover import RoverEnsembler
 import numpy as np
 from algorithms.asr.hallucination import filter_short_segment_outputs
+from utils.audio_normalize import normalize_for_asr, remove_dc, measure
 
 # Segments shorter than this are padded with surrounding audio before ASR.
 CONTEXT_PAD_BELOW = 2.0
@@ -193,6 +194,23 @@ class ASRService:
                 audio_16k = librosa.resample(raw_audio, orig_sr=sr, target_sr=16000)
             else:
                 audio_16k = raw_audio
+
+            # Level-condition after resampling and after the context pad is
+            # concatenated, so segment and padding receive the same gain and
+            # the join between them stays seamless. One scalar per buffer: it
+            # moves the whole clip to the loudness the recognisers were trained
+            # at without altering its spectrum. Separated audio arrives quieter
+            # than the mixture -- the interferer has been removed -- and a quiet
+            # clip is where Whisper starts emitting training-set boilerplate.
+            pre = measure(audio_16k)
+            audio_16k = normalize_for_asr(remove_dc(audio_16k))
+            if self.logger and pre["rms"] > 0:
+                post = measure(audio_16k)
+                gain = post["rms"] / pre["rms"]
+                if gain > 2.0 or gain < 0.5:
+                    self.logger.debug(
+                        f"[ASR:level] seg {seg.index} rms {pre['rms']:.4f} -> "
+                        f"{post['rms']:.4f} (x{gain:.2f}) peak {post['peak']:.3f}")
 
             core_len = (end_frame - start_frame) / sr
             if core_len * 16000 < 160:

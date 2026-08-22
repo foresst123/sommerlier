@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 
 def apply_sortformer_segment_padding(df: pd.DataFrame, pad_onset: float = 0.0, pad_offset: float = 0.0, audio_duration: float = None) -> pd.DataFrame:
@@ -88,7 +89,43 @@ def deduplicate_segments_by_index(segments: list, logger=None) -> list:
                 logger.warning(f"Duplicate segment index detected and skipped: {idx}")
     return deduped
 
-def split_long_segments(segment_list: list, max_duration: float = 30.0) -> list:
+def _quietest_cut(waveform, sample_rate, lo: float, hi: float,
+                  frame_sec: float = 0.02) -> float:
+    """Time in [lo, hi] where the audio is quietest, or None if unmeasurable.
+
+    Used to place a split inside a search band rather than on a stopwatch. The
+    quietest 20ms frame is where a pause is, and cutting there keeps a word
+    whole; cutting at a fixed offset lands mid-syllable roughly as often as not.
+    """
+    if waveform is None or sample_rate is None or hi <= lo:
+        return None
+    i, j = int(lo * sample_rate), int(hi * sample_rate)
+    i, j = max(0, i), min(len(waveform), j)
+    if j - i < 2:
+        return None
+
+    band = waveform[i:j]
+    frame = max(1, int(frame_sec * sample_rate))
+    if len(band) < frame * 2:
+        return None
+
+    n = len(band) // frame
+    rms = np.sqrt((band[:n * frame].reshape(n, frame) ** 2).mean(axis=1) + 1e-12)
+    return lo + (int(np.argmin(rms)) + 0.5) * frame / sample_rate
+
+
+def split_long_segments(segment_list: list, max_duration: float = 30.0,
+                        waveform=None, sample_rate: int = None,
+                        search_sec: float = 2.0) -> list:
+    """Break over-long segments, preferring a pause to the stopwatch.
+
+    Without audio this splits exactly on max_duration, which cuts mid-word as
+    often as not -- and a clipped word is a transcription error the recogniser
+    has no way to recover from. Given the waveform, the cut moves to the
+    quietest point within `search_sec` before the deadline, so the pieces end
+    on a pause. The deadline is never exceeded: the search band sits entirely
+    before it.
+    """
     new_segments = []
     new_index = 0
     for segment in segment_list:
@@ -104,6 +141,18 @@ def split_long_segments(segment_list: list, max_duration: float = 30.0) -> list:
             current_start = start_time
             while current_start < end_time:
                 chunk_end = min(current_start + max_duration, end_time)
+
+                # Only look for a pause on a cut that is actually forced; the
+                # final piece ends where the segment ends.
+                if chunk_end < end_time and waveform is not None:
+                    band_lo = max(current_start + max_duration - search_sec,
+                                  current_start + 0.2)
+                    quiet = _quietest_cut(waveform, sample_rate, band_lo, chunk_end)
+                    # Guard against a degenerate band handing back a cut that
+                    # would make no progress.
+                    if quiet is not None and quiet > current_start + 0.2:
+                        chunk_end = quiet
+
                 new_segments.append({
                     'index': str(new_index).zfill(5),
                     'start': round(current_start, 3),

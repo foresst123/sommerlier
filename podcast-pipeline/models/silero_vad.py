@@ -13,7 +13,17 @@ import torch
 import numpy as np
 import onnxruntime
 
-VAD_THRESHOLD = 20
+# Segments longer than this are re-cut on Silero's own speech boundaries;
+# shorter ones keep the diarizer's edges untouched. It used to be 20s, which
+# meant that once max_segment_length dropped to 20 nothing reached the VAD at
+# all and every boundary came straight from the diarizer's 0.8s frame grid.
+# A couple of seconds is enough audio for Silero to place an edge on the
+# waveform rather than on a frame index.
+VAD_THRESHOLD = float(os.environ.get("VAD_THRESHOLD", "2.0"))
+# Longest run of speech `segment_speech` will hand back as one piece before it
+# splits at the widest internal pause. Independent of VAD_THRESHOLD: that one
+# decides whether the VAD runs, this one decides how it carves the result.
+VAD_MAX_SEGMENT = float(os.environ.get("VAD_MAX_SEGMENT", "20.0"))
 SAMPLING_RATE = 16000
 
 
@@ -22,7 +32,8 @@ class SileroVAD:
     Voice Activity Detection (VAD) using Silero-VAD.
     """
 
-    def __init__(self, local=False, model="silero_vad", device=torch.device("cpu")):
+    def __init__(self, local=False, model="silero_vad", device=torch.device("cpu"),
+                 vad_threshold=None, max_segment=None):
         """
         Initialize the VAD object.
 
@@ -30,6 +41,10 @@ class SileroVAD:
             local (bool, optional): Whether to load the model locally. Defaults to False.
             model (str, optional): The VAD model name to load. Defaults to "silero_vad".
             device (torch.device, optional): The device to run the model on. Defaults to 'cpu'.
+            vad_threshold (float, optional): Segments longer than this are re-cut on
+                Silero's boundaries. Defaults to VAD_THRESHOLD.
+            max_segment (float, optional): Longest run returned as one piece before
+                splitting at the widest pause. Defaults to VAD_MAX_SEGMENT.
 
         Returns:
             None
@@ -37,6 +52,8 @@ class SileroVAD:
         Raises:
             RuntimeError: If loading the model fails.
         """
+        self.vad_threshold = VAD_THRESHOLD if vad_threshold is None else float(vad_threshold)
+        self.max_segment = VAD_MAX_SEGMENT if max_segment is None else float(max_segment)
         try:
             # Set ONNX Runtime providers based on device
             if device.type == "cuda":
@@ -150,7 +167,7 @@ class SileroVAD:
                 start_index == end_index
                 or adjusted_timestamps[end_index][1]
                 - adjusted_timestamps[start_index][0]
-                < 20 * sampling_rate
+                < self.max_segment * sampling_rate
             ):
                 segments.append([start_index, end_index])
             else:
@@ -204,7 +221,7 @@ class SileroVAD:
             if row["speaker"] not in speakers_seen:
                 speakers_seen.add(row["speaker"])
 
-            if end - start <= VAD_THRESHOLD:
+            if end - start <= self.vad_threshold:
                 out.append(
                     {
                         "index": str(count_id).zfill(5),

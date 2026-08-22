@@ -27,12 +27,17 @@
             "gpu_1": 0,
             "gpu_2": 1,
             "pipeline": {
-                "merge_gap": 1.0,
+                "merge_gap": 0.3,
+                "max_segment_length": 20.0,
                 "seg_th": 0.11,
                 "min_cluster_size": 11,
                 "clust_th": 0.5
             },
             "models": {
+                "vad": {
+                    "vad_threshold": 2.0,
+                    "max_segment": 20.0
+                },
                 "whisper": {
                     "model_size": "large-v3",
                     "compute_type": "float16",
@@ -46,11 +51,11 @@
                 "diarizen": {
                     "batch_size": 12,
                     "seg_duration": 16,
-                    "segmentation_step": 0.05,
+                    "segmentation_step": 0.02,
                     "apply_median_filtering": false,
                     "clustering_method": "VBxClustering",
                     "min_speakers": 1,
-                    "max_speakers": 20,
+                    "max_speakers": 10,
                     "ahc_threshold": 0.6
                 },
                 "demucs": {
@@ -65,12 +70,17 @@
             "gpu_1": 0,
             "gpu_2": 0,
             "pipeline": {
-                "merge_gap": 1.0,
+                "merge_gap": 0.3,
+                "max_segment_length": 20.0,
                 "seg_th": 0.11,
                 "min_cluster_size": 11,
                 "clust_th": 0.5
             },
             "models": {
+                "vad": {
+                    "vad_threshold": 2.0,
+                    "max_segment": 20.0
+                },
                 "whisper": {
                     "model_size": "large-v3-turbo",
                     "compute_type": "bfloat16",

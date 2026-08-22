@@ -42,6 +42,11 @@ def parse_args():
                         help="Keep models in VRAM between stages instead of unloading them. "
                              "Saves reload time when processing many files, at the cost of a "
                              "higher peak: only use it when the GPU has room for every model at once.")
+    parser.add_argument("--no_stage_output", action="store_true",
+                        help="Skip the per-stage artifact directories (01_diarization/, "
+                             "02_separation/, ...). They are written by default so a run "
+                             "stopped or crashed part-way still leaves its finished work "
+                             "on disk.")
     parser.add_argument("--stop_after", type=str, choices=["diarization", "separation", "music_removal", "asr", "captioning"], help="Stop pipeline gracefully after this stage")
     return parser.parse_args()
 

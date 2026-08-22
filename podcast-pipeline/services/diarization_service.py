@@ -125,12 +125,24 @@ class DiarizationService:
             
         # Apply merge and smooth logic
         merge_gap = getattr(args, "merge_gap", 2.0)
+        # The merge loop keeps absorbing same-speaker turns until it hits this
+        # ceiling, so the ceiling is what actually decides turn length -- a run
+        # of it produced 47 segments piled against a 30s limit, none of them a
+        # real turn. It also sets how lopsided a TSE window can get: a long turn
+        # swallowing a 0.3s backchannel is what makes the separator emit one
+        # source and silence. Keep merge and split reading the same number.
+        max_seg = getattr(args, "max_segment_length", None) or 30.0
         self._log_segment_stats("post-vad", raw_list)
-        smoothed_list = cut_by_speaker_label(raw_list, merge_gap=merge_gap, logger=self.logger)
-        self._log_segment_stats(f"post-merge(gap={merge_gap})", smoothed_list)
-        
-        # Split segments that are too long
-        final_list = split_long_segments(smoothed_list, max_duration=30.0)
+        smoothed_list = cut_by_speaker_label(
+            raw_list, merge_gap=merge_gap, max_segment_length=max_seg, logger=self.logger)
+        self._log_segment_stats(f"post-merge(gap={merge_gap} max={max_seg})", smoothed_list)
+
+        # Split segments that are too long. Passing the waveform lets the cut
+        # land on a pause instead of on the stopwatch, so a forced split stops
+        # clipping words in half.
+        final_list = split_long_segments(
+            smoothed_list, max_duration=max_seg,
+            waveform=audio.waveform, sample_rate=audio.sample_rate)
         self._log_segment_stats("post-split", final_list)
         
         # Build schemas

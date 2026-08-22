@@ -72,7 +72,8 @@ def test_backchannel_gets_a_real_probe_not_the_whole_window():
     svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
     assert len(fake.calls) == 1, "one job expected"
     call = fake.calls[0]
-    assert call["len_sec"] >= 20.0
+    # No length floor: a stitched window is deliberately short. What matters is
+    # that B is scored on real solo speech, not on the whole window.
     assert call["probe_B_sec"] >= 2.0, "B must be scored on its solo turn"
     assert call["probe_B_sec"] < call["len_sec"], "probe must be a subset, not the window"
 
@@ -259,3 +260,92 @@ def test_old_checkpoint_unpickles_without_new_fields():
     loaded.enhanced_audio = np.ones(SR, dtype=np.float32)
     t0, _ = svc.export_sdlm_dual_channel([loaded], 2.0, SR, strict=True)
     assert np.allclose(t0[:SR], 0.0), "failed span must still be masked after unpickling"
+
+
+# --- stitched window + splice-site QC ---------------------------------------
+
+def _svc():
+    return TargetExtractionService.__new__(TargetExtractionService)
+
+
+def _diar(spans):
+    return [Segment(index=str(i).zfill(5), start=a, end=b, speaker=s)
+            for i, (a, b, s) in enumerate(spans)]
+
+
+def _buried_case():
+    """A 0.34s backchannel inside a long turn -- the shape that broke Sidon."""
+    segs = _diar([(730.0, 758.4, "2"), (758.4, 787.7, "1"),
+                  (777.33, 777.67, "2"), (788.2, 816.5, "1")])
+    svc = _svc()
+    svc.logger = None
+    return svc, svc._intervals_by_speaker(segs)
+
+
+def test_stitching_balances_a_window_a_continuous_one_cannot():
+    svc, by = _buried_case()
+    wav = np.zeros(int(820 * SR), dtype=np.float32)
+    built = svc._build_stitched(by, "1", "2", 777.33, 777.67, wav, SR, 820.0)
+    assert built is not None
+
+    _audio, _core, _pa, _pb, layout = built
+    # The continuous window for this overlap spans 36s at 28.75s vs 6.91s.
+    assert layout["ratio"] < 1.5
+    assert layout["dur"] < 12.0
+    # Fitting one Sidon chunk removes cross-chunk channel drift entirely.
+    assert layout["dur"] <= 20.0
+
+
+def test_stitched_core_is_exactly_the_overlap_and_probes_stay_clear_of_it():
+    svc, by = _buried_case()
+    wav = np.zeros(int(820 * SR), dtype=np.float32)
+    audio, core, probe_a, probe_b, _ = svc._build_stitched(
+        by, "1", "2", 777.33, 777.67, wav, SR, 820.0)
+
+    assert abs((core[1] - core[0]) / SR - 0.34) < 0.01
+    assert 0 <= core[0] < core[1] <= len(audio)
+    for i, j in probe_a + probe_b:
+        assert 0 <= i < j <= len(audio)
+        assert j <= core[0] or i >= core[1]
+
+
+def test_stitching_declines_when_a_speaker_has_no_clean_audio():
+    """Falling back to the continuous window is right; inventing one is not."""
+    segs = _diar([(0.0, 40.0, "1"), (20.0, 20.3, "2")])
+    svc = _svc()
+    svc.logger = None
+    wav = np.zeros(int(45 * SR), dtype=np.float32)
+    assert svc._build_stitched(svc._intervals_by_speaker(segs),
+                               "1", "2", 20.0, 20.3, wav, SR, 45.0) is None
+
+
+def test_qc_rejects_a_track_that_is_silent_where_the_mixture_speaks():
+    """The observed failure: sim scored 0.67 on solo audio 19s away while the
+    track held silence across the backchannel and the other speaker after it."""
+    rng = np.random.default_rng(0)
+    n = int(0.34 * SR)
+    host = (rng.standard_normal(n) * 0.12).astype(np.float32)
+
+    # Silent across the backchannel, the other speaker's tail at the end --
+    # the measured shape of the real failure (00046: 11 of 17 frames flat).
+    bad = np.zeros(n, dtype=np.float32)
+    tail = int(n * 0.72)
+    bad[tail:] = rng.standard_normal(n - tail) * 0.08
+    assert TargetExtractionService._track_has_speech(host, bad) is False
+    # Whole-clip RMS is far above the silence threshold, which is why the
+    # existing gate let this through.
+    assert float(np.sqrt(np.mean(bad ** 2))) > 0.002
+
+    good = (host * 0.5).astype(np.float32)
+    assert TargetExtractionService._track_has_speech(host, good) is True
+
+
+def test_qc_accepts_a_quieter_track_and_rejects_an_empty_one():
+    rng = np.random.default_rng(1)
+    n = int(0.5 * SR)
+    host = (rng.standard_normal(n) * 0.15).astype(np.float32)
+    assert TargetExtractionService._track_has_speech(host, host * 0.08) is True
+    assert TargetExtractionService._track_has_speech(host, np.zeros(n, np.float32)) is False
+    # Nothing to preserve where the mixture is silent.
+    z = np.zeros(n, dtype=np.float32)
+    assert TargetExtractionService._track_has_speech(z, z) is True

@@ -31,7 +31,9 @@ class ModelLoader:
     def load_base_models(self):
         """Load essential models (VAD, DNSMOS)."""
         if self.logger: self.logger.info(f"Loading Base models on {self.device_1}")
-        self.models["vad"] = SileroVAD(device=self.device_1)
+        vad_cfg = self.config.get("environments", {}).get(
+            self.args.env, {}).get("models", {}).get("vad", {})
+        self.models["vad"] = SileroVAD(device=self.device_1, **vad_cfg)
         
     def load_diarization_models(self, diarizen_service=None):
         """Load Pyannote/DiariZen based on args."""

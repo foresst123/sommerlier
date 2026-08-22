@@ -1,6 +1,7 @@
 import os
 from typing import Any
 from utils.checkpoint import CheckpointManager
+from services.stage_output_service import StageOutputService
 from schemas.audio import AudioData
 
 class PipelineService:
@@ -103,6 +104,12 @@ class PipelineService:
         if self.logger:
             self.logger.info(f"Outputs for this file: {output_dir}")
 
+        # Stage artifacts are written as each stage completes, so --stop_after
+        # and a mid-pipeline crash both leave the finished work on disk.
+        stage_out = StageOutputService(
+            output_dir, logger=self.logger,
+            enabled=not getattr(args, "no_stage_output", False))
+
         base_job = getattr(args, "job_id", "default_job")
         job_id = f"{base_job}_{os.path.splitext(os.path.basename(audio_path))[0]}"
         cache_dir = getattr(args, "cache_dir", "cache")
@@ -136,13 +143,17 @@ class PipelineService:
                 )
 
             checkpoint.save("diarization", diarization_result)
-            
+
+        stage_out.write_diarization(diarization_result.segments, audio_data.duration)
+
         self._free(args, "diarizer", "vad")
         # Unloading the client does not touch the subprocess holding the weights.
         self._release_worker("diarizen")
 
         if getattr(args, "stop_after", None) == "diarization":
             if self.logger: self.logger.info("Stopping pipeline after diarization as requested by --stop_after.")
+            stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
+                                      "stopped_after": "diarization"})
             return None
             
         # 3. Speech Separation (Overlap)
@@ -158,12 +169,20 @@ class PipelineService:
             enhanced_segments = self.separation_svc.process_overlaps(diarization_result.segments, audio_data)
             if self.logger: self.logger.info(f"[DEBUG] After Separation: {len(enhanced_segments)} segments")
             checkpoint.save("separation", enhanced_segments)
-            
+
+        stage_out.write_separation(
+            enhanced_segments, audio_data.duration,
+            report=self.separation_svc.report_payload()
+            if hasattr(self.separation_svc, "report_payload") else None)
+        stage_out.write_separated_audio(enhanced_segments, audio_data.sample_rate)
+
         self._free(args, "separator", "embedder")
         self._release_worker("sidon")
 
         if getattr(args, "stop_after", None) == "separation":
             if self.logger: self.logger.info("Stopping pipeline after separation as requested by --stop_after.")
+            stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
+                                      "stopped_after": "separation"})
             return None
             
         # 4. Background Music Removal
@@ -174,11 +193,15 @@ class PipelineService:
             enhanced_segments = self.music_svc.process_segments(enhanced_segments, audio_data)
             if self.logger: self.logger.info(f"[DEBUG] After Music Removal: {len(enhanced_segments)} segments")
             checkpoint.save("music_removal", enhanced_segments)
-            
+
+        stage_out.write_music_removal(enhanced_segments, audio_data.duration)
+
         self._free(args, "panns", "demucs")
             
         if getattr(args, "stop_after", None) == "music_removal":
             if self.logger: self.logger.info("Stopping pipeline after music_removal as requested by --stop_after.")
+            stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
+                                      "stopped_after": "music_removal"})
             return None
             
         # 5. ASR Ensemble (MoE)
@@ -191,11 +214,15 @@ class PipelineService:
             if self.logger: self.logger.info(f"[DEBUG] ASR returned {len(transcripts)} transcripts")
             checkpoint.save("asr", transcripts)
 
+        stage_out.write_asr(transcripts)
+
         # The Qwen3 worker is done; the refinement LLM needs its ~4.7GB.
         self._release_worker("qwen3")
 
         if getattr(args, "stop_after", None) == "asr":
             if self.logger: self.logger.info("Stopping pipeline after asr as requested by --stop_after.")
+            stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
+                                      "stopped_after": "asr"})
             return transcripts
             
         # 6. Qwen3-Omni Captioning
@@ -210,15 +237,23 @@ class PipelineService:
                 
         if getattr(args, "stop_after", None) == "captioning":
             if self.logger: self.logger.info("Stopping pipeline after captioning as requested by --stop_after.")
+            stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
+                                      "stopped_after": "captioning"})
             return transcripts
                 
         # 7. LLM Refinement
         if getattr(args, "llm_refinement", False):
+            import copy
+            # Keep the pre-refinement text so the stage can report exactly what
+            # the model rewrote. A refinement pass that quietly rewrites most of
+            # the corpus is a regression, and without this it looks like success.
+            before = copy.deepcopy(transcripts)
             # None keeps the service's built-in fusion prompt; only an explicit
             # override replaces it.
             transcripts = self.refinement_svc.refine(
                 transcripts, getattr(args, "llm_prompt", None) or None
             )
+            stage_out.write_refinement(transcripts, before=before)
             # Export needs no GPU, and a following file needs this memory.
             if not getattr(args, "keep_models", False):
                 self.refinement_svc.unload()
@@ -270,5 +305,9 @@ class PipelineService:
         except Exception as e:
             if self.logger: self.logger.error(f"Failed to export intermediate results: {e}")
         
+        # One index over every stage, written last so it can compare them.
+        stage_out.write_manifest(metadata, extra={"final": {
+            "json": f"{base_name}.json", "srt": f"{base_name}.srt"}})
+
         if self.logger: self.logger.info(f"Pipeline completed successfully. Results saved to {save_path}")
         return transcripts
