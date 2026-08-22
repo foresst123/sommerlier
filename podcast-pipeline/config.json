@@ -51,7 +51,7 @@
                 "diarizen": {
                     "batch_size": 12,
                     "seg_duration": 16,
-                    "segmentation_step": 0.02,
+                    "segmentation_step": 0.04,
                     "apply_median_filtering": false,
                     "clustering_method": "VBxClustering",
                     "min_speakers": 1,
