@@ -181,3 +181,25 @@ def test_disabling_stage_output_writes_nothing(tmp_path):
     so.write_diarization(_turns(), 60.0)
     so.write_manifest({"audio_file": "a.mp3"})
     assert not list(tmp_path.iterdir())
+
+
+def test_stage_artifacts_are_written_once_not_once_per_stage():
+    """Under stage-major execution run() is re-entered per stage, so a later
+    stage re-reads every earlier checkpoint. Rewriting their output each time
+    re-emitted the same JSON, the same WAV clips and the same warnings four
+    times for a single file."""
+    import os
+    import re
+
+    src = open(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "services/pipeline_service.py"), encoding="utf-8").read()
+
+    for stage, writer in (("diarization", "write_diarization"),
+                          ("separation", "write_separation"),
+                          ("music_removal", "write_music_removal"),
+                          ("asr", "write_asr")):
+        call = re.search(rf".*stage_out\.{writer}\(.*", src).group(0)
+        before = src[:src.index(call)]
+        assert f'if "{stage}" in computed:' in before.rsplit("\n\n", 1)[-1], (
+            f"{writer} runs even when {stage} came from a checkpoint")

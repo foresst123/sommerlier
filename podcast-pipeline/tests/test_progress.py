@@ -102,3 +102,41 @@ def test_the_input_audio_is_never_touched(tmp_path):
 
     for p in files:
         assert os.path.exists(p)
+
+
+def test_a_failed_file_has_its_partial_work_cleared(tmp_path):
+    """A failed file leaves a checkpoint behind, and the checkpoint is the
+    dangerous half: the next attempt would reload the stages that finished and
+    jump straight back to the one that broke, with the same state that broke
+    it."""
+    led = ProgressLedger(str(tmp_path))
+
+    checkpoint = tmp_path / "cache" / "job_f00"
+    (checkpoint / "diarization").mkdir(parents=True)
+    (checkpoint / "diarization" / "result.pkl").write_bytes(b"x")
+    output = tmp_path / "out" / "f00"
+    output.mkdir(parents=True)
+    (output / "f00.json").write_text("{}")
+
+    removed = led.discard_partial_output(str(checkpoint), str(output))
+
+    assert len(removed) == 2
+    assert not checkpoint.exists()
+    assert not output.exists()
+
+
+def test_clearing_tolerates_paths_that_are_not_there(tmp_path):
+    """A file can fail before writing anything; the point is to end up with
+    nothing, not to find something to delete."""
+    led = ProgressLedger(str(tmp_path))
+    assert led.discard_partial_output(str(tmp_path / "missing"), None) == []
+
+
+def test_a_failed_file_is_offered_again_next_pass(tmp_path):
+    files = _files(tmp_path, 2)
+    led = ProgressLedger(str(tmp_path))
+    led.mark_failed(files[0], "OOM")
+    led.save()
+
+    fresh = ProgressLedger(str(tmp_path))
+    assert files[0] in fresh.pending(files), "a failure must not count as done"

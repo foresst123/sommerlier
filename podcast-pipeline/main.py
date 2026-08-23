@@ -170,6 +170,26 @@ from services.qwen3_worker_service import Qwen3WorkerService
 from services.diarizen_worker_service import DiarizenWorkerService
 from services.sidon_worker_service import SidonWorkerService
 
+def _discard_partial(ledger, args, audio_path, logger, pipeline=None):
+    """Remove a failed file's checkpoint and output so the retry starts clean.
+
+    The checkpoint matters most: leaving it means the next attempt reloads the
+    stages that did finish and jumps straight to the one that broke, with the
+    same state that broke it. The output directory goes too, so a half-written
+    transcript is not mistaken for a finished one.
+    """
+    base_job = getattr(args, "job_id", "default_job")
+    stem = os.path.splitext(os.path.basename(audio_path))[0]
+    cache_dir = getattr(args, "cache_dir", "cache")
+    targets = [os.path.join(cache_dir, f"{base_job}_{stem}")]
+    if pipeline is not None:
+        try:
+            targets.append(pipeline._resolve_output_dir(args, audio_path))
+        except Exception:
+            pass
+    ledger.discard_partial_output(*targets, logger=logger)
+
+
 def main():
         
     logger = Logger.get_logger()
@@ -355,6 +375,8 @@ def main():
                     pipeline, args, config, group, logger=logger)
                 failed_paths = {p for p, _ in pass_failures}
                 for path, err in pass_failures:
+                    logger.error(f"FAILED {os.path.basename(path)}: {err}")
+                    _discard_partial(ledger, args, path, logger, pipeline)
                     ledger.mark_failed(path, err)
                     failures.append((path, err))
                 for path in group:
@@ -370,7 +392,8 @@ def main():
                     except Exception as e:
                         # One bad file must not cost the rest of the pass.
                         err = f"{type(e).__name__}: {e}"
-                        logger.error(f"Failed on {path}: {err}")
+                        logger.error(f"FAILED {os.path.basename(path)}: {err}")
+                        _discard_partial(ledger, args, path, logger, pipeline)
                         ledger.mark_failed(path, err)
                         failures.append((path, err))
 

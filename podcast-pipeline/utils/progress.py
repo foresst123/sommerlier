@@ -113,6 +113,37 @@ class ProgressLedger:
             "last_tried": time.strftime("%Y-%m-%dT%H:%M:%S"),
         }
 
+    def discard_partial_output(self, *paths, logger=None):
+        """Delete the half-finished artifacts of a failed file.
+
+        A file that failed leaves a checkpoint and a stage directory behind. The
+        checkpoint is the dangerous half: the next run would load the stages
+        that did complete and skip straight past them, so a file that failed in
+        refinement would be retried with the same broken state and fail the same
+        way. Clearing both means a retry starts clean.
+
+        Missing paths are fine -- the point is to end up with nothing there.
+        """
+        import shutil
+
+        removed = []
+        for path in paths:
+            if not path or not os.path.exists(path):
+                continue
+            try:
+                if os.path.isdir(path):
+                    shutil.rmtree(path)
+                else:
+                    os.remove(path)
+                removed.append(path)
+            except Exception as e:
+                if logger:
+                    logger.warning(f"Could not remove {path}: {e}")
+        if removed and logger:
+            logger.info(
+                f"Cleared {len(removed)} partial artifact(s) so the retry starts clean")
+        return removed
+
     # -- reporting -----------------------------------------------------
     def summary(self, total_seen: int = None) -> str:
         parts = [f"{len(self.done)} done"]

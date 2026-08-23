@@ -182,3 +182,45 @@ def test_closing_a_scope_that_was_never_opened_is_safe():
     pipe = _pipeline(_FakeWorkerService())
     pipe.model_loader = _Loader()
     pipe.end_stage_scope()          # must not raise
+
+
+# --- workers are not revived for stages that will not use them --------------
+
+def test_a_checkpointed_stage_does_not_revive_its_worker():
+    """The OOM: reviving all three workers at the top of run() meant that by
+    the refinement stage the diarizer (5.15GB) and Sidon (2.62GB) were resident
+    again, leaving 0.03GB on a card that had just been emptied for the LLM."""
+    import re
+
+    src = open(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "services/pipeline_service.py"), encoding="utf-8").read()
+
+    for worker, stage in (("diarizen", "diarization"),
+                          ("sidon", "separation"),
+                          ("qwen3", "asr")):
+        call = re.search(rf'.*_rebind_worker\(args, "{worker}".*', src).group(0)
+        line_no = src[:src.index(call)].count("\n")
+        guard = src.splitlines()[line_no - 1]
+        assert f'checkpoint.exists("{stage}")' in guard, (
+            f"{worker} is revived unconditionally; it should only start when "
+            f"the {stage} stage is actually going to run")
+
+
+def test_refinement_raises_when_most_batches_fail():
+    """Silently returning un-refined text made a run that produced nothing look
+    identical to one that worked, and the ledger recorded the file as done."""
+    import ast
+
+    src = open(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "services/diarization_refinement_service.py"), encoding="utf-8").read()
+
+    tree = ast.parse(src)
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef))
+    refine = next(n for n in cls.body
+                  if isinstance(n, ast.FunctionDef) and n.name == "refine")
+
+    raises = [n for n in ast.walk(refine) if isinstance(n, ast.Raise)]
+    assert raises, "refine() must fail loudly when the stage did not work"
+    assert "REFINE_FAILURE_LIMIT" in src

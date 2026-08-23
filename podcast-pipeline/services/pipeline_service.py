@@ -209,17 +209,30 @@ class PipelineService:
                 reset()
 
         # Without --keep_models each stage releases its worker when it finishes,
-        # so a second file arrives with dead workers. Restart them and re-point
-        # the clients: a restart produces a new Popen, and a client still
-        # holding the old one would write into a closed pipe.
-        self._rebind_worker(args, "diarizen", self.diarization_svc, "diarizer")
-        self._rebind_worker(args, "sidon", self.separation_svc, "tse_model")
-        self._rebind_worker(args, "qwen3", self.asr_svc, "qwen3")
+        # so a second file arrives with dead workers and they have to be
+        # restarted. Only the ones this call will actually reach, though:
+        # reviving all three at the top meant that by the refinement stage the
+        # diarizer (5.15GB) and Sidon (2.62GB) were both resident again, and
+        # the LLM hit OOM with 0.03GB free on a card that had just been emptied
+        # for it. A checkpointed stage does not need its worker at all.
+        if not checkpoint.exists("diarization"):
+            self._rebind_worker(args, "diarizen", self.diarization_svc, "diarizer")
+        if not checkpoint.exists("separation"):
+            self._rebind_worker(args, "sidon", self.separation_svc, "tse_model")
+        if not checkpoint.exists("asr"):
+            self._rebind_worker(args, "qwen3", self.asr_svc, "qwen3")
         
         # 1. Audio Preprocessing
         audio_data = self.audio_svc.load_audio(audio_path, target_sr=24000)
         
         # 2. Diarization (with VAD & Chunking)
+        # Stage artifacts are written only when a stage actually computes.
+        # Under stage-major execution run() is re-entered once per stage, so a
+        # later stage re-reads every earlier checkpoint; rewriting their output
+        # each time re-emitted the same JSON, the same clips and the same
+        # warnings four times over for a single file.
+        computed = set()
+
         if checkpoint.exists("diarization"):
             if self.logger: self.logger.info("Loading Diarization from checkpoint")
             diarization_result = checkpoint.load("diarization")
@@ -238,8 +251,10 @@ class PipelineService:
                 )
 
             checkpoint.save("diarization", diarization_result)
+            computed.add("diarization")
 
-        stage_out.write_diarization(diarization_result.segments, audio_data.duration)
+        if "diarization" in computed:
+            stage_out.write_diarization(diarization_result.segments, audio_data.duration)
 
         self._free(args, "diarizer", "vad")
         # Unloading the client does not touch the subprocess holding the weights.
@@ -264,12 +279,14 @@ class PipelineService:
             enhanced_segments = self.separation_svc.process_overlaps(diarization_result.segments, audio_data)
             if self.logger: self.logger.info(f"[DEBUG] After Separation: {len(enhanced_segments)} segments")
             checkpoint.save("separation", enhanced_segments)
+            computed.add("separation")
 
-        stage_out.write_separation(
-            enhanced_segments, audio_data.duration,
-            report=self.separation_svc.report_payload()
-            if hasattr(self.separation_svc, "report_payload") else None)
-        stage_out.write_separated_audio(enhanced_segments, audio_data.sample_rate)
+        if "separation" in computed:
+            stage_out.write_separation(
+                enhanced_segments, audio_data.duration,
+                report=self.separation_svc.report_payload()
+                if hasattr(self.separation_svc, "report_payload") else None)
+            stage_out.write_separated_audio(enhanced_segments, audio_data.sample_rate)
 
         self._free(args, "separator", "embedder")
         self._release_worker(args, "sidon")
@@ -288,8 +305,10 @@ class PipelineService:
             enhanced_segments = self.music_svc.process_segments(enhanced_segments, audio_data)
             if self.logger: self.logger.info(f"[DEBUG] After Music Removal: {len(enhanced_segments)} segments")
             checkpoint.save("music_removal", enhanced_segments)
+            computed.add("music_removal")
 
-        stage_out.write_music_removal(enhanced_segments, audio_data.duration)
+        if "music_removal" in computed:
+            stage_out.write_music_removal(enhanced_segments, audio_data.duration)
 
         self._free(args, "panns", "demucs")
             
@@ -308,8 +327,10 @@ class PipelineService:
             transcripts = self.asr_svc.process(enhanced_segments, audio_data)
             if self.logger: self.logger.info(f"[DEBUG] ASR returned {len(transcripts)} transcripts")
             checkpoint.save("asr", transcripts)
+            computed.add("asr")
 
-        stage_out.write_asr(transcripts)
+        if "asr" in computed:
+            stage_out.write_asr(transcripts)
 
         # The Qwen3 worker is done; the refinement LLM needs its ~4.7GB.
         self._release_worker(args, "qwen3")

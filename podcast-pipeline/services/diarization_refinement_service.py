@@ -48,6 +48,11 @@ FUSION_SYSTEM_PROMPT = (
 )
 
 
+# Above this share of segments failing, the stage is treated as broken rather
+# than as having hit a few awkward inputs.
+REFINE_FAILURE_LIMIT = float(os.environ.get("REFINE_FAILURE_LIMIT", "0.5"))
+
+
 class DiarizationRefinementService:
     """Uses a local LLM (Qwen) to refine speaker labels and text based on dialogue context."""
 
@@ -296,8 +301,8 @@ class DiarizationRefinementService:
         finally:
             tokenizer.padding_side = original_padding_side
 
+        tail = f", {self.rejected} rejected as unfaithful" if self.rejected else ""
         if self.logger:
-            tail = f", {self.rejected} rejected as unfaithful" if self.rejected else ""
             if failed_count:
                 self.logger.warning(
                     f"LLM refinement: {refined_count} segments refined, "
@@ -306,6 +311,21 @@ class DiarizationRefinementService:
             else:
                 self.logger.info(
                     f"LLM refinement: {refined_count} segments refined{tail}")
+
+        # A few failed batches are a bad input; most of them failing is a broken
+        # configuration -- almost always the GPU being too full for the model
+        # that was asked for. Returning the un-refined text either way made a
+        # run that produced nothing look identical to one that worked, and the
+        # ledger then recorded the file as done. Raise so the file is marked
+        # failed and retried, instead of silently landing in the dataset with a
+        # stage missing.
+        if pending and failed_count / len(pending) > REFINE_FAILURE_LIMIT:
+            raise RuntimeError(
+                f"LLM refinement failed on {failed_count} of {len(pending)} "
+                f"segments ({100.0 * failed_count / len(pending):.0f}%). The "
+                "usual cause is too little free VRAM for "
+                f"{self.model_name}: check the out-of-memory warnings above, "
+                "lower models.refinement.batch_size, or use a smaller model.")
 
         return segments
 
