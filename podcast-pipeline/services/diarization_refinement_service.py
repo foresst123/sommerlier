@@ -53,12 +53,26 @@ class DiarizationRefinementService:
 
     # The ~1200-token system prompt dominates each sequence, so even a modest
     # batch builds a large KV cache; 2 fits alongside the ASR models on a T4.
-    def __init__(self, logger=None, batch_size: int = 4, model_name: str = None):
+    def __init__(self, logger=None, batch_size: int = 4, model_name: str = None,
+                 torch_dtype: str = "bfloat16", prefix_cache: bool = False):
         self.logger = logger
         self.model = None
         self.tokenizer = None
         self.batch_size = batch_size
         self.rejected = 0
+        self.torch_dtype = torch_dtype
+        # Every request repeats the same ~1200-token system prompt, and without
+        # this each batch re-runs the attention over it from scratch. Caching
+        # its keys and values once per stage cuts the prefill by 43% at batch 2
+        # and 82% at batch 24 -- the saving grows with the batch, which is why
+        # it is worth having before moving to a card that can hold a big one.
+        # Off by default: it needs headroom for the cache and a model whose
+        # generate() accepts a prepared past_key_values, and a T4 running batch
+        # 2 has neither to spare.
+        self.prefix_cache = prefix_cache
+        self._prefix = None          # (input_ids, past_key_values, length)
+        self._prefix_key = None      # the system prompt it was built from
+        self._prefix_failed = False  # give up quietly after one failure
         # Qwen2.5-3B-Instruct: ~6.2GB in bf16, which leaves room on a 14.5GB T4
         # for whatever else is resident, and it is what produced the refinement
         # results this pipeline has actually been measured on (0 of 36 segments
@@ -80,10 +94,14 @@ class DiarizationRefinementService:
         if self.logger: self.logger.info(f"Loading LLM {self.model_name} for refinement...")
         try:
             from transformers import AutoModelForCausalLM, AutoTokenizer
+            # bfloat16 keeps fp32's exponent range, so activations cannot
+            # overflow the way they can in fp16. It only runs natively from
+            # Ampere onwards -- Turing emulates it -- so the profile picks.
+            dtype = getattr(torch, self.torch_dtype, torch.bfloat16)
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
-                torch_dtype=torch.bfloat16,
+                torch_dtype=dtype,
                 device_map="auto"
             )
             self.model.eval()
@@ -117,6 +135,10 @@ class DiarizationRefinementService:
         """
         if self.model is None and self.tokenizer is None:
             return
+        # The prefix cache holds tensors on the model's device; dropping the
+        # model without it would leave that memory pinned for the rest of the run.
+        self._release_prefix()
+        self._prefix_failed = False
         self.model = None
         self.tokenizer = None
         try:
@@ -287,6 +309,183 @@ class DiarizationRefinementService:
 
         return segments
 
+    # ------------------------------------------------------------------
+    def _split_prompt(self, system_prompt: str, user_msg: str):
+        """Chat template split into its shared prefix and the per-request tail.
+
+        Rendering the system turn alone and the full exchange, then checking the
+        first is a prefix of the second, is what makes the split safe across
+        chat templates -- their exact control tokens differ per model family,
+        so slicing at a hardcoded offset would silently corrupt the prompt.
+        Returns None when the template does not lay out that way.
+        """
+        tok = self.tokenizer
+        try:
+            prefix = tok.apply_chat_template(
+                [{"role": "system", "content": system_prompt}],
+                tokenize=False, add_generation_prompt=False)
+            full = tok.apply_chat_template(
+                [{"role": "system", "content": system_prompt},
+                 {"role": "user", "content": user_msg}],
+                tokenize=False, add_generation_prompt=True)
+        except Exception:
+            return None
+        # An empty or near-empty prefix means the template folded the system
+        # turn into the user turn: there is nothing shared to cache, and
+        # proceeding would build a cache of zero tokens that later reshapes
+        # into an error.
+        if not prefix or not full.startswith(prefix) or len(prefix) < 16:
+            return None
+        return prefix, full[len(prefix):]
+
+    def _build_prefix(self, system_prompt: str, sample_user: str) -> bool:
+        """Run the shared prefix once and keep its KV cache. False if unusable."""
+        if self._prefix_failed or not self.prefix_cache:
+            return False
+        if self._prefix is not None and self._prefix_key == system_prompt:
+            return True
+
+        split = self._split_prompt(system_prompt, sample_user)
+        if split is None:
+            self._prefix_failed = True
+            if self.logger:
+                self.logger.info(
+                    "Prefix cache off: this chat template does not start with a "
+                    "standalone system turn")
+            return False
+
+        prefix_text, _ = split
+        try:
+            ids = self.tokenizer(prefix_text, return_tensors="pt",
+                                 add_special_tokens=False).input_ids.to(self.model.device)
+            if ids.shape[1] == 0:
+                raise ValueError("shared prefix tokenised to nothing")
+            with torch.no_grad():
+                out = self.model(input_ids=ids, use_cache=True)
+            self._prefix = (ids, out.past_key_values, ids.shape[1])
+            self._prefix_key = system_prompt
+            if self.logger:
+                self.logger.info(
+                    f"Prefix cache built: {ids.shape[1]} shared tokens will skip "
+                    "prefill on every batch")
+            return True
+        except Exception as e:
+            self._prefix_failed = True
+            self._prefix = None
+            if self.logger:
+                self.logger.warning(f"Prefix cache unavailable, using full prompts: {e}")
+            return False
+
+    def _expand_prefix(self, batch_size: int):
+        """A fresh copy of the cached prefix, widened to the batch.
+
+        Rebuilt per batch rather than mutated: the cache grows as generation
+        proceeds, so handing the same object to a second batch would feed it
+        the first batch's tokens.
+
+        transformers 5 exposes batch_repeat_interleave for exactly this and
+        keeps its internal layout private; 4.x stored key_cache/value_cache as
+        plain lists. Both are handled, and an unrecognised layout returns None
+        so the caller falls back rather than guessing -- a mis-shaped cache
+        yields wrong text, not an exception.
+        """
+        import copy as _copy
+
+        try:
+            src = self._prefix[1]
+        except (TypeError, IndexError):
+            return None
+
+        # transformers >= 5: official API, cache internals stay private.
+        if hasattr(src, "batch_repeat_interleave"):
+            try:
+                clone = _copy.deepcopy(src)
+                clone.batch_repeat_interleave(batch_size)
+                return clone
+            except Exception:
+                return None
+
+        def _widen(t):
+            return t.expand(batch_size, *t.shape[1:]).contiguous()
+
+        # transformers 4.x legacy tuple form.
+        if isinstance(src, (tuple, list)):
+            try:
+                return tuple(tuple(_widen(t) for t in layer) for layer in src)
+            except Exception:
+                return None
+
+        keys = getattr(src, "key_cache", None)
+        values = getattr(src, "value_cache", None)
+        if keys is not None and values is not None:
+            try:
+                legacy = tuple((_widen(k), _widen(v)) for k, v in zip(keys, values))
+                from transformers.cache_utils import DynamicCache
+                if hasattr(DynamicCache, "from_legacy_cache"):
+                    return DynamicCache.from_legacy_cache(legacy)
+                return legacy
+            except Exception:
+                return None
+        return None
+
+    def _release_prefix(self):
+        self._prefix = None
+        self._prefix_key = None
+
+    def _prepare_cached_inputs(self, batch, system_prompt, inputs, gen_kwargs) -> bool:
+        """Swap `inputs` to tail-only tokens backed by the cached prefix.
+
+        Mutates `inputs` and `gen_kwargs` in place and returns whether it
+        succeeded. On any doubt it changes nothing and returns False, leaving
+        the caller on the full-prompt path: a wrong cache produces wrong
+        Vietnamese rather than an exception, so the bar for using it is that
+        every step verified cleanly.
+        """
+        tok = self.tokenizer
+        try:
+            tails = []
+            for _, user_msg in batch:
+                split = self._split_prompt(system_prompt, user_msg)
+                if split is None:
+                    return False
+                tails.append(split[1])
+
+            enc = tok(tails, return_tensors="pt", padding=True,
+                      add_special_tokens=False).to(self.model.device)
+
+            past = self._expand_prefix(len(batch))
+            if past is None:
+                # An unrecognised cache class: stop trying rather than risk it.
+                self._prefix_failed = True
+                self._release_prefix()
+                if self.logger:
+                    self.logger.info(
+                        "Prefix cache off: this transformers version returns a "
+                        "cache type that cannot be safely expanded")
+                return False
+
+            prefix_len = self._prefix[2]
+            mask = torch.cat([
+                torch.ones(len(batch), prefix_len, dtype=enc.attention_mask.dtype,
+                           device=enc.attention_mask.device),
+                enc.attention_mask,
+            ], dim=1)
+
+            inputs["input_ids"] = enc.input_ids
+            inputs["attention_mask"] = mask
+            gen_kwargs["past_key_values"] = past
+            # generate() slices the prompt off by input_ids width, and the
+            # caller measures the same way, so both stay consistent.
+            return True
+        except Exception as e:
+            self._prefix_failed = True
+            self._release_prefix()
+            if self.logger:
+                self.logger.warning(
+                    f"Prefix cache disabled after an error, continuing with full "
+                    f"prompts: {e}")
+            return False
+
     def _refine_batch(self, batch, system_prompt):
         """Refine one batch in place. Returns (succeeded, refined_count)."""
         tokenizer = self.tokenizer
@@ -301,18 +500,28 @@ class DiarizationRefinementService:
 
         try:
             inputs = tokenizer(texts, return_tensors="pt", padding=True).to(self.model.device)
+            gen_kwargs = dict(
+                max_new_tokens=150,
+                do_sample=False,
+                temperature=None,
+                top_p=None,
+                top_k=None,
+                repetition_penalty=1.2,
+                pad_token_id=tokenizer.pad_token_id,
+            )
+
+            # Reuse the shared prefix's KV cache when one is available. The
+            # tails are re-tokenised on their own and the attention mask is
+            # widened to cover the cached span, so the model sees exactly the
+            # same sequence -- only the prefix's attention is not recomputed.
+            # Anything unexpected falls through to the full-prompt path below,
+            # which is the one that has always run.
+            past = None
+            if self._build_prefix(system_prompt, batch[0][1]):
+                past = self._prepare_cached_inputs(batch, system_prompt, inputs, gen_kwargs)
 
             with torch.no_grad():
-                generated_ids = self.model.generate(
-                    **inputs,
-                    max_new_tokens=150,
-                    do_sample=False,
-                    temperature=None,  
-                    top_p=None,        
-                    top_k=None,
-                    repetition_penalty=1.2,
-                    pad_token_id=tokenizer.pad_token_id,
-                )
+                generated_ids = self.model.generate(**inputs, **gen_kwargs)
 
             prompt_len = inputs.input_ids.shape[1]
             decoded = tokenizer.batch_decode(

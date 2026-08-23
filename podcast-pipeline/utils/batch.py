@@ -147,6 +147,14 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
         stage_args = copy.copy(args)
         stage_args.stop_after = stage
 
+        # Hold model releases until every file has passed through this stage.
+        # Without this the first file frees the diarizer that the second file
+        # is about to use, which turns stage-major back into file-major with
+        # extra steps.
+        begin = getattr(pipeline, "begin_stage_scope", None)
+        if begin:
+            begin()
+
         for i, path in enumerate(pending, start=1):
             if logger:
                 logger.info(f"[{label} {i}/{len(pending)}] {os.path.basename(path)}")
@@ -158,6 +166,10 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
                 if logger:
                     logger.error(f"Failed on {path} during {label}: {type(e).__name__}: {e}")
                 failures[path] = f"{label}: {type(e).__name__}: {e}"
+
+        end = getattr(pipeline, "end_stage_scope", None)
+        if end:
+            end()
 
         if stage is not None and original_stop == stage:
             break

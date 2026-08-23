@@ -1,8 +1,9 @@
 import argparse
 import json
 import os
+import time
 from utils.logger import Logger
-def parse_args():
+def _build_parser():
     parser = argparse.ArgumentParser(description="Sommelier ASR Pipeline")
     parser.add_argument("--audio", help="Path to a single input audio file")
     parser.add_argument("--audio_dir",
@@ -35,9 +36,11 @@ def parse_args():
                              "stage, instead of the whole pipeline per file. Loads "
                              "each model once per batch rather than once per file.")
     parser.add_argument("--only_batch", type=int, default=None,
-                        help="Run only this batch number (1-based) and exit. Lets a "
-                             "directory larger than max_hours be finished across "
-                             "several sessions without exceeding a runtime limit.")
+                        help="Stop after one pass instead of working through the "
+                             "whole directory. Lets a corpus larger than a session "
+                             "limit be finished across several sessions -- progress "
+                             "is kept in the input directory's ledger, so the next "
+                             "run picks up where this one stopped.")
     parser.add_argument("--keep_models", action="store_true",
                         help="Keep models in VRAM between stages instead of unloading them. "
                              "Saves reload time when processing many files, at the cost of a "
@@ -47,8 +50,19 @@ def parse_args():
                              "02_separation/, ...). They are written by default so a run "
                              "stopped or crashed part-way still leaves its finished work "
                              "on disk.")
+    # Tuning knobs that normally live in the profile. Declared here so a run can
+    # override one without editing config.json -- handy for a sweep. Anything
+    # not passed falls back to the profile.
+    parser.add_argument("--merge_gap", type=float,
+                        help="Override pipeline.merge_gap from the profile")
+    parser.add_argument("--max_segment_length", type=float,
+                        help="Override pipeline.max_segment_length from the profile")
     parser.add_argument("--stop_after", type=str, choices=["diarization", "separation", "music_removal", "asr", "captioning"], help="Stop pipeline gracefully after this stage")
-    return parser.parse_args()
+    return parser
+
+
+def parse_args():
+    return _build_parser().parse_args()
 
 # ==========================================
 # 1. EARLY ENVIRONMENT SETUP (PRE-IMPORT)
@@ -80,15 +94,34 @@ if hf_token:
 
 env_profile = config.get("environments", {}).get(args.env, {})
 
-# Inject config parameters into args dynamically
-pipeline_cfg = env_profile.get("pipeline", {})
-for k, v in pipeline_cfg.items():
-    setattr(args, k, v)
-    
-if "gpu_1" in env_profile:
-    args.gpu_1 = env_profile["gpu_1"]
-if "gpu_2" in env_profile:
-    args.gpu_2 = env_profile["gpu_2"]
+# --- Config -> args, with anything typed on the command line winning -------
+# argparse cannot tell a default from a value the user passed, so re-parse with
+# every default suppressed: what survives is what was actually typed. Without
+# this the profile overwrites deliberate flags, and `--env a100 --tse` would
+# quietly run with the profile's tse rather than the requested one.
+_probe = _build_parser()
+for _action in _probe._actions:
+    if _action.dest != "help":
+        _action.default = argparse.SUPPRESS
+_explicit = set(vars(_probe.parse_args()).keys())
+
+
+def _from_config(key, value):
+    """Apply a config value unless the command line already set this key."""
+    if key in _explicit:
+        return False
+    setattr(args, key, value)
+    return True
+
+
+# Everything under "pipeline" lands on args, so which stages run and their
+# thresholds can live in the profile instead of the command line.
+for k, v in env_profile.get("pipeline", {}).items():
+    _from_config(k, v)
+
+for k in ("gpu_1", "gpu_2"):
+    if k in env_profile:
+        _from_config(k, env_profile[k])
 
 if env_profile.get("offline_mode", False):
     os.environ["HF_HUB_OFFLINE"] = "1"
@@ -121,6 +154,7 @@ from utils.torch_compat import install_torch_load_shim
 install_torch_load_shim()
 
 from utils.batch import audio_duration, find_audio_files, find_name_collisions, plan_batches, run_batch_by_stage
+from utils.progress import ProgressLedger
 from utils.worker_env import resolve_worker_python
 from services.model_loader import ModelLoader
 from services.audio_service import AudioService
@@ -142,6 +176,25 @@ def main():
     logger.info(f"Starting Sommelier Pipeline for Job: {args.job_id}")
 
     import torch
+
+    # TF32 on the fp32 paths: DiariZen, Demucs, PANNS and ECAPA all run in
+    # fp32, and on Ampere and later their matmuls and convolutions can use
+    # TF32 tensor cores instead. Same code, same memory, roughly an order of
+    # magnitude more throughput on those ops, at a precision that is ample for
+    # inference. Turing has no TF32 units, so this is a no-op there rather
+    # than a regression -- which is why it can default to on.
+    tf32 = env_profile.get("allow_tf32", True)
+    if torch.cuda.is_available() and tf32:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        caps = {torch.cuda.get_device_capability(i)[0]
+                for i in range(torch.cuda.device_count())}
+        if any(c >= 8 for c in caps):
+            logger.info("TF32 enabled for fp32 matmul/conv (Ampere or newer detected)")
+        else:
+            logger.info("TF32 requested but this GPU predates Ampere; fp32 ops are unchanged")
+    elif torch.cuda.is_available():
+        logger.info("TF32 disabled by config (allow_tf32=false)")
 
     if torch.cuda.is_available() and torch.cuda.device_count() == 1:
         logger.info(f"Only 1 GPU detected. Overriding gpu_2 ({args.gpu_2}) to use gpu_1 ({args.gpu_1}).")
@@ -240,7 +293,10 @@ def main():
         # ~64s each, which dominates once a run holds more than a couple of
         # files. Each file still gets its own output folder and its own
         # checkpoint scope.
-        batch_cfg = config.get("batch", {})
+        # The profile's batch settings win over the shared defaults: how many
+        # hours fit in one run depends on the machine, not on the corpus.
+        batch_cfg = dict(config.get("batch", {}))
+        batch_cfg.update(env_profile.get("batch") or {})
         max_hours = args.max_hours if args.max_hours is not None else \
             float(batch_cfg.get("max_hours_per_run", 5.0))
 
@@ -264,42 +320,71 @@ def main():
             logger.error("Rename them or move them apart, then re-run.")
             return
 
-        batches = plan_batches(paths, max_hours, logger=logger)
-        total_hours = sum(audio_duration(p) for p in paths) / 3600.0
-        logger.info(
-            f"Processing {len(paths)} file(s), {total_hours:.2f}h total, "
-            f"in {len(batches)} run(s) of up to {max_hours}h")
-
-        if args.only_batch is not None:
-            if not (1 <= args.only_batch <= len(batches)):
-                logger.error(f"--only_batch {args.only_batch} is outside 1..{len(batches)}")
-                return
-            selected = [(args.only_batch, batches[args.only_batch - 1])]
-            logger.info(f"Running batch {args.only_batch}/{len(batches)} only")
-        else:
-            selected = list(enumerate(batches, start=1))
+        # A corpus is processed in passes. Each pass re-scans the directory,
+        # takes the next max_hours of unfinished audio, and runs every stage
+        # across that whole group before moving on. Re-scanning is what lets
+        # files be added while the run is going: they are simply there on the
+        # next pass.
+        ledger = ProgressLedger(args.audio_dir, logger=logger)
+        if ledger.done or ledger.failed:
+            logger.info(f"Resuming: {ledger.summary(len(paths))} "
+                        f"(ledger: {os.path.basename(ledger.path)})")
 
         failures = []
-        done = 0
-        for bi, batch in selected:
-            batch_hours = sum(audio_duration(p) for p in batch) / 3600.0
-            logger.info(f"--- Batch {bi}/{len(batches)}: "
-                        f"{len(batch)} file(s), {batch_hours:.2f}h ---")
+        pass_no = 0
+        while True:
+            pass_no += 1
+            # Re-scan every pass, not once at the top: this is the only reason
+            # newly-copied files get picked up without restarting the run.
+            current = find_audio_files(args.audio_dir, exts)
+            todo = ledger.pending(current)
+            if not todo:
+                break
 
+            group = plan_batches(todo, max_hours, logger=logger)[0]
+            group_hours = sum(audio_duration(p) for p in group) / 3600.0
+            logger.info(
+                f"--- Pass {pass_no}: {len(group)} file(s), {group_hours:.2f}h "
+                f"({len(todo)} of {len(current)} still to do) ---")
+
+            started = time.time()
             if args.by_stage:
-                failures.extend(run_batch_by_stage(pipeline, args, config, batch, logger=logger))
-                done += len(batch)
-                continue
+                # Stage-major: one model loaded, every file in the group pushed
+                # through it, then the next stage.
+                pass_failures = run_batch_by_stage(
+                    pipeline, args, config, group, logger=logger)
+                failed_paths = {p for p, _ in pass_failures}
+                for path, err in pass_failures:
+                    ledger.mark_failed(path, err)
+                    failures.append((path, err))
+                for path in group:
+                    if path not in failed_paths:
+                        ledger.mark_done(path)
+            else:
+                for path in group:
+                    logger.info(f"Running pipeline on audio: {path}")
+                    file_started = time.time()
+                    try:
+                        pipeline.run(args, config, path)
+                        ledger.mark_done(path, time.time() - file_started)
+                    except Exception as e:
+                        # One bad file must not cost the rest of the pass.
+                        err = f"{type(e).__name__}: {e}"
+                        logger.error(f"Failed on {path}: {err}")
+                        ledger.mark_failed(path, err)
+                        failures.append((path, err))
 
-            for path in batch:
-                done += 1
-                logger.info(f"[{done}/{len(paths)}] Running pipeline on audio: {path}")
-                try:
-                    pipeline.run(args, config, path)
-                except Exception as e:
-                    # One bad file must not cost the rest of a five-hour run.
-                    logger.error(f"Failed on {path}: {type(e).__name__}: {e}")
-                    failures.append((path, f"{type(e).__name__}: {e}"))
+            # Written after every pass, so a run killed between passes resumes
+            # from the last completed group rather than the beginning.
+            ledger.save()
+            logger.info(f"Pass {pass_no} finished in {(time.time() - started) / 60:.1f} min "
+                        f"({ledger.summary()})")
+
+            if args.only_batch is not None:
+                logger.info("--only_batch was given; stopping after this pass")
+                break
+
+        logger.info(f"Corpus complete: {ledger.summary()}")
 
         if failures:
             logger.warning(f"{len(failures)}/{len(paths)} file(s) failed:")

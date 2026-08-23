@@ -109,8 +109,11 @@ class ASRService:
             return [""] * len(audios_16k)
         try:
             # Batch size is kept modest because Qwen3 shares the GPU.
+            # No batch_size here: PhoWhisper uses the one it was configured
+            # with. self.batch_size comes from models.qwen3 -- a different
+            # model, on a different device, with its own memory budget.
             res = self.phowhisper.transcribe_batch(
-                audios_16k, batch_size=self.batch_size, logger=self.logger, callback=callback
+                audios_16k, logger=self.logger, callback=callback
             )
             if getattr(self, "model_loader", None) and not self.keep_models:
                 self.model_loader.unload("phowhisper")

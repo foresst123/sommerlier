@@ -27,6 +27,18 @@
             "gpu_1": 0,
             "gpu_2": 1,
             "pipeline": {
+                "vad": true,
+                "tse": true,
+                "panns": true,
+                "ASRMoE": true,
+                "llm_refinement": true,
+                "qwen3omni": false,
+                "dia3": false,
+                "keep_models": false,
+                "by_stage": true,
+                "initprompt": true,
+                "lang": "vi",
+                "LLM": "case_0",
                 "merge_gap": 0.3,
                 "max_segment_length": 20.0,
                 "seg_th": 0.11,
@@ -40,6 +52,10 @@
                 },
                 "whisper": {
                     "model_size": "large-v3",
+                    "compute_type": "float16",
+                    "batch_size": 16
+                },
+                "phowhisper": {
                     "compute_type": "float16",
                     "batch_size": 16
                 },
@@ -64,16 +80,33 @@
                 },
                 "refinement": {
                     "model_name": "Qwen/Qwen2.5-3B-Instruct",
-                    "batch_size": 2
+                    "batch_size": 2,
+                    "torch_dtype": "bfloat16",
+                    "prefix_cache": false
                 }
+            },
+            "allow_tf32": true,
+            "batch": {
+                "max_hours_per_run": 5.0
             }
         },
-        "notebook": {
-            "offline_mode": true,
-            "offline_weights_dir": "./offline_weights",
+        "a100": {
+            "offline_mode": false,
             "gpu_1": 0,
             "gpu_2": 0,
             "pipeline": {
+                "vad": true,
+                "tse": true,
+                "panns": true,
+                "ASRMoE": true,
+                "llm_refinement": true,
+                "qwen3omni": false,
+                "dia3": false,
+                "keep_models": true,
+                "by_stage": true,
+                "initprompt": true,
+                "lang": "vi",
+                "LLM": "case_0",
                 "merge_gap": 0.3,
                 "max_segment_length": 20.0,
                 "seg_th": 0.11,
@@ -86,19 +119,23 @@
                     "max_segment": 20.0
                 },
                 "whisper": {
-                    "model_size": "large-v3-turbo",
+                    "model_size": "large-v3",
                     "compute_type": "bfloat16",
-                    "batch_size": 64
+                    "batch_size": 48
+                },
+                "phowhisper": {
+                    "compute_type": "bfloat16",
+                    "batch_size": 48
                 },
                 "qwen3": {
-                    "batch_size": 16,
+                    "batch_size": 24,
                     "use_flash_attention": true,
                     "torch_dtype": "bfloat16"
                 },
                 "diarizen": {
-                    "batch_size": 128,
+                    "batch_size": 64,
                     "seg_duration": 16,
-                    "segmentation_step": 0.05,
+                    "segmentation_step": 0.5,
                     "apply_median_filtering": false,
                     "clustering_method": "VBxClustering",
                     "min_speakers": 1,
@@ -106,13 +143,19 @@
                     "ahc_threshold": 0.6
                 },
                 "demucs": {
-                    "segment": 20,
+                    "segment": 30,
                     "overlap": 0.25
                 },
                 "refinement": {
-                    "model_name": "Qwen/Qwen2.5-3B-Instruct",
-                    "batch_size": 4
+                    "model_name": "Qwen/Qwen3-4B",
+                    "batch_size": 24,
+                    "torch_dtype": "bfloat16",
+                    "prefix_cache": true
                 }
+            },
+            "allow_tf32": true,
+            "batch": {
+                "max_hours_per_run": 20.0
             }
         }
     },

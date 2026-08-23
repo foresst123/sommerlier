@@ -32,6 +32,10 @@ class PipelineService:
         # {"diarizen": svc, "sidon": svc, ...} so each worker's VRAM can be
         # released as soon as its stage is done rather than at process exit.
         self.worker_services = worker_services or {}
+        # Non-None while a stage-major pass is running: model and worker
+        # releases collect here instead of firing at the end of each file.
+        self.defer_free = None
+        self.defer_workers = None
 
     def _free(self, args, *model_names):
         """Unload finished models unless the caller asked to keep them.
@@ -39,14 +43,59 @@ class PipelineService:
         --keep_models trades peak VRAM for reload time: worth it when several
         files run back to back on a GPU with room for everything, wrong when
         the models only fit because each stage releases the last.
+
+        Under stage-major execution the caller runs one stage across every file
+        before starting the next, so freeing here -- at the end of each file --
+        would drop the model the very next file is about to use. The names are
+        recorded instead and released once, when the stage finishes.
         """
         if getattr(args, "keep_models", False) or not self.model_loader:
+            return
+        if self.defer_free is not None:
+            self.defer_free.update(model_names)
             return
         for name in model_names:
             self.model_loader.unload(name)
 
-    def _release_worker(self, name: str):
-        """Stop a worker subprocess now that its stage is finished."""
+    def begin_stage_scope(self):
+        """Hold model releases until end_stage_scope(), for stage-major runs."""
+        self.defer_free = set()
+        self.defer_workers = set()
+
+    def end_stage_scope(self):
+        """Release everything the stage deferred. Safe when no scope is open."""
+        names, workers = self.defer_free, self.defer_workers
+        self.defer_free = None
+        self.defer_workers = None
+        if names and self.model_loader:
+            for name in sorted(names):
+                self.model_loader.unload(name)
+        for worker in sorted(workers or ()):
+            service = self.worker_services.get(worker)
+            if not service or getattr(service, "process", None) is None:
+                continue
+            if self.logger:
+                self.logger.info(f"Releasing {worker} worker (stage complete, freeing VRAM)")
+            try:
+                service.stop()
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f"Failed to stop {worker} worker: {e}")
+
+    def _release_worker(self, args, name: str):
+        """Stop a worker subprocess now that its stage is finished.
+
+        Honours --keep_models for the same reason _free does, and for a sharper
+        one: the workers are spawned once in main(), before the file loop, and
+        nothing spawns them again. Stopping one here without that guard leaves
+        every later file in the run without a worker to talk to -- invisible on
+        a single file, fatal from the second onwards.
+        """
+        if getattr(args, "keep_models", False):
+            return
+        if self.defer_workers is not None:
+            self.defer_workers.add(name)
+            return
         service = self.worker_services.get(name)
         if not service or getattr(service, "process", None) is None:
             return
@@ -57,6 +106,44 @@ class PipelineService:
         except Exception as e:
             if self.logger:
                 self.logger.warning(f"Failed to stop {name} worker: {e}")
+
+    def _rebind_worker(self, args, worker_name: str, service, attr: str):
+        """Restart `worker_name` if needed and hand the live process to its client.
+
+        No-op when the worker is still running, which is the --keep_models case
+        and the first file of any run.
+        """
+        if service is None or self.model_loader is None:
+            return
+        client = getattr(service, attr, None)
+        if client is None:
+            return
+        process = self._ensure_worker(args, worker_name)
+        if process is not None and getattr(client, "process", None) is not process:
+            client.process = process
+
+    def _ensure_worker(self, args, name: str):
+        """Bring a worker back up if an earlier file released it.
+
+        Pairs with _release_worker: without --keep_models a stage frees its
+        worker's VRAM when it finishes, so the next file has to start it again.
+        Returns the live process, or None when there is no such worker.
+        """
+        service = self.worker_services.get(name)
+        if service is None:
+            return None
+        if getattr(service, "process", None) is not None:
+            return service.process
+        if self.logger:
+            self.logger.info(f"Restarting {name} worker for this file")
+        try:
+            service.spawn()
+            service.wait_ready()
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Failed to restart {name} worker: {e}")
+            return None
+        return getattr(service, "process", None)
 
 
     def _resolve_output_dir(self, args, audio_path: str) -> str:
@@ -120,6 +207,14 @@ class PipelineService:
             reset = getattr(svc, "reset_stats", None)
             if reset:
                 reset()
+
+        # Without --keep_models each stage releases its worker when it finishes,
+        # so a second file arrives with dead workers. Restart them and re-point
+        # the clients: a restart produces a new Popen, and a client still
+        # holding the old one would write into a closed pipe.
+        self._rebind_worker(args, "diarizen", self.diarization_svc, "diarizer")
+        self._rebind_worker(args, "sidon", self.separation_svc, "tse_model")
+        self._rebind_worker(args, "qwen3", self.asr_svc, "qwen3")
         
         # 1. Audio Preprocessing
         audio_data = self.audio_svc.load_audio(audio_path, target_sr=24000)
@@ -148,7 +243,7 @@ class PipelineService:
 
         self._free(args, "diarizer", "vad")
         # Unloading the client does not touch the subprocess holding the weights.
-        self._release_worker("diarizen")
+        self._release_worker(args, "diarizen")
 
         if getattr(args, "stop_after", None) == "diarization":
             if self.logger: self.logger.info("Stopping pipeline after diarization as requested by --stop_after.")
@@ -177,7 +272,7 @@ class PipelineService:
         stage_out.write_separated_audio(enhanced_segments, audio_data.sample_rate)
 
         self._free(args, "separator", "embedder")
-        self._release_worker("sidon")
+        self._release_worker(args, "sidon")
 
         if getattr(args, "stop_after", None) == "separation":
             if self.logger: self.logger.info("Stopping pipeline after separation as requested by --stop_after.")
@@ -217,7 +312,7 @@ class PipelineService:
         stage_out.write_asr(transcripts)
 
         # The Qwen3 worker is done; the refinement LLM needs its ~4.7GB.
-        self._release_worker("qwen3")
+        self._release_worker(args, "qwen3")
 
         if getattr(args, "stop_after", None) == "asr":
             if self.logger: self.logger.info("Stopping pipeline after asr as requested by --stop_after.")

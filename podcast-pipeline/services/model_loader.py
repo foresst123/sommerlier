@@ -98,7 +98,9 @@ class ModelLoader:
         # "batch_size (12) is probably too large" -- a misleading message, since
         # that batch needs under 1GB. The card was simply already full.
         if self.logger: self.logger.info(f"Loading PhoWhisper on {self.device_2}")
-        self.models["phowhisper"] = PhoWhisperASR(device=self.device_2)
+        pho_cfg = self.config.get("environments", {}).get(
+            self.args.env, {}).get("models", {}).get("phowhisper", {})
+        self.models["phowhisper"] = PhoWhisperASR(device=self.device_2, **pho_cfg)
 
         
         if getattr(self.args, "ASRMoE", False) and getattr(self.args, "lang", "vi") == "vi":
