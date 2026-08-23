@@ -66,7 +66,13 @@ TSE_ENROLL_MIN_TOTAL = float(os.environ.get("TSE_ENROLL_MIN_TOTAL", "1.5"))
 # rather than masking the mixture, so ECAPA cosine against a natural enrollment
 # sits in a lower, unmeasured range. Read the sim percentiles in the [TSE] log
 # line and the clips under separation/failed/ before trusting either number.
-TSE_QC_SIM_THRESHOLD = float(os.environ.get("TSE_QC_SIM_THRESHOLD", "0.25"))
+# Lowered from 0.25 after a run rejected a track at 0.23 -- two hundredths
+# under, on a scale that has never been calibrated. DialogueSidon resynthesises
+# through a VAE decoder rather than masking, so ECAPA scores sit lower than they
+# would on natural speech: the same run had a median of 0.47, where natural
+# audio of one speaker usually gives 0.7-0.9. Judge the clips under
+# 02_separation/audio/failed/ by ear before moving it again.
+TSE_QC_SIM_THRESHOLD = float(os.environ.get("TSE_QC_SIM_THRESHOLD", "0.20"))
 TSE_NOT_A_MARGIN = float(os.environ.get("TSE_NOT_A_MARGIN", "0.15"))
 TSE_SILENCE_RMS = float(os.environ.get("TSE_SILENCE_RMS", "0.002"))
 

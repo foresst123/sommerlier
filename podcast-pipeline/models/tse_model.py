@@ -33,6 +33,18 @@ def _corr(x: np.ndarray, y: np.ndarray) -> float:
 # speaker sat at 1.2e-1, four orders of magnitude apart.
 ABS_SILENCE_RMS = 1e-3
 
+# Voiced audio ECAPA needs before its embedding is worth comparing. It pools
+# statistics over time, so a shorter probe gives a noisier vector -- and a noisy
+# vector competes in the A/B assignment, where being wrong flips which speaker a
+# track is labelled as.
+#
+# This applies to the solo regions the assignment is scored on, not to the
+# overlap being spliced: a 0.24s backchannel is never measured here. The
+# stitched window contributes TSE_STITCH_SOLO (3s) per speaker, so 1s leaves
+# room for the silence filter to drop pauses without failing the whole probe,
+# while still asking for enough audio to trust the score.
+TSE_MIN_VOICED_SEC = float(os.environ.get("TSE_MIN_VOICED_SEC", "1.0"))
+
 
 class TargetSpeakerExtractor:
     """
@@ -164,20 +176,22 @@ class TargetSpeakerExtractor:
 
     def _block_embedding(self, block: np.ndarray, sr: int):
         """Normalized ECAPA embedding for one block, or None if it holds no speech."""
-        probe = self._gather_probe(block, [(0, len(block))], sr, min_voiced_sec=0.30)
+        probe = self._gather_probe(block, [(0, len(block))], sr)
         if probe is None:
             return None
         return F.normalize(self._get_embedding(probe, sr), p=2, dim=0)
 
     @staticmethod
     def _gather_probe(track: np.ndarray, spans, sr: int, floor_db: float = -40.0,
-                      min_voiced_sec: float = 0.30, abs_floor_rms: float = ABS_SILENCE_RMS):
+                      min_voiced_sec: float = None, abs_floor_rms: float = ABS_SILENCE_RMS):
         """Concatenate `spans` of `track`, keeping only frames above an energy floor.
 
         Returns None when there is too little voiced audio to trust, which means
         "this speaker is not present here" -- a different outcome from
         "extraction failed", and the caller must not conflate the two.
         """
+        if min_voiced_sec is None:
+            min_voiced_sec = TSE_MIN_VOICED_SEC
         if not spans:
             return None
         pieces = [track[max(0, a):min(len(track), b)] for a, b in spans]

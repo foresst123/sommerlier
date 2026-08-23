@@ -48,6 +48,8 @@ vi_audio_output(2)
 vi_audio_output copy
 test_env
 tmp
-kaggle/
+# Result dumps pulled back from a run: kaggle/, "kaggle 2", "kaggle 3", ...
+# One pattern rather than a line per download -- a space in a pattern is a
+# literal character, so "kaggle *" never matched anything.
+kaggle*/
 new_data_run/
-kaggle 2

@@ -74,6 +74,10 @@
                     "max_speakers": 10,
                     "ahc_threshold": 0.6
                 },
+                "tse": {
+                    "qc_sim_threshold": 0.2,
+                    "min_voiced_sec": 1.0
+                },
                 "demucs": {
                     "segment": 10,
                     "overlap": 0.1
@@ -141,6 +145,10 @@
                     "min_speakers": 1,
                     "max_speakers": 20,
                     "ahc_threshold": 0.6
+                },
+                "tse": {
+                    "qc_sim_threshold": 0.2,
+                    "min_voiced_sec": 1.0
                 },
                 "demucs": {
                     "segment": 30,

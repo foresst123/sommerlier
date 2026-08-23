@@ -156,6 +156,16 @@ install_torch_load_shim()
 from utils.batch import audio_duration, find_audio_files, find_name_collisions, plan_batches, run_batch_by_stage
 from utils.progress import ProgressLedger
 from utils.worker_env import resolve_worker_python
+# TSE thresholds live in the profile, but separation_service and tse_model read
+# them at import time. Publish them as environment variables here -- before those
+# imports run -- or the modules capture the defaults instead. An env var set by
+# hand still wins, which keeps a quick sweep possible without editing config.
+for _cfg_key, _env_key in (("qc_sim_threshold", "TSE_QC_SIM_THRESHOLD"),
+                           ("min_voiced_sec", "TSE_MIN_VOICED_SEC")):
+    _value = env_profile.get("models", {}).get("tse", {}).get(_cfg_key)
+    if _value is not None and _env_key not in os.environ:
+        os.environ[_env_key] = str(_value)
+
 from services.model_loader import ModelLoader
 from services.audio_service import AudioService
 from services.diarization_service import DiarizationService
