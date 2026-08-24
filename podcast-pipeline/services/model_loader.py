@@ -76,8 +76,8 @@ class ModelLoader:
             # models; separating a full podcast needs ~1GB of headroom that is
             # not there, so Demucs runs on GPU 2 alongside the Qwen3 worker.
             demucs_cfg = self.config.get("environments", {}).get(self.args.env, {}).get("models", {}).get("demucs", {})
-            if self.logger: self.logger.info(f"Loading Demucs on {self.device_2}")
-            self.models["demucs"] = DemucsRemover(device=str(self.device_2), logger=self.logger, **demucs_cfg)
+            if self.logger: self.logger.info(f"Loading Demucs on {self.device_1}")
+            self.models["demucs"] = DemucsRemover(device=str(self.device_1), logger=self.logger, **demucs_cfg)
             
     def load_asr_models(self, qwen3_service: Qwen3WorkerService = None):
         """Load ASR models (Whisper, PhoWhisper, Qwen3)."""
