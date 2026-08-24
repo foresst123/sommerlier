@@ -79,7 +79,7 @@ def test_unreadable_duration_is_isolated():
 def test_every_file_finishes_a_stage_before_the_next_stage_starts():
     files = ["f1", "f2", "f3"]
     pipe = FakePipeline()
-    run_batch_by_stage(pipe, _args(), {}, files)
+    run_batch_by_stage(pipe, _args(qwen3omni=True), {}, files)
 
     seen = []
     for stage, _path in pipe.calls:
@@ -90,6 +90,25 @@ def test_every_file_finishes_a_stage_before_the_next_stage_starts():
     )
     for stage in PIPELINE_STAGES:
         assert [p for s, p in pipe.calls if s == stage] == files
+
+
+def test_captioning_is_skipped_when_its_model_is_off():
+    """With qwen3omni off the stage returns without touching the transcripts,
+    so the pass only reloads the audio and re-reads four checkpoints."""
+    pipe = FakePipeline()
+    run_batch_by_stage(pipe, _args(qwen3omni=False), {}, ["f1"])
+
+    assert "captioning" not in [s for s, _ in pipe.calls]
+    # Every other stage still runs.
+    assert [s for s, _ in pipe.calls] == [
+        s for s in PIPELINE_STAGES if s != "captioning"]
+
+
+def test_captioning_runs_when_its_model_is_on():
+    pipe = FakePipeline()
+    run_batch_by_stage(pipe, _args(qwen3omni=True), {}, ["f1"])
+
+    assert "captioning" in [s for s, _ in pipe.calls]
 
 
 def test_a_file_that_fails_is_dropped_from_later_stages():

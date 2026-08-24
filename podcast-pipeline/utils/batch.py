@@ -137,6 +137,15 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
             if _stage_index(stage) > _stage_index(original_stop):
                 break
 
+        # captioning is the one stage whose flag can be honoured from here: with
+        # qwen3omni off it returns without touching the transcripts, so skipping
+        # it costs nothing and saves a pass that reloads the audio and re-reads
+        # four checkpoints to do nothing. The others are not safe to skip --
+        # separation and music_removal each produce or forward the
+        # enhanced_segments that ASR consumes, flag or no flag.
+        if stage == "captioning" and not getattr(args, "qwen3omni", False):
+            continue
+
         label = stage or "refinement+export"
         pending = [p for p in batch if p not in failures]
         if not pending:

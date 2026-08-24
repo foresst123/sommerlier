@@ -283,6 +283,13 @@ class PipelineService:
             enhanced_segments = self.separation_svc.process_overlaps(diarization_result.segments, audio_data)
             if self.logger: self.logger.info(f"[DEBUG] After Separation: {len(enhanced_segments)} segments")
             checkpoint.save("separation", enhanced_segments)
+            # The counters live on the service and reset_stats() clears them at
+            # the start of every run(). Under stage-major execution the export
+            # happens in a later run() than this one, so the report has to be
+            # captured here or it is written empty.
+            if hasattr(self.separation_svc, "report_payload"):
+                checkpoint.save("separation_report",
+                                self.separation_svc.report_payload())
             computed.add("separation")
 
         if "separation" in computed:
@@ -363,17 +370,29 @@ class PipelineService:
                 
         # 7. LLM Refinement
         if getattr(args, "llm_refinement", False):
-            import copy
-            # Keep the pre-refinement text so the stage can report exactly what
-            # the model rewrote. A refinement pass that quietly rewrites most of
-            # the corpus is a regression, and without this it looks like success.
-            before = copy.deepcopy(transcripts)
-            # None keeps the service's built-in fusion prompt; only an explicit
-            # override replaces it.
-            transcripts = self.refinement_svc.refine(
-                transcripts, getattr(args, "llm_prompt", None) or None
-            )
-            stage_out.write_refinement(transcripts, before=before)
+            # Checkpointed like every other stage. It is the most expensive one
+            # -- 200 segments took 12 minutes on a T4, about half the run -- so
+            # without this a retry after a failure anywhere downstream, or a
+            # second pass over a finished file, pays for all of it again.
+            if checkpoint.exists("refinement"):
+                if self.logger: self.logger.info("Loading Refinement from checkpoint")
+                transcripts = checkpoint.load("refinement")
+            else:
+                import copy
+                # Keep the pre-refinement text so the stage can report exactly
+                # what the model rewrote. A refinement pass that quietly
+                # rewrites most of the corpus is a regression, and without this
+                # it looks like success.
+                before = copy.deepcopy(transcripts)
+                # None keeps the service's built-in fusion prompt; only an
+                # explicit override replaces it.
+                transcripts = self.refinement_svc.refine(
+                    transcripts, getattr(args, "llm_prompt", None) or None
+                )
+                checkpoint.save("refinement", transcripts)
+                computed.add("refinement")
+                stage_out.write_refinement(transcripts, before=before)
+
             # Export needs no GPU, and a following file needs this memory.
             if not getattr(args, "keep_models", False):
                 self.refinement_svc.unload()
@@ -385,7 +404,13 @@ class PipelineService:
         base_name = os.path.splitext(os.path.basename(audio_path))[0]
 
         if hasattr(self.separation_svc, "write_report"):
-            self.separation_svc.write_report(save_path, base_name)
+            # Prefer the counters the separation stage checkpointed: this export
+            # may be running in a later run() whose reset_stats() already
+            # cleared the live ones. Falling back to None keeps the single-file
+            # path, where separation ran moments ago, exactly as it was.
+            self.separation_svc.write_report(
+                save_path, base_name,
+                payload=checkpoint.load("separation_report"))
         
         metadata = {
             "audio_file": os.path.basename(audio_path),

@@ -169,10 +169,18 @@ class TargetExtractionService:
         """The audit dict, so callers can embed it instead of re-deriving it."""
         return self._report_payload()
 
-    def write_report(self, save_dir: str, audio_name: str):
-        """Dump per-span audit so failures can be inspected instead of guessed at."""
+    def write_report(self, save_dir: str, audio_name: str, payload: dict = None):
+        """Dump per-span audit so failures can be inspected instead of guessed at.
+
+        `payload` lets a caller supply counters captured earlier. Under
+        stage-major execution the export happens in a later run() than the
+        separation, and reset_stats() has cleared the counters by then -- so
+        reading them here produced an empty report on every batch run. Passing
+        the payload the separation stage checkpointed is what keeps it filled.
+        """
         path = os.path.join(save_dir, f"{audio_name}_tse_report.json")
-        payload = self._report_payload()
+        if payload is None:
+            payload = self._report_payload()
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
