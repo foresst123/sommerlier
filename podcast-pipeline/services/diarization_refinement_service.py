@@ -255,11 +255,24 @@ class DiarizationRefinementService:
         # The previous segment's text feeds the next one's context, so build all
         # messages up front against the pre-refinement text. Batching keeps the
         # GPU busy instead of running one 1200-token prefill at a time.
-        pending = []
-        for i, seg in enumerate(segments):
-            if not (seg.text_whisper or seg.text_phowhisper or seg.text_qwen3):
-                continue
-            pending.append((seg, self._build_user_message(segments, i)))
+        # _build_user_message is pure string work over the pre-refinement text,
+        # so the segments are independent and this parallelises cleanly. It is
+        # the one part of refinement that is CPU-bound: generation itself is on
+        # the GPU and stays sequential.
+        indices = [i for i, seg in enumerate(segments)
+                   if (seg.text_whisper or seg.text_phowhisper or seg.text_qwen3)]
+
+        workers = int(os.environ.get("OMP_NUM_THREADS", "1"))
+        if len(indices) > 64 and workers > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                messages = list(ex.map(lambda i: self._build_user_message(segments, i),
+                                       indices))
+        else:
+            # Below that, the pool costs more to start than the work it saves.
+            messages = [self._build_user_message(segments, i) for i in indices]
+
+        pending = [(segments[i], m) for i, m in zip(indices, messages)]
 
         if not pending:
             return segments

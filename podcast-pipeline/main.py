@@ -1,3 +1,11 @@
+# Thread budget first: torch reads OMP_NUM_THREADS at import and caches it, so
+# this has to run before anything pulls torch in transitively.
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from utils.cpu_plan import configure_process as _configure_cpu
+_CPU_THREADS = _configure_cpu(n_workers=3)
+
 import argparse
 import json
 import os
@@ -204,6 +212,10 @@ def main():
         
     logger = Logger.get_logger()
     logger.info(f"Starting Sommelier Pipeline for Job: {args.job_id}")
+    from utils.cpu_plan import usable_cores
+    # Workers inherit this through os.environ.copy() in base_worker_service.
+    logger.info(f"CPU: {usable_cores()} core(s) usable, "
+                f"{_CPU_THREADS} thread(s) per process")
 
     import torch
 
