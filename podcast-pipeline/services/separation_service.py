@@ -7,7 +7,6 @@ from typing import Dict, List, Optional, Tuple
 from schemas.audio import AudioData
 from schemas.segment import Segment, EnhancedSegment
 from algorithms.diarization.overlap import detect_overlapping_segments
-from utils.audio_normalize import match_splice_level, safe_limit
 
 # --- Window ---------------------------------------------------------------
 # Sidon processes 20s chunks (CHUNK_SECONDS in sidon_infer.py). Start there and
@@ -20,36 +19,6 @@ TSE_WINDOW_MAX = float(os.environ.get("TSE_WINDOW_MAX", "48.0"))
 TSE_WINDOW_GROW = float(os.environ.get("TSE_WINDOW_GROW", "4.0"))
 # Voiced solo audio one speaker needs for ECAPA to produce a usable embedding.
 TSE_MIN_SOLO = float(os.environ.get("TSE_MIN_SOLO", "2.0"))
-
-# --- Stitched window ------------------------------------------------------
-# A continuous window has to span whatever lies between the overlap and each
-# speaker's nearest solo speech, so a 0.34s backchannel buried in a long turn
-# produced 36s of window holding 28.75s of one speaker against 6.91s of the
-# other. DialogueSidon resynthesises through a VAE decoder rather than masking,
-# and at that imbalance the cheapest solution it can find is "one source carries
-# everything, the other is silent" -- measured: the backchannel came back empty
-# on its own track with the interfering speaker's tail in its place.
-#
-# Stitching a short window instead -- a trimmed slice of each speaker's nearest
-# clean speech, then the overlap -- puts both voices in front of the model in
-# equal measure. On the case above this took the imbalance from 85:1 to 9:1 and
-# the window from 36s to 6.3s, which also fits inside one 20s Sidon chunk and so
-# removes cross-chunk channel drift entirely.
-TSE_STITCH = os.environ.get("TSE_STITCH", "1") not in ("0", "false", "False")
-# Solo audio to take per speaker. ECAPA needs ~2s for a stable embedding, and
-# more than a few seconds only re-creates the imbalance this is meant to avoid.
-TSE_STITCH_SOLO = float(os.environ.get("TSE_STITCH_SOLO", "3.0"))
-# Shortest usable piece: below this a slice is mostly onset and carries little
-# speaker identity.
-TSE_STITCH_MIN_PIECE = float(os.environ.get("TSE_STITCH_MIN_PIECE", "0.5"))
-# How far to look for clean speech before giving up and using a plain window.
-TSE_STITCH_SEARCH = float(os.environ.get("TSE_STITCH_SEARCH", "400.0"))
-# Crossfade over each seam so the joins are not step discontinuities the
-# decoder would read as acoustic events.
-TSE_STITCH_FADE = float(os.environ.get("TSE_STITCH_FADE", "0.02"))
-# Silence padded around the overlap so seam artifacts cannot bleed into the one
-# span actually spliced back.
-TSE_STITCH_GUARD = float(os.environ.get("TSE_STITCH_GUARD", "0.25"))
 
 # --- Job grouping ---------------------------------------------------------
 TSE_JOB_MERGE_GAP = float(os.environ.get("TSE_JOB_MERGE_GAP", "8.0"))
@@ -66,13 +35,7 @@ TSE_ENROLL_MIN_TOTAL = float(os.environ.get("TSE_ENROLL_MIN_TOTAL", "1.5"))
 # rather than masking the mixture, so ECAPA cosine against a natural enrollment
 # sits in a lower, unmeasured range. Read the sim percentiles in the [TSE] log
 # line and the clips under separation/failed/ before trusting either number.
-# Lowered from 0.25 after a run rejected a track at 0.23 -- two hundredths
-# under, on a scale that has never been calibrated. DialogueSidon resynthesises
-# through a VAE decoder rather than masking, so ECAPA scores sit lower than they
-# would on natural speech: the same run had a median of 0.47, where natural
-# audio of one speaker usually gives 0.7-0.9. Judge the clips under
-# 02_separation/audio/failed/ by ear before moving it again.
-TSE_QC_SIM_THRESHOLD = float(os.environ.get("TSE_QC_SIM_THRESHOLD", "0.20"))
+TSE_QC_SIM_THRESHOLD = float(os.environ.get("TSE_QC_SIM_THRESHOLD", "0.25"))
 TSE_NOT_A_MARGIN = float(os.environ.get("TSE_NOT_A_MARGIN", "0.15"))
 TSE_SILENCE_RMS = float(os.environ.get("TSE_SILENCE_RMS", "0.002"))
 
@@ -89,7 +52,6 @@ REASONS = (
     "not_a_fail",       # the "not-A" relative test did not pass
     "already_spliced",  # another job already wrote this span
     "short_track",      # separator returned too few samples
-    "empty_track",      # track is silent exactly where the mixture has speech
 )
 
 
@@ -160,23 +122,9 @@ class TargetExtractionService:
         else:
             self.logger.info("[TSE] no similarity was computed at all")
 
-    def report_payload(self) -> dict:
-        """The audit dict, so callers can embed it instead of re-deriving it."""
-        return self._report_payload()
-
     def write_report(self, save_dir: str, audio_name: str):
         """Dump per-span audit so failures can be inspected instead of guessed at."""
         path = os.path.join(save_dir, f"{audio_name}_tse_report.json")
-        payload = self._report_payload()
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            if self.logger:
-                self.logger.warning(f"Failed to write TSE report: {e}")
-        return path
-
-    def _report_payload(self) -> dict:
         payload = {
             "thresholds": {
                 "qc_sim": TSE_QC_SIM_THRESHOLD, "not_a_margin": TSE_NOT_A_MARGIN,
@@ -193,7 +141,12 @@ class TargetExtractionService:
                 for a, b, spk, r, d in self.failures
             ],
         }
-        return payload
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False, indent=2)
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"Failed to write TSE report: {e}")
 
     def mine_enrollments(self, segments: List[Segment], audio: AudioData, min_dur: float = 2.0, top_k: int = 5) -> Dict[str, List[np.ndarray]]:
         """
@@ -269,40 +222,6 @@ class TargetExtractionService:
                 enrollments[spk] = picked
 
         return enrollments
-
-    @staticmethod
-    def _track_has_speech(host: np.ndarray, track: np.ndarray,
-                          frame_sec: float = 0.02, sr_hint: int = 24000) -> bool:
-        """True when `track` holds speech wherever `host` (the mixture) does.
-
-        Compares short-frame energy rather than whole-clip RMS. A track that is
-        silent over the first two thirds of a backchannel and then carries the
-        other speaker's tail still passes an RMS threshold comfortably -- that
-        is exactly the failure this exists to catch -- but it is obvious frame
-        by frame.
-        """
-        n = min(len(host), len(track))
-        if n == 0:
-            return False
-        frame = max(1, int(frame_sec * sr_hint))
-        if n < frame * 2:
-            # Too short to profile; fall back to "is there anything at all".
-            return float(np.sqrt(np.mean(track[:n] ** 2) + 1e-12)) >= TSE_SILENCE_RMS
-
-        m = n // frame
-        h = np.sqrt((host[:m * frame].reshape(m, frame) ** 2).mean(axis=1) + 1e-12)
-        t = np.sqrt((track[:m * frame].reshape(m, frame) ** 2).mean(axis=1) + 1e-12)
-
-        # Frames where the mixture clearly has speech, relative to its own peak
-        # so this holds at any recording level.
-        voiced = h >= max(h.max() * 0.25, TSE_SILENCE_RMS)
-        if not voiced.any():
-            return True          # nothing to preserve here; not the track's fault
-
-        # The track may legitimately be quieter -- the interferer is gone -- so
-        # judge it against its own scale, not the mixture's.
-        alive = t >= max(t.max() * 0.15, TSE_SILENCE_RMS * 0.5)
-        return float(np.mean(alive[voiced])) >= 0.35
 
     def _cross_fade(self, orig_audio: np.ndarray, new_audio: np.ndarray, fade_samples: int) -> np.ndarray:
         """Replace a portion of orig_audio with new_audio, crossfading the joins.
@@ -493,112 +412,6 @@ class TargetExtractionService:
             return best_single[1], None
         return None, "no_window"
 
-    # ------------------------------------------------------------------
-    def _pick_solo(self, by_spk, spk, centre, want, search=None):
-        """Nearest `want` seconds of solo speech to `centre`, trimmed to fit.
-
-        Pieces are taken closest-first and cut down rather than used whole, so
-        the result stays at the requested length instead of dragging in a 28s
-        turn. Each piece is trimmed from the end facing `centre`, keeping the
-        audio as close in time -- and so as close in vocal delivery -- to the
-        overlap as the diarization allows.
-        """
-        search = TSE_STITCH_SEARCH if search is None else search
-        lo, hi = max(0.0, centre - search), centre + search
-        pieces = [p for p in self._solo_spans(by_spk, spk, lo, hi)
-                  if p[1] - p[0] >= TSE_STITCH_MIN_PIECE]
-        pieces.sort(key=lambda ab: abs((ab[0] + ab[1]) / 2.0 - centre))
-
-        out, total = [], 0.0
-        for a, b in pieces:
-            take = min(b - a, want - total)
-            if take <= 0:
-                break
-            # Trim towards the overlap: a piece before it keeps its tail, one
-            # after it keeps its head.
-            out.append((b - take, b) if (a + b) / 2.0 < centre else (a, a + take))
-            total += take
-            if total >= want - 1e-6:
-                break
-        out.sort()
-        return out, total
-
-    def _build_stitched(self, by_spk, spk_a, spk_b, ov_lo, ov_hi, waveform, sr, total_dur):
-        """Assemble [solo A][solo B][overlap] into one short balanced window.
-
-        Returns (audio, core_range, probe_a, probe_b, layout) or None when either
-        speaker lacks clean speech to contribute, in which case the caller falls
-        back to the continuous window.
-
-        The overlap goes last, after the model has heard both voices alone in
-        equal measure. Guard silence around it keeps seam transients out of the
-        only span that gets spliced back, and every returned range is in samples
-        of the assembled window, which is what the separator and the probes see.
-        """
-        want = TSE_STITCH_SOLO
-        solo_a, got_a = self._pick_solo(by_spk, spk_a, ov_lo, want)
-        solo_b, got_b = self._pick_solo(by_spk, spk_b, ov_lo, want)
-        if got_a < TSE_MIN_SOLO or got_b < TSE_MIN_SOLO:
-            return None
-
-        fade = max(1, int(TSE_STITCH_FADE * sr))
-        guard = np.zeros(int(TSE_STITCH_GUARD * sr), dtype=np.float32)
-
-        def grab(a, b):
-            i, j = max(0, int(a * sr)), min(len(waveform), int(b * sr))
-            return waveform[i:j].astype(np.float32, copy=True) if j > i else None
-
-        parts, probe_a, probe_b, cursor = [], [], [], 0
-
-        def append(chunk, probe_for=None):
-            nonlocal cursor
-            if chunk is None or len(chunk) == 0:
-                return
-            # Ramp the seam rather than butting two unrelated waveforms
-            # together: a step discontinuity is an acoustic event, and the
-            # decoder will happily resynthesise it as one.
-            if parts and len(chunk) > fade * 2:
-                ramp = np.linspace(0.0, 1.0, fade, dtype=np.float32)
-                chunk = chunk.copy()
-                chunk[:fade] *= ramp
-                chunk[-fade:] *= ramp[::-1]
-            start = cursor
-            parts.append(chunk)
-            cursor += len(chunk)
-            if probe_for is not None:
-                # Keep the probe clear of the ramps, which are no longer clean
-                # solo speech.
-                probe_for.append((start + fade, cursor - fade))
-
-        for a, b in solo_a:
-            append(grab(a, b), probe_a)
-        append(guard)
-        for a, b in solo_b:
-            append(grab(a, b), probe_b)
-        append(guard)
-
-        core_start = cursor
-        overlap = grab(ov_lo, ov_hi)
-        if overlap is None or len(overlap) == 0:
-            return None
-        parts.append(overlap)          # never ramped: this is the span spliced back
-        cursor += len(overlap)
-        core = (core_start, cursor)
-        parts.append(guard)
-
-        audio = np.concatenate(parts).astype(np.float32)
-        probe_a = [(i, j) for i, j in probe_a if j > i]
-        probe_b = [(i, j) for i, j in probe_b if j > i]
-        if not probe_a or not probe_b:
-            return None
-
-        layout = {
-            "solo_a": got_a, "solo_b": got_b,
-            "dur": len(audio) / sr,
-            "ratio": max(got_a, got_b) / max(min(got_a, got_b), 1e-9),
-        }
-        return audio, core, probe_a, probe_b, layout
-
     @staticmethod
     def _growth_bias(by_spk, spk, lo, hi) -> float:
         """How strongly to grow right rather than left to reach `spk`.
@@ -700,10 +513,15 @@ class TargetExtractionService:
         if self.logger:
             self.logger.info("Processing overlaps with Target Speaker Extraction (TSE)")
 
+        # với mỗi thành phần trong segments, tạo một dictionary chứa thông tin start, end, speaker và index
         seg_dicts = [{"start": s.start, "end": s.end, "speaker": s.speaker, "index": s.index} for s in segments]
+
+        # lọc ra những bộ key valuf có overlap >= overlap_threshold
         pairs = detect_overlapping_segments(seg_dicts, overlap_threshold=overlap_threshold, logger=self.logger)
 
+        # Tạo danh sách các EnhancedSegment từ danh sách segments
         enhanced = [EnhancedSegment(**s.__dict__) for s in segments]
+        # Lấy sample rate và waveform từ audio
         sr = audio.sample_rate
         waveform = audio.waveform
         total_dur = len(waveform) / sr
@@ -750,50 +568,23 @@ class TargetExtractionService:
 
             job_lo = min(p["overlap_start"] for p in plist)
             job_hi = max(p["overlap_end"] for p in plist)
+            built, reason = self._build_window(by_spk, spk_a, spk_b, job_lo, job_hi, total_dur)
+            if built is None:
+                fail_all(reason, f"span={job_hi - job_lo:.2f}s")
+                continue
 
-            # A stitched window only makes sense for a single overlap: the
-            # assembled timeline no longer matches the recording, so several
-            # overlaps at different offsets could not all be located in it.
-            stitched = None
-            if TSE_STITCH and len(plist) == 1:
-                stitched = self._build_stitched(
-                    by_spk, spk_a, spk_b, job_lo, job_hi, waveform, sr, total_dur)
-
-            if stitched is not None:
-                window_audio, core, probe_a_s, probe_b_s, layout = stitched
-                # win_lo maps window samples back to recording time. The stitched
-                # timeline is discontinuous, so only the core span is meaningful
-                # there -- and that is the one span spliced back.
-                win_lo = job_lo - core[0] / sr
-                win_hi = win_lo + len(window_audio) / sr
-                solo_a = solo_b = ()
-                anchor = spk_a if layout["solo_a"] >= layout["solo_b"] else spk_b
-                self.stats["stitched"] += 1
-                if self.logger:
-                    self.logger.info(
-                        f"[TSE:stitch] {job_lo:.2f}-{job_hi:.2f}s -> {layout['dur']:.1f}s window "
-                        f"(solo {spk_a}={layout['solo_a']:.1f}s {spk_b}={layout['solo_b']:.1f}s, "
-                        f"balance {layout['ratio']:.1f}:1)")
-            else:
-                built, reason = self._build_window(by_spk, spk_a, spk_b, job_lo, job_hi, total_dur)
-                if built is None:
-                    fail_all(reason, f"span={job_hi - job_lo:.2f}s")
-                    continue
-
-                win_lo, win_hi, solo_a, solo_b, anchor = built
-                lo_f, hi_f = int(win_lo * sr), int(win_hi * sr)
-                window_audio = waveform[lo_f:hi_f].copy()
-                core = (int((job_lo - win_lo) * sr), int((job_hi - win_lo) * sr))
-                n = len(window_audio)
-                probe_a_s = self._to_samples(solo_a, win_lo, sr, n)
-                probe_b_s = self._to_samples(solo_b, win_lo, sr, n)
+            win_lo, win_hi, solo_a, solo_b, anchor = built
+            lo_f, hi_f = int(win_lo * sr), int(win_hi * sr)
+            window_audio = waveform[lo_f:hi_f].copy()
+            n = len(window_audio)
+            core = (int((job_lo - win_lo) * sr), int((job_hi - win_lo) * sr))
 
             track_A, track_B, sim_A, sim_B, diag = self.tse_model.separate_two_speakers(
                 window_audio,
                 enroll_A=enrollments[spk_a], enroll_B=enrollments[spk_b],
                 sample_rate=sr, id_A=spk_a, id_B=spk_b,
-                probe_A=probe_a_s,
-                probe_B=probe_b_s,
+                probe_A=self._to_samples(solo_a, win_lo, sr, n),
+                probe_B=self._to_samples(solo_b, win_lo, sr, n),
                 core_range=core,
             )
             for sim in (sim_A, sim_B):
@@ -888,29 +679,8 @@ class TargetExtractionService:
                         self._fail(enh, ov_lo, ov_hi, "already_spliced", "")
                         continue
 
-                    # Verify the track carries speech where the mixture does,
-                    # on the span about to be written. Every other check scores
-                    # a speaker's solo region, which can sit many seconds away:
-                    # one case scored sim=0.67 from solo audio 19s earlier while
-                    # the track was flat silence across the backchannel itself,
-                    # and that silence went into the dataset labelled as speech.
-                    host = enh.enhanced_audio[dst:dst + limit]
-                    if not self._track_has_speech(host, track[src:src + limit]):
-                        self._fail(enh, ov_lo, ov_hi, "empty_track",
-                                   "silent where mixture has speech")
-                        continue
-
-                    # The separated track is quieter than the mixture it
-                    # replaces -- the interfering speaker and the background
-                    # are gone, which is the whole point -- so splicing it in
-                    # raw leaves a level step at each join. On a backchannel of
-                    # a few hundred milliseconds that step spans most of the
-                    # clip. Matching RMS to the audio being replaced closes it
-                    # with a scalar, before the crossfade smooths the edges.
-                    patch = match_splice_level(
-                        enh.enhanced_audio[dst:dst + limit], track[src:src + limit])
                     enh.enhanced_audio[dst:dst + limit] = self._cross_fade(
-                        enh.enhanced_audio[dst:dst + limit], patch, fade_samples)
+                        enh.enhanced_audio[dst:dst + limit], track[src:src + limit], fade_samples)
                     enh.tse = True
                     enh.tse_spans.append((ov_lo, ov_lo + limit / sr,
                                           float(sim) if sim is not None else -1.0))
@@ -996,16 +766,6 @@ class TargetExtractionService:
                     "TSE failure rate landing in your dataset. Check the [TSE] counters."
                 )
 
-        # Segments are summed into these tracks, so overlapping same-speaker
-        # spans can push the total past full scale. Hard clipping would fold
-        # the waveform and spread broadband distortion across the spectrum --
-        # the unnatural kind of artifact that costs ASR accuracy and that a
-        # listener hears as crackle. Scaling instead keeps every relative level
-        # intact and removes nothing.
-        track_0, g0 = safe_limit(track_0)
-        track_1, g1 = safe_limit(track_1)
-        if self.logger and (g0 < 1.0 or g1 < 1.0):
-            self.logger.info(
-                f"[SDLM] limiter applied: track_0 x{g0:.3f}, track_1 x{g1:.3f} "
-                "(summed segments exceeded full scale)")
+        np.clip(track_0, -1.0, 1.0, out=track_0)
+        np.clip(track_1, -1.0, 1.0, out=track_1)
         return track_0, track_1
