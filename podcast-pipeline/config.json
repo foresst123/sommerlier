@@ -133,7 +133,7 @@
                 },
                 "qwen3": {
                     "batch_size": 24,
-                    "use_flash_attention": true,
+                    "use_flash_attention": false,
                     "torch_dtype": "bfloat16"
                 },
                 "diarizen": {
