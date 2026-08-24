@@ -224,3 +224,33 @@ def test_refinement_raises_when_most_batches_fail():
     raises = [n for n in ast.walk(refine) if isinstance(n, ast.Raise)]
     assert raises, "refine() must fail loudly when the stage did not work"
     assert "REFINE_FAILURE_LIMIT" in src
+
+
+def test_a_stage_scope_closes_even_when_the_stage_blows_up():
+    """An open scope swallows every later release, so a stage that dies outside
+    the per-file try would leave its models resident for the rest of the run."""
+    import utils.batch as batch
+
+    class _Exploding:
+        def __init__(self):
+            self.opened = 0
+            self.closed = 0
+
+        def begin_stage_scope(self):
+            self.opened += 1
+
+        def end_stage_scope(self):
+            self.closed += 1
+
+        def run(self, args, config, path):
+            raise KeyboardInterrupt("stage interrupted")
+
+    pipe = _Exploding()
+    args = types.SimpleNamespace(stop_after=None, keep_models=False)
+    try:
+        batch.run_batch_by_stage(pipe, args, {}, ["f1"], stages=("diarization",))
+    except KeyboardInterrupt:
+        pass
+
+    assert pipe.opened == 1
+    assert pipe.closed == 1, "the scope was left open after the stage failed"

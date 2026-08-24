@@ -112,3 +112,24 @@ def test_same_stem_different_extension_is_reported_before_running():
 
 def test_distinct_names_report_no_collision():
     assert find_name_collisions(["/a/x.mp3", "/a/y.mp3", "/b/z.wav"]) == {}
+
+
+def test_the_separator_dump_is_scoped_to_one_file():
+    """Dump filenames carry a timestamp and speaker pair but not the audio
+    name, so a directory shared across a batch means later files silently
+    overwrite earlier ones."""
+    import os
+    import re
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "services/pipeline_service.py"), encoding="utf-8") as f:
+        src = f.read()
+
+    assign = re.search(r"self\.separation_svc\.dump_dir = os\.path\.join\(\s*([^)]*)\)", src)
+    assert assign, "dump_dir assignment not found"
+    target = assign.group(1)
+
+    assert "output_dir" in target, (
+        "dump_dir must be built from output_dir, which is unique per file")
+    assert "dirname(audio_path)" not in target, (
+        "every file in a batch shares the audio's parent directory")

@@ -271,11 +271,15 @@ class PipelineService:
             if self.logger: self.logger.info("Loading Separation from checkpoint")
             enhanced_segments = checkpoint.load("separation")
         else:
-            # Both separated and failed clips are dumped next to the outputs so
-            # the QC thresholds can be judged by ear rather than from counters:
-            # separation/separated/ and separation/failed/.
+            # Both separated and failed clips are dumped next to this file's own
+            # outputs so the QC thresholds can be judged by ear rather than from
+            # counters. Built from output_dir, not from the audio's parent
+            # directory: every file in a batch shares that parent, and the dump
+            # filenames carry a timestamp and speaker pair but not the audio
+            # name, so a shared directory means later files silently overwrite
+            # earlier ones -- the collision _resolve_output_dir exists to avoid.
             self.separation_svc.dump_dir = os.path.join(
-                os.path.dirname(audio_path), "_final", "separation")
+                output_dir, "02_separation", "audio", "raw")
             enhanced_segments = self.separation_svc.process_overlaps(diarization_result.segments, audio_data)
             if self.logger: self.logger.info(f"[DEBUG] After Separation: {len(enhanced_segments)} segments")
             checkpoint.save("separation", enhanced_segments)

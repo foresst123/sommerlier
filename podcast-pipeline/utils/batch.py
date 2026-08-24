@@ -152,24 +152,28 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
         # is about to use, which turns stage-major back into file-major with
         # extra steps.
         begin = getattr(pipeline, "begin_stage_scope", None)
+        end = getattr(pipeline, "end_stage_scope", None)
         if begin:
             begin()
 
-        for i, path in enumerate(pending, start=1):
-            if logger:
-                logger.info(f"[{label} {i}/{len(pending)}] {os.path.basename(path)}")
-            try:
-                pipeline.run(stage_args, config, path)
-            except Exception as e:
-                # A file that dies in diarization must not be retried in every
-                # later stage, and must not stop its neighbours.
+        # finally, not a plain call after the loop: an open scope swallows every
+        # later release, so a stage that dies outside the per-file try would
+        # leave the models it finished with resident for the rest of the run.
+        try:
+            for i, path in enumerate(pending, start=1):
                 if logger:
-                    logger.error(f"Failed on {path} during {label}: {type(e).__name__}: {e}")
-                failures[path] = f"{label}: {type(e).__name__}: {e}"
-
-        end = getattr(pipeline, "end_stage_scope", None)
-        if end:
-            end()
+                    logger.info(f"[{label} {i}/{len(pending)}] {os.path.basename(path)}")
+                try:
+                    pipeline.run(stage_args, config, path)
+                except Exception as e:
+                    # A file that dies in diarization must not be retried in
+                    # every later stage, and must not stop its neighbours.
+                    if logger:
+                        logger.error(f"Failed on {path} during {label}: {type(e).__name__}: {e}")
+                    failures[path] = f"{label}: {type(e).__name__}: {e}"
+        finally:
+            if end:
+                end()
 
         if stage is not None and original_stop == stage:
             break
