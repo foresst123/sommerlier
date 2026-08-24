@@ -64,6 +64,19 @@ class TargetSpeakerExtractor:
 
         self._load_model()
 
+    def reset_speakers(self):
+        """Forget the cached enrollment embeddings.
+
+        The cache is keyed by the diarizer's speaker label -- "1", "2" -- and
+        those labels restart at 1 for every file. Carried across a batch, the
+        second file's speaker "1" hits the first file's entry and every track in
+        it gets scored against a stranger's voice: similarities collapse, the
+        A/B assignment inverts, and QC rejects work that was fine. It only shows
+        up from the second file onwards, which is why a single-file run looks
+        healthy.
+        """
+        self.target_embed_cache.clear()
+
     def close(self):
         """Remove the scratch directory used to exchange arrays with the worker."""
         import shutil
