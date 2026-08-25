@@ -1,0 +1,283 @@
+diff --git a/podcast-pipeline/main.py b/podcast-pipeline/main.py
+index a5ed139..f32dc1d 100644
+--- a/podcast-pipeline/main.py
++++ b/podcast-pipeline/main.py
+@@ -30,6 +30,14 @@ def parse_args():
+     parser.add_argument("--LLM", default="case_0", type=str, help="LLM refinement case")
+     parser.add_argument("--initprompt", action="store_true", help="Use initial prompt for LLM")
+     parser.add_argument("--env", default="kaggle", type=str, help="Environment profile name in config.json")
++    parser.add_argument("--by_stage", action="store_true",
++                        help="Run each stage across the whole batch before the next "
++                             "stage, instead of the whole pipeline per file. Loads "
++                             "each model once per batch rather than once per file.")
++    parser.add_argument("--only_batch", type=int, default=None,
++                        help="Run only this batch number (1-based) and exit. Lets a "
++                             "directory larger than max_hours be finished across "
++                             "several sessions without exceeding a runtime limit.")
+     parser.add_argument("--keep_models", action="store_true",
+                         help="Keep models in VRAM between stages instead of unloading them. "
+                              "Saves reload time when processing many files, at the cost of a "
+@@ -107,7 +115,7 @@ from utils.torch_compat import install_torch_load_shim
+ # Must run before any model module imports torch and loads a checkpoint.
+ install_torch_load_shim()
+ 
+-from utils.batch import audio_duration, find_audio_files, plan_batches
++from utils.batch import audio_duration, find_audio_files, plan_batches, run_batch_by_stage
+ from utils.worker_env import resolve_worker_python
+ from services.model_loader import ModelLoader
+ from services.audio_service import AudioService
+@@ -246,12 +254,27 @@ def main():
+             f"Processing {len(paths)} file(s), {total_hours:.2f}h total, "
+             f"in {len(batches)} run(s) of up to {max_hours}h")
+ 
++        if args.only_batch is not None:
++            if not (1 <= args.only_batch <= len(batches)):
++                logger.error(f"--only_batch {args.only_batch} is outside 1..{len(batches)}")
++                return
++            selected = [(args.only_batch, batches[args.only_batch - 1])]
++            logger.info(f"Running batch {args.only_batch}/{len(batches)} only")
++        else:
++            selected = list(enumerate(batches, start=1))
++
+         failures = []
+         done = 0
+-        for bi, batch in enumerate(batches, start=1):
++        for bi, batch in selected:
+             batch_hours = sum(audio_duration(p) for p in batch) / 3600.0
+             logger.info(f"--- Batch {bi}/{len(batches)}: "
+                         f"{len(batch)} file(s), {batch_hours:.2f}h ---")
++
++            if args.by_stage:
++                failures.extend(run_batch_by_stage(pipeline, args, config, batch, logger=logger))
++                done += len(batch)
++                continue
++
+             for path in batch:
+                 done += 1
+                 logger.info(f"[{done}/{len(paths)}] Running pipeline on audio: {path}")
+diff --git a/podcast-pipeline/services/diarization_refinement_service.py b/podcast-pipeline/services/diarization_refinement_service.py
+index a89b281..46646a5 100644
+--- a/podcast-pipeline/services/diarization_refinement_service.py
++++ b/podcast-pipeline/services/diarization_refinement_service.py
+@@ -1,3 +1,4 @@
++import os
+ from typing import List
+ from difflib import SequenceMatcher
+ from algorithms.asr.hallucination import foreign_script_ratio
+@@ -58,8 +59,20 @@ class DiarizationRefinementService:
+         self.tokenizer = None
+         self.batch_size = batch_size
+         self.rejected = 0
+-        # Qwen2.5-3B is extremely fast, smart enough for this task, and only takes ~6GB VRAM
+-        self.model_name = "Qwen/Qwen2.5-3B-Instruct"
++        # Qwen3.5-9B is the strongest sub-10B model available and covers 201
++        # languages against Qwen2.5's 29, which matters for Vietnamese.
++        #
++        # UNVERIFIED ON THIS HARDWARE. Three things can bite on a T4 (Turing):
++        #   - ~18GB in fp16 does not fit 16GB; it needs Q8 (~9.6GB) or Q6 (~7.4GB),
++        #     and Turing lacks the fast int4/int8 kernels, so quantised may be
++        #     SLOWER than fp16 rather than faster.
++        #   - Gated DeltaNet needs recent transformers; an older one raises
++        #     KeyError on the model type. Upgrading it inside sommelier_env risks
++        #     the speechbrain/pyannote pins.
++        #   - It is a vision-language model; AutoModelForCausalLM may not be the
++        #     right class.
++        # Set SOMMELIER_LLM to fall back without editing code.
++        self.model_name = os.environ.get("SOMMELIER_LLM", "Qwen/Qwen3.5-9B")
+         
+     def _load_model(self):
+         if self.model is not None:
+diff --git a/podcast-pipeline/tests/test_batch.py b/podcast-pipeline/tests/test_batch.py
+new file mode 100644
+index 0000000..34c424a
+--- /dev/null
++++ b/podcast-pipeline/tests/test_batch.py
+@@ -0,0 +1,118 @@
++"""Tests for duration-bounded batching and stage-major execution.
++
++Run:  python -m pytest tests/test_batch.py -q     (from podcast-pipeline/)
++"""
++import os
++import sys
++import types
++from unittest.mock import patch
++
++sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++
++from utils import batch as B
++from utils.batch import PIPELINE_STAGES, plan_batches, run_batch_by_stage
++
++HOUR = 3600.0
++
++
++def _durations(mapping):
++    return patch.object(B, "audio_duration", lambda p: mapping[p])
++
++
++class FakePipeline:
++    """Records (stage, path) in call order."""
++
++    def __init__(self, fail_on=None, fail_stage=None):
++        self.calls = []
++        self.fail_on = fail_on
++        self.fail_stage = fail_stage
++
++    def run(self, args, config, path):
++        stage = getattr(args, "stop_after", None)
++        self.calls.append((stage, path))
++        if path == self.fail_on and stage == self.fail_stage:
++            raise RuntimeError("boom")
++
++
++def _args(**kw):
++    a = types.SimpleNamespace(stop_after=None)
++    for k, v in kw.items():
++        setattr(a, k, v)
++    return a
++
++
++# --- planning ------------------------------------------------------------
++
++def test_batch_total_stays_within_the_limit():
++    durs = {c: HOUR for c in "abcdefg"}
++    with _durations(durs):
++        batches = plan_batches(list(durs), 5.0)
++    assert [len(b) for b in batches] == [5, 2]
++    for b in batches:
++        assert sum(durs[p] for p in b) <= 5 * HOUR + 1e-6
++
++
++def test_a_batch_may_reach_the_limit_exactly():
++    durs = {"a": 2 * HOUR, "b": 3 * HOUR, "c": HOUR}
++    with _durations(durs):
++        batches = plan_batches(list(durs), 5.0)
++    assert batches == [["a", "b"], ["c"]], "5.00h exactly must not spill into a second batch"
++
++
++def test_oversized_file_runs_alone_rather_than_being_dropped():
++    durs = {"a": HOUR, "big": 9 * HOUR, "b": HOUR}
++    with _durations(durs):
++        batches = plan_batches(list(durs), 5.0)
++    assert ["big"] in batches
++    assert sum(len(b) for b in batches) == 3, "no file may be silently skipped"
++
++
++def test_unreadable_duration_is_isolated():
++    durs = {"a": HOUR, "bad": 0.0, "b": HOUR}
++    with _durations(durs):
++        batches = plan_batches(list(durs), 5.0)
++    assert ["bad"] in batches
++
++
++# --- stage-major execution ----------------------------------------------
++
++def test_every_file_finishes_a_stage_before_the_next_stage_starts():
++    files = ["f1", "f2", "f3"]
++    pipe = FakePipeline()
++    run_batch_by_stage(pipe, _args(), {}, files)
++
++    seen = []
++    for stage, _path in pipe.calls:
++        if not seen or seen[-1] != stage:
++            seen.append(stage)
++    assert seen == list(PIPELINE_STAGES), (
++        f"stages ran as {seen}; each stage must cover the whole batch before the next"
++    )
++    for stage in PIPELINE_STAGES:
++        assert [p for s, p in pipe.calls if s == stage] == files
++
++
++def test_a_file_that_fails_is_dropped_from_later_stages():
++    files = ["f1", "f2", "f3"]
++    pipe = FakePipeline(fail_on="f2", fail_stage="diarization")
++    failures = run_batch_by_stage(pipe, _args(), {}, files)
++
++    assert [p for p, _ in failures] == ["f2"]
++    later = [p for s, p in pipe.calls if s == "separation"]
++    assert later == ["f1", "f3"], (
++        "a file that died in diarization must not be retried in every later "
++        "stage, and must not take its neighbours down"
++    )
++
++
++def test_stop_after_is_respected():
++    pipe = FakePipeline()
++    run_batch_by_stage(pipe, _args(stop_after="separation"), {}, ["f1", "f2"])
++    stages = {s for s, _ in pipe.calls}
++    assert stages == {"diarization", "separation"}, f"ran {stages}"
++
++
++def test_caller_args_are_not_mutated():
++    args = _args(stop_after=None)
++    run_batch_by_stage(FakePipeline(), args, {}, ["f1"])
++    assert args.stop_after is None, "stop_after must be set on a copy, not the caller's args"
+diff --git a/podcast-pipeline/utils/batch.py b/podcast-pipeline/utils/batch.py
+index 1b6b2c9..007acea 100644
+--- a/podcast-pipeline/utils/batch.py
++++ b/podcast-pipeline/utils/batch.py
+@@ -93,3 +93,65 @@ def plan_batches(paths, max_hours: float, logger=None):
+     if current:
+         batches.append(current)
+     return batches
++
++
++# Stage order must match the pipeline's own sequence; `None` means "run to the
++# end", which covers refinement and export.
++PIPELINE_STAGES = ("diarization", "separation", "music_removal", "asr", "captioning", None)
++
++
++def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELINE_STAGES):
++    """Run one stage across every file before moving to the next stage.
++
++    File-major order reloads each model once per file. Stage-major loads the
++    diarizer once, runs all five files, frees it, then loads the separator. The
++    pipeline already checkpoints per stage and per file, so each pass resumes
++    from the previous pass's output rather than recomputing.
++
++    Returns a list of (path, error) for files that failed.
++    """
++    import copy
++    import os
++
++    failures = {}
++    original_stop = getattr(args, "stop_after", None)
++
++    for stage in stages:
++        if stage is not None and original_stop is not None:
++            # The caller asked to stop early; do not run past their request.
++            if _stage_index(stage) > _stage_index(original_stop):
++                break
++
++        label = stage or "refinement+export"
++        pending = [p for p in batch if p not in failures]
++        if not pending:
++            break
++        if logger:
++            logger.info(f"=== Stage '{label}': {len(pending)} file(s) ===")
++
++        stage_args = copy.copy(args)
++        stage_args.stop_after = stage
++
++        for i, path in enumerate(pending, start=1):
++            if logger:
++                logger.info(f"[{label} {i}/{len(pending)}] {os.path.basename(path)}")
++            try:
++                pipeline.run(stage_args, config, path)
++            except Exception as e:
++                # A file that dies in diarization must not be retried in every
++                # later stage, and must not stop its neighbours.
++                if logger:
++                    logger.error(f"Failed on {path} during {label}: {type(e).__name__}: {e}")
++                failures[path] = f"{label}: {type(e).__name__}: {e}"
++
++        if stage is not None and original_stop == stage:
++            break
++
++    return list(failures.items())
++
++
++def _stage_index(stage) -> int:
++    try:
++        return PIPELINE_STAGES.index(stage)
++    except ValueError:
++        return len(PIPELINE_STAGES)

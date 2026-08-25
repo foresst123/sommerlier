@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sommelier Pipeline Viewer</title>
+    <style>
+        :root {
+            --primary: #6366f1;
+            --primary-hover: #4f46e5;
+            --bg-color: #0f172a;
+            --card-bg: #1e293b;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --border-color: #334155;
+            --success: #10b981;
+            --warning: #f59e0b;
+        }
+
+        body {
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            margin: 0;
+            padding: 2rem;
+            line-height: 1.5;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        h1 {
+            font-size: 2rem;
+            margin: 0;
+            background: linear-gradient(to right, #818cf8, #c084fc);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .upload-section {
+            background-color: var(--card-bg);
+            padding: 2rem;
+            border-radius: 12px;
+            text-align: center;
+            border: 2px dashed var(--border-color);
+            margin-bottom: 2rem;
+            transition: all 0.3s ease;
+        }
+
+        .upload-section:hover {
+            border-color: var(--primary);
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+
+        .btn {
+            background-color: var(--primary);
+            color: white;
+            padding: 0.75rem 1.5rem;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: background-color 0.2s;
+            display: inline-block;
+        }
+
+        .btn:hover {
+            background-color: var(--primary-hover);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background-color: var(--card-bg);
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+
+        th, td {
+            padding: 1rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        th {
+            background-color: #0f172a;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            font-size: 0.85rem;
+            letter-spacing: 0.05em;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+
+        tr:hover {
+            background-color: rgba(255, 255, 255, 0.02);
+        }
+
+        .time-badge {
+            background-color: #334155;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 0.9rem;
+        }
+
+        .speaker-badge {
+            background-color: rgba(99, 102, 241, 0.2);
+            color: #818cf8;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-weight: bold;
+            font-size: 0.9rem;
+        }
+
+        .text-final {
+            font-weight: bold;
+            color: #f8fafc;
+            font-size: 1.05rem;
+        }
+
+        .text-model {
+            color: var(--text-muted);
+            font-size: 0.95rem;
+        }
+
+        .tag-true {
+            color: var(--success);
+            background: rgba(16, 185, 129, 0.1);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+        }
+
+        .tag-false {
+            color: var(--text-muted);
+            font-size: 0.8rem;
+        }
+
+        .meta-container {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .meta-item {
+            background: var(--card-bg);
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            border: 1px solid var(--border-color);
+        }
+
+        .meta-label {
+            color: var(--text-muted);
+            margin-right: 0.5rem;
+        }
+
+        #metadata-section {
+            display: none;
+            margin-bottom: 2rem;
+        }
+
+        .col-models {
+            width: 25%;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="header">
+        <h1>Sommelier ASR Pipeline Viewer</h1>
+    </div>
+
+    <div class="upload-section" id="upload-box">
+        <h3>Tải lên file JSON kết quả</h3>
+        <p style="color: var(--text-muted); margin-bottom: 1.5rem;">Chọn file JSON được xuất ra từ pipeline (ví dụ: thu_that_thach_10m.json)</p>
+        <label for="file-input" class="btn">
+            Chọn File JSON
+        </label>
+        <input type="file" id="file-input" accept=".json">
+    </div>
+
+    <div id="metadata-section">
+        <h3 style="margin-bottom: 1rem; color: #818cf8;">Cấu hình & Metadata</h3>
+        <div class="meta-container" id="meta-content">
+            <!-- Rendered via JS -->
+        </div>
+    </div>
+
+    <div style="overflow-x: auto;">
+        <table id="result-table" style="display: none;">
+            <thead>
+                <tr>
+                    <th>Index</th>
+                    <th>Thời gian</th>
+                    <th>Speaker</th>
+                    <th class="col-models">Whisper</th>
+                    <th class="col-models">PhoWhisper</th>
+                    <th class="col-models">Qwen3-ASR</th>
+                    <th class="col-models">Kết quả (ROVER Ensemble)</th>
+                    <th>Plugins</th>
+                </tr>
+            </thead>
+            <tbody id="table-body">
+                <!-- Data goes here -->
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+    function formatTime(seconds) {
+        const h = Math.floor(seconds / 3600);
+        const m = Math.floor((seconds % 3600) / 60);
+        const s = Math.floor(seconds % 60);
+        const ms = Math.floor((seconds - Math.floor(seconds)) * 100);
+        if (h > 0) return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+        return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+    }
+
+    document.getElementById('file-input').addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            try {
+                const data = JSON.parse(e.target.result);
+                renderData(data);
+                document.getElementById('upload-box').style.display = 'none';
+            } catch (err) {
+                alert("Lỗi khi đọc file JSON: " + err.message);
+            }
+        };
+        reader.readAsText(file);
+    });
+
+    function renderData(data) {
+        // Render Metadata
+        if (data.metadata && Object.keys(data.metadata).length > 0) {
+            const metaDiv = document.getElementById('meta-content');
+            metaDiv.innerHTML = '';
+            for (const [key, value] of Object.entries(data.metadata)) {
+                let valStr = value;
+                if (Array.isArray(value)) valStr = value.join(', ');
+                if (typeof value === 'boolean') valStr = value ? 'Bật' : 'Tắt';
+                
+                metaDiv.innerHTML += `
+                    <div class="meta-item">
+                        <span class="meta-label">${key}:</span>
+                        <span style="color: #f8fafc; font-weight: 500;">${valStr}</span>
+                    </div>
+                `;
+            }
+            document.getElementById('metadata-section').style.display = 'block';
+        }
+
+        // Render Table
+        const tbody = document.getElementById('table-body');
+        tbody.innerHTML = '';
+        
+        data.segments.forEach(seg => {
+            const tr = document.createElement('tr');
+            
+            const demucsTag = seg.demucs ? `<div class="tag-true" style="margin-bottom: 4px;">Demucs ✓</div>` : `<div class="tag-false">Demucs ✗</div>`;
+            const srTag = seg.srcorrnet ? `<div class="tag-true">SR-CorrNet ✓</div>` : `<div class="tag-false">SR-CorrNet ✗</div>`;
+
+            tr.innerHTML = `
+                <td style="color: var(--text-muted); font-size: 0.9rem;">#${seg.index}</td>
+                <td>
+                    <div class="time-badge">${formatTime(seg.start)} - ${formatTime(seg.end)}</div>
+                </td>
+                <td>
+                    <div class="speaker-badge">${seg.speaker.replace('SPEAKER_', 'S')}</div>
+                </td>
+                <td class="text-model">${seg.text_whisper || '-'}</td>
+                <td class="text-model">${seg.text_phowhisper || '-'}</td>
+                <td class="text-model">${seg.text_qwen3 || '-'}</td>
+                <td class="text-final">${seg.text || '-'}</td>
+                <td>
+                    ${demucsTag}
+                    ${srTag}
+                </td>
+            `;
+            tbody.appendChild(tr);
+        });
+
+        document.getElementById('result-table').style.display = 'table';
+    }
+</script>
+
+</body>
+</html>

@@ -1,0 +1,72 @@
+import os
+
+import numpy as np
+import torch
+from panns_inference import AudioTagging
+
+class PANNSDetector:
+    """Wrapper for PANNS Audio Tagging (background music detection)."""
+    
+    def __init__(self, device: str = None):
+        if device is None:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            self.device = device
+
+        # panns_inference compares `device == "cuda"` exactly, so an indexed
+        # string like "cuda:0" silently falls back to CPU ("Using CPU." in its
+        # own log). It then wraps the model in DataParallel across every visible
+        # GPU, so the index cannot be honoured anyway -- pin the device with
+        # CUDA_VISIBLE_DEVICES if placement matters.
+        panns_device = "cuda" if str(self.device).startswith("cuda") else "cpu"
+
+        # checkpoint_path=None makes panns_inference re-download Cnn14 (312MB from
+        # Zenodo, ~5 min on Kaggle) on every run. PANNS_CHECKPOINT lets the caller
+        # point at a pre-staged copy; None keeps the old download behaviour.
+        checkpoint_path = os.environ.get("PANNS_CHECKPOINT") or None
+        self.model = AudioTagging(checkpoint_path=checkpoint_path, device=panns_device)
+
+        # AudioTagging wraps the model in DataParallel across every visible GPU
+        # (it prints "GPU number: 2"). Inference here always runs with batch size
+        # 1, so the second replica never receives a sample -- it only burns VRAM
+        # on the GPU hosting the Qwen3/Demucs workers and adds scatter/gather
+        # overhead. Unwrap it and pin the module to the requested device.
+        inner = getattr(self.model, "model", None)
+        if isinstance(inner, torch.nn.DataParallel):
+            self.model.model = inner.module.to(self.device)
+            self.model.device = self.device
+        
+    def detect_music(self, audio_array, sample_rate: int = 32000, threshold: float = 0.5) -> tuple:
+        """Detect if music is present in audio."""
+        import librosa
+        if sample_rate != 32000:
+            audio_array = librosa.resample(audio_array, orig_sr=sample_rate, target_sr=32000)
+            
+        # PANNs (Cnn14) requires a minimum length to pass through all pooling layers (approx 1 second)
+        if len(audio_array) < 32000:
+            return False, 0.0
+            
+        if len(audio_array.shape) > 1:
+            audio_array = audio_array.mean(axis=1) if audio_array.shape[1] == 2 else audio_array
+
+        # Unlike the ASR and separation models, PANNs applies no input
+        # normalization of its own, so its tagging confidence tracks absolute
+        # level. Scale to a consistent peak here rather than depending on how
+        # loud the source happened to be.
+        peak = float(np.max(np.abs(audio_array))) if audio_array.size else 0.0
+        if peak > 0:
+            audio_array = (audio_array / peak) * 0.9
+
+        clipwise_output, _ = self.model.inference(audio_array[None, :])
+        
+        music_idx = None
+        for i, label in enumerate(self.model.labels):
+            if label.lower() == "music":
+                music_idx = i
+                break
+                
+        if music_idx is not None:
+            music_prob = float(clipwise_output[0, music_idx])
+            has_music = music_prob > threshold
+            return has_music, music_prob
+        return False, 0.0

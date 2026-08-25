@@ -6,12 +6,24 @@
 #
 # Note: This code has been modified to fit the context of this repository.
 
+import os
+
 import librosa
 import torch
 import numpy as np
 import onnxruntime
 
-VAD_THRESHOLD = 20
+# Segments longer than this are re-cut on Silero's own speech boundaries;
+# shorter ones keep the diarizer's edges untouched. It used to be 20s, which
+# meant that once max_segment_length dropped to 20 nothing reached the VAD at
+# all and every boundary came straight from the diarizer's 0.8s frame grid.
+# A couple of seconds is enough audio for Silero to place an edge on the
+# waveform rather than on a frame index.
+VAD_THRESHOLD = float(os.environ.get("VAD_THRESHOLD", "2.0"))
+# Longest run of speech `segment_speech` will hand back as one piece before it
+# splits at the widest internal pause. Independent of VAD_THRESHOLD: that one
+# decides whether the VAD runs, this one decides how it carves the result.
+VAD_MAX_SEGMENT = float(os.environ.get("VAD_MAX_SEGMENT", "20.0"))
 SAMPLING_RATE = 16000
 
 
@@ -20,7 +32,8 @@ class SileroVAD:
     Voice Activity Detection (VAD) using Silero-VAD.
     """
 
-    def __init__(self, local=False, model="silero_vad", device=torch.device("cpu")):
+    def __init__(self, local=False, model="silero_vad", device=torch.device("cpu"),
+                 vad_threshold=None, max_segment=None):
         """
         Initialize the VAD object.
 
@@ -28,6 +41,10 @@ class SileroVAD:
             local (bool, optional): Whether to load the model locally. Defaults to False.
             model (str, optional): The VAD model name to load. Defaults to "silero_vad".
             device (torch.device, optional): The device to run the model on. Defaults to 'cpu'.
+            vad_threshold (float, optional): Segments longer than this are re-cut on
+                Silero's boundaries. Defaults to VAD_THRESHOLD.
+            max_segment (float, optional): Longest run returned as one piece before
+                splitting at the widest pause. Defaults to VAD_MAX_SEGMENT.
 
         Returns:
             None
@@ -35,6 +52,8 @@ class SileroVAD:
         Raises:
             RuntimeError: If loading the model fails.
         """
+        self.vad_threshold = VAD_THRESHOLD if vad_threshold is None else float(vad_threshold)
+        self.max_segment = VAD_MAX_SEGMENT if max_segment is None else float(max_segment)
         try:
             # Set ONNX Runtime providers based on device
             if device.type == "cuda":
@@ -45,27 +64,66 @@ class SileroVAD:
             # Monkey-patch onnxruntime.InferenceSession to use providers by default
             original_init = onnxruntime.InferenceSession.__init__
 
-            def patched_init(self, path_or_bytes, sess_options=None, providers=providers, **kwargs):
-                original_init(self, path_or_bytes, sess_options=sess_options, providers=providers, **kwargs)
+            def patched_init(self, path_or_bytes, sess_options=None, **kwargs):
+                # setdefault, not an override: a caller that passes its own
+                # providers should keep them.
+                kwargs.setdefault("providers", providers)
+                original_init(self, path_or_bytes, sess_options=sess_options, **kwargs)
 
             onnxruntime.InferenceSession.__init__ = patched_init
 
-            vad_model, utils = torch.hub.load(
-                repo_or_dir="snakers4/silero-vad" if not local else "vad/silero-vad",
-                model=model,
-                force_reload=False,
-                onnx=True,
-                source="github" if not local else "local",
-            )
-
-            # Restore original __init__
-            onnxruntime.InferenceSession.__init__ = original_init
+            try:
+                vad_model, utils = torch.hub.load(
+                    # Pinned: an unpinned master can change the hub entrypoint
+                    # signature and break the pipeline with no local change.
+                    # Keep SILERO_VAD_REV in sync with download_offline_weights.py.
+                    repo_or_dir=(
+                        os.environ.get("SILERO_VAD_REV", "snakers4/silero-vad:v5.1")
+                        if not local else "vad/silero-vad"
+                    ),
+                    model=model,
+                    force_reload=False,
+                    onnx=True,
+                    trust_repo=True,
+                    source="github" if not local else "local",
+                )
+            finally:
+                # Restore unconditionally: without this, a failure inside
+                # torch.hub.load left every later InferenceSession in the process
+                # forced onto the CUDA provider.
+                onnxruntime.InferenceSession.__init__ = original_init
 
             self.vad_model = vad_model
             (get_speech_timestamps, _, _, _, _) = utils
-            self.get_speech_timestamps = get_speech_timestamps
+            self._get_speech_timestamps = get_speech_timestamps
         except Exception as e:
             raise RuntimeError(f"Failed to load VAD model: {e}")
+
+    def get_speech_timestamps(self, audio_segment, **kwargs):
+        """Wrapper for PyTorch Hub get_speech_timestamps with auto-resampling."""
+        sr = kwargs.get('sampling_rate', 16000)
+        
+        # Silero VAD strictly requires 16000 (or 8000)
+        if sr not in [8000, 16000]:
+            if isinstance(audio_segment, torch.Tensor):
+                audio_np = audio_segment.cpu().numpy()
+            else:
+                audio_np = np.array(audio_segment)
+                
+            audio_16k = librosa.resample(audio_np, orig_sr=sr, target_sr=16000)
+            audio_tensor = torch.from_numpy(audio_16k).to(torch.float32)
+            
+            kwargs['sampling_rate'] = 16000
+            timestamps = self._get_speech_timestamps(audio_tensor, self.vad_model, **kwargs)
+            
+            # Scale timestamps back to original sample rate frame indices
+            scale = sr / 16000.0
+            for t in timestamps:
+                t['start'] = int(t['start'] * scale)
+                t['end'] = int(t['end'] * scale)
+            return timestamps
+            
+        return self._get_speech_timestamps(audio_segment, self.vad_model, **kwargs)
 
     def segment_speech(self, audio_segment, start_time, end_time, sampling_rate):
         """
@@ -87,7 +145,7 @@ class SileroVAD:
             raise ValueError("Invalid audio segment")
 
         speech_timestamps = self.get_speech_timestamps(
-            audio_segment, self.vad_model, sampling_rate=sampling_rate
+            audio_segment, sampling_rate=sampling_rate
         )
 
         adjusted_timestamps = [
@@ -109,7 +167,7 @@ class SileroVAD:
                 start_index == end_index
                 or adjusted_timestamps[end_index][1]
                 - adjusted_timestamps[start_index][0]
-                < 20 * sampling_rate
+                < self.max_segment * sampling_rate
             ):
                 segments.append([start_index, end_index])
             else:
@@ -154,15 +212,16 @@ class SileroVAD:
             end = float(row["end"])
 
             if end <= last_end:
-                continue
-            last_end = end
+                pass
+            else:
+                last_end = end
 
             start_frame = int(start * sampling_rate)
             end_frame = int(end * sampling_rate)
             if row["speaker"] not in speakers_seen:
                 speakers_seen.add(row["speaker"])
 
-            if end - start <= VAD_THRESHOLD:
+            if end - start <= self.vad_threshold:
                 out.append(
                     {
                         "index": str(count_id).zfill(5),

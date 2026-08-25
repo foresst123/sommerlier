@@ -19,9 +19,21 @@ import os
 import numpy as np
 import torch
 import soundfile as sf
+import argparse
 
+import warnings
+warnings.filterwarnings("ignore")
 
-def load_model():
+if hasattr(torch, "torch_version") and hasattr(torch.serialization, "add_safe_globals"):
+    torch.serialization.add_safe_globals([torch.torch_version.TorchVersion])
+    
+_original_load = torch.load
+def _patched_load(*args, **kwargs):
+    kwargs["weights_only"] = False
+    return _original_load(*args, **kwargs)
+torch.load = _patched_load
+
+def load_model(config_path=None, env_name="kaggle"):
     """Load Qwen3-ASR model and processor."""
     from transformers import AutoProcessor, AutoModelForMultimodalLM
 
@@ -30,16 +42,35 @@ def load_model():
 
     print(json.dumps({"status": "loading", "model": model_name}), flush=True)
 
+    qwen_cfg = {}
+    if config_path and os.path.exists(config_path):
+        try:
+            with open(config_path, 'r') as f:
+                cfg = json.load(f)
+            qwen_cfg = cfg.get("environments", {}).get(env_name, {}).get("models", {}).get("qwen3", {})
+        except Exception as e:
+            print(json.dumps({"error": f"Failed to parse config: {str(e)}"}), flush=True)
+
+    dtype_str = qwen_cfg.get("torch_dtype", "float16")
+    use_bf16 = dtype_str == "bfloat16" or os.environ.get("SOMMELIER_USE_BF16") == "1"
+    dtype = torch.bfloat16 if use_bf16 else torch.float16
+    use_flash_attention = qwen_cfg.get("use_flash_attention", False)
+
     processor = AutoProcessor.from_pretrained(model_name)
+    model_kwargs = {
+        "device_map": {"": device},
+        "torch_dtype": dtype
+    }
+    if use_flash_attention:
+        model_kwargs["attn_implementation"] = "flash_attention_2"
+        
     model = AutoModelForMultimodalLM.from_pretrained(
         model_name,
-        device_map={"": device},
-        torch_dtype=torch.float16
+        **model_kwargs
     )
     
-    # Ép kiểu toàn bộ model một cách triệt để về float16 
-    # để loại bỏ các bias còn kẹt ở bfloat16
-    model.to(torch.float16)
+    # Ép kiểu toàn bộ model một cách triệt để
+    model.to(dtype)
     
     model.eval()
 
@@ -47,26 +78,47 @@ def load_model():
     return model, processor, device
 
 
+def _read_audio(audio_path):
+    """Load a request's audio as float32 mono at 16 kHz.
+
+    The pipeline already holds 16 kHz float32 in memory, so it hands over a .npy
+    dump and skips the WAV encode/decode round trip entirely.
+    """
+    if audio_path.endswith(".npy"):
+        return np.load(audio_path).astype("float32"), 16000
+    return sf.read(audio_path, dtype="float32")
+
+
 def transcribe(model, processor, device, audio_path, language="vi"):
     """Run Qwen3-ASR inference on an audio file."""
     try:
-        audio_data, sr = sf.read(audio_path, dtype="float32")
+        audio_data, sr = _read_audio(audio_path)
         if sr != 16000:
             import librosa
             audio_data = librosa.resample(audio_data, orig_sr=sr, target_sr=16000)
 
         conversation = [
+            {"role": "system", "content": "You are a highly accurate Vietnamese ASR system. Transcribe the audio precisely. Maintain natural punctuation and capitalization. Ignore background noise, music, and do not hallucinate content if the audio is silent or unintelligible."},
             {"role": "user", "content": [
                 {"type": "audio", "audio_url": "dummy"},
-                {"type": "text", "text": f"Transcribe the audio in Vietnamese."},
+                {"type": "text", "text": "Transcription in Vietnamese."},
             ]}
         ]
 
         text = processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
-        inputs = processor(text=text, audio=audio_data, return_tensors="pt", sampling_rate=16000).to(device, torch.float16)
+        dtype = model.dtype
+        inputs = processor(text=text, audio=audio_data, return_tensors="pt", sampling_rate=16000).to(device, dtype)
 
         with torch.no_grad():
-            gen_ids = model.generate(**inputs, max_new_tokens=256)
+            # Tối ưu hóa Decoding: Temperature=0.0 để giảm ảo giác, no_repeat_ngram_size=3 chặn lặp từ
+            gen_ids = model.generate(
+                **inputs, 
+                max_new_tokens=256, 
+                do_sample=False, 
+                temperature=0.0,
+                repetition_penalty=1.2,
+                no_repeat_ngram_size=3
+            )
             gen_ids = gen_ids[:, inputs.input_ids.size(1):]
             response = processor.batch_decode(gen_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
             
@@ -79,7 +131,12 @@ def transcribe(model, processor, device, audio_path, language="vi"):
 
 
 def main():
-    model, processor, device = load_model()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="config.json")
+    parser.add_argument("--env", default="kaggle")
+    args = parser.parse_args()
+
+    model, processor, device = load_model(args.config, args.env)
 
     # Read commands from stdin, one JSON per line
     for line in sys.stdin:

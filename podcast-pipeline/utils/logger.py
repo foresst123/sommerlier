@@ -51,6 +51,15 @@ class Logger:
         logger = logging.getLogger(name)
         logger.setLevel(logging.DEBUG)
 
+        # Libraries in the stack (speechbrain, lightning) call logging.basicConfig,
+        # which installs a handler on the root logger. Propagating there as well
+        # printed every record twice: once via our handlers below, once as
+        # "LEVEL:name:message" from root. Re-running in a notebook cell also
+        # stacked duplicate handlers on the cached logger.
+        logger.propagate = False
+        for existing in list(logger.handlers):
+            logger.removeHandler(existing)
+
         # Add file handler to save logs to a file
         log_date = time.strftime("%Y-%m-%d", time.localtime())
         log_time = time.strftime("%H-%M-%S", time.localtime())
@@ -79,15 +88,18 @@ class Logger:
                 Returns:
                     str: The formatted log message.
                 """
+                # Colour the formatted output, never record.msg: mutating the
+                # record in place leaks ANSI codes into every other handler that
+                # sees the same record, and nests them if it is formatted twice.
                 if record.levelno >= logging.ERROR:
-                    record.msg = "\033[1;31m" + str(record.msg) + "\033[0m"
+                    colour = "1;31"
                 elif record.levelno >= logging.WARNING:
-                    record.msg = "\033[1;33m" + str(record.msg) + "\033[0m"
+                    colour = "1;33"
                 elif record.levelno >= logging.INFO:
-                    record.msg = "\033[1;34m" + str(record.msg) + "\033[0m"
-                elif record.levelno >= logging.DEBUG:
-                    record.msg = "\033[1;32m" + str(record.msg) + "\033[0m"
-                return super().format(record)
+                    colour = "1;34"
+                else:
+                    colour = "1;32"
+                return f"\033[{colour}m{super().format(record)}\033[0m"
 
         color_formatter = ColorFormatter(
             "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

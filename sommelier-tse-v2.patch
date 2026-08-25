@@ -1,0 +1,1549 @@
+diff --git a/podcast-pipeline/main.py b/podcast-pipeline/main.py
+index b1acdf8..4d275c8 100644
+--- a/podcast-pipeline/main.py
++++ b/podcast-pipeline/main.py
+@@ -127,7 +127,7 @@ def main():
+         qwen3_env_bin = resolve_worker_python("qwen3", config=config, env_profile=env_profile, logger=logger)
+         qwen3_worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qwen3_worker.py")
+         qwen3_service = Qwen3WorkerService(qwen3_env_bin, qwen3_worker_script, device_id=args.gpu_2, logger=logger, env_name=args.env, config_path=args.config)
+-        qwen3_service.start()
++        qwen3_service.spawn()
+ 
+     # 1b. Start DiariZen Worker (if dia3 is not used)
+     diarizen_service = None
+@@ -135,13 +135,19 @@ def main():
+         diarizen_env_bin = resolve_worker_python("diarizen", config=config, env_profile=env_profile, logger=logger)
+         diarizen_worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diarizen_worker.py")
+         diarizen_service = DiarizenWorkerService(diarizen_env_bin, diarizen_worker_script, device_id=args.gpu_1, logger=logger, env_name=args.env, config_path=args.config)
+-        diarizen_service.start()
++        diarizen_service.spawn()
+         
+     # 1c. Start Sidon Worker (if TSE enabled)
+     sidon_service = None
+     if args.tse:
+         sidon_service = SidonWorkerService(config, args, logger)
+-        sidon_service.start()
++        sidon_service.spawn()
++
++    # 1d. Join. All three were spawned above without blocking, so total startup
++    # is now bounded by the slowest worker rather than the sum of all three.
++    for _svc in (qwen3_service, diarizen_service, sidon_service):
++        if _svc is not None:
++            _svc.wait_ready()
+ 
+     try:
+         # 2. Load Models
+diff --git a/podcast-pipeline/models/panns.py b/podcast-pipeline/models/panns.py
+index 2864922..8de1cc0 100644
+--- a/podcast-pipeline/models/panns.py
++++ b/podcast-pipeline/models/panns.py
+@@ -1,3 +1,5 @@
++import os
++
+ import numpy as np
+ import torch
+ from panns_inference import AudioTagging
+@@ -17,7 +19,22 @@ class PANNSDetector:
+         # GPU, so the index cannot be honoured anyway -- pin the device with
+         # CUDA_VISIBLE_DEVICES if placement matters.
+         panns_device = "cuda" if str(self.device).startswith("cuda") else "cpu"
+-        self.model = AudioTagging(checkpoint_path=None, device=panns_device)
++
++        # checkpoint_path=None makes panns_inference re-download Cnn14 (312MB from
++        # Zenodo, ~5 min on Kaggle) on every run. PANNS_CHECKPOINT lets the caller
++        # point at a pre-staged copy; None keeps the old download behaviour.
++        checkpoint_path = os.environ.get("PANNS_CHECKPOINT") or None
++        self.model = AudioTagging(checkpoint_path=checkpoint_path, device=panns_device)
++
++        # AudioTagging wraps the model in DataParallel across every visible GPU
++        # (it prints "GPU number: 2"). Inference here always runs with batch size
++        # 1, so the second replica never receives a sample -- it only burns VRAM
++        # on the GPU hosting the Qwen3/Demucs workers and adds scatter/gather
++        # overhead. Unwrap it and pin the module to the requested device.
++        inner = getattr(self.model, "model", None)
++        if isinstance(inner, torch.nn.DataParallel):
++            self.model.model = inner.module.to(self.device)
++            self.model.device = self.device
+         
+     def detect_music(self, audio_array, sample_rate: int = 32000, threshold: float = 0.5) -> tuple:
+         """Detect if music is present in audio."""
+diff --git a/podcast-pipeline/models/silero_vad.py b/podcast-pipeline/models/silero_vad.py
+index 4243aac..ac095b9 100644
+--- a/podcast-pipeline/models/silero_vad.py
++++ b/podcast-pipeline/models/silero_vad.py
+@@ -6,6 +6,8 @@
+ #
+ # Note: This code has been modified to fit the context of this repository.
+ 
++import os
++
+ import librosa
+ import torch
+ import numpy as np
+@@ -45,21 +47,34 @@ class SileroVAD:
+             # Monkey-patch onnxruntime.InferenceSession to use providers by default
+             original_init = onnxruntime.InferenceSession.__init__
+ 
+-            def patched_init(self, path_or_bytes, sess_options=None, providers=providers, **kwargs):
+-                original_init(self, path_or_bytes, sess_options=sess_options, providers=providers, **kwargs)
++            def patched_init(self, path_or_bytes, sess_options=None, **kwargs):
++                # setdefault, not an override: a caller that passes its own
++                # providers should keep them.
++                kwargs.setdefault("providers", providers)
++                original_init(self, path_or_bytes, sess_options=sess_options, **kwargs)
+ 
+             onnxruntime.InferenceSession.__init__ = patched_init
+ 
+-            vad_model, utils = torch.hub.load(
+-                repo_or_dir="snakers4/silero-vad" if not local else "vad/silero-vad",
+-                model=model,
+-                force_reload=False,
+-                onnx=True,
+-                source="github" if not local else "local",
+-            )
+-
+-            # Restore original __init__
+-            onnxruntime.InferenceSession.__init__ = original_init
++            try:
++                vad_model, utils = torch.hub.load(
++                    # Pinned: an unpinned master can change the hub entrypoint
++                    # signature and break the pipeline with no local change.
++                    # Keep SILERO_VAD_REV in sync with download_offline_weights.py.
++                    repo_or_dir=(
++                        os.environ.get("SILERO_VAD_REV", "snakers4/silero-vad:v5.1")
++                        if not local else "vad/silero-vad"
++                    ),
++                    model=model,
++                    force_reload=False,
++                    onnx=True,
++                    trust_repo=True,
++                    source="github" if not local else "local",
++                )
++            finally:
++                # Restore unconditionally: without this, a failure inside
++                # torch.hub.load left every later InferenceSession in the process
++                # forced onto the CUDA provider.
++                onnxruntime.InferenceSession.__init__ = original_init
+ 
+             self.vad_model = vad_model
+             (get_speech_timestamps, _, _, _, _) = utils
+diff --git a/podcast-pipeline/models/tse_model.py b/podcast-pipeline/models/tse_model.py
+index 164cc17..68b072c 100644
+--- a/podcast-pipeline/models/tse_model.py
++++ b/podcast-pipeline/models/tse_model.py
+@@ -3,7 +3,7 @@ import sys
+ import torch
+ import numpy as np
+ import librosa
+-from typing import Dict, List, Union, Optional
++from typing import Dict, List, Tuple, Union, Optional
+ import torch.nn.functional as F
+ 
+ class TargetSpeakerExtractor:
+@@ -65,7 +65,12 @@ class TargetSpeakerExtractor:
+         enroll_embeddings = []
+         for e in enrollment_audios:
+             if len(e) > 0:
+-                enroll_embeddings.append(self._get_embedding(e, sample_rate))
++                # Normalize each clip before averaging: raw ECAPA embeddings have
++                # length-dependent norms, so the longest clip would otherwise
++                # dominate the centroid.
++                enroll_embeddings.append(
++                    F.normalize(self._get_embedding(e, sample_rate), p=2, dim=0)
++                )
+                 
+         if not enroll_embeddings:
+             raise ValueError(f"No valid enrollment audios provided for target {target_id}")
+@@ -78,10 +83,53 @@ class TargetSpeakerExtractor:
+             
+         return target_embed
+ 
+-    def separate_two_speakers(self, mixture_audio: np.ndarray, enroll_A: List[np.ndarray], enroll_B: List[np.ndarray], sample_rate: int = 16000, id_A: Optional[str] = None, id_B: Optional[str] = None, eval_pad_start_sec: float = 0.0, eval_core_len_sec: float = 0.0):
++    @staticmethod
++    def _gather_probe(track: np.ndarray, spans, sr: int, floor_db: float = -40.0,
++                      min_voiced_sec: float = 0.30):
++        """Concatenate `spans` of `track`, keeping only frames above an energy floor.
++
++        Returns None when there is too little voiced audio to trust, which means
++        "this speaker is not present here" -- a different outcome from
++        "extraction failed", and the caller must not conflate the two.
+         """
+-        Runs BSS once (via Worker), then uses ECAPA to map the 2 output tracks to Speaker A and B.
+-        Returns: (track_A, track_B, sim_A, sim_B)
++        if not spans:
++            return None
++        pieces = [track[max(0, a):min(len(track), b)] for a, b in spans]
++        pieces = [pc for pc in pieces if pc.size]
++        if not pieces:
++            return None
++        seg = np.concatenate(pieces)
++
++        frame = max(1, int(0.02 * sr))
++        if seg.size < frame * 2:
++            return seg if seg.size else None
++        n = seg.size // frame
++        frames = seg[: n * frame].reshape(n, frame)
++        rms = np.sqrt((frames ** 2).mean(axis=1) + 1e-12)
++        ref = np.percentile(rms, 95) + 1e-12
++        keep = 20.0 * np.log10(rms / ref) > floor_db
++        if keep.sum() * frame < min_voiced_sec * sr:
++            return None
++        return frames[keep].reshape(-1)
++
++    def separate_two_speakers(self, mixture_audio: np.ndarray, enroll_A: List[np.ndarray], enroll_B: List[np.ndarray], sample_rate: int = 16000, id_A: Optional[str] = None, id_B: Optional[str] = None, probe_A: Optional[List[Tuple[int, int]]] = None, probe_B: Optional[List[Tuple[int, int]]] = None, core_range: Optional[Tuple[int, int]] = None):
++        """Run blind separation, then map the two output tracks onto A and B.
++
++        probe_A / probe_B: (start, end) sample ranges within mixture_audio where
++        that speaker is known to speak ALONE. Assignment and the returned
++        similarities are measured there.
++
++        Scoring on the overlap core instead (the previous eval_pad_start_sec /
++        eval_core_len_sec path) is what drove sim_A from 0.46 to -0.07: ECAPA
++        pools statistics over time and cannot form an embedding from ~0.2s.
++        Solo regions are seconds long, so the same model works normally there.
++
++        core_range: overlap core in mixture samples, used only by the "not-A"
++        relative test for a speaker that has no solo region.
++
++        Returns (track_A, track_B, sim_A, sim_B, diag). A sim is None when that
++        speaker had too little voiced audio in its probe to judge; diag carries
++        the numbers the caller needs for the not-A decision.
+         """
+         if not self.classifier:
+             raise RuntimeError("ECAPA is not loaded.")
+@@ -160,48 +208,61 @@ class TargetSpeakerExtractor:
+         track_1_tensor = torch.from_numpy(track_1_np).to(self.device)
+         track_2_tensor = torch.from_numpy(track_2_np).to(self.device)
+ 
+-        # ---------------------------------------------------------
+-        # BẢN VÁ CHẤT LƯỢNG CAO: CẮT LÕI (CORE OVERLAP) ĐỂ ECAPA CHẤM ĐIỂM
+-        # ---------------------------------------------------------
+-        if eval_core_len_sec > 0:
+-            start_idx = int(eval_pad_start_sec * target_sr)
+-            end_idx = start_idx + int(eval_core_len_sec * target_sr)
+-            
+-            # Khóa an toàn: Đảm bảo index không vượt quá giới hạn của mảng (ngăn lỗi Out of Bounds)
+-            max_len = track_1_tensor.shape[0]
+-            start_idx = max(0, min(start_idx, max_len - 1))
+-            end_idx = max(start_idx + 1, min(end_idx, max_len))
+-            
+-            eval_t1 = track_1_tensor[start_idx:end_idx]
+-            eval_t2 = track_2_tensor[start_idx:end_idx]
+-        else:
+-            eval_t1 = track_1_tensor
+-            eval_t2 = track_2_tensor
+-
+-        # --- ECAPA-TDNN Matching ---
++        # --- ECAPA matching, measured on the caller's probe spans ---
+         embed_A = self._get_target_embedding(enroll_A, id_A, sample_rate)
+         embed_B = self._get_target_embedding(enroll_B, id_B, sample_rate)
+-        
+-        # Đưa đoạn lõi (eval_t1, eval_t2) vào lấy Embedding để loại bỏ nhiễu từ khoảng lặng
+-        emb_1 = F.normalize(self._get_embedding(eval_t1.cpu().numpy(), target_sr), p=2, dim=0)
+-        emb_2 = F.normalize(self._get_embedding(eval_t2.cpu().numpy(), target_sr), p=2, dim=0)
+-        
+-        # Calculate matching scores for all combinations
+-        score_1A = torch.dot(embed_A, emb_1).item()
+-        score_2A = torch.dot(embed_A, emb_2).item()
+-        score_1B = torch.dot(embed_B, emb_1).item()
+-        score_2B = torch.dot(embed_B, emb_2).item()
+-        
+-        # Determine assignment (Max Bipartite Matching for 2x2)
+-        # LƯU Ý: Vẫn gán out_A_tensor và out_B_tensor bằng track đầy đủ (10s), chỉ dùng điểm từ lõi để quyết định
+-        if (score_1A + score_2B) > (score_2A + score_1B):
++
++        # Probes arrive in mixture samples; the separator decodes at its own rate.
++        scale = target_sr / float(sample_rate)
++        def _rescale(spans):
++            if not spans:
++                return None
++            return [(int(a * scale), int(b * scale)) for a, b in spans]
++
++        span_A = _rescale(probe_A) or [(0, len(track_1_np))]
++        span_B = _rescale(probe_B) or [(0, len(track_1_np))]
++
++        def _score(track_np, spans, target_embed):
++            probe = self._gather_probe(track_np, spans, target_sr)
++            if probe is None:
++                return None
++            emb = F.normalize(self._get_embedding(probe, target_sr), p=2, dim=0)
++            return float(torch.dot(target_embed, emb))
++
++        s_1A, s_2A = _score(track_1_np, span_A, embed_A), _score(track_2_np, span_A, embed_A)
++        s_1B, s_2B = _score(track_1_np, span_B, embed_B), _score(track_2_np, span_B, embed_B)
++
++        def _n(x):
++            # A missing score must not win the comparison by default.
++            return -1.0 if x is None else x
++
++        if (_n(s_1A) + _n(s_2B)) >= (_n(s_2A) + _n(s_1B)):
+             out_A_tensor, out_B_tensor = track_1_tensor, track_2_tensor
+-            sim_A, sim_B = score_1A, score_2B
++            out_A_np, out_B_np = track_1_np, track_2_np
++            sim_A, sim_B = s_1A, s_2B
+         else:
+             out_A_tensor, out_B_tensor = track_2_tensor, track_1_tensor
+-            sim_A, sim_B = score_2A, score_1B
+-            
+-        # --- Resample back to original sample rate ---
++            out_A_np, out_B_np = track_2_np, track_1_np
++            sim_A, sim_B = s_2A, s_1B
++
++        # Diagnostics for the "not-A" test: when one speaker has no solo region,
++        # asking "is this track B?" is unanswerable on a 0.2s core, but asking
++        # "is this track a duplicate of A?" only needs a relative comparison,
++        # which survives a bad absolute embedding.
++        diag = {"anchor_self": None, "anchor_other": None, "other_rms": None}
++        if core_range is not None:
++            c0, c1 = int(core_range[0] * scale), int(core_range[1] * scale)
++            c0, c1 = max(0, c0), min(len(out_A_np), c1)
++            if c1 > c0:
++                core_other = out_B_np[c0:c1]
++                diag["other_rms"] = float(np.sqrt((core_other ** 2).mean() + 1e-12))
++                anchor_embed = embed_A if sim_A is not None else embed_B
++                for key, arr in (("anchor_self", out_A_np[c0:c1]), ("anchor_other", core_other)):
++                    pr = self._gather_probe(arr, [(0, len(arr))], target_sr, min_voiced_sec=0.05)
++                    if pr is not None:
++                        e = F.normalize(self._get_embedding(pr, target_sr), p=2, dim=0)
++                        diag[key] = float(torch.dot(anchor_embed, e))
++
+         def restore_track(track_tensor_in):
+             if sample_rate != target_sr:
+                 track_tensor_out = F_audio.resample(track_tensor_in.unsqueeze(0).cpu(), target_sr, sample_rate).squeeze(0)
+@@ -217,4 +278,4 @@ class TargetSpeakerExtractor:
+                 track_np = np.pad(track_np, (0, orig_len - len(track_np)))
+             return track_np
+             
+-        return restore_track(out_A_tensor), restore_track(out_B_tensor), sim_A, sim_B
+\ No newline at end of file
++        return restore_track(out_A_tensor), restore_track(out_B_tensor), sim_A, sim_B, diag
+\ No newline at end of file
+diff --git a/podcast-pipeline/schemas/segment.py b/podcast-pipeline/schemas/segment.py
+index 29f6775..9ea7a59 100644
+--- a/podcast-pipeline/schemas/segment.py
++++ b/podcast-pipeline/schemas/segment.py
+@@ -1,6 +1,6 @@
+ import numpy as np
+-from dataclasses import dataclass
+-from typing import Optional
++from dataclasses import dataclass, field
++from typing import List, Optional, Tuple
+ 
+ @dataclass
+ class Segment:
+@@ -14,3 +14,22 @@ class EnhancedSegment(Segment):
+     enhanced_audio: Optional[np.ndarray] = None  # Audio đã qua TSE
+     tse: bool = False                            # Có được xử lý bởi TSE không
+     demucs: bool = False                         # Có được xử lý bởi Demucs không
++    # Absolute (start, end, sim) of every span actually replaced by TSE output.
++    # `tse` alone cannot say which part of a segment is separated and which is
++    # still raw mixture; the dual-channel export needs that distinction to avoid
++    # writing the interfering speaker into the target track.
++    tse_spans: List[Tuple[float, float, float]] = field(default_factory=list)
++    # (start, end, reason, detail) for overlapping spans that could NOT be
++    # separated. Every overlap must land in exactly one of these two lists --
++    # a span in neither means some code path discarded it silently.
++    tse_failed_spans: List[Tuple[float, float, str, str]] = field(default_factory=list)
++
++    @property
++    def tse_status(self) -> str:
++        if not self.tse_spans and not self.tse_failed_spans:
++            return "clean"        # no overlap touched this segment
++        if not self.tse_failed_spans:
++            return "separated"
++        if not self.tse_spans:
++            return "failed"
++        return "partial"
+diff --git a/podcast-pipeline/services/base_worker_service.py b/podcast-pipeline/services/base_worker_service.py
+index 8a2499e..2afc67e 100644
+--- a/podcast-pipeline/services/base_worker_service.py
++++ b/podcast-pipeline/services/base_worker_service.py
+@@ -92,6 +92,20 @@ class WorkerProcessService:
+         return [self.python_bin, self.worker_script] + self.extra_args
+ 
+     def start(self):
++        """Spawn and block until ready. Kept for callers that want the old flow."""
++        self.spawn()
++        self.wait_ready()
++
++    def spawn(self):
++        """Launch the subprocess without waiting for its ready handshake.
++
++        Split out of start() so several workers can be launched at once and
++        joined afterwards; starting them one at a time serialised ~100s of model
++        loading. stderr is drained by a daemon thread from this point on, but
++        nothing reads stdout until wait_ready(), so a worker that writes more
++        than the pipe buffer (~64KB) before signalling ready would block. All
++        current workers stay well under that.
++        """
+         if self.process is not None:
+             return
+ 
+@@ -127,6 +141,10 @@ class WorkerProcessService:
+         )
+         self._stderr_thread.start()
+ 
++    def wait_ready(self):
++        """Block until the worker signals ready. Safe to call once per spawn."""
++        if self.process is None:
++            raise RuntimeError(f"{self.name} worker was never spawned")
+         self._wait_for_ready()
+ 
+     def _wait_for_ready(self):
+diff --git a/podcast-pipeline/services/diarization_service.py b/podcast-pipeline/services/diarization_service.py
+index f0e6f42..1b44a6e 100644
+--- a/podcast-pipeline/services/diarization_service.py
++++ b/podcast-pipeline/services/diarization_service.py
+@@ -28,6 +28,22 @@ class DiarizationService:
+         self.logger = logger
+         self.diarizer_config = diarizer_config or {}
+         
++    def _log_segment_stats(self, stage: str, seg_list: list):
++        """One line per pipeline stage so segment loss can be attributed."""
++        if not self.logger:
++            return
++        if not seg_list:
++            self.logger.info(f"[DIAR:{stage}] 0 segments")
++            return
++        durs = sorted(s["end"] - s["start"] for s in seg_list)
++        n = len(durs)
++        speakers = len({s.get("speaker") for s in seg_list})
++        self.logger.info(
++            f"[DIAR:{stage}] n={n} speakers={speakers} | "
++            f"dur min={durs[0]:.2f} p50={durs[n // 2]:.2f} max={durs[-1]:.2f} | "
++            f"<0.5s={sum(d < 0.5 for d in durs)} <0.2s={sum(d < 0.2 for d in durs)}"
++        )
++
+     def prepare_chunks(self, audio: AudioData, max_duration: float = 120.0, min_silence: float = 0.5) -> Tuple[List[DiarizationChunk], str]:
+         """Deprecated. Returns a single dummy chunk since diarization now processes the full audio natively."""
+         if self.logger:
+@@ -94,6 +110,11 @@ class DiarizationService:
+                 
+         combined_df = pd.DataFrame(data) if data else pd.DataFrame(columns=["start", "end", "speaker"])
+         combined_df = combined_df.sort_values("start").reset_index(drop=True)
++
++        # The exported *_intermediate_diarization.json is written after VAD, merge
++        # and split, so it cannot show whether a low segment count came from the
++        # diarizer or from cut_by_speaker_label. Log both ends.
++        self._log_segment_stats("raw", df_to_list(combined_df))
+         
+         # Apply VAD to split long continuous segments if VAD is available
+         if getattr(args, "vad", False) and self.vad_model:
+@@ -104,10 +125,13 @@ class DiarizationService:
+             
+         # Apply merge and smooth logic
+         merge_gap = getattr(args, "merge_gap", 2.0)
++        self._log_segment_stats("post-vad", raw_list)
+         smoothed_list = cut_by_speaker_label(raw_list, merge_gap=merge_gap, logger=self.logger)
++        self._log_segment_stats(f"post-merge(gap={merge_gap})", smoothed_list)
+         
+         # Split segments that are too long
+         final_list = split_long_segments(smoothed_list, max_duration=30.0)
++        self._log_segment_stats("post-split", final_list)
+         
+         # Build schemas
+         final_segments = []
+diff --git a/podcast-pipeline/services/model_loader.py b/podcast-pipeline/services/model_loader.py
+index 90cfb6b..cac99ae 100644
+--- a/podcast-pipeline/services/model_loader.py
++++ b/podcast-pipeline/services/model_loader.py
+@@ -43,7 +43,9 @@ class ModelLoader:
+                 use_community=True
+             )
+         else:
+-            if self.logger: self.logger.info(f"Connecting to DiariZen worker on {self.device_2}")
++            # main.py spawns the DiariZen worker with device_id=args.gpu_1, so
++            # device_1 is where it actually lives. The old message said device_2.
++            if self.logger: self.logger.info(f"Connecting to DiariZen worker on {self.device_1}")
+             self.models["diarizer"] = DiariZenDiarizer(process=diarizen_service.process if diarizen_service else None)
+             
+         # Embedder is needed for cross-chunk diarization fusion AND SR-CorrNet speaker identification
+diff --git a/podcast-pipeline/services/pipeline_service.py b/podcast-pipeline/services/pipeline_service.py
+index 9de4dd3..6a36143 100644
+--- a/podcast-pipeline/services/pipeline_service.py
++++ b/podcast-pipeline/services/pipeline_service.py
+@@ -89,6 +89,10 @@ class PipelineService:
+             if self.logger: self.logger.info("Loading Separation from checkpoint")
+             enhanced_segments = checkpoint.load("separation")
+         else:
++            # Failed clips are dumped next to the outputs so the QC thresholds
++            # can be judged by ear rather than only from counters.
++            self.separation_svc.dump_dir = os.path.join(
++                os.path.dirname(audio_path), "_final", "separation")
+             enhanced_segments = self.separation_svc.process_overlaps(diarization_result.segments, audio_data)
+             if self.logger: self.logger.info(f"[DEBUG] After Separation: {len(enhanced_segments)} segments")
+             checkpoint.save("separation", enhanced_segments)
+@@ -180,6 +184,9 @@ class PipelineService:
+             
+         os.makedirs(save_path, exist_ok=True)
+         base_name = os.path.splitext(os.path.basename(audio_path))[0]
++
++        if hasattr(self.separation_svc, "write_report"):
++            self.separation_svc.write_report(save_path, base_name)
+         
+         metadata = {
+             "audio_file": os.path.basename(audio_path),
+diff --git a/podcast-pipeline/services/separation_service.py b/podcast-pipeline/services/separation_service.py
+index da7442d..2d21b1c 100644
+--- a/podcast-pipeline/services/separation_service.py
++++ b/podcast-pipeline/services/separation_service.py
+@@ -1,21 +1,137 @@
+ import bisect
++import collections
++import json
++import os
+ import numpy as np
+-import librosa
+-from typing import List, Dict, Tuple
++from typing import Dict, List, Optional, Tuple
+ from schemas.audio import AudioData
+ from schemas.segment import Segment, EnhancedSegment
+ from algorithms.diarization.overlap import detect_overlapping_segments
+ 
++# --- Window ---------------------------------------------------------------
++# Sidon processes 20s chunks (CHUNK_SECONDS in sidon_infer.py). Start there and
++# only grow when the window does not yet contain enough solo speech to score.
++TSE_WINDOW_TARGET = float(os.environ.get("TSE_WINDOW_TARGET", "20.0"))
++TSE_WINDOW_MAX = float(os.environ.get("TSE_WINDOW_MAX", "40.0"))
++TSE_WINDOW_GROW = float(os.environ.get("TSE_WINDOW_GROW", "4.0"))
++# Voiced solo audio one speaker needs for ECAPA to produce a usable embedding.
++TSE_MIN_SOLO = float(os.environ.get("TSE_MIN_SOLO", "2.0"))
++
++# --- Job grouping ---------------------------------------------------------
++TSE_JOB_MERGE_GAP = float(os.environ.get("TSE_JOB_MERGE_GAP", "8.0"))
++TSE_JOB_MAX_SPAN = float(os.environ.get("TSE_JOB_MAX_SPAN", "120.0"))
++TSE_RETRY_SPLIT = os.environ.get("TSE_RETRY_SPLIT", "1") not in ("0", "false", "False")
++
++# --- Enrollment -----------------------------------------------------------
++TSE_ENROLL_BUDGET = float(os.environ.get("TSE_ENROLL_BUDGET", "8.0"))
++TSE_ENROLL_MIN_CLIP = float(os.environ.get("TSE_ENROLL_MIN_CLIP", "0.35"))
++TSE_ENROLL_MIN_TOTAL = float(os.environ.get("TSE_ENROLL_MIN_TOTAL", "1.5"))
++
++# --- QC -------------------------------------------------------------------
++# NOT CALIBRATED. DialogueSidon resynthesises speech through a VAE decoder
++# rather than masking the mixture, so ECAPA cosine against a natural enrollment
++# sits in a lower, unmeasured range. Read the sim percentiles in the [TSE] log
++# line and the clips under separation/failed/ before trusting either number.
++TSE_QC_SIM_THRESHOLD = float(os.environ.get("TSE_QC_SIM_THRESHOLD", "0.25"))
++TSE_NOT_A_MARGIN = float(os.environ.get("TSE_NOT_A_MARGIN", "0.15"))
++TSE_SILENCE_RMS = float(os.environ.get("TSE_SILENCE_RMS", "0.002"))
++
++TSE_DUMP_FAILED = os.environ.get("TSE_DUMP_FAILED", "1") not in ("0", "false", "False")
++
++# Closed vocabulary of failure reasons, so every discarded overlap can be
++# counted and grepped rather than vanishing into a bare `continue`.
++REASONS = (
++    "no_enroll",        # speaker lacks enough clean audio for an enrollment
++    "no_window",        # no window up to TSE_WINDOW_MAX satisfies the criteria
++    "multi_speaker",    # >2 speakers in the window; Sidon is a 2-source model
++    "qc_sim",           # track scored below TSE_QC_SIM_THRESHOLD
++    "unscorable",       # too little voiced audio to judge (not a failure to separate)
++    "not_a_fail",       # the "not-A" relative test did not pass
++    "already_spliced",  # another job already wrote this span
++    "short_track",      # separator returned too few samples
++)
++
++
+ class TargetExtractionService:
++    """Isolate overlapping speech with blind separation plus ECAPA assignment.
++
++    Every overlap ends up in exactly one of two places on its EnhancedSegment:
++    tse_spans (separated) or tse_failed_spans (not, with a reason). Nothing is
++    dropped silently -- test_every_overlap_is_accounted_for enforces that.
+     """
+-    Replaces SeparationService. Uses Target Speaker Extraction (TSE) to isolate overlapping speech.
+-    Preserves backchannels natively using enrollment profiles and context windows.
+-    """
+-    
+-    def __init__(self, tse_model, logger=None):
++
++    def __init__(self, tse_model, logger=None, dump_dir: Optional[str] = None):
+         self.tse_model = tse_model
+         self.logger = logger
+-        
++        self.dump_dir = dump_dir
++        self.stats = collections.Counter()
++        self.sims = []
++        self.overlap_durations = []
++        self.failures = []          # (start, end, speaker, reason, detail)
++
++    # ------------------------------------------------------------------
++    def _fail(self, enh_seg, start, end, reason, detail=""):
++        """Record a span that stayed as raw mixture, and why."""
++        assert reason in REASONS, f"unknown reason {reason!r}"
++        self.stats[f"fail_{reason}"] += 1
++        if enh_seg is not None:
++            enh_seg.tse_failed_spans.append((start, end, reason, detail))
++        self.failures.append((start, end, getattr(enh_seg, "speaker", "?"), reason, detail))
++        if self.logger:
++            self.logger.debug(f"[TSE] {reason} @ {start:.2f}s {detail}")
++
++    def _report_stats(self):
++        if not self.logger:
++            return
++        s = self.stats
++        self.logger.info(
++            f"[TSE] jobs={s['jobs']} pairs={s['pairs']} spliced={s['spliced']} "
++            f"retried={s['retried']}"
++        )
++        fails = {r: s[f"fail_{r}"] for r in REASONS if s[f"fail_{r}"]}
++        self.logger.info(f"[TSE] failures: {fails or 'none'}")
++        if self.overlap_durations:
++            d = np.array(self.overlap_durations)
++            self.logger.info(
++                f"[TSE] overlap dur: min={d.min():.2f}s p50={np.median(d):.2f}s "
++                f"max={d.max():.2f}s | <0.5s={int((d < 0.5).sum())}"
++            )
++        if self.sims:
++            a = np.array(self.sims)
++            self.logger.info(
++                f"[TSE] ECAPA sim: p10={np.percentile(a, 10):.2f} "
++                f"p50={np.percentile(a, 50):.2f} p90={np.percentile(a, 90):.2f} "
++                f"max={a.max():.2f} (threshold {TSE_QC_SIM_THRESHOLD}, NOT calibrated)"
++            )
++        else:
++            self.logger.info("[TSE] no similarity was computed at all")
++
++    def write_report(self, save_dir: str, audio_name: str):
++        """Dump per-span audit so failures can be inspected instead of guessed at."""
++        path = os.path.join(save_dir, f"{audio_name}_tse_report.json")
++        payload = {
++            "thresholds": {
++                "qc_sim": TSE_QC_SIM_THRESHOLD, "not_a_margin": TSE_NOT_A_MARGIN,
++                "min_solo": TSE_MIN_SOLO, "window_target": TSE_WINDOW_TARGET,
++                "window_max": TSE_WINDOW_MAX,
++            },
++            "stats": dict(self.stats),
++            "sim_percentiles": (
++                {p: float(np.percentile(self.sims, p)) for p in (10, 50, 90)}
++                if self.sims else None
++            ),
++            "failures": [
++                {"start": a, "end": b, "speaker": spk, "reason": r, "detail": d}
++                for a, b, spk, r, d in self.failures
++            ],
++        }
++        try:
++            with open(path, "w", encoding="utf-8") as fh:
++                json.dump(payload, fh, ensure_ascii=False, indent=2)
++        except Exception as e:
++            if self.logger:
++                self.logger.warning(f"Failed to write TSE report: {e}")
++
+     def mine_enrollments(self, segments: List[Segment], audio: AudioData, min_dur: float = 2.0, top_k: int = 5) -> Dict[str, List[np.ndarray]]:
+         """
+         Component 1: Extract clean, non-overlapping segments for each speaker to serve as TSE enrollments.
+@@ -62,31 +178,35 @@ class TargetExtractionService:
+ 
+         for spk in set(s.speaker for s in segments):
+             candidates = clean_by_speaker.get(spk, [])
+-            clean_clips = []
+-            for dur_thresh in [min_dur, min_dur / 2, 0.5, 0.1]:
+-                clean_clips = [c for c in candidates if (c[1] - c[0]) >= dur_thresh]
+-                if clean_clips:
+-                    break  # Found clips, stop lowering threshold
+ 
+-            if not clean_clips and self.logger:
+-                self.logger.warning(
+-                    f"No clean (non-overlapping) audio found for speaker {spk}; "
+-                    "TSE will skip every overlap involving them."
+-                )
++            # The old fallback ladder ended at 0.1s. A 0.1s ECAPA enrollment is
++            # not "slightly worse", it is noise -- and it failed silently, because
++            # the bad embedding surfaced later as a low similarity that looked
++            # like a separation failure. Gather clips up to a time budget instead
++            # and refuse outright when there is not enough.
++            candidates = [c for c in candidates if (c[1] - c[0]) >= TSE_ENROLL_MIN_CLIP]
++            candidates.sort(key=lambda c: c[1] - c[0], reverse=True)
+ 
+-            # Sort by duration descending
+-            clean_clips.sort(key=lambda c: c[1] - c[0], reverse=True)
++            picked, total = [], 0.0
++            for start, end in candidates:
++                if total >= TSE_ENROLL_BUDGET:
++                    break
++                picked.append(waveform[int(start * sr):int(end * sr)].copy())
++                total += end - start
+ 
+-            enrollments[spk] = []
+-            for start, end in clean_clips[:top_k]:
+-                start_f = int(start * sr)
+-                end_f = int(end * sr)
+-                enrollments[spk].append(waveform[start_f:end_f].copy())
++            if total < TSE_ENROLL_MIN_TOTAL:
++                if self.logger:
++                    self.logger.warning(
++                        f"Speaker {spk}: only {total:.2f}s of clean audio "
++                        f"(need >={TSE_ENROLL_MIN_TOTAL}s); enrollment would be unreliable, "
++                        "so every overlap involving this speaker is skipped."
++                    )
++                enrollments[spk] = []
++            else:
++                enrollments[spk] = picked
+ 
+         return enrollments
+ 
+-    # Removed mock _compute_itc and _compute_itd as they are replaced by real sim_A, sim_B from tse_model
+-        
+     def _cross_fade(self, orig_audio: np.ndarray, new_audio: np.ndarray, fade_samples: int) -> np.ndarray:
+         """Smoothly replace a portion of orig_audio with new_audio using Hanning crossfade."""
+         result = orig_audio.copy()
+@@ -110,190 +230,398 @@ class TargetExtractionService:
+         # Crossfade end
+         result[mid_limit:limit] = orig_audio[mid_limit:limit] * fade_in + new_audio[mid_limit:limit] * fade_out
+         return result
+-        
+-    def process_overlaps(self, segments: List[Segment], audio: AudioData, overlap_threshold: float = 0.1) -> List[EnhancedSegment]:
++            # ------------------------------------------------------------------
++    # Window construction
++    # ------------------------------------------------------------------
++    @staticmethod
++    def _intervals_by_speaker(segments) -> Dict[str, List[Tuple[float, float]]]:
++        by_spk: Dict[str, List[Tuple[float, float]]] = {}
++        for s in segments:
++            by_spk.setdefault(s.speaker, []).append((s.start, s.end))
++        for spk in by_spk:
++            by_spk[spk].sort()
++        return by_spk
++
++    @staticmethod
++    def _solo_spans(by_spk, spk, lo, hi) -> List[Tuple[float, float]]:
++        """Parts of [lo, hi] where `spk` speaks and nobody else does."""
++        own = [(max(a, lo), min(b, hi)) for a, b in by_spk.get(spk, []) if b > lo and a < hi]
++        own = [(a, b) for a, b in own if b > a]
++        if not own:
++            return []
++        others = []
++        for other, ivals in by_spk.items():
++            if other == spk:
++                continue
++            for a, b in ivals:
++                if b > lo and a < hi:
++                    others.append((max(a, lo), min(b, hi)))
++        others.sort()
++
++        solo = []
++        for a, b in own:
++            cur = a
++            for oa, ob in others:
++                if ob <= cur:
++                    continue
++                if oa >= b:
++                    break
++                if cur < oa:
++                    solo.append((cur, min(oa, b)))
++                cur = max(cur, ob)
++                if cur >= b:
++                    break
++            if cur < b:
++                solo.append((cur, b))
++        return [(a, b) for a, b in solo if b - a > 1e-6]
++
++    @staticmethod
++    def _speakers_in(by_spk, lo, hi):
++        return {spk for spk, ivals in by_spk.items()
++                if any(b > lo and a < hi for a, b in ivals)}
++
++    def _build_window(self, by_spk, spk_a, spk_b, ov_lo, ov_hi, total_dur):
++        """Grow a window around the overlap until one speaker can be scored.
++
++        Returns (lo, hi, solo_a, solo_b, anchor) on success, or (None, reason).
++
++        Only ONE speaker needs solo audio. Channel assignment is a 2x2 decision:
++        if track 1 matches A strongly where A speaks alone and track 2 does not,
++        the assignment is settled without knowing anything about B. Requiring
++        both would reject the common case here -- A talking for 28s with B only
++        interjecting.
+         """
+-        Process overlapping regions using TSE, Context Windows, and Confidence Gating.
++        pad = max(0.0, (TSE_WINDOW_TARGET - (ov_hi - ov_lo)) / 2.0)
++        lo, hi = max(0.0, ov_lo - pad), min(total_dur, ov_hi + pad)
++
++        # Borrow from the other side when clamped at a file edge, so a window
++        # near 0.0 still reaches its target length.
++        if hi - lo < TSE_WINDOW_TARGET and total_dur >= TSE_WINDOW_TARGET:
++            if lo <= 0.0:
++                hi = min(total_dur, lo + TSE_WINDOW_TARGET)
++            elif hi >= total_dur:
++                lo = max(0.0, hi - TSE_WINDOW_TARGET)
++
++        best_single = None
++        for _ in range(24):
++            present = self._speakers_in(by_spk, lo, hi)
++            if len(present) > 2:
++                # Sidon emits exactly two sources; a third voice would be folded
++                # into one of them. Growing the window only makes that worse.
++                return None, "multi_speaker"
++
++            solo_a = self._solo_spans(by_spk, spk_a, lo, hi)
++            solo_b = self._solo_spans(by_spk, spk_b, lo, hi)
++            dur_a = sum(b - a for a, b in solo_a)
++            dur_b = sum(b - a for a, b in solo_b)
++
++            # Both scorable is strictly better: each speaker then gets a real
++            # cosine instead of the weaker relative "not-A" test. Keep growing
++            # for it, but remember the one-speaker window as a fallback so a
++            # reachable anchor is never thrown away.
++            if dur_a >= TSE_MIN_SOLO and dur_b >= TSE_MIN_SOLO:
++                anchor = spk_a if dur_a >= dur_b else spk_b
++                return (lo, hi, solo_a, solo_b, anchor), None
++            if best_single is None and (dur_a >= TSE_MIN_SOLO or dur_b >= TSE_MIN_SOLO):
++                best_single = (lo, hi, solo_a, solo_b, spk_a if dur_a >= dur_b else spk_b)
++
++            if (hi - lo) >= TSE_WINDOW_MAX or (lo <= 0.0 and hi >= total_dur):
++                break
++            grow = min(TSE_WINDOW_GROW, (TSE_WINDOW_MAX - (hi - lo)) / 2.0)
++            lo, hi = max(0.0, lo - grow), min(total_dur, hi + grow)
++
++        if best_single is not None:
++            return best_single, None
++        return None, "no_window"
++
++    @staticmethod
++    def _to_samples(spans, window_lo, sr, n_samples):
++        out = []
++        for a, b in spans:
++            i, j = int((a - window_lo) * sr), int((b - window_lo) * sr)
++            i, j = max(0, i), min(n_samples, j)
++            if j > i:
++                out.append((i, j))
++        return out
++
++    def _group_jobs(self, pairs):
++        """One separation call per (speaker pair, neighbourhood).
++
++        Two overlaps a few seconds apart would otherwise each get their own
++        window covering nearly the same audio: twice the diffusion cost, and two
++        independent separations spliced over each other in the shared region.
++        TSE_JOB_MAX_SPAN caps the chain so a backchannel every 5s cannot silently
++        merge the whole file into one job.
+         """
++        buckets: Dict[frozenset, list] = {}
++        for p in pairs:
++            buckets.setdefault(frozenset((p["seg1"]["speaker"], p["seg2"]["speaker"])), []).append(p)
++
++        jobs = []
++        for spk_pair, plist in buckets.items():
++            if len(spk_pair) != 2:
++                continue
++            spk_a, spk_b = sorted(spk_pair)
++            plist.sort(key=lambda p: p["overlap_start"])
++            current = []
++            for p in plist:
++                if current:
++                    gap = p["overlap_start"] - current[-1]["overlap_end"]
++                    span = p["overlap_end"] - current[0]["overlap_start"]
++                    if gap > TSE_JOB_MERGE_GAP or span > TSE_JOB_MAX_SPAN:
++                        jobs.append((spk_a, spk_b, current))
++                        current = []
++                current.append(p)
++            if current:
++                jobs.append((spk_a, spk_b, current))
++        return jobs
++
++    # ------------------------------------------------------------------
++    def _dump_failed(self, tag, mixture, track_1, track_2, sr):
++        if not (TSE_DUMP_FAILED and self.dump_dir):
++            return
++        try:
++            import soundfile as sf
++            d = os.path.join(self.dump_dir, "failed")
++            os.makedirs(d, exist_ok=True)
++            sf.write(os.path.join(d, f"{tag}_mix.wav"), mixture, sr)
++            if track_1 is not None:
++                sf.write(os.path.join(d, f"{tag}_trackA.wav"), track_1, sr)
++                sf.write(os.path.join(d, f"{tag}_trackB.wav"), track_2, sr)
++        except Exception as e:
++            if self.logger:
++                self.logger.debug(f"[TSE] could not dump failed clip {tag}: {e}")
++
++    # ------------------------------------------------------------------
++    def process_overlaps(self, segments: List[Segment], audio: AudioData, overlap_threshold: float = 0.1) -> List[EnhancedSegment]:
+         if not self.tse_model:
+             return [EnhancedSegment(**s.__dict__) for s in segments]
+-            
+-        if self.logger: self.logger.info("Processing overlaps with Target Speaker Extraction (TSE)")
+-        
++
++        if self.logger:
++            self.logger.info("Processing overlaps with Target Speaker Extraction (TSE)")
++
+         seg_dicts = [{"start": s.start, "end": s.end, "speaker": s.speaker, "index": s.index} for s in segments]
+-        overlapping_pairs = detect_overlapping_segments(seg_dicts, overlap_threshold=overlap_threshold, logger=self.logger)
+-        
+-        if not overlapping_pairs:
+-            return [EnhancedSegment(**s.__dict__) for s in segments]
+-            
+-        enhanced_segments = [EnhancedSegment(**s.__dict__) for s in segments]
++        pairs = detect_overlapping_segments(seg_dicts, overlap_threshold=overlap_threshold, logger=self.logger)
++
++        enhanced = [EnhancedSegment(**s.__dict__) for s in segments]
+         sr = audio.sample_rate
+         waveform = audio.waveform
+-        total_len = len(waveform)
+-        
+-        # Initialize enhanced_audio
+-        for enh_seg in enhanced_segments:
+-            start_f = int(enh_seg.start * sr)
+-            end_f = int(enh_seg.end * sr)
+-            enh_seg.enhanced_audio = waveform[start_f:end_f].copy()
+-            
+-        # Component 1: Mine Enrollments
+-        enrollments = self.mine_enrollments(segments, audio, min_dur=2.0, top_k=5)
++        total_dur = len(waveform) / sr
++        for e in enhanced:
++            e.enhanced_audio = waveform[int(e.start * sr):int(e.end * sr)].copy()
+ 
+-        # Indices are unique after split_long_segments, so one lookup table beats
+-        # rescanning every segment per overlap pair.
+-        seg_by_index = {s.index: s for s in enhanced_segments}
++        if not pairs:
++            if self.logger:
++                self.logger.info(
++                    f"[TSE] no overlap >= {overlap_threshold}s among {len(segments)} segments"
++                )
++            return enhanced
++
++        enrollments = self.mine_enrollments(segments, audio)
++        by_spk = self._intervals_by_speaker(segments)
++        seg_by_index = {s.index: s for s in enhanced}
++
++        queue = self._group_jobs(pairs)
++        if self.logger:
++            self.logger.info(f"[TSE] {len(pairs)} overlap pairs -> {len(queue)} separation jobs")
+ 
+         from tqdm import tqdm
+-        for pair in tqdm(overlapping_pairs, desc="[TSE Extractor]", leave=True):
+-            seg1, seg2 = pair["seg1"], pair["seg2"]
+-            overlap_start = pair["overlap_start"]
+-            overlap_end = pair["overlap_end"]
+-            
+-            # Component 2: Context Window (ÉP TỐI THIỂU 10 GIÂY CHO SIDON)
+-            core_duration = overlap_end - overlap_start
+-            min_context = 10.0
+-            
+-            if core_duration < min_context:
+-                # Nếu lõi ngắn hơn 10s, chia đều padding ra 2 bên
+-                pad_needed = min_context - core_duration
+-                pad_left = pad_needed / 2.0
+-                pad_right = pad_needed / 2.0
+-            else:
+-                # Nếu lõi đã dài hơn 10s, cộng thêm chút đệm an toàn
+-                pad_left = 1.5
+-                pad_right = 1.5
+-                
+-            ctx_start = max(0.0, overlap_start - pad_left)
+-            ctx_end = min(total_len / sr, overlap_end + pad_right)
+-            
+-            # Thuật toán bù trừ: Nếu chạm viền file mà chưa đủ 10s, mượn thời gian của bên còn lại
+-            if (ctx_end - ctx_start) < min_context and (total_len / sr) >= min_context:
+-                if ctx_start == 0.0:
+-                    ctx_end = min(total_len / sr, min_context)
+-                elif ctx_end == (total_len / sr):
+-                    ctx_start = max(0.0, ctx_end - min_context)
+-            
+-            ctx_start_f = int(ctx_start * sr)
+-            ctx_end_f = int(ctx_end * sr)
+-            context_audio = waveform[ctx_start_f:ctx_end_f].copy()
+-            
+-            target_A = seg1["speaker"]
+-            target_B = seg2["speaker"]
+-            
+-            # Ensure we have enrollments
+-            if target_A not in enrollments or target_B not in enrollments or not enrollments[target_A] or not enrollments[target_B]:
++        pbar = tqdm(total=len(queue), desc="[TSE Extractor]", leave=True)
++        while queue:
++            spk_a, spk_b, plist = queue.pop(0)
++            pbar.total = pbar.n + len(queue) + 1
++            pbar.update(1)
++            is_retry = len(plist) == 1 and self.stats["jobs"] >= len(pairs)
++            self.stats["jobs"] += 1
++            self.stats["pairs"] += len(plist)
++            for p in plist:
++                self.overlap_durations.append(p["overlap_end"] - p["overlap_start"])
++
++            def fail_all(reason, detail=""):
++                for p in plist:
++                    for sd in (p["seg1"], p["seg2"]):
++                        self._fail(seg_by_index.get(sd["index"]),
++                                   p["overlap_start"], p["overlap_end"], reason, detail)
++
++            if not enrollments.get(spk_a) or not enrollments.get(spk_b):
++                missing = spk_a if not enrollments.get(spk_a) else spk_b
++                fail_all("no_enroll", f"speaker={missing}")
++                continue
++
++            job_lo = min(p["overlap_start"] for p in plist)
++            job_hi = max(p["overlap_end"] for p in plist)
++            built, reason = self._build_window(by_spk, spk_a, spk_b, job_lo, job_hi, total_dur)
++            if built is None:
++                fail_all(reason, f"span={job_hi - job_lo:.2f}s")
+                 continue
+-                
+-            # Component 3: TSE Engine (1-Pass Separation)
+-            track_A_ctx, track_B_ctx, sim_A, sim_B = self.tse_model.separate_two_speakers(
+-                context_audio, 
+-                enroll_A=enrollments[target_A], 
+-                enroll_B=enrollments[target_B], 
+-                sample_rate=sr, 
+-                id_A=target_A, 
+-                id_B=target_B,
+-                eval_pad_start_sec=(overlap_start - ctx_start),  # Cho ECAPA biết offset
+-                eval_core_len_sec=core_duration                  # Cho ECAPA biết độ dài đoạn overlap
++
++            win_lo, win_hi, solo_a, solo_b, anchor = built
++            lo_f, hi_f = int(win_lo * sr), int(win_hi * sr)
++            window_audio = waveform[lo_f:hi_f].copy()
++            n = len(window_audio)
++            core = (int((job_lo - win_lo) * sr), int((job_hi - win_lo) * sr))
++
++            track_A, track_B, sim_A, sim_B, diag = self.tse_model.separate_two_speakers(
++                window_audio,
++                enroll_A=enrollments[spk_a], enroll_B=enrollments[spk_b],
++                sample_rate=sr, id_A=spk_a, id_B=spk_b,
++                probe_A=self._to_samples(solo_a, win_lo, sr, n),
++                probe_B=self._to_samples(solo_b, win_lo, sr, n),
++                core_range=core,
+             )
+-            
+-            # Crop the padding to extract just the overlap core
+-            pad_start_frames = int((overlap_start - ctx_start) * sr)
+-            core_len = int(core_duration * sr)
+-
+-            # A track shorter than the nominal core would silently yield a short
+-            # slice, leaving part of the overlap unprocessed while still flagged
+-            # as separated. Detect that instead of hiding it.
+-            available = min(len(track_A_ctx), len(track_B_ctx)) - pad_start_frames
+-            if available < core_len:
+-                if available <= 0:
+-                    if self.logger:
+-                        self.logger.warning(
+-                            f"TSE returned too little audio for overlap at {overlap_start:.2f}s; skipping."
+-                        )
++            for sim in (sim_A, sim_B):
++                if sim is not None:
++                    self.sims.append(sim)
++
++            # Per-track gating. Discarding both whenever one fails threw away a
++            # clean extraction of the dominant speaker because a 0.3s
++            # backchannel scored badly.
++            accepted, rejected = {}, {}
++            for spk, track, sim in ((spk_a, track_A, sim_A), (spk_b, track_B, sim_B)):
++                if sim is not None:
++                    if sim >= TSE_QC_SIM_THRESHOLD:
++                        accepted[spk] = (track, sim)
++                    else:
++                        rejected[spk] = ("qc_sim", f"sim={sim:.2f} th={TSE_QC_SIM_THRESHOLD}")
+                     continue
+-                if self.logger:
+-                    self.logger.warning(
+-                        f"TSE track shorter than overlap core at {overlap_start:.2f}s "
+-                        f"({available} < {core_len} samples); splicing what is available."
+-                    )
+-                core_len = available
+ 
+-            track_A_core = track_A_ctx[pad_start_frames : pad_start_frames + core_len]
+-            track_B_core = track_B_ctx[pad_start_frames : pad_start_frames + core_len]
++                # No solo region for this speaker. "Is this track B?" is
++                # unanswerable on a sub-second core, but "is this track just a
++                # copy of the anchor?" only needs a relative comparison.
++                own, other, rms = diag["anchor_self"], diag["anchor_other"], diag["other_rms"]
++                if rms is not None and rms < TSE_SILENCE_RMS:
++                    rejected[spk] = ("unscorable", f"rms={rms:.5f}")
++                elif own is None or other is None:
++                    rejected[spk] = ("unscorable", "no core embedding")
++                elif (own - other) > TSE_NOT_A_MARGIN:
++                    accepted[spk] = (track, None)
++                    self.stats["accept_not_a"] += 1
++                else:
++                    rejected[spk] = ("not_a_fail",
++                                     f"margin={own - other:.2f} th={TSE_NOT_A_MARGIN}")
+ 
+-            # Component 4: Quality Control (ÉP NGƯỠNG XUỐNG 0.2)
+-            # Check real ECAPA matching scores (Intra-Track Consistency equivalent)
+-            if sim_A < 0.2 or sim_B < 0.2:
+-                if self.logger: self.logger.warning(f"TSE QC failed (Low ECAPA similarity A:{sim_A:.2f} B:{sim_B:.2f}) at {overlap_start}s.")
+-                if self.logger: self.logger.warning(f"Discarding failed extraction for overlap at {overlap_start}s. Retaining original mixture.")
++            if not accepted:
++                if len(plist) > 1 and TSE_RETRY_SPLIT:
++                    # A grouped job failing as a whole must not condemn every
++                    # overlap in it; retry each one with its own window.
++                    self.stats["retried"] += 1
++                    self.stats["pairs"] -= len(plist)
++                    self.stats["jobs"] -= 1
++                    queue.extend([(spk_a, spk_b, [p]) for p in plist])
++                    continue
++                for p in plist:
++                    for sd in (p["seg1"], p["seg2"]):
++                        r, d = rejected.get(sd["speaker"], ("unscorable", "no verdict"))
++                        self._fail(seg_by_index.get(sd["index"]),
++                                   p["overlap_start"], p["overlap_end"], r, d)
++                self._dump_failed(f"{job_lo:.2f}_{spk_a}_{spk_b}", window_audio, track_A, track_B, sr)
+                 continue
+ 
+-            # Component 5: Splice with Cross-fade (20ms fade)
+             fade_samples = int(0.02 * sr)
+-            for seg_dict, track_core in ((seg1, track_A_core), (seg2, track_B_core)):
+-                enh_seg = seg_by_index.get(seg_dict["index"])
+-                if enh_seg is None:
+-                    continue
++            for p in plist:
++                ov_lo, ov_hi = p["overlap_start"], p["overlap_end"]
++                for sd in (p["seg1"], p["seg2"]):
++                    spk = sd["speaker"]
++                    enh = seg_by_index.get(sd["index"])
++                    if enh is None:
++                        continue
++                    if spk not in accepted:
++                        r, d = rejected.get(spk, ("unscorable", "no verdict"))
++                        self._fail(enh, ov_lo, ov_hi, r, d)
++                        continue
+ 
+-                rel_start = int((overlap_start - enh_seg.start) * sr)
+-                if rel_start < 0:
+-                    continue
++                    track, sim = accepted[spk]
++                    src = int((ov_lo - win_lo) * sr)
++                    dst = int((ov_lo - enh.start) * sr)
++                    if src < 0 or dst < 0:
++                        self._fail(enh, ov_lo, ov_hi, "short_track", "negative offset")
++                        continue
++                    limit = min(int((ov_hi - ov_lo) * sr), len(track) - src,
++                                len(enh.enhanced_audio) - dst)
++                    if limit <= 0:
++                        self._fail(enh, ov_lo, ov_hi, "short_track", f"limit={limit}")
++                        continue
++                    if any(not (ov_hi <= a or ov_lo >= b) for a, b, _ in enh.tse_spans):
++                        self._fail(enh, ov_lo, ov_hi, "already_spliced", "")
++                        continue
+ 
+-                limit = min(len(track_core), len(enh_seg.enhanced_audio) - rel_start)
+-                if limit <= 0:
+-                    continue
++                    enh.enhanced_audio[dst:dst + limit] = self._cross_fade(
++                        enh.enhanced_audio[dst:dst + limit], track[src:src + limit], fade_samples)
++                    enh.tse = True
++                    enh.tse_spans.append((ov_lo, ov_lo + limit / sr,
++                                          float(sim) if sim is not None else -1.0))
++                    self.stats["spliced"] += 1
+ 
+-                enh_seg.enhanced_audio[rel_start:rel_start + limit] = self._cross_fade(
+-                    enh_seg.enhanced_audio[rel_start:rel_start + limit], track_core[:limit], fade_samples
+-                )
+-                enh_seg.tse = True  # Flag indicating it was processed
++        pbar.close()
++        self._report_stats()
++        return enhanced
+ 
+-        return enhanced_segments
+-   
+-    def export_sdlm_dual_channel(self, enhanced_segments: List[EnhancedSegment], audio_duration: float, sr: int) -> Tuple[np.ndarray, np.ndarray]:
+-        """
+-        Component 6: Export Dual-Channel Audio for SDLM training.
+-        Reconstructs the full timeline into two continuous tracks (Track 0, Track 1) from the separated segments.
+-        Uses additive mixing to preserve overlapping segments belonging to the same speaker.
++    # ------------------------------------------------------------------
++    def export_sdlm_dual_channel(self, enhanced_segments: List[EnhancedSegment], audio_duration: float, sr: int,
++                                 strict: bool = True) -> Tuple[np.ndarray, np.ndarray]:
++        """Reconstruct two continuous tracks for SDLM / full-duplex training.
++
++        strict=True zeroes every span recorded in tse_failed_spans. Those spans
++        still contain the interfering speaker, so writing them would train track
++        0 on audio containing speaker 1 -- label contamination that is far more
++        expensive to discover later than a shorter corpus is now.
+         """
+         total_samples = int(audio_duration * sr)
+         track_0 = np.zeros(total_samples, dtype=np.float32)
+         track_1 = np.zeros(total_samples, dtype=np.float32)
+-        
+-        # Identify the two speakers. Sort alphabetically to assign Track 0 and Track 1 consistently.
+-        speakers = sorted(list(set(s.speaker for s in enhanced_segments)))
++
++        speakers = sorted({s.speaker for s in enhanced_segments})
+         if not speakers:
+             return track_0, track_1
+-            
+-        if len(speakers) > 2:
+-            if self.logger: self.logger.warning(f"export_sdlm_dual_channel: Expected 2 speakers, found {len(speakers)}. Extra speakers will be ignored.")
+-            
++        if len(speakers) > 2 and self.logger:
++            self.logger.warning(
++                f"export_sdlm_dual_channel: expected 2 speakers, found {len(speakers)}; "
++                "the rest are ignored."
++            )
+         spk_0 = speakers[0]
+         spk_1 = speakers[1] if len(speakers) > 1 else None
+-        
++
++        written = dropped = 0
+         for seg in enhanced_segments:
+-            if seg.speaker not in [spk_0, spk_1]:
++            if seg.speaker not in (spk_0, spk_1) or seg.enhanced_audio is None:
+                 continue
+-                
+             start_idx = int(seg.start * sr)
+-            end_idx = start_idx + len(seg.enhanced_audio)
+-            
+-            # Ensure we don't exceed buffer bounds
+-            if end_idx > total_samples:
+-                audio_to_paste = seg.enhanced_audio[:total_samples - start_idx]
+-                end_idx = total_samples
++            end_idx = min(total_samples, start_idx + len(seg.enhanced_audio))
++            if end_idx <= start_idx:
++                continue
++            chunk = seg.enhanced_audio[: end_idx - start_idx].copy()
++
++            if strict:
++                keep = np.ones(end_idx - start_idx, dtype=bool)
++                for a, b, _reason, _detail in seg.tse_failed_spans:
++                    i = max(start_idx, int(a * sr)) - start_idx
++                    j = min(end_idx, int(b * sr)) - start_idx
++                    if j > i:
++                        keep[i:j] = False
++                dropped += int((~keep).sum())
++                written += int(keep.sum())
++                chunk = chunk * keep
+             else:
+-                audio_to_paste = seg.enhanced_audio
+-                
+-            # Additive mixing to preserve same-speaker overlaps
++                written += end_idx - start_idx
++
+             if seg.speaker == spk_0:
+-                track_0[start_idx:end_idx] += audio_to_paste
+-            elif seg.speaker == spk_1:
+-                track_1[start_idx:end_idx] += audio_to_paste
+-                
+-        # Clip to prevent clipping distortion if additive mixing exceeded [-1.0, 1.0]
++                track_0[start_idx:end_idx] += chunk
++            else:
++                track_1[start_idx:end_idx] += chunk
++
++        if strict and self.logger:
++            total = written + dropped
++            pct = (100.0 * dropped / total) if total else 0.0
++            self.logger.info(
++                f"[SDLM] wrote {written / sr:.1f}s, zeroed {dropped / sr:.1f}s ({pct:.1f}%) "
++                "of un-separated overlap to avoid cross-speaker leakage."
++            )
++            if pct > 5.0:
++                self.logger.warning(
++                    f"[SDLM] {pct:.1f}% of speech dropped as contaminated -- that is the "
++                    "TSE failure rate landing in your dataset. Check the [TSE] counters."
++                )
++
+         np.clip(track_0, -1.0, 1.0, out=track_0)
+         np.clip(track_1, -1.0, 1.0, out=track_1)
+-        
+         return track_0, track_1
+diff --git a/podcast-pipeline/services/sidon_worker_service.py b/podcast-pipeline/services/sidon_worker_service.py
+index 2b60198..d7b4b1c 100644
+--- a/podcast-pipeline/services/sidon_worker_service.py
++++ b/podcast-pipeline/services/sidon_worker_service.py
+@@ -32,7 +32,15 @@ class SidonWorkerService(WorkerProcessService):
+             ready_timeout=1800.0,
+         )
+ 
+-    def start(self):
++    def spawn(self):
++        # Guard lives on spawn(), not start(): callers that spawn/wait_ready
++        # separately would otherwise bypass it and launch the worker with
++        # --tse off.
+         if not getattr(self.args, "tse", False):
+             return
+-        super().start()
++        super().spawn()
++
++    def wait_ready(self):
++        if self.process is None:
++            return
++        super().wait_ready()
+diff --git a/podcast-pipeline/tests/test_separation_logic.py b/podcast-pipeline/tests/test_separation_logic.py
+new file mode 100644
+index 0000000..544c64f
+--- /dev/null
++++ b/podcast-pipeline/tests/test_separation_logic.py
+@@ -0,0 +1,238 @@
++"""Logic tests for TargetExtractionService that need no GPU and no models.
++
++The separator is stubbed, so these check windowing, job grouping, per-track
++gating and the dual-channel leakage mask -- not audio quality.
++
++Run:  python -m pytest tests/test_separation_logic.py -q     (from podcast-pipeline/)
++"""
++import os
++import sys
++
++import numpy as np
++
++sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++
++from schemas.audio import AudioData
++from schemas.segment import Segment
++from services.separation_service import TargetExtractionService
++
++SR = 24000
++
++
++class FakeTSE:
++    """Returns two tracks of a known constant so splices are identifiable."""
++
++    def __init__(self, sim_a=0.6, sim_b=0.6):
++        self.sim_a, self.sim_b = sim_a, sim_b
++        self.calls = []
++
++    def separate_two_speakers(self, mixture_audio, enroll_A, enroll_B, sample_rate,
++                              id_A, id_B, probe_A=None, probe_B=None, core_range=None):
++        self.calls.append({
++            "len_sec": len(mixture_audio) / sample_rate,
++            "probe_A_sec": sum(b - a for a, b in (probe_A or [])) / sample_rate,
++            "probe_B_sec": sum(b - a for a, b in (probe_B or [])) / sample_rate,
++        })
++        return (np.full(len(mixture_audio), 0.5, dtype=np.float32),
++                np.full(len(mixture_audio), -0.5, dtype=np.float32),
++                self.sim_a, self.sim_b,
++                {"anchor_self": 0.6, "anchor_other": 0.1, "other_rms": 0.5})
++
++
++def _audio(duration=60.0):
++    rng = np.random.default_rng(0)
++    return AudioData(waveform=rng.normal(0, 0.05, int(duration * SR)).astype(np.float32),
++                     sample_rate=SR, name="test", audio_segment=None, duration=duration)
++
++
++def _dialogue():
++    """A talks 0-30s; B has a 0.4s backchannel at 14.0s and a real turn 32-40s."""
++    return [
++        Segment(index="00001", start=0.0, end=30.0, speaker="SPEAKER_00"),
++        Segment(index="00002", start=14.0, end=14.4, speaker="SPEAKER_01"),
++        Segment(index="00003", start=32.0, end=40.0, speaker="SPEAKER_01"),
++    ]
++
++
++def test_window_reaches_target_and_contains_both_speakers():
++    svc = TargetExtractionService(FakeTSE(), logger=None)
++    by_spk = svc._intervals_by_speaker(_dialogue())
++    built, reason = svc._build_window(by_spk, "SPEAKER_00", "SPEAKER_01", 14.0, 14.4, 60.0)
++    assert built is not None, f"window should be buildable, got {reason}"
++    lo, hi, solo_a, solo_b, anchor = built
++    assert hi - lo >= 20.0, f"window {hi - lo:.1f}s is shorter than Sidon's chunk"
++    # Only one speaker needs solo audio; the anchor is whichever has more.
++    assert max(sum(b - a for a, b in solo_a), sum(b - a for a, b in solo_b)) >= 2.0
++    assert anchor in ("SPEAKER_00", "SPEAKER_01")
++
++
++def test_backchannel_gets_a_real_probe_not_the_whole_window():
++    fake = FakeTSE()
++    svc = TargetExtractionService(fake, logger=None)
++    svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
++    assert len(fake.calls) == 1, "one job expected"
++    call = fake.calls[0]
++    assert call["len_sec"] >= 20.0
++    assert call["probe_B_sec"] >= 2.0, "B must be scored on its solo turn"
++    assert call["probe_B_sec"] < call["len_sec"], "probe must be a subset, not the window"
++
++
++def test_low_scoring_track_does_not_discard_the_good_one():
++    # A scores well, B fails QC -- the old code dropped both.
++    fake = FakeTSE(sim_a=0.60, sim_b=0.05)
++    svc = TargetExtractionService(fake, logger=None)
++    out = svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
++    a_seg = next(s for s in out if s.index == "00001")
++    b_seg = next(s for s in out if s.index == "00002")
++    assert a_seg.tse is True and a_seg.tse_spans, "A's clean extraction must survive"
++    assert b_seg.tse is False, "B failed QC and must keep the original mixture"
++    assert b_seg.tse_failed_spans, "B's failure must be recorded, not silently dropped"
++    assert b_seg.tse_status == "failed"
++
++
++def test_nearby_overlaps_share_one_separation_call():
++    segs = [
++        Segment(index="00001", start=0.0, end=30.0, speaker="SPEAKER_00"),
++        Segment(index="00002", start=10.0, end=10.4, speaker="SPEAKER_01"),
++        Segment(index="00003", start=13.0, end=13.4, speaker="SPEAKER_01"),
++        Segment(index="00004", start=32.0, end=40.0, speaker="SPEAKER_01"),
++    ]
++    fake = FakeTSE()
++    svc = TargetExtractionService(fake, logger=None)
++    svc.process_overlaps(segs, _audio(), overlap_threshold=0.1)
++    assert len(fake.calls) == 1, f"two nearby overlaps should share one call, got {len(fake.calls)}"
++    assert svc.stats["pairs"] == 2
++
++
++def test_sdlm_export_zeroes_unseparated_overlap():
++    fake = FakeTSE(sim_a=0.05, sim_b=0.05)   # everything fails QC
++    svc = TargetExtractionService(fake, logger=None)
++    out = svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
++    t0, _t1 = svc.export_sdlm_dual_channel(out, 60.0, SR, strict=True)
++    lo, hi = int(14.0 * SR), int(14.4 * SR)
++    assert np.allclose(t0[lo:hi], 0.0), "A's track must not carry B's overlapping speech"
++    assert np.abs(t0[int(2.0 * SR):int(3.0 * SR)]).sum() > 0, "solo speech must survive"
++
++
++def test_sdlm_export_keeps_separated_overlap():
++    fake = FakeTSE(sim_a=0.6, sim_b=0.6)     # separation succeeds
++    svc = TargetExtractionService(fake, logger=None)
++    out = svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
++    t0, _t1 = svc.export_sdlm_dual_channel(out, 60.0, SR, strict=True)
++    lo, hi = int(14.05 * SR), int(14.35 * SR)
++    assert np.abs(t0[lo:hi]).sum() > 0, "a successfully separated overlap must be kept"
++
++
++class DuplicatingTSE:
++    """Sidon's realistic failure mode on short, lopsided overlaps: the dominant
++    speaker is emitted on BOTH tracks. sim_A is high, sim_B is at chance."""
++
++    def separate_two_speakers(self, mixture_audio, enroll_A, enroll_B, sample_rate,
++                              id_A, id_B, probe_A=None, probe_B=None, core_range=None):
++        a_voice = np.full(len(mixture_audio), 0.5, dtype=np.float32)
++        # Identical tracks -> the anchor matches both equally -> no margin.
++        return a_voice, a_voice.copy(), 0.46, -0.05, {
++            "anchor_self": 0.46, "anchor_other": 0.45, "other_rms": 0.5}
++
++
++def test_max_rule_would_paste_speaker_a_into_speaker_b():
++    """Guard against the max(sim_A, sim_B) QC rule.
++
++    Under max(), 0.46 passes and B's segment gets spliced with A's voice.
++    Per-track gating must leave B untouched.
++    """
++    svc = TargetExtractionService(DuplicatingTSE(), logger=None)
++    out = svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
++
++    a_seg = next(s for s in out if s.index == "00001")
++    b_seg = next(s for s in out if s.index == "00002")
++
++    assert a_seg.tse is True, "A's track scored 0.46 and should be spliced"
++    assert b_seg.tse is False, (
++        "B scored -0.05: splicing here would write A's voice into B's segment. "
++        "This is exactly what max(sim_A, sim_B) < threshold would allow."
++    )
++    assert b_seg.tse_failed_spans[0][2] == "qc_sim"
++
++
++def test_every_overlap_is_accounted_for():
++    """The core invariant: no overlap may vanish without a recorded reason."""
++    for fake in (FakeTSE(0.6, 0.6), FakeTSE(0.6, 0.05), FakeTSE(0.05, 0.05),
++                 DuplicatingTSE()):
++        svc = TargetExtractionService(fake, logger=None)
++        out = svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
++        n_ok = sum(len(s.tse_spans) for s in out)
++        n_bad = sum(len(s.tse_failed_spans) for s in out)
++        # one overlap x two segments (A's and B's side)
++        assert n_ok + n_bad == 2, (
++            f"{type(fake).__name__}: {n_ok} spliced + {n_bad} failed != 2 -- "
++            "some code path discarded an overlap without recording it"
++        )
++
++
++def test_window_rejects_three_speakers():
++    segs = [
++        Segment(index="00001", start=0.0, end=30.0, speaker="SPEAKER_00"),
++        Segment(index="00002", start=14.0, end=14.4, speaker="SPEAKER_01"),
++        Segment(index="00003", start=16.0, end=18.0, speaker="SPEAKER_02"),
++        Segment(index="00004", start=32.0, end=40.0, speaker="SPEAKER_01"),
++    ]
++    svc = TargetExtractionService(FakeTSE(), logger=None)
++    by_spk = svc._intervals_by_speaker(segs)
++    built, reason = svc._build_window(by_spk, "SPEAKER_00", "SPEAKER_01", 14.0, 14.4, 60.0)
++    assert built is None and reason == "multi_speaker"
++
++
++def test_no_window_does_not_block_later_overlaps():
++    """A skipped overlap must not take the next one down with it."""
++    segs = [
++        Segment(index="00001", start=0.0, end=55.0, speaker="SPEAKER_00"),
++        Segment(index="00002", start=5.0, end=5.3, speaker="SPEAKER_01"),   # B has no solo nearby
++        Segment(index="00003", start=50.0, end=50.4, speaker="SPEAKER_01"),
++        Segment(index="00004", start=56.0, end=59.0, speaker="SPEAKER_01"), # B's only solo turn
++    ]
++    svc = TargetExtractionService(FakeTSE(), logger=None)
++    out = svc.process_overlaps(segs, _audio(60.0), overlap_threshold=0.1)
++    n_ok = sum(len(s.tse_spans) for s in out)
++    n_bad = sum(len(s.tse_failed_spans) for s in out)
++    assert n_ok + n_bad == 4, "both overlaps (x2 sides) must be accounted for"
++    assert n_ok > 0, "the overlap near B's solo turn should still be processed"
++
++
++class AllRejectTSE:
++    """Rejects on the grouped window but succeeds on a single-overlap retry."""
++
++    def __init__(self):
++        self.calls = 0
++
++    def separate_two_speakers(self, mixture_audio, enroll_A, enroll_B, sample_rate,
++                              id_A, id_B, probe_A=None, probe_B=None, core_range=None):
++        self.calls += 1
++        sim = 0.05 if self.calls == 1 else 0.6
++        return (np.full(len(mixture_audio), 0.5, dtype=np.float32),
++                np.full(len(mixture_audio), -0.5, dtype=np.float32), sim, sim,
++                {"anchor_self": 0.6, "anchor_other": 0.1, "other_rms": 0.5})
++
++
++def test_failed_group_job_retries_each_overlap():
++    segs = [
++        Segment(index="00001", start=0.0, end=30.0, speaker="SPEAKER_00"),
++        Segment(index="00002", start=10.0, end=10.4, speaker="SPEAKER_01"),
++        Segment(index="00003", start=13.0, end=13.4, speaker="SPEAKER_01"),
++        Segment(index="00004", start=32.0, end=40.0, speaker="SPEAKER_01"),
++    ]
++    fake = AllRejectTSE()
++    svc = TargetExtractionService(fake, logger=None)
++    out = svc.process_overlaps(segs, _audio(), overlap_threshold=0.1)
++    assert svc.stats["retried"] == 1, "the rejected group job should have been split"
++    assert fake.calls > 1, "retry must actually re-run separation"
++    assert sum(len(s.tse_spans) for s in out) > 0, "retries should recover the overlaps"
++
++
++def test_sdlm_mask_uses_failed_spans():
++    svc = TargetExtractionService(FakeTSE(0.05, 0.05), logger=None)
++    out = svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
++    assert all(s.tse_failed_spans or not s.tse_spans for s in out if s.index == "00002")
++    t0, _ = svc.export_sdlm_dual_channel(out, 60.0, SR, strict=True)
++    lo, hi = int(14.0 * SR), int(14.4 * SR)
++    assert np.allclose(t0[lo:hi], 0.0)
+diff --git a/podcast-pipeline/utils/logger.py b/podcast-pipeline/utils/logger.py
+index b2b7536..98e64db 100644
+--- a/podcast-pipeline/utils/logger.py
++++ b/podcast-pipeline/utils/logger.py
+@@ -51,6 +51,15 @@ class Logger:
+         logger = logging.getLogger(name)
+         logger.setLevel(logging.DEBUG)
+ 
++        # Libraries in the stack (speechbrain, lightning) call logging.basicConfig,
++        # which installs a handler on the root logger. Propagating there as well
++        # printed every record twice: once via our handlers below, once as
++        # "LEVEL:name:message" from root. Re-running in a notebook cell also
++        # stacked duplicate handlers on the cached logger.
++        logger.propagate = False
++        for existing in list(logger.handlers):
++            logger.removeHandler(existing)
++
+         # Add file handler to save logs to a file
+         log_date = time.strftime("%Y-%m-%d", time.localtime())
+         log_time = time.strftime("%H-%M-%S", time.localtime())
+@@ -79,15 +88,18 @@ class Logger:
+                 Returns:
+                     str: The formatted log message.
+                 """
++                # Colour the formatted output, never record.msg: mutating the
++                # record in place leaks ANSI codes into every other handler that
++                # sees the same record, and nests them if it is formatted twice.
+                 if record.levelno >= logging.ERROR:
+-                    record.msg = "\033[1;31m" + str(record.msg) + "\033[0m"
++                    colour = "1;31"
+                 elif record.levelno >= logging.WARNING:
+-                    record.msg = "\033[1;33m" + str(record.msg) + "\033[0m"
++                    colour = "1;33"
+                 elif record.levelno >= logging.INFO:
+-                    record.msg = "\033[1;34m" + str(record.msg) + "\033[0m"
+-                elif record.levelno >= logging.DEBUG:
+-                    record.msg = "\033[1;32m" + str(record.msg) + "\033[0m"
+-                return super().format(record)
++                    colour = "1;34"
++                else:
++                    colour = "1;32"
++                return f"\033[{colour}m{super().format(record)}\033[0m"
+ 
+         color_formatter = ColorFormatter(
+             "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
