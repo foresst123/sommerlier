@@ -81,7 +81,7 @@
                     "stitch_edge_pad": 0.2
                 },
                 "sidon": {
-                    "num_steps": 60
+                    "num_steps": 100
                 },
                 "demucs": {
                     "segment": 10,
