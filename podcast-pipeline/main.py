@@ -169,7 +169,9 @@ from utils.worker_env import resolve_worker_python
 # imports run -- or the modules capture the defaults instead. An env var set by
 # hand still wins, which keeps a quick sweep possible without editing config.
 for _cfg_key, _env_key in (("qc_sim_threshold", "TSE_QC_SIM_THRESHOLD"),
-                           ("min_voiced_sec", "TSE_MIN_VOICED_SEC")):
+                           ("min_voiced_sec", "TSE_MIN_VOICED_SEC"),
+                           ("stitch_solo", "TSE_STITCH_SOLO"),
+                           ("stitch_edge_pad", "TSE_STITCH_EDGE_PAD")):
     _value = env_profile.get("models", {}).get("tse", {}).get(_cfg_key)
     if _value is not None and _env_key not in os.environ:
         os.environ[_env_key] = str(_value)

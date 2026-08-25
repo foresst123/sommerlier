@@ -388,10 +388,21 @@ class TargetSpeakerExtractor:
             c0, c1 = int(core_range[0] * scale), int(core_range[1] * scale)
             c0, c1 = max(0, c0), min(len(out_A_np), c1)
             if c1 > c0:
-                core_other = out_B_np[c0:c1]
+                # The anchor is whichever speaker had a solo region to score on.
+                # "self" must be that speaker's own track and "other" the one
+                # opposite it -- reading them as A and B regardless meant that
+                # every job anchored on B scored embed_B against track A, so
+                # own came out low, other high, and (own - other) was negative
+                # for all of them: a guaranteed not_a_fail on exactly the cases
+                # the relative test exists to rescue.
+                anchor_is_a = sim_A is not None
+                anchor_embed = embed_A if anchor_is_a else embed_B
+                self_np = out_A_np if anchor_is_a else out_B_np
+                other_np = out_B_np if anchor_is_a else out_A_np
+
+                core_other = other_np[c0:c1]
                 diag["other_rms"] = float(np.sqrt((core_other ** 2).mean() + 1e-12))
-                anchor_embed = embed_A if sim_A is not None else embed_B
-                for key, arr in (("anchor_self", out_A_np[c0:c1]), ("anchor_other", core_other)):
+                for key, arr in (("anchor_self", self_np[c0:c1]), ("anchor_other", core_other)):
                     pr = self._gather_probe(arr, [(0, len(arr))], target_sr, min_voiced_sec=0.05)
                     if pr is not None:
                         e = F.normalize(self._get_embedding(pr, target_sr), p=2, dim=0)

@@ -36,9 +36,19 @@ TSE_MIN_SOLO = float(os.environ.get("TSE_MIN_SOLO", "2.0"))
 # the window from 36s to 6.3s, which also fits inside one 20s Sidon chunk and so
 # removes cross-chunk channel drift entirely.
 TSE_STITCH = os.environ.get("TSE_STITCH", "1") not in ("0", "false", "False")
-# Solo audio to take per speaker. ECAPA needs ~2s for a stable embedding, and
-# more than a few seconds only re-creates the imbalance this is meant to avoid.
-TSE_STITCH_SOLO = float(os.environ.get("TSE_STITCH_SOLO", "3.0"))
+# Solo audio to take per speaker. ECAPA pools statistics over time, so more of
+# it makes the embedding steadier and the A/B assignment harder to get wrong;
+# 3s left the scores noisy enough that tracks were being mislabelled. Raised to
+# 5s, which is still far short of the imbalance the stitched window exists to
+# avoid -- both speakers contribute the same amount, so the ratio stays 1:1
+# however large this is.
+TSE_STITCH_SOLO = float(os.environ.get("TSE_STITCH_SOLO", "5.0"))
+# Context kept either side of the overlap inside the stitched window. The
+# diarizer's boundaries land on a frame grid, not on the speech, so a span cut
+# exactly at them can start mid-syllable; a fifth of a second lets the decoder
+# hear the onset it is separating. Only the overlap itself is spliced back --
+# this padding is context for the model, never output.
+TSE_STITCH_EDGE_PAD = float(os.environ.get("TSE_STITCH_EDGE_PAD", "0.2"))
 # Shortest usable piece: below this a slice is mostly onset and carries little
 # speaker identity.
 TSE_STITCH_MIN_PIECE = float(os.environ.get("TSE_STITCH_MIN_PIECE", "0.5"))
@@ -590,7 +600,7 @@ class TargetExtractionService:
         for a, b in solo_b:
             append(grab(a, b), probe_b)
         append(guard)
-        pad =1 
+        pad = TSE_STITCH_EDGE_PAD
         core_start = cursor
         overlap = grab(max(0.0, ov_lo - pad), min(total_dur, ov_hi + pad))
         if overlap is None or len(overlap) == 0:

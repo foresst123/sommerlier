@@ -76,7 +76,9 @@
                 },
                 "tse": {
                     "qc_sim_threshold": 0.2,
-                    "min_voiced_sec": 1.0
+                    "min_voiced_sec": 1.0,
+                    "stitch_solo": 5.0,
+                    "stitch_edge_pad": 0.2
                 },
                 "demucs": {
                     "segment": 10,
@@ -148,7 +150,9 @@
                 },
                 "tse": {
                     "qc_sim_threshold": 0.2,
-                    "min_voiced_sec": 1.0
+                    "min_voiced_sec": 1.0,
+                    "stitch_solo": 5.0,
+                    "stitch_edge_pad": 0.2
                 },
                 "demucs": {
                     "segment": 30,

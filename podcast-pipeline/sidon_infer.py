@@ -124,8 +124,36 @@ def _separate_chunk(wav: torch.Tensor, num_steps: int, models: dict, device: tor
     spk2 = models["vae_decoder"](latents[:, :, latent_dim:].transpose(1, 2)).squeeze(0)
     return torch.cat([spk1, spk2], dim=0)
 
+# Frame length for the envelope the channel test runs on. Short enough to
+# follow syllables, long enough that phase does not enter into it.
+_ENVELOPE_FRAME = 240          # 10ms at 24kHz
+
+
+def _energy_envelope(x: torch.Tensor, frame: int = _ENVELOPE_FRAME) -> torch.Tensor:
+    """Per-frame RMS, which describes when a voice is loud rather than where its
+    waveform happens to sit."""
+    x = x.reshape(-1)
+    n = x.shape[-1] // frame
+    if n < 2:
+        return x
+    return x[: n * frame].reshape(n, frame).pow(2).mean(dim=1).clamp_min(1e-12).sqrt()
+
+
 def _channel_similarity(a: torch.Tensor, b: torch.Tensor) -> float:
-    a, b = a.reshape(-1), b.reshape(-1)
+    """Correlate two channels by energy envelope, not by raw samples.
+
+    The decoder resynthesises each chunk independently, so the same voice comes
+    back with a slightly different phase either side of a seam. Raw-sample
+    correlation collapses under that: a 2ms shift takes it from 1.0 to -0.64,
+    which is enough to make the caller swap two channels that were already in
+    the right order. The envelope is unchanged by the same shift (0.997), and
+    which speaker is loud when is what actually distinguishes the two tracks.
+    """
+    a, b = _energy_envelope(a), _energy_envelope(b)
+    n = min(a.shape[-1], b.shape[-1])
+    if n < 2:
+        return 0.0
+    a, b = a[:n], b[:n]
     a, b = a - a.mean(), b - b.mean()
     denom = torch.linalg.norm(a) * torch.linalg.norm(b)
     return float(torch.dot(a, b) / denom) if float(denom) > 1e-8 else 0.0
