@@ -83,8 +83,7 @@ class DemucsRemover:
             for start in range(0, audio.size, chunk):
                 end = min(audio.size, start + chunk)
                 lo, hi = max(0, start - pad), min(audio.size, end + pad)
-
-                wav = torch.from_numpy(audio[lo:hi]).to(self.device)
+                wav = torch.from_numpy(np.ascontiguousarray(audio[lo:hi])).to(self.device)
                 if sample_rate != model.samplerate:
                     wav = AF.resample(wav, sample_rate, model.samplerate)
 
