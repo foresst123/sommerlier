@@ -79,7 +79,7 @@ def serve():
                     est_sources, out_sr = run_separation_chunked(
                         wav=mix_tensor,
                         sample_rate=sample_rate,
-                        num_steps=30,
+                        num_steps=60,
                         device=device
                     )
                 
