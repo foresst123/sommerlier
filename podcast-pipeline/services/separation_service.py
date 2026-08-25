@@ -590,14 +590,15 @@ class TargetExtractionService:
         for a, b in solo_b:
             append(grab(a, b), probe_b)
         append(guard)
-
+        pad =1 
         core_start = cursor
-        overlap = grab(ov_lo, ov_hi)
+        overlap = grab(max(0.0, ov_lo - pad), min(total_dur, ov_hi + pad))
         if overlap is None or len(overlap) == 0:
             return None
         parts.append(overlap)          # never ramped: this is the span spliced back
         cursor += len(overlap)
-        core = (core_start, cursor)
+        lead = int(min(pad, ov_lo) * sr)
+        core = (core_start + lead, core_start + lead + int((ov_hi - ov_lo) * sr))
         parts.append(guard)
 
         audio = np.concatenate(parts).astype(np.float32)
