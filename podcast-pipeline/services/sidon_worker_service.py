@@ -26,7 +26,9 @@ class SidonWorkerService(WorkerProcessService):
                 "sidon", config=config, env_profile=self.env_profile, logger=logger
             ),
             worker_script=os.path.join(base_dir, "sidon_worker.py"),
-            extra_args=["--device", f"cuda:{args.gpu_1}"],
+            extra_args=["--device", f"cuda:{args.gpu_1}",
+                        "--config", getattr(args, "config", "config.json"),
+                        "--env", getattr(args, "env", "kaggle")],
             logger=logger,
             # Weight download on a cold cache is the slow part of startup.
             ready_timeout=1800.0,

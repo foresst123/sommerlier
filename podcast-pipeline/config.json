@@ -80,6 +80,9 @@
                     "stitch_solo": 5.0,
                     "stitch_edge_pad": 0.2
                 },
+                "sidon": {
+                    "num_steps": 60
+                },
                 "demucs": {
                     "segment": 10,
                     "overlap": 0.1
@@ -153,6 +156,9 @@
                     "min_voiced_sec": 1.0,
                     "stitch_solo": 5.0,
                     "stitch_edge_pad": 0.2
+                },
+                "sidon": {
+                    "num_steps": 60
                 },
                 "demucs": {
                     "segment": 30,

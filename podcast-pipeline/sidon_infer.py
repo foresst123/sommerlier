@@ -183,7 +183,10 @@ def run_separation_chunked(wav: torch.Tensor, sample_rate: int, num_steps: int, 
         max_val = wav_16k.abs().max().clamp_min(1e-6)
         wav_norm = torch.nn.functional.pad(0.9 * wav_16k / max_val, (160, 160))
         separated = _separate_chunk(wav_norm, num_steps, models, device)
-        return separated, out_sr
+        # Undo the input scaling so the result sits at the level of the audio
+        # that was handed in. With one chunk this only affects absolute level,
+        # but doing it here keeps both paths on the same scale.
+        return separated * (max_val / 0.9), out_sr
 
     overlap_samples_in = int(OVERLAP_SECONDS * SAMPLE_RATE_IN)
     hop_samples = chunk_samples - overlap_samples_in
@@ -197,6 +200,12 @@ def run_separation_chunked(wav: torch.Tensor, sample_rate: int, num_steps: int, 
         max_val = chunk.abs().max().clamp_min(1e-6)
         chunk_norm = torch.nn.functional.pad(0.9 * chunk / max_val, (160, 160))
         pred = _separate_chunk(chunk_norm, num_steps, models, device)
+        # Each chunk is normalised by its own peak, so two neighbours whose
+        # loudness differs come back on different scales. Crossfading them then
+        # blends two different gains and leaves a step at the seam. Restoring
+        # each chunk's own scaling first puts them all back in the recording's
+        # units, which is what makes the blend meaningful.
+        pred = pred * (max_val / 0.9)
         target_out = max(1, round((end - start) * out_sr / SAMPLE_RATE_IN))
         if pred.shape[-1] > target_out:
             pred = pred[:, :target_out]

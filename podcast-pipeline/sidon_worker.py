@@ -23,9 +23,26 @@ def serve():
     # accepted for backwards compatibility but unused.
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--device", type=str, default="cuda:0")
+    parser.add_argument("--config", type=str, default="config.json")
+    parser.add_argument("--env", type=str, default="kaggle")
     args = parser.parse_args()
 
     device = torch.device(args.device)
+
+    # Diffusion steps come from the profile like every other model setting.
+    # DPMSolver++ converges quickly, so this is the first knob to try when the
+    # separation stage needs to be faster -- but it trades directly against
+    # output quality, so measure before lowering it.
+    num_steps = 60
+    try:
+        with open(args.config, encoding="utf-8") as fh:
+            _cfg = json.load(fh)
+        _sidon = (_cfg.get("environments", {}).get(args.env, {})
+                      .get("models", {}).get("sidon", {}))
+        num_steps = int(_sidon.get("num_steps", num_steps))
+    except Exception as e:
+        print(json.dumps({"warning": f"could not read sidon config: {e}; "
+                                     f"using num_steps={num_steps}"}), flush=True)
     
     # Fix SpeechBrain 1.1.0 logger bug where it tries to setLevel("20")
     import logging
@@ -45,7 +62,7 @@ def serve():
     try:
         # Pre-load models (downloads .pt2 from HF Hub if not cached)
         load_models(device)
-        print(json.dumps({"status": "ready"}), flush=True)
+        print(json.dumps({"status": "ready", "num_steps": num_steps}), flush=True)
     except Exception as e:
         print(json.dumps({"status": "error", "message": str(e)}), flush=True)
         sys.exit(1)
@@ -79,7 +96,7 @@ def serve():
                     est_sources, out_sr = run_separation_chunked(
                         wav=mix_tensor,
                         sample_rate=sample_rate,
-                        num_steps=60,
+                        num_steps=num_steps,
                         device=device
                     )
                 
