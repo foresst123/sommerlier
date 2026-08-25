@@ -415,6 +415,28 @@ class StageOutputService:
         """
         if not self.enabled:
             return None
+
+        path = os.path.join(self.output_dir, "manifest.json")
+
+        # Merge with whatever is already on disk. Under stage-major execution
+        # this service is constructed fresh inside every run(), so self.manifest
+        # only ever holds the one stage this call computed -- writing it plain
+        # left the file describing the last stage alone, and the flow it exists
+        # to show could not be reconstructed. Stages from this run win, so a
+        # recomputed stage replaces its earlier entry rather than being ignored.
+        stages = {}
+        try:
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as f:
+                    stages = (json.load(f) or {}).get("stages", {}) or {}
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(
+                    f"[stage-out] could not read the existing manifest ({e}); "
+                    "starting a fresh one")
+        stages.update(self.manifest["stages"])
+        self.manifest["stages"] = stages
+
         flow = []
         for name in ("diarization", "separation", "music_removal", "asr", "refinement"):
             st = self.manifest["stages"].get(name, {}).get("stats")
@@ -439,7 +461,6 @@ class StageOutputService:
                 for msg in payload["warnings"]:
                     self.logger.warning(f"[stage-out] {msg}")
 
-        path = os.path.join(self.output_dir, "manifest.json")
         self._write_json(path, payload)
         if self.logger:
             self.logger.info(f"[stage-out] manifest -> {path}")

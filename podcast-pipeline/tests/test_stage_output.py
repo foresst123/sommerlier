@@ -203,3 +203,54 @@ def test_stage_artifacts_are_written_once_not_once_per_stage():
         before = src[:src.index(call)]
         assert f'if "{stage}" in computed:' in before.rsplit("\n\n", 1)[-1], (
             f"{writer} runs even when {stage} came from a checkpoint")
+
+
+def test_the_manifest_accumulates_across_separate_service_instances(tmp_path):
+    """Stage-major execution builds a new StageOutputService inside every run(),
+    so self.manifest only ever holds the one stage that call computed. Writing
+    it plain left the file describing the last stage alone -- a real two-file
+    run produced a manifest listing refinement and nothing else, while all five
+    stage directories held data."""
+    def _segments(n):
+        return [_Seg(index=str(i).zfill(5), start=i * 2.0, end=i * 2.0 + 1.8,
+                     speaker="1" if i % 2 else "2") for i in range(n)]
+
+    for writer in ("write_diarization", "write_separation", "write_music_removal"):
+        service = StageOutputService(str(tmp_path))          # fresh, as run() does
+        getattr(service, writer)(_segments(40), 90.0)
+        service.write_manifest({"audio_file": "a.mp3"})
+
+    service = StageOutputService(str(tmp_path))
+    service.write_asr([_Seg(index=str(i), text="x") for i in range(40)])
+    service.write_manifest({"audio_file": "a.mp3"})
+
+    flow = json.loads((tmp_path / "manifest.json").read_text())["flow"]
+    assert [r["stage"] for r in flow] == [
+        "diarization", "separation", "music_removal", "asr"]
+
+
+def test_a_recomputed_stage_replaces_its_earlier_entry(tmp_path):
+    def _segments(n):
+        return [_Seg(index=str(i).zfill(5), start=float(i), end=i + 0.9,
+                     speaker="1") for i in range(n)]
+
+    first = StageOutputService(str(tmp_path))
+    first.write_diarization(_segments(10), 20.0)
+    first.write_manifest({"audio_file": "a.mp3"})
+
+    second = StageOutputService(str(tmp_path))
+    second.write_diarization(_segments(25), 40.0)
+    second.write_manifest({"audio_file": "a.mp3"})
+
+    flow = json.loads((tmp_path / "manifest.json").read_text())["flow"]
+    assert len(flow) == 1
+    assert flow[0]["n"] == 25, "the rerun's count must win"
+
+
+def test_a_corrupt_manifest_does_not_stop_the_run(tmp_path):
+    (tmp_path / "manifest.json").write_text("{not json")
+    service = StageOutputService(str(tmp_path))
+    service.write_asr([_Seg(index="0", text="x")])
+    service.write_manifest({"audio_file": "a.mp3"})
+
+    assert json.loads((tmp_path / "manifest.json").read_text())["flow"]
