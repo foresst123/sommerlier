@@ -85,8 +85,9 @@
                 "refinement": {
                     "model_name": "Qwen/Qwen2.5-3B-Instruct",
                     "batch_size": 2,
-                    "torch_dtype": "bfloat16",
-                    "prefix_cache": false
+                    "torch_dtype": "float16",
+                    "prefix_cache": false,
+                    "device": "cuda:0"
                 }
             },
             "allow_tf32": true,
@@ -158,7 +159,8 @@
                     "model_name": "Qwen/Qwen3-4B",
                     "batch_size": 24,
                     "torch_dtype": "bfloat16",
-                    "prefix_cache": true
+                    "prefix_cache": true,
+                    "device": "cuda:0"
                 }
             },
             "allow_tf32": true,

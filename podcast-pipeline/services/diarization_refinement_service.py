@@ -63,6 +63,7 @@ class DiarizationRefinementService:
         self.logger = logger
         self.model = None
         self.tokenizer = None
+        self.device = device
         self.batch_size = batch_size
         self.rejected = 0
         self.torch_dtype = torch_dtype
@@ -107,8 +108,8 @@ class DiarizationRefinementService:
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
                 torch_dtype=dtype,
-                device_map="auto"
-            )
+                low_cpu_mem_usage=True,
+            ).to(self.device)
             self.model.eval()
             if self.logger: self.logger.info("LLM loaded successfully.")
         except Exception as e:
