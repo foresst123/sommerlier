@@ -450,9 +450,29 @@ class PipelineService:
         except Exception as e:
             if self.logger: self.logger.error(f"Failed to export intermediate results: {e}")
         
+        # A page for listening through the result and correcting it: the two
+        # audio versions, all three ASR outputs, the fused text and an editable
+        # copy, side by side. Built here because it needs the exported clips,
+        # which only exist once the steps above have run.
+        review_page = None
+        if getattr(args, "review_page", True):
+            try:
+                from tools.make_review_page import build_review_page
+                review_page = build_review_page(
+                    save_path,
+                    max_mb=getattr(args, "review_max_mb", None),
+                    logger=self.logger)
+            except Exception as e:
+                # A missing review page must not fail a run whose transcripts
+                # are already on disk.
+                if self.logger:
+                    self.logger.warning(f"Could not build the review page: {e}")
+
         # One index over every stage, written last so it can compare them.
-        stage_out.write_manifest(metadata, extra={"final": {
-            "json": f"{base_name}.json", "srt": f"{base_name}.srt"}})
+        final = {"json": f"{base_name}.json", "srt": f"{base_name}.srt"}
+        if review_page:
+            final["review"] = os.path.basename(review_page)
+        stage_out.write_manifest(metadata, extra={"final": final})
 
         if self.logger: self.logger.info(f"Pipeline completed successfully. Results saved to {save_path}")
         return transcripts

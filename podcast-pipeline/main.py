@@ -65,6 +65,13 @@ def _build_parser():
                         help="Override pipeline.merge_gap from the profile")
     parser.add_argument("--max_segment_length", type=float,
                         help="Override pipeline.max_segment_length from the profile")
+    parser.add_argument("--no_review_page", dest="review_page", action="store_false",
+                        default=None,
+                        help="Skip the HTML review page. It is built by default at "
+                             "the end of each file and embeds every clip, so it is "
+                             "worth turning off when only the transcripts matter.")
+    parser.add_argument("--review_max_mb", type=int, default=None,
+                        help="Cap on audio embedded in the review page (default 400).")
     parser.add_argument("--stop_after", type=str, choices=["diarization", "separation", "music_removal", "asr", "captioning"], help="Stop pipeline gracefully after this stage")
     return parser
 
