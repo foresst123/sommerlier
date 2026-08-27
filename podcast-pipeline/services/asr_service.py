@@ -12,7 +12,7 @@ from utils.audio_normalize import normalize_for_asr, remove_dc, measure
 # Segments shorter than this are padded with surrounding audio before ASR.
 CONTEXT_PAD_BELOW = 2.0
 CONTEXT_PAD_SECONDS = 2.0
-EDGE_PAD_SECONDS = 0.02
+EDGE_PAD_SECONDS = 0.05
 class ASRService:
     """Coordinates MoE ASR models and ROVER ensemble."""
     
