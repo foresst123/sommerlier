@@ -8,6 +8,7 @@ from schemas.audio import AudioData
 from schemas.segment import Segment, EnhancedSegment
 from algorithms.diarization.overlap import detect_overlapping_segments
 from utils.audio_normalize import match_splice_level, safe_limit
+from utils import spectral_restore
 
 # --- Window ---------------------------------------------------------------
 # Sidon processes 20s chunks (CHUNK_SECONDS in sidon_infer.py). Start there and
@@ -206,6 +207,9 @@ class TargetExtractionService:
                 "min_solo": TSE_MIN_SOLO, "window_target": TSE_WINDOW_TARGET,
                 "window_max": TSE_WINDOW_MAX,
             },
+            # Recorded per run because it changes what the audio sounds like:
+            # a report from a run without it is not comparable to one with it.
+            "spectral_restore": spectral_restore.enabled(),
             "stats": dict(self.stats),
             "sim_percentiles": (
                 {p: float(np.percentile(self.sims, p)) for p in (10, 50, 90)}
@@ -823,6 +827,21 @@ class TargetExtractionService:
                 probe_B=probe_b_s,
                 core_range=core,
             )
+            # Undo the decoder's spectral tilt before anything downstream sees
+            # the tracks.
+            #
+            # The QC scores below were computed inside the model, on the
+            # uncorrected audio, and that is the right way round: sim answers
+            # "is this the enrolled speaker", which is a question about who
+            # Sidon extracted, not about tone. Correcting first and re-scoring
+            # would only measure how much the EQ moved ECAPA's embedding. The
+            # gate therefore keeps judging separation, and this keeps fixing
+            # timbre, without either one standing in for the other.
+            if spectral_restore.enabled():
+                track_A = spectral_restore.restore(track_A, sr)
+                track_B = spectral_restore.restore(track_B, sr)
+                self.stats["spectral_restored"] += 1
+
             for sim in (sim_A, sim_B):
                 if sim is not None:
                     self.sims.append(sim)

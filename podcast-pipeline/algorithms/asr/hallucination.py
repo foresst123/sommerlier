@@ -67,6 +67,34 @@ def strip_foreign_runs(text: str) -> str:
     return re.sub(r"\s{2,}", " ", cleaned).strip()
 
 
+_WORD = re.compile(r"[^\W\d_]+", re.UNICODE)
+
+
+def diacritic_ratio(text: str) -> float:
+    """Share of the words carrying a Vietnamese diacritic or the letter đ.
+
+    English and Vietnamese are both written in Latin script, so
+    ``foreign_script_ratio`` reads 0.0 for a sentence that has been translated
+    wholesale into English -- the one hallucination it cannot see. Diacritics
+    are what actually separates the two: running Vietnamese is densely marked
+    (0.7 is typical), English is exactly 0.0.
+
+    This is a signal, not a verdict. Vietnamese typed without diacritics scores
+    0.0 as well, so a caller must compare against the text it started from
+    rather than thresholding this on its own.
+    """
+    words = _WORD.findall(text)
+    if not words:
+        return 0.0
+    marked = sum(
+        1 for w in words
+        if "đ" in w.lower()
+        or any(unicodedata.category(c) == "Mn"
+               for c in unicodedata.normalize("NFD", w))
+    )
+    return marked / len(words)
+
+
 def _strip_accents(text: str) -> str:
     """Fold Vietnamese diacritics so a mis-accented hallucination still matches."""
     decomposed = unicodedata.normalize("NFD", text)
@@ -93,13 +121,28 @@ def is_boilerplate(text: str) -> bool:
 
 
 def is_repetition(text: str, min_repeats: int = 3) -> bool:
-    """Whether ``text`` is the same short phrase repeated, a decoding-loop tell."""
+    """Whether ``text`` is the same short phrase repeated, a decoding-loop tell.
+
+    Three repeats is the safe threshold for a single word, because Vietnamese
+    reduplicates for emphasis: "rất rất tốt", "xa xa" are ordinary speech, not
+    a stuck decoder.
+
+    A multi-word phrase is different. Nothing in natural speech says "gì hết gì
+    hết" or "đúng rồi đúng rồi" with no other words around it, so a phrase of
+    two or more words repeating over essentially the whole segment is counted
+    at two. That covers the doubles that reached the transcripts -- the fusion
+    prompt already asks the model to collapse them, which it cannot be relied
+    on to do.
+    """
     words = text.split()
-    if len(words) < min_repeats:
+    if len(words) < 2:
         return False
 
     for size in (1, 2, 3):
-        if len(words) < size * min_repeats:
+        # A repeated multi-word phrase is a decoding loop even at two, but a
+        # single word needs the full count to stay clear of reduplication.
+        needed = min_repeats if size == 1 else min(min_repeats, 2)
+        if len(words) < size * needed:
             continue
         phrase = words[:size]
         repeats = 1
@@ -108,7 +151,7 @@ def is_repetition(text: str, min_repeats: int = 3) -> bool:
                 repeats += 1
             else:
                 break
-        if repeats >= min_repeats and repeats * size >= len(words) * 0.8:
+        if repeats >= needed and repeats * size >= len(words) * 0.8:
             return True
     return False
 

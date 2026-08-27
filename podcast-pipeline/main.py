@@ -183,6 +183,13 @@ for _cfg_key, _env_key in (("qc_sim_threshold", "TSE_QC_SIM_THRESHOLD"),
     if _value is not None and _env_key not in os.environ:
         os.environ[_env_key] = str(_value)
 
+# Spectral restoration is a Sidon setting rather than a TSE threshold, and it
+# is read at call time rather than at import -- but it is published the same way
+# so that one profile switch controls it like everything else.
+_restore = env_profile.get("models", {}).get("sidon", {}).get("spectral_restore")
+if _restore is not None and "SIDON_SPECTRAL_RESTORE" not in os.environ:
+    os.environ["SIDON_SPECTRAL_RESTORE"] = "1" if _restore else "0"
+
 from services.model_loader import ModelLoader
 from services.audio_service import AudioService
 from services.diarization_service import DiarizationService

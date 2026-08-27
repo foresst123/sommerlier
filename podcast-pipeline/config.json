@@ -1,196 +1,198 @@
 {
-    "language": {
-        "multilingual": false,
-        "supported": [
-            "en",
-            "ko",
-            "ja",
-            "zh",
-            "es",
-            "fr",
-            "de",
-            "it",
-            "pt",
-            "ru",
-            "ar",
-            "hi"
-        ]
-    },
-    "entrypoint": {
-        "input_folder_path": "audio_pipeline/test",
-        "SAMPLE_RATE": 16000
-    },
-    "huggingface_token": "hf_XXXXXXXXXXXXXXXXXXXXXXXX",
-    "environments": {
-        "kaggle": {
-            "offline_mode": false,
-            "gpu_1": 0,
-            "gpu_2": 1,
-            "pipeline": {
-                "vad": true,
-                "tse": true,
-                "panns": true,
-                "ASRMoE": true,
-                "llm_refinement": true,
-                "qwen3omni": false,
-                "dia3": false,
-                "keep_models": false,
-                "by_stage": true,
-                "review_page": true,
-                "review_max_mb": 400,
-                "initprompt": true,
-                "lang": "vi",
-                "LLM": "case_0",
-                "merge_gap": 0.3,
-                "max_segment_length": 20.0,
-                "seg_th": 0.11,
-                "min_cluster_size": 11,
-                "clust_th": 0.5
-            },
-            "models": {
-                "vad": {
-                    "vad_threshold": 2.0,
-                    "max_segment": 20.0
-                },
-                "whisper": {
-                    "model_size": "large-v3",
-                    "compute_type": "float16",
-                    "batch_size": 16
-                },
-                "phowhisper": {
-                    "compute_type": "float16",
-                    "batch_size": 16
-                },
-                "qwen3": {
-                    "batch_size": 6,
-                    "use_flash_attention": false,
-                    "torch_dtype": "float16"
-                },
-                "diarizen": {
-                    "batch_size": 12,
-                    "seg_duration": 16,
-                    "segmentation_step": 0.1,
-                    "apply_median_filtering": false,
-                    "clustering_method": "VBxClustering",
-                    "min_speakers": 1,
-                    "max_speakers": 10,
-                    "ahc_threshold": 0.6
-                },
-                "tse": {
-                    "qc_sim_threshold": 0.2,
-                    "min_voiced_sec": 1.0,
-                    "stitch_solo": 5.0,
-                    "stitch_edge_pad": 0.2
-                },
-                "sidon": {
-                    "num_steps": 100
-                },
-                "demucs": {
-                    "segment": 10,
-                    "overlap": 0.1
-                },
-                "refinement": {
-                    "model_name": "Qwen/Qwen2.5-3B-Instruct",
-                    "batch_size": 2,
-                    "torch_dtype": "bfloat16",
-                    "prefix_cache": false
-                }
-            },
-            "allow_tf32": true,
-            "batch": {
-                "max_hours_per_run": 5.0
-            }
+  "language": {
+    "multilingual": false,
+    "supported": [
+      "en",
+      "ko",
+      "ja",
+      "zh",
+      "es",
+      "fr",
+      "de",
+      "it",
+      "pt",
+      "ru",
+      "ar",
+      "hi"
+    ]
+  },
+  "entrypoint": {
+    "input_folder_path": "audio_pipeline/test",
+    "SAMPLE_RATE": 16000
+  },
+  "huggingface_token": "hf_XXXXXXXXXXXXXXXXXXXXXXXX",
+  "environments": {
+    "kaggle": {
+      "offline_mode": false,
+      "gpu_1": 0,
+      "gpu_2": 1,
+      "pipeline": {
+        "vad": true,
+        "tse": true,
+        "panns": true,
+        "ASRMoE": true,
+        "llm_refinement": true,
+        "qwen3omni": false,
+        "dia3": false,
+        "keep_models": false,
+        "by_stage": true,
+        "review_page": true,
+        "review_max_mb": 400,
+        "initprompt": true,
+        "lang": "vi",
+        "LLM": "case_0",
+        "merge_gap": 0.3,
+        "max_segment_length": 20.0,
+        "seg_th": 0.11,
+        "min_cluster_size": 11,
+        "clust_th": 0.5
+      },
+      "models": {
+        "vad": {
+          "vad_threshold": 2.0,
+          "max_segment": 20.0
         },
-        "a100": {
-            "offline_mode": false,
-            "gpu_1": 0,
-            "gpu_2": 0,
-            "pipeline": {
-                "vad": true,
-                "tse": true,
-                "panns": true,
-                "ASRMoE": true,
-                "llm_refinement": true,
-                "qwen3omni": false,
-                "dia3": false,
-                "keep_models": true,
-                "by_stage": true,
-                "review_page": true,
-                "review_max_mb": 400,
-                "initprompt": true,
-                "lang": "vi",
-                "LLM": "case_0",
-                "merge_gap": 0.3,
-                "max_segment_length": 20.0,
-                "seg_th": 0.11,
-                "min_cluster_size": 11,
-                "clust_th": 0.5
-            },
-            "models": {
-                "vad": {
-                    "vad_threshold": 2.0,
-                    "max_segment": 20.0
-                },
-                "whisper": {
-                    "model_size": "large-v3",
-                    "compute_type": "bfloat16",
-                    "batch_size": 48
-                },
-                "phowhisper": {
-                    "compute_type": "bfloat16",
-                    "batch_size": 48
-                },
-                "qwen3": {
-                    "batch_size": 24,
-                    "use_flash_attention": false,
-                    "torch_dtype": "bfloat16"
-                },
-                "diarizen": {
-                    "batch_size": 64,
-                    "seg_duration": 16,
-                    "segmentation_step": 0.5,
-                    "apply_median_filtering": false,
-                    "clustering_method": "VBxClustering",
-                    "min_speakers": 1,
-                    "max_speakers": 20,
-                    "ahc_threshold": 0.6
-                },
-                "tse": {
-                    "qc_sim_threshold": 0.2,
-                    "min_voiced_sec": 1.0,
-                    "stitch_solo": 5.0,
-                    "stitch_edge_pad": 0.2
-                },
-                "sidon": {
-                    "num_steps": 60
-                },
-                "demucs": {
-                    "segment": 30,
-                    "overlap": 0.25
-                },
-                "refinement": {
-                    "model_name": "Qwen/Qwen3-4B",
-                    "batch_size": 24,
-                    "torch_dtype": "bfloat16",
-                    "prefix_cache": true
-                }
-            },
-            "allow_tf32": true,
-            "batch": {
-                "max_hours_per_run": 20.0
-            }
+        "whisper": {
+          "model_size": "large-v3",
+          "compute_type": "float16",
+          "batch_size": 16
+        },
+        "phowhisper": {
+          "compute_type": "float16",
+          "batch_size": 16
+        },
+        "qwen3": {
+          "batch_size": 6,
+          "use_flash_attention": false,
+          "torch_dtype": "float16"
+        },
+        "diarizen": {
+          "batch_size": 12,
+          "seg_duration": 16,
+          "segmentation_step": 0.1,
+          "apply_median_filtering": false,
+          "clustering_method": "VBxClustering",
+          "min_speakers": 1,
+          "max_speakers": 10,
+          "ahc_threshold": 0.6
+        },
+        "tse": {
+          "qc_sim_threshold": 0.2,
+          "min_voiced_sec": 1.0,
+          "stitch_solo": 5.0,
+          "stitch_edge_pad": 0.2
+        },
+        "sidon": {
+          "num_steps": 100,
+          "spectral_restore": false
+        },
+        "demucs": {
+          "segment": 10,
+          "overlap": 0.1
+        },
+        "refinement": {
+          "model_name": "Qwen/Qwen2.5-3B-Instruct",
+          "batch_size": 2,
+          "torch_dtype": "bfloat16",
+          "prefix_cache": false
         }
+      },
+      "allow_tf32": true,
+      "batch": {
+        "max_hours_per_run": 5.0
+      }
     },
-    "batch": {
-        "max_hours_per_run": 5.0,
-        "audio_extensions": [
-            ".mp3",
-            ".wav",
-            ".m4a",
-            ".flac",
-            ".opus",
-            ".ogg",
-            ".aac"
-        ]
+    "a100": {
+      "offline_mode": false,
+      "gpu_1": 0,
+      "gpu_2": 0,
+      "pipeline": {
+        "vad": true,
+        "tse": true,
+        "panns": true,
+        "ASRMoE": true,
+        "llm_refinement": true,
+        "qwen3omni": false,
+        "dia3": false,
+        "keep_models": true,
+        "by_stage": true,
+        "review_page": true,
+        "review_max_mb": 400,
+        "initprompt": true,
+        "lang": "vi",
+        "LLM": "case_0",
+        "merge_gap": 0.3,
+        "max_segment_length": 20.0,
+        "seg_th": 0.11,
+        "min_cluster_size": 11,
+        "clust_th": 0.5
+      },
+      "models": {
+        "vad": {
+          "vad_threshold": 2.0,
+          "max_segment": 20.0
+        },
+        "whisper": {
+          "model_size": "large-v3",
+          "compute_type": "bfloat16",
+          "batch_size": 48
+        },
+        "phowhisper": {
+          "compute_type": "bfloat16",
+          "batch_size": 48
+        },
+        "qwen3": {
+          "batch_size": 24,
+          "use_flash_attention": false,
+          "torch_dtype": "bfloat16"
+        },
+        "diarizen": {
+          "batch_size": 64,
+          "seg_duration": 16,
+          "segmentation_step": 0.5,
+          "apply_median_filtering": false,
+          "clustering_method": "VBxClustering",
+          "min_speakers": 1,
+          "max_speakers": 20,
+          "ahc_threshold": 0.6
+        },
+        "tse": {
+          "qc_sim_threshold": 0.2,
+          "min_voiced_sec": 1.0,
+          "stitch_solo": 5.0,
+          "stitch_edge_pad": 0.2
+        },
+        "sidon": {
+          "num_steps": 60,
+          "spectral_restore": false
+        },
+        "demucs": {
+          "segment": 30,
+          "overlap": 0.25
+        },
+        "refinement": {
+          "model_name": "Qwen/Qwen3-4B",
+          "batch_size": 24,
+          "torch_dtype": "bfloat16",
+          "prefix_cache": true
+        }
+      },
+      "allow_tf32": true,
+      "batch": {
+        "max_hours_per_run": 20.0
+      }
     }
+  },
+  "batch": {
+    "max_hours_per_run": 5.0,
+    "audio_extensions": [
+      ".mp3",
+      ".wav",
+      ".m4a",
+      ".flac",
+      ".opus",
+      ".ogg",
+      ".aac"
+    ]
+  }
 }

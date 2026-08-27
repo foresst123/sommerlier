@@ -53,3 +53,7 @@ tmp
 # literal character, so "kaggle *" never matched anything.
 kaggle*/
 new_data_run/
+
+# A/B listening samples generated to check the spectral EQ by ear. Audio,
+# regenerated on demand from the run output -- never source.
+podcast-pipeline/eq_samples/

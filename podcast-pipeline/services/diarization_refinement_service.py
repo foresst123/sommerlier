@@ -1,7 +1,7 @@
 import os
 from typing import List
 from difflib import SequenceMatcher
-from algorithms.asr.hallucination import foreign_script_ratio
+from algorithms.asr.hallucination import diacritic_ratio, foreign_script_ratio
 from algorithms.asr.rover import normalize_token
 from schemas.transcript import TranscriptSegment
 import torch
@@ -51,6 +51,43 @@ FUSION_SYSTEM_PROMPT = (
 # Above this share of segments failing, the stage is treated as broken rather
 # than as having hit a few awkward inputs.
 REFINE_FAILURE_LIMIT = float(os.environ.get("REFINE_FAILURE_LIMIT", "0.5"))
+
+# Segments this short, or this few words, are left with their ROVER text.
+#
+# Fusion needs three transcripts that disagree in a way context can settle. A
+# backchannel gives the model one or two words and no sentence to place them
+# in, so there is nothing to choose between -- and what came back instead was
+# invention: "dạ" -> "dạ nhờ yeah", "ừ" -> "ừ từ đúng", "đúng không" -> "bàu
+# đùa". Hand-checking 932 segments found the models already right on these and
+# refinement wrong, so the cheapest correct move is not to ask.
+#
+# The bound is deliberately tight. Refinement earns its keep on ordinary
+# segments (286 fixed against 38 broken), and every segment skipped here is one
+# it no longer gets to fix.
+REFINE_MIN_SECONDS = float(os.environ.get("REFINE_MIN_SECONDS", "1.0"))
+REFINE_MIN_WORDS = int(os.environ.get("REFINE_MIN_WORDS", "2"))
+
+
+def too_short_to_refine(seg) -> bool:
+    """Whether ``seg`` is a backchannel that refinement should leave alone.
+
+    Duration and word count are both checked because either can be the honest
+    signal: a 0.4s "ừ" is short in time, while a slowly drawn-out "dạ" is short
+    only in words. The word count uses the longest of the three transcripts --
+    the shortest is often blank, and one model dropping a word is not evidence
+    the segment is a backchannel.
+    """
+    words = max((len(t.split()) for t in
+                 (seg.text_whisper, seg.text_phowhisper, seg.text_qwen3) if t),
+                default=0)
+    if words and words <= REFINE_MIN_WORDS:
+        return True
+
+    # A missing or reversed span says nothing; only trust a real duration.
+    start, end = getattr(seg, "start", None), getattr(seg, "end", None)
+    if start is not None and end is not None and end > start:
+        return (end - start) < REFINE_MIN_SECONDS
+    return False
 
 
 class DiarizationRefinementService:
@@ -181,6 +218,26 @@ class DiarizationRefinementService:
                 )
             return False
 
+        # The check above only sees non-Latin script, and English is Latin, so
+        # a segment translated wholesale into English passes it untouched:
+        # "nhưng sau đó họ fail là bởi vì họ fix" came back as "but after that
+        # they failed because they fixed" and scored 0.00 on both sides.
+        #
+        # Diacritics are the difference. Compare against the inputs rather than
+        # thresholding the output alone -- Vietnamese transcribed without
+        # diacritics is legitimate, and only a drop relative to what the ASR
+        # models produced is evidence the model translated instead of choosing.
+        source_diacritics = diacritic_ratio(" ".join(sources))
+        if source_diacritics >= 0.25 and diacritic_ratio(refined) < source_diacritics * 0.4:
+            if self.logger:
+                self.logger.warning(
+                    f"[LLM] rejected refinement for segment {seg.index} "
+                    f"(translated out of Vietnamese: diacritics "
+                    f"{source_diacritics:.2f} -> {diacritic_ratio(refined):.2f}); "
+                    "keeping ROVER text"
+                )
+            return False
+
         # Compare on folded tokens. Punctuation is exactly what refinement is
         # supposed to add, and on a one-word backchannel it is the whole
         # difference: "Ừ?" against "Ừ" scores 0.0 as raw words and would reject
@@ -260,7 +317,17 @@ class DiarizationRefinementService:
         # the one part of refinement that is CPU-bound: generation itself is on
         # the GPU and stays sequential.
         indices = [i for i, seg in enumerate(segments)
-                   if (seg.text_whisper or seg.text_phowhisper or seg.text_qwen3)]
+                   if (seg.text_whisper or seg.text_phowhisper or seg.text_qwen3)
+                   and not too_short_to_refine(seg)]
+
+        skipped = sum(1 for seg in segments
+                      if (seg.text_whisper or seg.text_phowhisper or seg.text_qwen3)
+                      and too_short_to_refine(seg))
+        if skipped and self.logger:
+            self.logger.info(
+                f"[LLM] Skipping {skipped} backchannel segment(s) "
+                f"(< {REFINE_MIN_SECONDS}s or <= {REFINE_MIN_WORDS} words); "
+                "keeping their ROVER text")
 
         workers = int(os.environ.get("OMP_NUM_THREADS", "1"))
         if len(indices) > 64 and workers > 1:
