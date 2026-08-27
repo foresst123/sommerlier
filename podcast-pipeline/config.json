@@ -84,7 +84,7 @@
                 },
                 "sidon": {
                     "num_steps": 100,
-                    "spectral_restore": false
+                    "spectral_restore": true
                 },
                 "demucs": {
                     "segment": 10,
@@ -164,7 +164,7 @@
                 },
                 "sidon": {
                     "num_steps": 60,
-                    "spectral_restore": false
+                    "spectral_restore": true
                 },
                 "demucs": {
                     "segment": 30,
