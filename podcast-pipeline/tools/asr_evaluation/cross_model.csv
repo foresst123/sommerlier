@@ -1,0 +1,933 @@
+﻿id,reference,Whisper_wer,Whisper_perfect,PhoWhisper_wer,PhoWhisper_perfect,Qwen3_wer,Qwen3_perfect,Final_wer,Final_perfect,num_perfect_models,perfect_models,all_correct,all_wrong
+0,bên ngoài thì trời đang mưa rồi,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+1,mời được anh hoàng đến đây có khác trời đổ mưa liền,0.16666666666666666,False,0.25,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+2,shhhhh,3.0,False,4.0,False,1.0,False,7.0,False,0,,False,True
+3,không khí phỏng vấn mới chill,0.3333333333333333,False,0.5,False,0.8333333333333334,False,0.3333333333333333,False,0,,False,True
+4,chill thật là hy vọng là cái cuộc trò chuyện của mình nó cũng chill như cơn mưa nhưng mà,0.15,False,0.1,False,0.1,False,0.1,False,0,,False,True
+5,thử thì vẫn phải thử mà thách thì vẫn phải thách chào mừng anh hoàng đến với thử thật thách,0.05,False,0.25,False,0.1,False,0.05,False,0,,False,True
+6,xin chào 28unit và xin chào tất cả các độc giả của thử thách tôi đã sẵn sàng với những câu hỏi cực kỳ khó của host nghiêm ngọc,0.10344827586206896,False,0.2413793103448276,False,0.13793103448275862,False,0.034482758620689655,False,0,,False,True
+7,nhưng mà đầu tiên thì cũng mình bắt đầu một cái dễ dàng thôi là vừa launching xong cuộc thi miss cosmo rồi cảm xúc của anh bây giờ như thế nào,0.03125,False,0.09375,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+8,ờ,1.0,False,1.0,False,1.0,False,2.0,False,0,,False,True
+9,cảm xúc của anh là lâng lâng tại vì bận quá,0.18181818181818182,False,0.0,True,0.18181818181818182,False,0.0,True,2,"PhoWhisper, Final",False,False
+10,nói thật là kiểu khi mà mình,0.0,True,0.2857142857142857,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+11,mình ấp ủ,0.6666666666666666,False,0.0,True,0.3333333333333333,False,0.6666666666666666,False,1,PhoWhisper,False,False
+12,giống như mình áp ủ một đứa con của mình vậy đó xong cuối cùng là mình nhìn thấy cái ngày mà mình được giới thiệu với mọi người,0.0,True,0.06896551724137931,False,0.034482758620689655,False,0.0,True,2,"Whisper, Final",False,False
+13,trong cái chương trình đó có thể là đối với mọi người nó là một buổi họp báo đơn giản thôi nhưng đối với tụi anh thật sự nó là rất là nhiều những cái,0.0,True,0.14285714285714285,False,0.08571428571428572,False,0.02857142857142857,False,1,Whisper,False,False
+14,tâm tư mà mình,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+15,mình ấp ủ mình chuẩn bị cho một thời gian dài,0.09090909090909091,False,0.36363636363636365,False,0.2727272727272727,False,0.18181818181818182,False,0,,False,True
+16,và cuối cùng mình cũng có thể được chia sẻ với mọi người,0.07692307692307693,False,0.07692307692307693,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+17,và may mắn là ngày hôm đó xong thì tụi anh nhận được một cái hiệu ứng rất là tích cực sự đón nhận,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+18,của cộng đồng không phải chỉ trong nước mà còn ngoài nước cộng đồng fan quốc tế nữa,0.16666666666666666,False,0.2222222222222222,False,0.0,True,0.2222222222222222,False,1,Qwen3,False,False
+19,và anh nhận được rất là nhiều những lời chúc mừng từ những người bạn những người đồng nghiệp cũ những network của anh trên cả thế giới trong cái lĩnh vực sắc đẹp,0.058823529411764705,False,0.11764705882352941,False,0.029411764705882353,False,0.0,True,1,Final,False,False
+20,thế nên là đầu tiên thì rất vui và lâng lâng nhưng mà sau đó mình mới nhận ra là à cái khối lượng công việc phải tiếp tục xử lý sau họp báo mình tưởng là nhẹ nhàng đi nhưng cuối cùng lại tăng lên,0.13043478260869565,False,0.043478260869565216,False,0.15217391304347827,False,0.021739130434782608,False,0,,False,True
+21,cho nên là thực ra hiện đại tất cả mọi người đều đang tăng ca hết công suất để có thể đáp ứng được và,0.04,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+22,đảm bảo là những cái lời hứa mà mình mang đến cho khán giả trong ngày họp báo thì,0.05263157894736842,False,0.15789473684210525,False,0.15789473684210525,False,0.0,True,1,Final,False,False
+23,mình sẽ làm được nhiều và nhiều hơn nữa,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+24,từ cái lúc mà anh nói cho em biết về,0.0,True,0.0,True,0.1,False,0.1,False,2,"Whisper, PhoWhisper",False,False
+25,cái dự định mở một cuộc thi mới cho đến khi launching đến bây giờ là,0.1875,False,0.25,False,0.25,False,0.25,False,0,,False,True
+26,hơn năm,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+27,hơn năm lận và trong quá trình đấy thì mình đã phải plan rất nhiều thứ kể cả cái việc đổi cái format cuộc thi trong nước để phù hợp với cuộc thi,1.0,False,0.2727272727272727,False,0.15151515151515152,False,0.30303030303030304,False,0,,False,True
+28,đúng rồi,0.0,True,1.0,False,0.5,False,0.0,True,2,"Whisper, Final",False,False
+29,cho nước ngoài sắp tới thì trong đó có một cái thay đổi mà,0.0,True,0.14285714285714285,False,0.07142857142857142,False,0.0,True,2,"Whisper, Final",False,False
+30,có một cái thay đổi mà rất là nhiều người chú ý là không có top ba chỉ có top hai thôi cũng không,0.125,False,0.16666666666666666,False,0.16666666666666666,False,0.08333333333333333,False,0,,False,True
+31,câu hỏi câu hỏi ứng xử mà debate với nhau luôn,0.09090909090909091,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+32,có rất là nhiều thay đổi như vậy,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+33,và đôi khi em thắc mắc là lý do tại sao anh quyết định đổi như vậy,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+34,có phải là nếu như mà,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+35,cái này là em nghĩ thôi nha nếu như không đổi thì cuộc thi của mình nó vẫn sẽ giống như những cuộc thi thông thường,0.0,True,0.038461538461538464,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+36,dạ,0.0,True,0.0,True,1.0,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+37,nó rất là khó nổi bật ra khỏi cái mặt bằng chung rất nhiều của thi hiện nay,0.3333333333333333,False,0.3333333333333333,False,0.1111111111111111,False,0.0,True,1,Final,False,False
+38,anh nghĩ ngọc chắc là một trong những người biết,0.1,False,0.0,True,0.1,False,0.1,False,1,PhoWhisper,False,False
+39,về những cái cột mốc và những thay đổi đầu tiên của miss cosmo từ việt nam tới quốc tế thì anh không hiểu tại sao trong những dịp mà anh đang suy nghĩ về việc làm cái gì mới thì,0.07317073170731707,False,0.3170731707317073,False,0.17073170731707318,False,0.04878048780487805,False,0,,False,True
+40,hhhhha,3.0,False,6.0,False,1.0,False,3.0,False,0,,False,True
+41,gần như tình cờ là anh em mình đều gặp nhau đúng không trong những buổi cà phê,0.1111111111111111,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+42,um thì,0.5,False,0.5,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+43,anh nghĩ ấy,0.3333333333333333,False,1.0,False,0.3333333333333333,False,1.0,False,0,,False,True
+44,cái quan điểm từ của anh giờ nó không đổi tức là,0.08333333333333333,False,0.25,False,0.16666666666666666,False,0.0,True,1,Final,False,False
+45,nếu mà mình chỉ có làm mọi thứ giống nhau thì mình không thể mong đợi kết quả nó sẽ khác đi được,0.0,True,0.043478260869565216,False,0.043478260869565216,False,0.0,True,2,"Whisper, Final",False,False
+46,có đúng không,1.3333333333333333,False,0.3333333333333333,False,0.3333333333333333,False,1.3333333333333333,False,0,,False,True
+47,phụ so you,0.6666666666666666,False,1.0,False,0.3333333333333333,False,0.0,True,1,Final,False,False
+48,thì rõ ràng là nếu mà mình vẫn làm như từ trước giờ mình làm và mình cũng làm giống như cách mọi người làm và mọi nghĩ nó phải là á,0.1875,False,0.125,False,0.1875,False,0.21875,False,0,,False,True
+49,thì chắc chắn cái kết quả nó sẽ là the same nó chỉ có thể là giống hoặc tệ hơn thôi,0.09523809523809523,False,0.23809523809523808,False,0.14285714285714285,False,0.09523809523809523,False,0,,False,True
+50,tại vì người ta đã làm rồi,0.0,True,0.0,True,0.14285714285714285,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+51,mình cũng làm lặp lại y hệt mình còn tư duy lười cải tiến nữa thì chắc chắn là sẽ không thành công,0.17391304347826086,False,0.13043478260869565,False,0.17391304347826086,False,0.13043478260869565,False,0,,False,True
+52,thì quan điểm của tụi anh là nếu mà mình có một cái cơ hội để làm mới thì mình sẽ làm mới,0.043478260869565216,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+53,mà ở đây mình còn là có cơ hội làm từ đâu nữa cơ,0.07142857142857142,False,0.07142857142857142,False,0.07142857142857142,False,0.07142857142857142,False,0,,False,True
+54,anh coi đó là cơ hội nhé tại vì mình sinh ra cái thương hiệu cái sản phẩm này là từ bắt đầu,0.17391304347826086,False,0.08695652173913043,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+55,cho nên mình cũng không bị đóng khung trong câu chuyện là phải như thế nào cho đúng,0.05555555555555555,False,0.05555555555555555,False,0.05555555555555555,False,0.05555555555555555,False,0,,False,True
+56,thì anh chỉ thấy là à ok có những cái nguyên tắc trong cái việc,0.0,True,0.13333333333333333,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+57,tạo nên phong cách của một cuộc thi sắc đẹp mà mình nên giữ nhưng còn lại thì anh để cho bản thân và để cho tất cả đội ngũ của mình rất là thoải mái trong cách tư duy xây dựng format,0.046511627906976744,False,0.11627906976744186,False,0.06976744186046512,False,0.046511627906976744,False,0,,False,True
+58,cho nên là tụi anh gần như,0.0,True,0.0,True,0.2857142857142857,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+59,phá cái cấu trúc truyền thống và khi mà đặt vào bất cứ một cái khuôn mẫu nào thì anh luôn tự hỏi là tại sao mình phải làm như vậy có cách nào làm khác đi không,0.05263157894736842,False,0.0,True,0.02631578947368421,False,0.02631578947368421,False,1,PhoWhisper,False,False
+60,thế nên là tụi anh cũng,0.0,True,0.0,True,0.3333333333333333,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+61,có thể gọi là khá là táo bạo những câu chuyện là đập vỡ cái format truyền thống mà mình xây một cái phong cách hoàn toàn mới cho cosmo,0.1,False,0.2,False,0.13333333333333333,False,0.06666666666666667,False,0,,False,True
+62,ờ mà nói là chắc chắn sẽ thành công hoặc là anh tự tin là ok tôi làm khác tôi sẽ thắng,0.045454545454545456,False,0.13636363636363635,False,0.09090909090909091,False,0.045454545454545456,False,0,,False,True
+63,thì không hẳn,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+64,nhưng mà chắc chắn anh nói đó nếu mà mình không làm khác thì chắc chắn là mình sẽ,0.2631578947368421,False,0.05263157894736842,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+65,mình sẽ chỉ vậy thôi hoặc,0.3333333333333333,False,0.0,True,0.16666666666666666,False,0.16666666666666666,False,1,PhoWhisper,False,False
+66,chắc chắn là chỉ thua thôi,0.0,True,0.0,True,0.16666666666666666,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+67,cho nên là bây giờ đây là một cái cuộc đặc cược,0.16666666666666666,False,0.08333333333333333,False,0.16666666666666666,False,0.16666666666666666,False,0,,False,True
+68,dĩ nhiên là mình phải đặt cược với rất nhiều tâm huyết rất nhiều tư duy ở trong đó và tụi anh cũng test and learn cũng thử và học,0.06666666666666667,False,0.23333333333333334,False,0.16666666666666666,False,0.13333333333333333,False,0,,False,True
+69,cũng tham khảo ý kiến của rất nhiều nguồn,0.1111111111111111,False,0.0,True,0.1111111111111111,False,0.0,True,2,"PhoWhisper, Final",False,False
+70,và cũng có những cái mà anh thấy là à,0.1,False,0.2,False,0.1,False,0.2,False,0,,False,True
+71,nó không được như mình kỳ vọng đó nhưng mình vẫn sẽ thử đó và cũng có những cái à ok cho tới bây giờ mọi người đã bắt đầu quen ví dụ như,0.0,True,0.08823529411764706,False,0.08823529411764706,False,0.0,True,2,"Whisper, Final",False,False
+72,ừ,0.0,True,1.0,False,1.0,False,0.0,True,2,"Whisper, Final",False,False
+73,sau một cái format,0.5,False,0.5,False,0.75,False,0.5,False,0,,False,True
+74,của việt nam thì bây giờ tụi anh công bố cái việc mà chọn top hai cho cuộc quốc tế,0.05,False,0.05,False,0.0,True,0.05,False,1,Qwen3,False,False
+75,thì rất là nhiều khán giả của việt nam và quốc tế họ đã quen rồi và họ nói là à,0.0,True,0.047619047619047616,False,0.047619047619047616,False,0.0,True,2,"Whisper, Final",False,False
+76,thực ra đây không phải là một bài test nữa bởi vì tổ chức này đã làm điều đó ở cuộc thi việt nam và chắc chắn họ đã học được kinh nghiệm để tổ chức điều đó một cách chỉnh chu nhất,0.13953488372093023,False,0.2558139534883721,False,0.2558139534883721,False,0.023255813953488372,False,0,,False,True
+77,thì anh thấy happy là mình đã dám thử,0.1111111111111111,False,0.1111111111111111,False,0.1111111111111111,False,0.1111111111111111,False,0,,False,True
+78,nhưng mà trong mọi cái thử gọi là,0.125,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+79,như anh nói rằng là cái này nó làm mình test and learn,0.0,True,0.0,True,0.3076923076923077,False,0.15384615384615385,False,2,"Whisper, PhoWhisper",False,False
+80,thì,1.0,False,0.0,True,0.0,True,1.0,False,2,"PhoWhisper, Qwen3",False,False
+81,nó sẽ không có đúng và sai nó chỉ có là nên hay không nên,0.06666666666666667,False,0.2,False,0.2,False,0.06666666666666667,False,0,,False,True
+82,dạ,0.0,True,1.0,False,1.0,False,2.0,False,1,Whisper,False,False
+83,thì trong suốt một quá trình đó,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+84,đầu có một khoảnh khắc nào đó anh cảm thấy rằng là đáng lẽ mình không nên làm như vậy,0.05,False,0.05,False,0.1,False,0.0,True,1,Final,False,False
+85,ờ,1.0,False,0.0,True,1.0,False,1.0,False,1,PhoWhisper,False,False
+86,hoặc là đáng lẽ nên mình giữ một chút nào đó gọi là fix mindset cái format cố định không hay là có một lúc nào mình quyết định mình nghĩ như vậy không,0.17647058823529413,False,0.4411764705882353,False,0.29411764705882354,False,0.058823529411764705,False,0,,False,True
+87,ừ,0.0,True,0.0,True,1.0,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+88,câu này anh thấy cũng rất là hay anh nghĩ ai chắc sẽ có trăn trở khi mình chọn nhưng mà,0.0,True,0.09523809523809523,False,0.19047619047619047,False,0.0,True,2,"Whisper, Final",False,False
+89,quan điểm của anh là gì ví dụ mình tới một ngã ba mà mình đã rẽ trái,0.1111111111111111,False,0.05555555555555555,False,0.05555555555555555,False,0.0,True,1,Final,False,False
+90,ở cái thời điểm đó mình không biết cái gì đợi mình ở hướng bên phải hết á,0.0,True,0.05555555555555555,False,0.1111111111111111,False,0.0,True,2,"Whisper, Final",False,False
+91,ừm,0.0,True,1.0,False,1.0,False,0.0,True,2,"Whisper, Final",False,False
+92,còn nếu mình đang đi bên trái và mình cứ nghĩ mãi là cái gì đợi phương hướng còn lại thì mình sẽ không bao giờ tập trung được tập trung được,0.09375,False,0.1875,False,0.21875,False,0.0,True,1,Final,False,False
+93,cho cái hướng đi của mình,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+94,thế nên là anh có hai câu chuyện một là lúc chuẩn bị rẽ thì phải nghĩ thật kỹ,0.15789473684210525,False,0.05263157894736842,False,0.10526315789473684,False,0.05263157894736842,False,0,,False,True
+95,nhưng đã rẽ rồi là phải tập trung vào,0.1111111111111111,False,0.0,True,0.1111111111111111,False,0.1111111111111111,False,1,PhoWhisper,False,False
+96,anh sẽ không có,0.5,False,0.25,False,0.0,True,0.25,False,1,Qwen3,False,False
+97,ok ừ ô kê giá mà hồi kia mình làm khác đi hoặc là mình cứ làm theo cách đó thôi thì có thể nó sẽ khác hơn,0.10714285714285714,False,0.03571428571428571,False,0.14285714285714285,False,0.0,True,1,Final,False,False
+98,suy nghĩ như vậy nó không có,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+99,giúp ích được gì cho bản thân mình hết nên anh sẽ không nghĩ,0.07142857142857142,False,0.07142857142857142,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+100,còn câu chuyện là chắc chắn giống như em nói có những lúc mình thử xong mình sẽ học bài học làm sao,0.043478260869565216,False,0.17391304347826086,False,0.17391304347826086,False,0.17391304347826086,False,0,,False,True
+101,hoặc mình thấy là à ok cái này không phù hợp không phù hợp,0.42857142857142855,False,0.21428571428571427,False,0.2857142857142857,False,0.2857142857142857,False,0,,False,True
+102,có thể là bởi vì,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+103,một là thời điểm,0.0,True,0.25,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+104,thị trường chưa đón nhận hoặc chưa đủ để đón những cái sản phẩm này hoặc bản thân mình chưa đủ nội lực mà,0.125,False,0.125,False,0.125,False,0.0,True,1,Final,False,False
+105,ví dụ mình muốn làm cái mới mà nội lực mình chuẩn bị chưa xong,0.0,True,0.0,True,0.2,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+106,thì dù là bất cứ lý do gì thì mình phải rút ra cái bài học là một là mình phải hoàn thiện nội lực hai là mình,0.03571428571428571,False,0.03571428571428571,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+107,educate thêm thị trường từ từ ba nữa là mình phải chờ đợi cái thành công nó đến muộn hơn chút xíu chẳng hạn,0.041666666666666664,False,0.08333333333333333,False,0.041666666666666664,False,0.041666666666666664,False,0,,False,True
+108,thì,1.0,False,1.0,False,1.0,False,1.0,False,0,,False,True
+109,cuối cùng là,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+110,cái cách làm mới nào,0.6,False,0.0,True,0.2,False,0.2,False,1,PhoWhisper,False,False
+111,it cũng cần một cái khoảng thời gian để mình bắt đầu mình hái được quả,0.1875,False,0.0625,False,0.0625,False,0.0,True,1,Final,False,False
+112,quả nó đắng ngọt anh chưa biết nha nhưng mà chắc chắn là không thể nào nó có ngay được,0.0,True,0.1,False,0.05,False,0.0,True,2,"Whisper, Final",False,False
+113,nên là,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+114,anh thì anh cũng không sốt ruột đến mức như vậy,0.09090909090909091,False,0.18181818181818182,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+115,còn,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+116,ở trong cái câu hỏi của em thì anh thấy có một ý đó là,0.06666666666666667,False,0.06666666666666667,False,0.06666666666666667,False,0.0,True,1,Final,False,False
+117,có khi nào mà mình nên,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+118,chung thành với một cái fix,0.0,True,0.3333333333333333,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+119,hoặc em nói là fix mindset á,0.5714285714285714,False,0.5714285714285714,False,0.14285714285714285,False,0.14285714285714285,False,0,,False,True
+120,thì anh nghĩ là,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+121,quan điểm của anh nha thứ đầu tiên là mình tốn rất là nhiều mình kỳ công mà để mình tạo nên cái mindset của mình,0.038461538461538464,False,0.19230769230769232,False,0.07692307692307693,False,0.07692307692307693,False,0,,False,True
+122,cái tư duy của mình tại vì mindset của một người nó được tạo ra từ kiến thức của họ,0.0,True,0.15,False,0.15,False,0.1,False,1,Whisper,False,False
+123,từ những cái trải nghiệm từ kinh nghiệm của bản thân họ thì tạo nên cái tư duy của họ đúng không,0.13636363636363635,False,0.13636363636363635,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+124,và khi mình tạo lên được cái tư duy của mình á,0.0,True,0.0,True,0.08333333333333333,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+125,thì cái ngã đau nhất chính là ngã lên trên cái fixed mindset đó của mình tại vì mình tin là mình đúng mà,0.08333333333333333,False,0.20833333333333334,False,0.16666666666666666,False,0.125,False,0,,False,True
+126,mình làm tất cả để mình tạo nên cái sản phẩm,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+127,và sau đó mình ngã lên đó chính là cái ngã đau nhất cho nên ngay khi anh cảm giác là à cái này chắc chắn,0.19230769230769232,False,0.11538461538461539,False,1.0,False,0.038461538461538464,False,0,,False,True
+128,là rất đúng rồi á,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+129,thì đó là cái lúc anh sẽ suy nghĩ lại,0.0,True,0.0,True,1.0,False,0.2,False,2,"Whisper, PhoWhisper",False,False
+130,tại vì anh tin là,0.2,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+131,không có cái gì là một trăm phần trăm đúng và một cái gì một trăm phân trăm đúng của hôm nay chưa chắc qua ngày mai áp dụng lại nó đã được,0.2727272727272727,False,0.12121212121212122,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+132,cho nên là mình vừa,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+133,xây dựng lên nó nhưng mình vừa phải đập đổ đó đi,0.08333333333333333,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+134,thì mình mới có thể tiến lên được,0.5,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+135,quá trình mà tạo nên fix mindset em nghĩ nó gọi là quá trình learning,0.06666666666666667,False,0.4,False,0.13333333333333333,False,0.13333333333333333,False,0,,False,True
+136,và tất cả mọi thứ mà mình đang như anh nói là mình nghĩ trong đầu rằng nó đúng như vậy,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+137,ừ,0.0,True,1.0,False,1.0,False,0.0,True,2,"Whisper, Final",False,False
+138,quá trình mình xây dựng lên như thế nó là tập hợp từ kinh nghiệm của bản thân,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+139,cách cái quá trình của bản thân thậm chí là thu nhặt kiến thức từ người khác nữa thì trong cái hành trình anh làm việc từ khi đi học đại học ngoại thương đến khi mình ra ngoài làm việc bằng đó năm cho đến khi lên ceo,0.061224489795918366,False,0.16326530612244897,False,0.12244897959183673,False,0.02040816326530612,False,0,,False,True
+140,thì đã bao giờ anh cảm thấy rằng là cái fix mindset của mình cái gọi là cái suy nghĩ cố định cái cái gọi là mặc định trong đầu á,0.0967741935483871,False,0.16129032258064516,False,0.0967741935483871,False,0.0967741935483871,False,0,,False,True
+141,nó có vấn đề chưa,0.2,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+142,anh thấy cái đẹp như này tức là,0.125,False,0.25,False,0.125,False,0.0,True,1,Final,False,False
+143,mình ít khi nào nhận ra tức là giống như em nói nó không phải là khi mình fix cái mindset của mình á,0.0,True,0.20833333333333334,False,0.041666666666666664,False,0.041666666666666664,False,1,Whisper,False,False
+144,không phải là cái thời điểm này mình ngồi cái mình nhìn ra là mindset mình đang fixed đâu,0.10526315789473684,False,0.2631578947368421,False,0.21052631578947367,False,0.21052631578947367,False,0,,False,True
+145,ừ,1.0,False,1.0,False,1.0,False,1.0,False,0,,False,True
+146,cái khó là tới lúc có nhiều khi mình phải ngã xong rồi mình mới nhận ra là cái cú ngã đó của mình lại cho thời điểm mình đã không mở,0.125,False,0.0625,False,0.0625,False,0.03125,False,0,,False,True
+147,là do thời điểm không mở mà mình không mở là bởi vì mình tin là mình đúng,0.05555555555555555,False,0.05555555555555555,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+148,và bởi vì mình tin mình đúng belief của mình cái niềm tin của mình nó tạo nên từ mindset của mình mà,0.08695652173913043,False,0.2608695652173913,False,0.08695652173913043,False,0.17391304347826086,False,0,,False,True
+149,thì đó là do mình fix mindset của mình nó không tạo cho mình một cái belief mới không tạo một cái niềm tin mới,0.08,False,0.36,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+150,và do đó là mình không mở bên ra để đón nhận một cái giải pháp mới một cái cách làm mới thì mình fail,0.04,False,0.04,False,0.04,False,0.04,False,0,,False,True
+151,và cái fail đó cho mình một bài học để mình mở,0.16666666666666666,False,0.16666666666666666,False,0.08333333333333333,False,0.08333333333333333,False,0,,False,True
+152,nó là một cái vòng,0.2,False,0.2,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+153,thế thì,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+154,ờm trong cái quá trình anh đi làm cho tới thời điểm này chắc chắn anh đã học được nhiều bài học tương tự ví dụ như anh nhớ có một cái thời điểm mà anh mới ra trường cái công việc đầu tiên của anh là anh làm bia làm,0.058823529411764705,False,0.09803921568627451,False,0.0196078431372549,False,0.0196078431372549,False,0,,False,True
+155,làm với báo chí anh nghĩ đó là cái công việc đầu tiên mà anh em mình tiếp xúc với nhau quá,0.045454545454545456,False,0.045454545454545456,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+156,thì ở cái thời điểm đó đối với làm truyền thông đặc biệt là,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+157,những cái chương trình giải trí,0.16666666666666666,False,0.0,True,0.16666666666666666,False,0.16666666666666666,False,1,PhoWhisper,False,False
+158,thì pr có nghĩa là em làm việc với báo chí và báo chí ở đó thì thời điểm đó báo mạng đã là cái platform số 1 đi,0.06896551724137931,False,0.3448275862068966,False,0.20689655172413793,False,0.034482758620689655,False,0,,False,True
+159,và họ chưa có những công cụ social media content nhiều như bây giờ thế mà mình chưa có cái,0.1,False,0.4,False,0.3,False,0.15,False,0,,False,True
+160,nền tảng quá mạnh kiểu facebook để,0.0,True,0.2857142857142857,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+161,chia sẻ video hoặc là tiktok để chia sẻ video như bây giờ,0.0,True,0.07692307692307693,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+162,ờ thì ngày xưa mình làm việc pr có nghĩa là làm với báo,0.07142857142857142,False,0.21428571428571427,False,0.2857142857142857,False,0.07142857142857142,False,0,,False,True
+163,nhưng tới một cái thời điểm,0.0,True,0.0,True,1.0,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+164,mà bản thân cái cuộc vận động,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+165,của truyền thông của mạng xã hội nó thay đổi và buộc lòng những người làm truyền thông họ cũng phải thay đổi cái mindset đó,0.11538461538461539,False,0.4230769230769231,False,0.07692307692307693,False,0.0,True,1,Final,False,False
+166,và từ đó em sẽ thấy là không phải chỉ người làm truyền thông mà rất nhiều công ty truyền thông,0.14285714285714285,False,0.09523809523809523,False,0.047619047619047616,False,0.0,True,1,Final,False,False
+167,họ cũng thay đổi toàn bộ cái cấu trúc và mô hình công việc của mình để đáp ứng với thị trường,0.0,True,0.0,True,1.0,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+168,và từ đó mình sẽ thấy là có những công ty họ fail,0.0,True,0.07692307692307693,False,0.07692307692307693,False,0.07692307692307693,False,1,Whisper,False,False
+169,và có những công ty tự nhiên họ win lên,0.2,False,0.2,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+170,những công ty họ fail có khi trước đó họ đã có một đế chế rất là mạnh xây dựng trên cái cách làm truyền thông cũ,0.0,True,0.037037037037037035,False,0.037037037037037035,False,0.037037037037037035,False,1,Whisper,False,False
+171,nhưng sau đó họ fail là bởi vì họ fix,0.0,True,0.1,False,1.0,False,1.0,False,1,Whisper,False,False
+172,tại vì họ đã quá thành công nên họ ngại thay đổi,0.0,True,0.0,True,0.08333333333333333,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+173,hoặc tại vì họ đã đang thành công cho nên họ không thấy là lý do gì tôi phải thay đổi hết,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+174,cho nên cái bẫy của fixed mindset là như vậy đó khi mình gặp sập cái bảy của fixed mindset là thường là bởi vì mình đang thành công chứ không phải do mình thất bại đâu,0.0,True,0.21621621621621623,False,0.21621621621621623,False,0.21621621621621623,False,1,Whisper,False,False
+175,vậy thì,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+176,ví dụ bản thân của anh đi em muốn nghe một câu chuyện một lần,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+177,mà khi mình ngã rồi mình quay lại mình thấy ồ hóa ra mình đã fix nó cứng đến như vậy nó cứng lên mức là mình ngã,0.03571428571428571,False,0.17857142857142858,False,0.07142857142857142,False,0.0,True,1,Final,False,False
+178,ừm,0.0,True,1.0,False,1.0,False,0.0,True,2,"Whisper, Final",False,False
+179,anh nghĩ là,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+180,bản thân anh cũng,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+181,nhiều rớt trong đó ví dụ như một cái trường hợp đi anh làm mà,0.2,False,0.13333333333333333,False,0.06666666666666667,False,0.13333333333333333,False,0,,False,True
+182,anh làm hoa hậu hoàn vũ,0.5,False,0.16666666666666666,False,0.5,False,0.3333333333333333,False,0,,False,True
+183,và,1.0,False,0.0,True,1.0,False,1.0,False,1,PhoWhisper,False,False
+184,anh làm một số chương trình thực tế với unimedia,0.4,False,0.0,True,0.2,False,0.0,True,2,"PhoWhisper, Final",False,False
+185,thì lúc mà anh tin anh tin một cái điểm là khán giả họ cần thêm những yếu tố có tính kiến thức thông tin,0.08,False,0.04,False,0.04,False,0.0,True,1,Final,False,False
+186,vào trong những chương trình giải trí,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+187,và anh nghĩ là à ok mình có thể mang đến cái giá trị đó được,0.0,True,0.0,True,0.25,False,0.0625,False,2,"Whisper, PhoWhisper",False,False
+188,thì,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+189,anh mới gọi là nhúng tay vào trực tiếp các chương trình để anh,0.14285714285714285,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+190,mang thêm nhiều cái yếu tố nó học thuật hơn chút xíu,0.08333333333333333,False,0.08333333333333333,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+191,ví dụ như anh ra đề cho chương trình việt nam why not đi chẳng hạn hoặc là những cái đề bài của cuộc thi,0.08,False,0.12,False,0.08,False,0.08,False,0,,False,True
+192,hoa hậu hoàn vũ việt nam mà mọi người thấy cái chương trình truyền thực tế thì có những câu debate sẽ câu câu ứng xử thì thường là anh sẽ đặt đề vào,0.14705882352941177,False,0.20588235294117646,False,0.14705882352941177,False,0.058823529411764705,False,0,,False,True
+193,thì trong đó có những cái mà anh nghĩ là,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+194,mình mình cũng tự hào là mình làm được,0.1111111111111111,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+195,mang được thêm cái giá trị kiến thức,0.125,False,0.125,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+196,nhưng có những cái anh cũng thấy là à okay,0.2,False,0.2,False,0.1,False,0.1,False,0,,False,True
+197,đôi khi nó,0.0,True,0.3333333333333333,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+198,hàn lâm quá,0.6666666666666666,False,0.6666666666666666,False,0.3333333333333333,False,0.3333333333333333,False,0,,False,True
+199,nó học thuật quá lại không phải là cái phù hợp cho giải trí,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+200,và cuối cùng là khán giả họ còn không cảm thấy đủ hứng thú để coi,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+201,thì lấy gì để mà người ta tiếp nhận cái kiến thức mà mình muốn truyền tải,0.058823529411764705,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+202,cho nên trước khi mình muốn nói tới những cái học thuật,0.0,True,0.08333333333333333,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+203,thì mình phải học được cách làm giải trí đã,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+204,và để học được cách làm giải trí thì đó thay vì anh chỉ nhảy vô anh đưa yếu tố học thuật vào thì đầu tiên anh phải mở ra đến,0.06451612903225806,False,0.12903225806451613,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+205,kiếm một cái đội ngũ làm giải trí tốt,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+206,nên sau đó anh mới thay đổi cái công thức vận chuyển thực tế của tụi anh lại ngày xưa thì anh gom cái đó lại để trong nhà anh tự làm thôi,0.09090909090909091,False,0.030303030303030304,False,0.12121212121212122,False,0.12121212121212122,False,0,,False,True
+207,mọi thứ anh tự,0.25,False,0.25,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+208,xây dựng hết và anh cố gắng làm cho nó,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+209,anh dùng từ là có giá trị nhất theo cái cách nghĩ của mình đó là hàn lâm,0.1111111111111111,False,0.0,True,0.05555555555555555,False,0.05555555555555555,False,1,PhoWhisper,False,False
+210,nhưng mà sau đó thì bây giờ anh bỏ cái suy nghĩ rồi,0.0,True,0.3076923076923077,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+211,không à cá nhân em theo dõi qua mấy mùa thì thấy,0.0,True,0.0,True,0.16666666666666666,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+212,chương trình truyền hình thực tế của hoàn vũ đi cũng có nhiều thay đổi thật,0.125,False,0.1875,False,0.1875,False,0.125,False,0,,False,True
+213,ừ,0.0,True,0.0,True,1.0,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+214,yeah,1.0,False,1.0,False,0.0,True,2.0,False,1,Qwen3,False,False
+215,và cũng có những thay đổi để mà được tới ngày hôm nay,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+216,thì chắc chắn là nó cũng có những thay đổi mà anh đã tự thấy là anh sai rồi đó,0.05,False,0.0,True,0.05,False,0.0,True,2,"PhoWhisper, Final",False,False
+217,và chắc mọi người không biết nhưng ekip của anh lại hiểu rất rõ cái quá trình đó,0.05555555555555555,False,0.0,True,0.2222222222222222,False,0.0,True,2,"PhoWhisper, Final",False,False
+218,sau cái phần trả lời này là khán giả sẽ ồ a ekip của anh hỏi,0.0625,False,0.125,False,0.25,False,0.0,True,1,Final,False,False
+219,em nghĩ thế,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+220,tại vì mọi người cảm thấy rằng là cho ceo bảo hoàng sai họ kiểu,0.06666666666666667,False,0.26666666666666666,False,0.06666666666666667,False,0.0,True,1,Final,False,False
+221,hahaaa,3.0,False,2.0,False,1.0,False,3.0,False,0,,False,True
+222,một cái người như vậy mà sai nếu tôi muốn biết họ sai cái gì tại vì sao,0.1111111111111111,False,0.1111111111111111,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+223,khi mà hình ảnh của anh xuất hiện trên truyền thông thời điểm hiện tại,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+224,nó luôn là một hình ảnh rất là tốt,0.0,True,0.1111111111111111,False,0.2222222222222222,False,0.0,True,2,"Whisper, Final",False,False
+225,yeah,1.0,False,1.0,False,0.0,True,2.0,False,1,Qwen3,False,False
+226,lên ceo ở tuổi hai bảy hai tám,0.5,False,0.0,True,0.125,False,0.0,True,2,"PhoWhisper, Final",False,False
+227,trước đó thì,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+228,cái tập thành tích lúc đi học nó cũng dày cộm nữa và ngay cả những lúc mà ở tuổi rất trẻ cũng đã ngồi được những cái vị trí tốt,0.03225806451612903,False,0.0967741935483871,False,0.03225806451612903,False,0.0,True,1,Final,False,False
+229,ừ,1.0,False,1.0,False,1.0,False,2.0,False,0,,False,True
+230,profile của anh kiểu,1.0,False,0.75,False,0.75,False,0.0,True,1,Final,False,False
+231,em cảm thấy rằng là nó còn khán giả kiểu fan tung lên mạng nói chi tiết như chính tay anh viết vậy đó,0.08333333333333333,False,0.041666666666666664,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+232,tuy nhiên là,1.0,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+233,hồi nãy mình có nói đến fix mindset thì thật ra em nghĩ trên đời này ai cũng có cái fixed mindset đó,0.043478260869565216,False,0.2608695652173913,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+234,ừ,4.0,False,3.0,False,4.0,False,6.0,False,0,,False,True
+235,ừ,2.0,False,1.0,False,4.0,False,7.0,False,0,,False,True
+236,và,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+237,có cái từ mà thay trong giới truyền thông hay dùng cho khán giả hơn đó là định kiến,0.10526315789473684,False,0.10526315789473684,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+238,ừ,0.0,True,1.0,False,1.0,False,0.0,True,2,"Whisper, Final",False,False
+239,và bản thân anh hoàng,0.0,True,0.0,True,0.2,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+240,và bản thân anh hoàng,0.0,True,0.0,True,0.2,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+241,lý do rồi tại sao em nói là,0.25,False,0.25,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+242,rồi tại sao em nói rằng là nếu mà anh nói rằng anh sai khán giả sẽ ồ đi tìm xem anh còn sai cái gì bởi vì,0.17857142857142858,False,0.21428571428571427,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+243,đúng rồi hàng,0.3333333333333333,False,0.6666666666666666,False,1.0,False,0.0,True,1,Final,False,False
+244,tại vì,0.0,True,0.0,True,1.0,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+245,mọi người luôn mặc định là những cái người mà trẻ tuổi tài giỏi thành tựu tốt,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+246,ừ,1.0,False,1.0,False,1.0,False,3.0,False,0,,False,True
+247,thì hẳn nhiên nó phải là,0.16666666666666666,False,0.0,True,0.16666666666666666,False,0.0,True,2,"PhoWhisper, Final",False,False
+248,con ông cháu cha rồi con vua thì lại làm vua nó có những,0.0,True,0.21428571428571427,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+249,có những xuất phát điểm tốt,1.0,False,0.8333333333333334,False,1.0,False,1.0,False,0,,False,True
+250,đúng nó có những xuất phát điểm tốt và,0.2222222222222222,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+251,nhìn thấy cái sai lầm của người ta sẽ cảm thấy mình rằng là cũng vui đấy kiểu như vậy,0.1,False,0.15,False,0.15,False,0.1,False,0,,False,True
+252,ừ,3.0,False,2.0,False,1.0,False,5.0,False,0,,False,True
+253,và nó nó là một cái định kiến rất là lâu trong khán giả và gần đây,0.058823529411764705,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+254,em không biết là anh có thấy chưa nhưng trên mạng bắt đầu xuất hiện những cái thông tin,0.05263157894736842,False,0.0,True,0.15789473684210525,False,0.0,True,2,"PhoWhisper, Final",False,False
+255,ừm,2.0,False,2.0,False,2.0,False,4.0,False,0,,False,True
+256,ừ,1.0,False,1.0,False,1.0,False,1.0,False,0,,False,True
+257,họ thậm chí họ không gọi là tin đồn họ thông tin,0.08333333333333333,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+258,anh hoàng lên được vị trí ceo của uni là bởi vì là con cháu của lãnh đạo cấp cao đấy,0.047619047619047616,False,0.047619047619047616,False,0.047619047619047616,False,0.0,True,1,Final,False,False
+259,yeah,1.0,False,1.0,False,0.0,True,2.0,False,1,Qwen3,False,False
+260,thì anh đọc chưa và anh nghĩ thế nào về cái gọi là định kiến và fix mindset này,0.10526315789473684,False,0.3157894736842105,False,0.10526315789473684,False,0.0,True,1,Final,False,False
+261,hhhhhh,2.0,False,6.0,False,4.0,False,2.0,False,0,,False,True
+262,anh thì thật ra hồi trước giờ anh ít khi nào dành thời gian để trả lời những tin đồn,0.1,False,0.2,False,0.1,False,2.0,False,0,,False,True
+263,tại vì anh thấy là,0.8,False,0.0,True,0.0,True,0.8,False,2,"PhoWhisper, Qwen3",False,False
+264,trả lời không biết bao giờ cho hết được đúng không,0.09090909090909091,False,0.18181818181818182,False,0.09090909090909091,False,0.09090909090909091,False,0,,False,True
+265,còn suy nghĩ thì nếu mà hỏi anh suy nghỉ gì với cái cái nhìn đó của mọi người thì anh thấy cũng bình thường tức là,0.037037037037037035,False,0.1111111111111111,False,0.037037037037037035,False,0.07407407407407407,False,0,,False,True
+266,đầu tiên em thấy cũng vui nha,0.0,True,0.14285714285714285,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+267,tại vì rõ ràng là mình phải có cái gì đó người ta mới nghĩ là mình có một cái xuất phát điểm tốt đến như vậy đúng không,0.034482758620689655,False,0.0,True,0.034482758620689655,False,0.0,True,2,"PhoWhisper, Final",False,False
+268,nhưng mà thật ra thì không có nói chung là đơn giản là nó không có thôi còn khi nó đã không có anh thường không quan tâm,0.03571428571428571,False,0.10714285714285714,False,0.10714285714285714,False,0.14285714285714285,False,0,,False,True
+269,thực sự là vậy còn,0.4,False,0.2,False,0.2,False,0.2,False,0,,False,True
+270,câu chuyện anh thấy cái quan điểm là mình phải,0.0,True,0.1,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+271,con ông cháu cha con người này người kia hay là,0.0,True,0.18181818181818182,False,0.18181818181818182,False,0.8181818181818182,False,1,Whisper,False,False
+272,nó cũng nó cũng cũng cũng phai nhạt rồi ở trong xã hội này tức là bây giờ,0.2222222222222222,False,0.0,True,0.05555555555555555,False,0.2777777777777778,False,1,PhoWhisper,False,False
+273,xuất phát điểm nào cũng có điều kiện để vươn lên,0.18181818181818182,False,0.0,True,0.09090909090909091,False,0.0,True,2,"PhoWhisper, Final",False,False
+274,và anh tin là nếu mà các bạn trẻ bây giờ các bạn cũng có niềm tin đó mạnh mẽ hơn là nếu mình có năng lực thì luôn luôn có chỗ cho mình trong xã hội hết,0.0,True,0.07894736842105263,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+275,còn đương nhiên anh thấy là,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+276,nhiều bạn mà xuất phát đến tốt nhiều khi còn phải vượt sướng,0.07692307692307693,False,0.07692307692307693,False,0.07692307692307693,False,0.3076923076923077,False,0,,False,True
+277,vượt sướng có khi còn khổ hơn vượt khổ nữa,0.4,False,0.3,False,0.1,False,0.0,True,1,Final,False,False
+278,cái này là em thấy nhiều rồi vượt sướng nó còn hơn cả vượt khổ nữa,0.125,False,0.0625,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+279,ừ,0.0,True,0.0,True,1.0,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+280,tại vì tới lúc mình thành tựu rồi á,0.0,True,0.1111111111111111,False,0.3333333333333333,False,0.1111111111111111,False,1,Whisper,False,False
+281,cái sự công nhận nó lại còn,0.14285714285714285,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+282,nửa vời nữa nhiều khi mình có thành tựu mà người ta cứ nhìn là ừ thật ra,0.0,True,0.0,True,0.05555555555555555,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+283,trong cái thành tựu của ông này có năm mươi phần trăm là thành tựu và năm mươi phần trăm là xuất phát điểm,0.5,False,0.125,False,0.20833333333333334,False,0.041666666666666664,False,0,,False,True
+284,người ta lại còn phải cố gắng chứng minh thêm một lần nữa là thành tựu của tôi,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+285,cái thành tựu nó vượt trên xuất phát điểm của tôi,0.45454545454545453,False,0.45454545454545453,False,0.09090909090909091,False,0.09090909090909091,False,0,,False,True
+286,thì anh thấy thôi coi như là,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+287,khi mà mình xuất phát bằng không nó lại còn may mắn tại vì tất cả những gì mình tạo nên từ đó đều là thành tựu hết,0.03571428571428571,False,0.10714285714285714,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+288,nãy giờ mình đề cập khi mà nói chuyện ấy,0.1,False,0.1,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+289,em đề cập đến việc fix mindset và leanring tại vì nó là một giai đoạn đầu của một khái niệm khá hay ho mà em đọc được gần đây,0.13333333333333333,False,0.2,False,1.0,False,0.0,True,1,Final,False,False
+290,ừ,0.0,True,1.0,False,1.0,False,0.0,True,2,"Whisper, Final",False,False
+291,đó là khái niệm unlearning,0.0,True,0.2,False,0.8,False,0.8,False,1,Whisper,False,False
+292,tức là,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+293,mình gỡ bỏ những cái tư duy cũ,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+294,những cái tư duy đã không còn hợp thời nữa,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+295,yeah,1.0,False,2.0,False,0.0,True,1.0,False,1,Qwen3,False,False
+296,những cái không còn hợp thời thì mình cần gỡ bỏ ra mình không bị đóng linh trong đầu nữa,0.05,False,0.1,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+297,thì em không biết là cái khái niệm unlearning này anh hoàng đã nghe thấy bao giờ chưa và nếu như nghe thì,0.043478260869565216,False,0.17391304347826086,False,0.08695652173913043,False,0.08695652173913043,False,0,,False,True
+298,rồi thì anh có đồng ý không,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+299,ờ anh nghĩ là hầu hết mình đều nghe cái khái niệm đó rồi và trong cái đường cong mà đường không gọi là cong gọi là,0.18518518518518517,False,0.18518518518518517,False,0.18518518518518517,False,0.07407407407407407,False,0,,False,True
+300,học học thuật á đường cong để học à,0.3333333333333333,False,0.4444444444444444,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+301,tại vì anh từng,0.0,True,0.0,True,0.25,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+302,anh từng enroll một cái khóa học gọi là,0.1111111111111111,False,0.3333333333333333,False,0.1111111111111111,False,0.1111111111111111,False,0,,False,True
+303,learning how to learn,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+304,là học cách để học,0.0,True,0.4,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+305,học cái để học thêm nữa,0.3333333333333333,False,0.16666666666666666,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+306,thì giống như mình nên là mình sẽ đổ cái ly nước đi thì mình mới có chỗ để mình siêu thêm nước vào,0.08333333333333333,False,0.041666666666666664,False,0.08333333333333333,False,0.0,True,1,Final,False,False
+307,thì unlearn là như vậy,0.4,False,0.4,False,0.4,False,0.4,False,0,,False,True
+308,ờ tại vì,0.3333333333333333,False,0.0,True,0.3333333333333333,False,0.3333333333333333,False,1,PhoWhisper,False,False
+309,một cái thông tin kiến thức nó cũng sẽ phải thay đổi theo thời gian sách giáo khoa người ta còn phải cập nhật mà đúng không,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+310,ờ và,0.5,False,0.0,True,0.5,False,0.5,False,1,PhoWhisper,False,False
+311,kể cả như chatgpt thì nó cũng phải dựa trên cái phiên bản nâng cấp và nâng cấp là dựa vào cái bigdata mới tức là cái gì nó cũng sẽ có thêm,0.24242424242424243,False,0.30303030303030304,False,0.12121212121212122,False,0.0,True,1,Final,False,False
+312,input,0.0,True,0.0,True,1.0,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+313,có thêm vi xử lý mới rồi mới ra được output mới,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+314,thì anh nghĩ là chắc chắn cái chuyện mình phải unlearn để mình learn cái cái,0.125,False,0.1875,False,0.25,False,0.375,False,0,,False,True
+315,cái mới đó là cái điều chắc chắn là cần thiết rồi giống như kể cả đối với,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+316,bản thân mình nữa,0.25,False,0.25,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+317,trong quá trình mình phát triển,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+318,thì mình cũng sẽ tự khám phá về mình,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+319,và cái khám phá đó về mình buộc mình phải,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+320,có những lúc mình sẽ bị,0.0,True,0.16666666666666666,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+321,bị khó chịu á tự nhiên mình khám phá ra một góc khác của bản thân mình,0.11764705882352941,False,0.0,True,0.11764705882352941,False,0.0,True,2,"PhoWhisper, Final",False,False
+322,nhưng sau đó mình phải học cách để chung sống với cái góc độ đó nó chính là unlearn đó,0.15,False,0.05,False,0.1,False,0.1,False,0,,False,True
+323,là em học lại về con người của em,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+324,hoặc trong cả mối quan hệ với người bạn người yêu người bạn đời của mình,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+325,đôi khi một thời gian dài sau em sẽ à okay,0.09090909090909091,False,0.09090909090909091,False,0.09090909090909091,False,0.0,True,1,Final,False,False
+326,có một cái nhìn khác về họ,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+327,và nó khác với cái con người mà từ trước giờ em nhìn thấy và em chấp nhận,0.0,True,0.1111111111111111,False,0.05555555555555555,False,0.0,True,2,"Whisper, Final",False,False
+328,và để hòa hợp với cái em vừa nhìn thấy đó em buộc phải unlearn về họ,0.058823529411764705,False,0.17647058823529413,False,0.11764705882352941,False,0.11764705882352941,False,0,,False,True
+329,thì anh tin là cái gì ở trong,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+330,cuộc sống này em vậy hết á khi mà mình học thì,0.08333333333333333,False,0.25,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+331,cái mà mình biết là cái mình biết ở thời điểm đó,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+332,nhưng mà mình không được coi cái biết ở thời điểm đó là tất cả,0.0,True,0.06666666666666667,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+333,tại vì thứ nhất là,0.0,True,0.0,True,1.0,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+334,có thể mình chưa biết hết,0.0,True,0.16666666666666666,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+335,thứ hai là có thể người ta còn biến đổi,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+336,và thứ ba nữa là cả hai quá trình nó cùng diễn ra nó đòi hỏi mình phải có một cái vi xử lý mới,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+337,và mình phải ơn lên cái điều cũ để học cái điều mới,0.07692307692307693,False,0.07692307692307693,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+338,thì anh,0.0,True,0.5,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+339,anh thì anh là một người tin vào cái điểm đó,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+340,anh không bao giờ tin là à ok cái mình biết chắc chắn đúng rồi,0.13333333333333333,False,0.2,False,0.3333333333333333,False,0.13333333333333333,False,0,,False,True
+341,thật đủ rồi,0.3333333333333333,False,0.6666666666666666,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+342,thật ra em lại là một người không giống anh hoàng,0.0,True,0.09090909090909091,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+343,ừ,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+344,em cứ thế này nó không phải là đổ lỗi nha nhưng trong cái quá trình mà em làm báo nhiều năm trước khi mà mình quen nhau thời gian trước á,0.0,True,0.0,True,0.03125,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+345,có những thứ mà em hay gọi đùa là nó đóng linh vào đầu em đó như vậy rồi,0.10526315789473684,False,0.2631578947368421,False,0.10526315789473684,False,0.10526315789473684,False,0,,False,True
+346,yeah,1.0,False,1.0,False,0.0,True,2.0,False,1,Qwen3,False,False
+347,khi em mới phát hiện là khái niệm unlean,0.4444444444444444,False,0.3333333333333333,False,0.2222222222222222,False,0.2222222222222222,False,0,,False,True
+348,thì em mới nhận ra rằng là thật ra là em đã bắt đầu unlearn dần kể từ khi em ngừng làm máu,0.08695652173913043,False,0.13043478260869565,False,1.0,False,0.08695652173913043,False,0,,False,True
+349,nhưng cái đó lúc đó em không định nghĩa được trong đầu nó là cái gì hết,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+350,và khi mà mình bắt đầu unlearn bắt đầu quá trình đó thì tức là bởi vì khoảnh khắc đấy mình nhận ra rằng cái trong đầu mình cái kiến thức của mình nó không còn phù hợp nữa,0.05128205128205128,False,0.1282051282051282,False,0.07692307692307693,False,0.05128205128205128,False,0,,False,True
+351,ờ,1.0,False,0.0,True,1.0,False,1.0,False,1,PhoWhisper,False,False
+352,nó ư,1.0,False,0.0,True,0.5,False,0.0,True,2,"PhoWhisper, Final",False,False
+353,thời điểm trước là đúng nhưng thời điểm này nó không còn phù hợp với cái giai đoạn này nữa,0.0,True,0.05,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+354,yeah,2.0,False,1.0,False,1.0,False,3.0,False,0,,False,True
+355,và,1.0,False,0.0,True,1.0,False,1.0,False,1,PhoWhisper,False,False
+356,em rất là nói như nào nhờ,0.14285714285714285,False,0.2857142857142857,False,0.2857142857142857,False,0.2857142857142857,False,0,,False,True
+357,em rất là,0.3333333333333333,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+358,hoảng sợ vì,0.3333333333333333,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+359,tại sao mình không nhận ra điều này sớm hơn,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+360,ừ,0.0,True,1.0,False,1.0,False,0.0,True,2,"Whisper, Final",False,False
+361,vì có quá nhiều thứ mà mình đã đóng đinh trong đầu mình mặc định trong đầu nó không còn phù hợp với cái xã hội đương đại và cái luồng công việc hiện đại nữa,0.027777777777777776,False,0.05555555555555555,False,0.05555555555555555,False,0.027777777777777776,False,0,,False,True
+362,yeah,1.0,False,2.0,False,1.0,False,2.0,False,0,,False,True
+363,ừ,1.0,False,1.0,False,1.0,False,3.0,False,0,,False,True
+364,thì đó là em mới nhận ra gần đây thôi còn anh hoàng thì anh nhận ra cái điều đó từ thời điểm nào và cái yếu tố nào mà anh bắt đầu unlearn đầu tiên,0.027777777777777776,False,0.08333333333333333,False,0.05555555555555555,False,0.05555555555555555,False,0,,False,True
+365,nếu mà gọi là yếu tố unlean đầu tiên thì anh sẽ không thể nào nhớ được hết,0.05555555555555555,False,0.1111111111111111,False,0.1111111111111111,False,0.05555555555555555,False,0,,False,True
+366,nhưng mà giống như em nói nhiều khi mình nhìn lại mình đánh giá thì nó dễ hơn ví dụ như em,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+367,em nói là em em em khá là fix ở thời điểm đó thì anh lại thấy khác tức là từ lúc anh biết em anh thấy là,0.07142857142857142,False,0.07142857142857142,False,0.07142857142857142,False,0.0,True,1,Final,False,False
+368,em là một người làm báo báo viết,0.125,False,0.125,False,0.125,False,0.125,False,0,,False,True
+369,và em là một người viết tốt,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+370,những gì anh biết về ngọc,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+371,sau đó anh thấy là em làm video,0.0,True,0.125,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+372,xong bây giờ thì lại làm thêm cả video nhưng ở nhiều cái form khác nhau,0.0625,False,0.125,False,0.0625,False,0.0,True,1,Final,False,False
+373,và ngày xưa có thể video phục vụ những platform truyền thống hơn,0.0,True,0.07692307692307693,False,0.07692307692307693,False,0.0,True,2,"Whisper, Final",False,False
+374,tv báo youtube,1.0,False,1.3333333333333333,False,0.0,True,1.0,False,1,Qwen3,False,False
+375,youtube mà bây giờ anh còn gọi là truyền thống rồi đó thì bây giờ lại tới những cái social media những cái kênh,0.0,True,0.375,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+376,tiktok hoặc là facebook họ cũng cần shortcontent form,0.4444444444444444,False,0.4444444444444444,False,0.2222222222222222,False,0.1111111111111111,False,0,,False,True
+377,thì bản thân cái đó đã là mình mình learn rồi đó mình evolve bản thân mình để phù hợp với lại cái đòi hỏi của thị trường và trong quá trình mình evolve mình tiến hóa lên,0.10526315789473684,False,0.13157894736842105,False,0.07894736842105263,False,0.05263157894736842,False,0,,False,True
+378,thì mình phải unlearn tức là mình phải,0.375,False,0.25,False,0.25,False,0.25,False,0,,False,True
+379,học lại từ đầu,0.25,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+380,ồ còn đối với quá trình của anh cũng vậy thôi từ lúc anh,0.07142857142857142,False,0.07142857142857142,False,0.07142857142857142,False,0.0,True,1,Final,False,False
+381,đi học,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+382,thì,0.0,True,1.0,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+383,cái quá trình học của anh đã là một cái quá trình nó cũng hơi kỳ khôi tức là anh học rất là nhiều lĩnh vực khác nhau,0.10714285714285714,False,0.14285714285714285,False,0.03571428571428571,False,0.0,True,1,Final,False,False
+384,từ văn rồi chuyên toán xong rồi anh lại học ngoại thương tức là về kinh tế,0.11764705882352941,False,0.058823529411764705,False,0.0,True,0.058823529411764705,False,1,Qwen3,False,False
+385,trong quá trình đó mình còn học thêm cả vẽ nữa,0.09090909090909091,False,0.09090909090909091,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+386,ừ,0.0,True,1.0,False,1.0,False,0.0,True,2,"Whisper, Final",False,False
+387,nó không liên quan gì hết,0.16666666666666666,False,0.16666666666666666,False,1.0,False,0.16666666666666666,False,0,,False,True
+388,nhưng mà tất cả những cái thứ nhặt nhành không liên quan đó nó lại giúp anh có những cái công cụ để anh mở những cái chìa khóa mới trong cuộc sống,0.15151515151515152,False,0.09090909090909091,False,0.06060606060606061,False,0.0,True,1,Final,False,False
+389,nên khi anh đi làm một cái lĩnh vực về truyền thông mà người thấy là ôi sao cái ông này em học gì rồi em làm truyện liên quan gì,0.0967741935483871,False,0.22580645161290322,False,0.0967741935483871,False,0.03225806451612903,False,0,,False,True
+390,bất ngờ thực ra nó lại rất liên quan đến dâu,0.36363636363636365,False,0.2727272727272727,False,0.36363636363636365,False,0.0,True,1,Final,False,False
+391,từ học văn đến có cái kỹ năng về ngôn ngữ tương đối,0.07692307692307693,False,0.23076923076923078,False,0.0,True,0.07692307692307693,False,1,Qwen3,False,False
+392,anh học vẽ để anh có cái thẩm mỹ về mỹ thuật,0.08333333333333333,False,0.08333333333333333,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+393,anh có logic để anh có thể làm việc như một người làm chiến lược và quản trị,0.1111111111111111,False,0.2777777777777778,False,0.05555555555555555,False,0.0,True,1,Final,False,False
+394,và anh cộng tất cả những cái yếu tố đó lại để mình vừa học cái mới nhưng mình vừa phải,0.047619047619047616,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+395,tiếp nhận tại vì có rất nhiều cái mình không biết mà,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+396,ví dụ như anh nói là ở thời điểm đó mình biết về môn vẽ nó tới đây,0.05555555555555555,False,0.05555555555555555,False,0.05555555555555555,False,0.0,True,1,Final,False,False
+397,nhưng mà sau đó khi anh học thì anh thấy lạ bây giờ có vô vàng công cụ,0.16666666666666666,False,0.16666666666666666,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+398,để vẽ và bây giờ lại còn có vô vàn công cụ để mình prompt để mình vẽ ví dụ như ai các công cụ như vậy,0.037037037037037035,False,0.07407407407407407,False,0.1111111111111111,False,0.0,True,1,Final,False,False
+399,thì,1.0,False,1.0,False,0.0,True,2.0,False,1,Qwen3,False,False
+400,không phải chỉ là mình học cách làm chủ mà mình còn cả học cách làm chủ các công cụ mới nữa,0.09090909090909091,False,0.045454545454545456,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+401,đúng không,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+402,ví dụ nếu mà anh ấy có rất nhiều người giữ một cái quan điểm là,0.0625,False,0.0,True,0.0625,False,0.0,True,2,"PhoWhisper, Final",False,False
+403,uhm,0.0,True,1.0,False,1.0,False,0.0,True,2,"Whisper, Final",False,False
+404,against lại cái sự tiến bộ của chat gpt tại vì cho là nó không thể thay thế được con người,0.047619047619047616,False,0.2857142857142857,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+405,cho là cái việc này nó đe dọa đến công việc của con người,0.0,True,0.0,True,0.14285714285714285,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+406,nhưng anh nghĩ đó là một cái điều không thể tránh khỏi,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+407,thế thì,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+408,thay vì mình ngồi yên mình sợ thì sao mình không học cách dùng nó đi,0.0625,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+409,để ứng dụng nó vào trong các công việc khác nhau vì,0.08333333333333333,False,0.0,True,0.08333333333333333,False,0.0,True,2,"PhoWhisper, Final",False,False
+410,tới lúc mà nó thực sự phải thay mình rồi á,0.0,True,0.09090909090909091,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+411,thì mình phải tự evolve mình lên một cấp độ mới rồi,0.16666666666666666,False,0.3333333333333333,False,0.3333333333333333,False,0.0,True,1,Final,False,False
+412,để mình có thể sử dụng được một cách thành thạo hoặc mình có kết hợp cái công cụ đó lại với nhau,0.08695652173913043,False,0.30434782608695654,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+413,để phục vụ công việc của mình,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+414,đúng không còn bây giờ mình ngồi mình chỉ có,0.0,True,0.1,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+415,than trách thôi thì sau lúc đó mình bị thay thế là đúng rồi,0.14285714285714285,False,0.14285714285714285,False,0.2857142857142857,False,0.14285714285714285,False,0,,False,True
+416,vậy thì đó là trong cái gọi là trong cái tư duy trong cái đời sống cá nhân,0.2222222222222222,False,0.05555555555555555,False,0.05555555555555555,False,0.0,True,1,Final,False,False
+417,ừ,1.0,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+418,trong cái trải nghiệm cá nhân vậy với lĩnh vực công việc sắc đẹp,0.0,True,0.07142857142857142,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+419,thì đâu là điều anh unlearning ở thời điểm này hoặc là thời điềm trước chẳng hạn chẳng hạn,0.10526315789473684,False,0.3157894736842105,False,0.9473684210526315,False,0.0,True,1,Final,False,False
+420,cảm ơn các bạn,0.0,True,1.0,False,1.0,False,0.0,True,2,"Whisper, Final",False,False
+421,ừm,1.0,False,1.0,False,1.0,False,1.0,False,0,,False,True
+422,nếu mà unlearn trong lĩnh vực sắc đẹp thì anh thấy là cái điều quan trọng nhất là khi làm được luật thi,0.5652173913043478,False,0.17391304347826086,False,0.391304347826087,False,0.30434782608695654,False,0,,False,True
+423,anh sẽ phải đứng trước những câu hỏi nó hơi,0.1,False,0.0,True,0.1,False,0.0,True,2,"PhoWhisper, Final",False,False
+424,ờ,0.0,True,0.0,True,1.0,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+425,tiêu cực,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+426,khác nhau về cái lĩnh vực đó ví dụ như người ta nói là,0.14285714285714285,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+427,cái công việc cái lĩnh vực hoa hậu nó không tạo nên thực sự nhiều giá trị như người ta vẫn nghĩ,0.0,True,0.09090909090909091,False,0.045454545454545456,False,0.0,True,2,"Whisper, Final",False,False
+428,cái thứ hai nữa là,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+429,ờ nó quá là bão hòa,0.3333333333333333,False,0.3333333333333333,False,0.3333333333333333,False,0.6666666666666666,False,0,,False,True
+430,có quá nhiều cuộc thi quá nhiều danh hiệu người ta không thể nhớ được,0.06666666666666667,False,0.06666666666666667,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+431,hoặc là những cái tiêu cực khác ví dụ như người sử dụng danh hiệu đó để làm những công việc nó không có chính đáng đàng hoàng,0.14285714285714285,False,0.07142857142857142,False,0.21428571428571427,False,0.07142857142857142,False,0,,False,True
+432,không tích cực,1.0,False,0.0,True,1.0,False,1.0,False,1,PhoWhisper,False,False
+433,thì bản thân khi đứng trước những cái điều đó nó cho tụi anh một cái,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+434,challenge,2.0,False,3.0,False,1.0,False,2.0,False,0,,False,True
+435,một cái thử thách là làm sao để mình ví dụ anh làm một cuộc thi mới hoàn toàn câu hỏi đầu tiên chắc chắn hiện lên trong đầu mọi người là,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+436,lại một cuộc thi nữa hả,0.3333333333333333,False,0.0,True,0.16666666666666666,False,0.0,True,2,"PhoWhisper, Final",False,False
+437,cuộc thi này để làm gì,0.5,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+438,câu quen lắm câu quen lắm luôn,0.42857142857142855,False,0.5714285714285714,False,0.14285714285714285,False,0.42857142857142855,False,0,,False,True
+439,đúng không,0.0,True,1.0,False,1.0,False,1.0,False,1,Whisper,False,False
+440,đây,1.0,False,0.0,True,1.0,False,0.0,True,2,"PhoWhisper, Final",False,False
+441,thì để là em đưa câu chuyện á thì anh nói là ừ mình phải,0.06666666666666667,False,0.13333333333333333,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+442,thay vì mình đi chống lại cái suy nghĩ đó theo dạng là,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+443,tại sao lại nghĩ vậy tôi đang làm tốt mà tôi đang làm rất cố gắng mọi người do không biết tôi thôi,0.13043478260869565,False,0.08695652173913043,False,0.043478260869565216,False,0.043478260869565216,False,0,,False,True
+444,do không biết cách tôi làm thôi nếu mà mình suy nghĩ như vậy anh sẽ chống lại khán giả,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+445,ngược lại thì anh sẽ cố gắng đứng ở góc nhìn của số đông để hiểu tại sao người ta có suy nghĩ đó,0.0,True,0.0,True,0.0,True,0.08333333333333333,False,3,"Whisper, PhoWhisper, Qwen3",False,False
+446,và cố gắng ở trong cái góc nhìn số đông để tạo ra một sản phẩm,0.0625,False,0.0,True,0.0625,False,0.0,True,2,"PhoWhisper, Final",False,False
+447,thích ứng và đáp ứng được với họ ví dụ như,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+448,một cuộc thi,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+449,mới mẻ về hình thức,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+450,một cuộc thi có,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+451,uhm,0.0,True,1.0,False,1.0,False,0.0,True,2,"Whisper, Final",False,False
+452,cái tính chuyên môn có cái ờ,0.14285714285714285,False,0.0,True,0.14285714285714285,False,0.14285714285714285,False,1,PhoWhisper,False,False
+453,cách làm khác hoặc nó cập nhật hơn với giới trẻ,0.09090909090909091,False,0.09090909090909091,False,0.09090909090909091,False,0.0,True,1,Final,False,False
+454,ứng dụng những công nghệ mới,0.3333333333333333,False,0.0,True,0.16666666666666666,False,0.0,True,2,"PhoWhisper, Final",False,False
+455,một cái cuộc thi với những tiêu chí và cách thức đánh giá nó phù hợp hơn với xã hội hiện đại,0.0,True,0.09090909090909091,False,0.045454545454545456,False,0.0,True,2,"Whisper, Final",False,False
+456,khi mà mình thấy những cái vận động xã hội ví dụ như người ta,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+457,embrace những cái thông điệp những cái về tinh thần sức khỏe tinh thân này,0.06666666666666667,False,0.4,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+458,hoặc là về,0.0,True,0.3333333333333333,False,1.0,False,0.0,True,2,"Whisper, Final",False,False
+459,ờm sự đa dạng trong vẻ đẹp hình thể về màu da,0.08333333333333333,False,0.0,True,0.08333333333333333,False,0.08333333333333333,False,1,PhoWhisper,False,False
+460,tính kết nối của mọi người lại hoặc là những cái thông điệp để trao quyền cho phụ nữ,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+461,thì bản thân mình phải tự,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+462,tiến hóa cái nền tảng của mình lên,0.0,True,0.0,True,0.125,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+463,mình đáp ứng được những cái nhu cầu của xã hội mới,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+464,và để làm cái điều đó,0.0,True,0.0,True,1.0,False,0.16666666666666666,False,2,"Whisper, PhoWhisper",False,False
+465,mình sẽ phải unlearn có rất là nhiều người họ vẫn mắc kẹt lại trong cái suy nghĩ,0.05555555555555555,False,0.16666666666666666,False,0.2222222222222222,False,0.16666666666666666,False,0,,False,True
+466,là,1.0,False,0.0,True,0.0,True,1.0,False,2,"PhoWhisper, Qwen3",False,False
+467,hoa hậu thì phải thế này thế kia chứ,0.0,True,0.2222222222222222,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+468,thì khi mà mình vẫn còn suy nghĩ về câu chuyện,0.0,True,0.09090909090909091,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+469,cái này thì phải thế này á,0.14285714285714285,False,0.14285714285714285,False,0.14285714285714285,False,0.14285714285714285,False,0,,False,True
+470,cái quan điểm đó là bản thân mình đã tìm cách mình fix lại mọi thứ trong một cái khuôn khổ,0.047619047619047616,False,0.047619047619047616,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+471,nên là,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+472,anh đây là một cái vấn đề nó hơi có tính,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+473,anh dùng từ là hơi triết học chút nghe nó hơi khó hiểu,0.15384615384615385,False,0.07692307692307693,False,0.3076923076923077,False,0.07692307692307693,False,0,,False,True
+474,nhưng mà,0.0,True,1.0,False,0.0,True,1.5,False,2,"Whisper, Qwen3",False,False
+475,nhưng mà đôi khi anh nói là,0.0,True,0.14285714285714285,False,0.0,True,0.2857142857142857,False,2,"Whisper, Qwen3",False,False
+476,mình dành cả đời để làm hai việc thôi,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+477,một á,1.0,False,0.0,True,1.0,False,1.0,False,1,PhoWhisper,False,False
+478,là mình đi tìm câu trả lời cho câu chuyện là cái này thì phải thế này,0.058823529411764705,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+479,nhưng đồng thời mình cũng dành thời gian để đọc cái suy nghĩ đó ra,0.0,True,0.06666666666666667,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+480,tại vì một là mình đi tìm câu trả lời,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+481,nhưng sau khi mình có câu trả lời rồi thì mình phải,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+482,phá câu trả lời ra vì có thể câu trả lại tiếp tục không đúng nữa nếu mình cứ có một câu trả rồi mình mang câu trả đi cả đời,0.0967741935483871,False,0.12903225806451613,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+483,thì có thể cơ thể nó sẽ là cái bẫy của chính mình,0.15384615384615385,False,0.23076923076923078,False,0.23076923076923078,False,0.07692307692307693,False,0,,False,True
+484,cho nên kể ngay cách anh làm cuộc thi sắc đẹp cũng vậy nữa,0.07142857142857142,False,0.14285714285714285,False,0.2857142857142857,False,0.0,True,1,Final,False,False
+485,khi mà anh thành công với cái cách làm này anh sẽ nghĩ tới cách làm khác,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+486,với format này sẽ nghĩ về format khác,0.625,False,0.75,False,0.375,False,0.375,False,0,,False,True
+487,bản thân anh sẽ rất là dị ứng nếu mà,0.0,True,0.0,True,0.2,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+488,nhân viên hoặc là kể cả đôi khi anh làm việc với cả bod lãnh đạo mọi người trong tập đoàn,0.0,True,0.047619047619047616,False,0.19047619047619047,False,0.047619047619047616,False,1,Whisper,False,False
+489,nếu mà mọi người đưa cho anh một cái đề bài áp đặt theo kiểu ô thì từ trước như như vậy mình làm vẫn tốt rồi thì bây giờ cứ thế làm đi,0.23529411764705882,False,0.23529411764705882,False,0.20588235294117646,False,0.17647058823529413,False,0,,False,True
+490,thì anh sẽ rất là khó chịu,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+491,tại vì anh thấy là không có cái gì mà dễ chết hơn là cái câu chuyện cứ thế làm đi cứ vậy mà làm hết,0.07692307692307693,False,0.038461538461538464,False,0.07692307692307693,False,0.038461538461538464,False,0,,False,True
+492,ừm,1.0,False,1.0,False,0.0,True,2.0,False,1,Qwen3,False,False
+493,trong những cái khái niệm mà gọi là những cái định hình về cuộc thi sắc đẹp nó có một cái,0.09523809523809523,False,0.047619047619047616,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+494,câu chuyện nó diễn ra chắc phải đến,0.125,False,0.25,False,0.25,False,0.125,False,0,,False,True
+495,em nghĩ là phải gần một thế kỷ rồi,0.0,True,0.0,True,0.1111111111111111,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+496,ờ,0.0,True,0.0,True,1.0,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+497,nó ư,1.0,False,0.0,True,1.0,False,0.0,True,2,"PhoWhisper, Final",False,False
+498,chính là cái sự phản đối của những cuộc thi,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+499,nó chính là sự phản đối của những khán giả,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+500,theo nữ quyền đánh giá cuộc thi hoa hậu,0.1111111111111111,False,0.2222222222222222,False,0.2222222222222222,False,0.2222222222222222,False,0,,False,True
+501,ừ,2.0,False,1.0,False,1.0,False,3.0,False,0,,False,True
+502,nó là họ cho rằng phụ nữ không nên và cũng không phải là những cái điều để mà bước trên sân khấu để cho người này đánh giá người kia xếp hạng rồi họ cho ràng là phụ nữ không phải để mua vui như vậy,0.0425531914893617,False,0.0425531914893617,False,0.02127659574468085,False,0.02127659574468085,False,0,,False,True
+503,ừm,2.0,False,2.0,False,2.0,False,4.0,False,0,,False,True
+504,ừ,1.0,False,1.0,False,2.0,False,3.0,False,0,,False,True
+505,tất nhiên em thì không phải người theo quan điểm đấy,0.09090909090909091,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+506,em là người kiểu,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+507,cái sự đẹp nó đều có sự trả giá như,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+508,đây là mình đẹp mình được quyet khoe đó là ý kiến của em và đẹp mà có ích,0.10526315789473684,False,0.21052631578947367,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+509,thì nó lại càng tốt,0.0,True,0.0,True,1.0,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+510,yeah,2.0,False,2.0,False,2.0,False,5.0,False,0,,False,True
+511,nhưng thật sự là cái luồng suy nghĩ như em vừa đề cập nó tồn tại đến gần một thế kỷ rồi và nó đến giờ nó vẫn vậy không thay đổi được,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+512,và nó là một trong những điều cần ụnlearn khi mà mình,0.16666666666666666,False,0.16666666666666666,False,1.3333333333333333,False,1.3333333333333333,False,0,,False,True
+513,tham gia vào cái cuộc chơi sắc đẹp này,0.0,True,0.0,True,0.4444444444444444,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+514,ừ,0.0,True,0.0,True,1.0,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+515,anh đã bao giờ phải đối diện,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+516,tức là xa quá mình không tính vòng quanh cái circle của anh thôi anh bao giờ phải đối diện những điều đấy chưa,0.041666666666666664,False,0.08333333333333333,False,0.16666666666666666,False,0.08333333333333333,False,0,,False,True
+517,ờ anh cũng có,0.0,True,0.0,True,0.25,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+518,kể kể cả trong đôi khi có những người bạn cũng thân hoặc là những cái người mà ngày xưa,0.05,False,0.05,False,0.05,False,0.0,True,1,Final,False,False
+519,có thể là học cùng một cái môi trường nó hơi,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+520,dùm từ là academic mọi người sẽ thắc mắc là sao anh lại làm một cái công việc về giải trí nó không phù hợp với lại cái lĩnh vực và định hướng của anh,0.11428571428571428,False,0.05714285714285714,False,0.17142857142857143,False,0.0,True,1,Final,False,False
+521,ngày xưa khi đi học anh cũng là một người rất thích nghiên cứu học thuật,0.125,False,0.0625,False,0.25,False,0.0,True,1,Final,False,False
+522,anh thì,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+523,anh nghĩ là như này tức là giống như hồi nãy trong cái quan điểm của em đi,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+524,anh cũng từng suy nghĩ tại sao mọi người có cái suy nghi đó,0.14285714285714285,False,0.07142857142857142,False,0.07142857142857142,False,0.0,True,1,Final,False,False
+525,khi mà anh thấy một cái suy nghĩ trái ngược với mình anh sẽ nghĩ vậy tức là sao người ta nghĩ,0.0,True,0.09090909090909091,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+526,khi góc độ đó tại vì,0.3333333333333333,False,0.16666666666666666,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+527,thực ra,0.5,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+528,khi mà mình chọn bước đặt mình vào trong một cái cuộc thi á,0.0,True,0.07142857142857142,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+529,thì cuộc thi là nó cũng có tiêu chí,0.1111111111111111,False,0.2222222222222222,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+530,và khi mình là cuộc thi thì mình phải chấp nhận,0.18181818181818182,False,0.09090909090909091,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+531,bị đánh giá,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+532,em thi ielts cũng vậy mà,0.16666666666666666,False,0.5,False,0.3333333333333333,False,1.0,False,0,,False,True
+533,còn nếu bây giờ chẳng lẽ em lại phản đối cuộc thi ielts bởi vì,0.2,False,0.13333333333333333,False,0.4,False,0.06666666666666667,False,0,,False,True
+534,sao bản thân tôi lại phải ngồi nghe những người bản xứ đánh giá về khả năng nói,1.0,False,0.05555555555555555,False,0.05555555555555555,False,0.05555555555555555,False,0,,False,True
+535,khả năng của mình nói tiếng của họ,0.0,True,0.125,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+536,nếu mình suy nghĩ như vậy,0.16666666666666666,False,0.0,True,0.16666666666666666,False,0.0,True,2,"PhoWhisper, Final",False,False
+537,thì chỉ có hold mình back thôi thì chỉ có giữ mình lại thôi đúng không,0.125,False,0.4375,False,0.375,False,0.4375,False,0,,False,True
+538,giống như bây giờ,1.0,False,0.0,True,0.75,False,1.25,False,1,PhoWhisper,False,False
+539,phụ nữ đi thi sắc đẹp nam giới đi thi sắc đẹp,0.16666666666666666,False,0.16666666666666666,False,0.08333333333333333,False,0.25,False,0,,False,True
+540,mình đi thi cuộc thi ca hát,0.0,True,0.14285714285714285,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+541,xong người lại có người phản đối là,0.125,False,0.25,False,0.125,False,0.125,False,0,,False,True
+542,tại sao giọng hát lẻ ra là thứ,0.125,False,0.125,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+543,làm niềm vui lại mang lên sân khấu cho người ta đánh giá xếp hạng nếu nghĩ như vậy để được cái gì,0.0,True,0.13043478260869565,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+544,đúng không,0.0,True,1.0,False,1.0,False,1.0,False,1,Whisper,False,False
+545,thì anh nghĩ là,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+546,luôn luôn sẽ có tồn tại những cái suy nghĩ đó,0.09090909090909091,False,0.09090909090909091,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+547,buộc lòng nó sẽ,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+548,ờ không tránh khỏi được nhưng cái thứ hai là bản thân những cuộc thi á,0.0625,False,0.0625,False,0.125,False,0.0625,False,0,,False,True
+549,không vì như vậy mà họ không ngừng thay đổi bản thân mình chẳng hạn anh nói là đúng cái sự tồn tại của các phong trào các vận động xã hội về nữ quyền họ có và họ có những ý đúng,0.0,True,0.0,True,0.046511627906976744,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+550,chỉ là có những người đẩy nó lên quá xa,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+551,nhưng anh tin là có những lý đúng và những lý đúng đó đã được những cuộc thi sắc đẹp hiện đại họ tiếp cận và họ,0.37037037037037035,False,0.18518518518518517,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+552,họ họ chắt lọc lại họ đưa vào trong nội dung cuộc thi của mình nếu họ coi đó là một cái phù hợp với vận động xã hội,0.06896551724137931,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+553,ví dụ cái câu chuyện về,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+554,ờ vẽ đẹp đa dạng hơn chẳng hạn giống như ngày xưa mình biết những cuộc thi sắc đẹp từ cái thời điểm nó ra đời là một ngàn khoảng năm một ngàn chín trăm,0.2857142857142857,False,0.2,False,0.14285714285714285,False,0.11428571428571428,False,0,,False,True
+555,ừ,0.0,True,1.0,False,1.0,False,0.0,True,2,"Whisper, Final",False,False
+556,hai mươi mấy hai mấy,0.6,False,0.8,False,1.0,False,1.2,False,0,,False,True
+557,năm mươi,1.0,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+558,anh nhớ là,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+559,có hoa hậu pháp là hơn trăm năm rồi,0.0,True,0.0,True,0.2222222222222222,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+560,ừ nhưng anh nói như miss những cái cuộc thi lâu đời nhất như miss world miss universe thì khoảng chín năm mươi chín chín trăm năm mốt gì đó không nhớ lắm khoảng bảy mươi bảy mấy năm tại anh nghĩ các cuộc thi đều kỷ niệm,0.375,False,0.3125,False,0.08333333333333333,False,0.020833333333333332,False,0,,False,True
+561,đúng rồi đúng rồi,0.0,True,0.5,False,1.0,False,0.5,False,1,Whisper,False,False
+562,bảy mươi bảy mấy năm á,0.5,False,0.16666666666666666,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+563,thì thời điểm đó là chắc mới xong thế chiến thứ hai,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+564,thế giới vẫn còn rất là phân cực,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+565,và những cái cuộc thi này thời điểm đó nó vẫn còn thiên về cho phụ nữ da trắng,0.10526315789473684,False,0.15789473684210525,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+566,sau đó mới đến,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+567,mới bắt đầu xuất hiện thêm nhiều phụ nữ châu á và phụ nữ da màu,0.0625,False,0.125,False,0.0625,False,0.0,True,1,Final,False,False
+568,rồi mới có những người phụ nữ da màu đầu tiên đăng quang sau đó là người da trắng và châu á cũng đăng quang xong lại đến,0.39285714285714285,False,0.32142857142857145,False,0.2857142857142857,False,0.0,True,1,Final,False,False
+569,gần đây thì mình sẽ thấy những cái câu chuyện về hình thể rồi,0.07142857142857142,False,0.07142857142857142,False,0.07142857142857142,False,0.07142857142857142,False,0,,False,True
+570,ờm,1.0,False,0.0,True,1.0,False,1.0,False,1,PhoWhisper,False,False
+571,lgbt hoặc là,1.0,False,1.3333333333333333,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+572,kể cả như mấy silver họ còn nới rộng cái tiêu chí về độ tuổi nữa để thể hiện cái tính inclusion tính,0.08695652173913043,False,0.2608695652173913,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+573,tính tính bao gồm tính đa dạng của họ hơn đó là một cái vận động mà họ lựa chọn dĩ nhiên,0.18181818181818182,False,0.13636363636363635,False,0.0,True,0.09090909090909091,False,1,Qwen3,False,False
+574,mình cũng anh cũng khoan hãy nói vội là câu chuyện nó đúng hay sai nhưng ít nhất là những cái platform mà cấp tiến nhất và tồn tại được là những platforms họ không ngừng thay đổi bản thân mình,0.12195121951219512,False,0.1951219512195122,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+575,cái đó là cái mình cần phải nhìn thấy,0.0,True,0.2222222222222222,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+576,vậy thì anh đã làm thế nào với những cái người,0.0,True,0.0,True,0.09090909090909091,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+577,mà có cái ý kiến như em nói rằng là nó hơi trái chiều một chút với con đường anh chọn,0.0,True,0.047619047619047616,False,0.047619047619047616,False,0.0,True,2,"Whisper, Final",False,False
+578,thì,0.0,True,1.0,False,1.0,False,0.0,True,2,"Whisper, Final",False,False
+579,em nghĩ là mọi thứ trong cuộc sống này nó đều bắt đầu từ thứ nhỏ nhất,0.0,True,0.058823529411764705,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+580,mình thay đổi được những người bên cạnh mình thì tương lai mình sẽ thay đổ được người bên ngoài,0.05,False,0.15,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+581,ừ,0.0,True,1.0,False,1.0,False,2.0,False,1,Whisper,False,False
+582,làm như thế nào thì anh nghĩ cái đầu tiên là anh phải,0.07692307692307693,False,0.07692307692307693,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+583,acknowledge tức là anh phải,1.0,False,1.0,False,0.8,False,1.0,False,0,,False,True
+584,nhìn thấy được cái sự tồn tại của luồng ý kiến đó,0.08333333333333333,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+585,mà anh phải cái thứ hai nữa là anh chấp nhận sự tồn tại của cái điều đó nữa nó tức là,0.09090909090909091,False,0.09090909090909091,False,0.09090909090909091,False,0.09090909090909091,False,0,,False,True
+586,luôn luôn,1.0,False,1.0,False,1.0,False,1.0,False,0,,False,True
+587,những cái,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+588,ở giữa dư luận thì sẽ có hai cái luồng ý kiến không bao giờ có câu chuyện là tất cả một chiều mà đôi khi tất cả 1 chiều nó lại còn nguy hiểm nữa,0.1388888888888889,False,0.08333333333333333,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+589,vì như thế thì cái dư luận trái chiều nó cũng thể hiện cái sự quan tâm,0.058823529411764705,False,0.11764705882352941,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+590,và nó cũng cho mình cái,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+591,chất liệu để mình tư duy mình phát triển mình lên còn nếu mà tất cả mọi người được ủng hộ mình,0.0,True,0.045454545454545456,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+592,thì nhiều khi mình không còn cảm giác mình có động lực để phát triển nữa,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+593,thì khi mà có những dư luận trái chiều như vậy thì anh cũng thấy đó là một điều nên có nha,0.09090909090909091,False,0.045454545454545456,False,0.045454545454545456,False,0.0,True,1,Final,False,False
+594,thứ ba nữa là sau đó anh mới bóc những dư luận trái chiều đó để xem thử xem là,0.15,False,0.2,False,0.2,False,0.05,False,0,,False,True
+595,nguyên cớ,0.5,False,0.0,True,1.0,False,0.5,False,1,PhoWhisper,False,False
+596,cái nguyên nhân nào tại sao nó dẫn đến những cái góc nhìn này,0.14285714285714285,False,0.14285714285714285,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+597,và cái thứ tư nữa thì anh sẽ đo lường để xem là,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+598,cái góc nhìn này nó có nguy có khả năng để nó phát triển lên không,0.1875,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+599,ví dụ như,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+600,khả năng tạo sự đồng thuận của góc nhìn đó,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+601,về tính đa dạng tính,0.2,False,0.2,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+602,ờm tính nhân rộng sau đó anh mới coi thử coi là à ok mình nên đón đầu cái làn sóng này như thế nào,0.04,False,0.0,True,0.08,False,0.04,False,1,PhoWhisper,False,False
+603,mình có nên thay đổi trước khi mà,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+604,tất cả,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+605,tức là nếu như mình cảm thấy có một cái xu hướng như vậy mình có thể là người đi đầu được tại sao không,0.12,False,0.12,False,0.04,False,0.08,False,0,,False,True
+606,đúng không,0.0,True,0.5,False,0.0,True,0.5,False,2,"Whisper, Qwen3",False,False
+607,nên là,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+608,bản thân anh thấy,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+609,giống như hồi xưa mình học triết mình hay nói là,0.09090909090909091,False,0.09090909090909091,False,0.0,True,0.09090909090909091,False,1,Qwen3,False,False
+610,mâu thuẫn là cái nguồn gốc của sự phát triển gì đó,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+611,thì trong cái quá trình mình đi làm doanh nghiệp cũng vậy thôi có những cái mình cảm giác họ đe dọa tới mình,0.0,True,0.125,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+612,nhưng đôi khi nếu mình nhìn thấy cái đe dọa đó lường trước và mình đương đầu mà dẫn đầu được thì có thể mình sẽ thành một người tiên phong trong công cuộc chuyển đổi,0.05555555555555555,False,0.05555555555555555,False,0.027777777777777776,False,0.0,True,1,Final,False,False
+613,cái giai đoạn sau của unlearning là relearning,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+614,là khi mà chúng ta gỡ bỏ những cái không phù hợp nữa,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+615,thì chúng ta sẽ tìm,0.0,True,0.2,False,0.2,False,0.8,False,1,Whisper,False,False
+616,và chúng ta sẽ học những cái mới vô,0.0,True,0.1111111111111111,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+617,cái mới học,1.0,False,0.3333333333333333,False,0.6666666666666666,False,1.3333333333333333,False,0,,False,True
+618,ừ,0.0,True,1.0,False,1.0,False,0.0,True,2,"Whisper, Final",False,False
+619,để mà nó có tạo thành cái hiệu quả lớn hơn,0.0,True,0.36363636363636365,False,0.2727272727272727,False,0.0,True,2,"Whisper, Final",False,False
+620,thì,0.0,True,0.0,True,1.0,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+621,em biết rằng là cái quá trình mà từ unlearning đến relearning với ví dụ mình có một ví dụ cụ thể đi là hoa hậu hoàn vũ microsmoke,0.06896551724137931,False,0.3793103448275862,False,0.06896551724137931,False,0.034482758620689655,False,0,,False,True
+622,ừ,0.0,True,1.0,False,1.0,False,0.0,True,2,"Whisper, Final",False,False
+623,là nó đã có những cái thay đổi như vậy rồi ví dụ như từ top hai thành top ba với em nó cũng là một cái relearning,0.07142857142857142,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+624,ừ,1.0,False,1.0,False,1.0,False,2.0,False,0,,False,True
+625,nhưng một người ngoài như em sẽ không bao giờ biết được hết rằng là liệu thật sự phía bên trong nó còn những cái gì nữa,0.037037037037037035,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+626,huuuu,3.0,False,2.0,False,2.0,False,4.0,False,0,,False,True
+627,thì hôm nay là muốn xin anh hoàng kể một xíu,0.09090909090909091,False,0.09090909090909091,False,0.2727272727272727,False,0.0,True,1,Final,False,False
+628,ừm,0.0,True,1.0,False,1.0,False,0.0,True,2,"Whisper, Final",False,False
+629,kể về gì đấy ra,0.4,False,0.6,False,0.2,False,0.2,False,0,,False,True
+630,về một sự,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+631,một cái mới,0.0,True,0.0,True,0.3333333333333333,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+632,để,1.0,False,0.0,True,1.0,False,1.0,False,1,PhoWhisper,False,False
+633,có thể chưa phải là đạt được nhưng mà mình aim minh đặt cái mong muốn rằng nó sẽ đạt được hiệu quả tốt hơn,0.12,False,0.24,False,0.24,False,0.08,False,0,,False,True
+634,yeah,1.0,False,1.0,False,0.0,True,2.0,False,1,Qwen3,False,False
+635,ừm,0.0,True,1.0,False,1.0,False,0.0,True,2,"Whisper, Final",False,False
+636,ví dụ như,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+637,anh nói câu chuyện là ừm,0.16666666666666666,False,0.0,True,0.16666666666666666,False,0.16666666666666666,False,1,PhoWhisper,False,False
+638,trong cái cuộc thi đó tụi anh quảng bá rất nhiều về cái thông điệp,0.06666666666666667,False,0.0,True,0.06666666666666667,False,0.0,True,2,"PhoWhisper, Final",False,False
+639,từ cuộc việt nam qua cuộc thế giới đó là thông điệp thiên về hành động á,0.0,True,0.23529411764705882,False,0.11764705882352941,False,0.0,True,2,"Whisper, Final",False,False
+640,tại vì,0.0,True,0.0,True,1.0,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+641,anh tin là trong cái cái cái slogan của cuộc thi là em park phương ti làm vẻ đẹp nâng tầm ảnh hưởng đi,0.3333333333333333,False,0.0,True,0.20833333333333334,False,0.08333333333333333,False,1,PhoWhisper,False,False
+642,khi anh nghĩ về cái cái cái impact đó,0.7777777777777778,False,0.3333333333333333,False,0.0,True,0.2222222222222222,False,1,Qwen3,False,False
+643,thì trong cái biện pháp nó có cái từ ác,0.3,False,0.0,True,0.3,False,0.0,True,2,"PhoWhisper, Final",False,False
+644,để tạo impact này mình phải act,0.42857142857142855,False,0.5714285714285714,False,0.14285714285714285,False,0.14285714285714285,False,0,,False,True
+645,để muốn tạo được ảnh hưởng thì mình phải hành động,0.09090909090909091,False,0.09090909090909091,False,0.0,True,0.8181818181818182,False,1,Qwen3,False,False
+646,cho nên trong cuộc thi nếu em thấy anh đưa rất nhiều thông điệp khuyến khích người ta hành động hơn là nói,0.30434782608695654,False,0.13043478260869565,False,0.17391304347826086,False,0.0,True,1,Final,False,False
+647,tại vì anh thấy nhiều cuộc thi sắc đẹp thì,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+648,giai đoạn một là phụ nữ đẹp giai đoạn thứ hai là phụ nữ đẹp mà nói tốt,0.2777777777777778,False,0.16666666666666666,False,0.05555555555555555,False,0.0,True,1,Final,False,False
+649,thì anh tin là ở cái giai đoạn mới là cần những người phụ nữ,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+650,nói được làm được,0.25,False,0.25,False,0.25,False,0.25,False,0,,False,True
+651,tại vì mình thấy rất nhiều good speaker rồi,0.0,True,0.3333333333333333,False,1.0,False,1.0,False,1,Whisper,False,False
+652,những người phụ nữ diễn thuyết,0.0,True,0.16666666666666666,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+653,truyền cảm hứng rồi,0.25,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+654,nhưng mà sau đó thì những điều họ hứa họ có thực sự làm,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+655,họ có định làm những điều họ nói hay không hay họ chỉ nói để đăng quang thôi,0.16666666666666666,False,0.05555555555555555,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+656,lại là câu chuyện khác,0.0,True,0.0,True,0.2,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+657,thế nên là anh thấy để mà cái,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+658,những cuộc thi sắc đẹp nó vẫn giống như em nói là relevant để người ta tiếp nhận,0.0,True,0.2222222222222222,False,0.16666666666666666,False,0.1111111111111111,False,1,Whisper,False,False
+659,một cách tích cực,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+660,nó tồn tại được trong đời sống chỉ có cách là những người đang quan từ đó thực sự được công nhận,0.13636363636363635,False,0.09090909090909091,False,0.0,True,0.045454545454545456,False,1,Qwen3,False,False
+661,mà muốn họ được công nhận thì những lời họ hứa họ phải có ý định làm,0.058823529411764705,False,0.058823529411764705,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+662,cho nên trong cái cách làm của cuộc thi này,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+663,ờm anh anh gần như,0.4,False,0.0,True,0.2,False,0.2,False,1,PhoWhisper,False,False
+664,là anh push anh bắt thí sinh của mình,0.0,True,0.1111111111111111,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+665,phải,0.0,True,0.0,True,1.0,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+666,cam kết bản thân với một cái kế hoạch hành động cụ thể,0.07692307692307693,False,0.07692307692307693,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+667,và chính dư luận sẽ là cái người,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+668,đánh giá mình nếu mà mình không làm nữa,0.1111111111111111,False,0.1111111111111111,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+669,và chính cái đó tạo nên một cái áp lực cho các bạn,0.0,True,0.07692307692307693,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+670,tại vì bản thân nếu không có áp lực thì anh thấy có nhiều bạn đăng quang xong sẽ có xu hướng,0.09090909090909091,False,0.13636363636363635,False,0.045454545454545456,False,0.0,True,1,Final,False,False
+671,là lười,0.5,False,0.5,False,0.5,False,0.5,False,0,,False,True
+672,thành dùng từ là vậy tức là an toàn trong những cái gì mà mình có được tại vì rõ ràng là đăng quang một cuộc thi hoa hậu là đời sống của em thay đổi mà em đi ra đường được nhiều người biết được săn đón đến các sự kiện bao nhiêu ống kính mới quay chỉ vào,0.05,False,0.11666666666666667,False,0.05,False,0.0,True,1,Final,False,False
+673,lên xe hơi về có mở cửa có trợ lý mở ra,0.08333333333333333,False,0.08333333333333333,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+674,rõ ràng là cũng sướng đấy,0.5,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+675,nhưng mà nếu mình sống trong cái sướng nhiều thì mình sẽ hư đó,0.2857142857142857,False,0.14285714285714285,False,0.21428571428571427,False,0.14285714285714285,False,0,,False,True
+676,nên trong cái sướng đó mình đồng thời phải tạo ra một cái áp lực để rèn mọi người lại,0.05,False,0.15,False,0.05,False,0.0,True,1,Final,False,False
+677,và cái áp lực này chính là áp lực của dư luận,0.08333333333333333,False,0.08333333333333333,False,0.3333333333333333,False,0.08333333333333333,False,0,,False,True
+678,và anh muốn cái dư luận nếu có áp lực phải là một áp lực tích cực tức là ok,0.15,False,0.1,False,0.15,False,0.0,True,1,Final,False,False
+679,làm những gì cô nói đi,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+680,hứa cái gì thì làm đi,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+681,nếu mà cô làm được những gì cô hứa thì tụi tôi sẽ yêu mến cô,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+682,khán giả rất sòng phẳng,0.4,False,0.4,False,0.4,False,0.4,False,0,,False,True
+683,và anh muốn,0.6666666666666666,False,0.3333333333333333,False,0.3333333333333333,False,1.0,False,0,,False,True
+684,đẩy cái đề bài này ra cho khán giả,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+685,được tự do,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+686,soi xét một cái danh hiệu trên cái khía cạnh đó,0.2727272727272727,False,0.09090909090909091,False,0.18181818181818182,False,0.18181818181818182,False,0,,False,True
+687,thì như vậy là một cái động lực tích cực để phát triển cái danh hiệu hoa hậu,0.1111111111111111,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+688,ít nhất là với danh hiệu hoa hậu hoàn vũ anh muốn làm như vậy,0.4,False,0.2,False,0.4,False,0.4,False,0,,False,True
+689,cho nên thường là,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+690,one of the biggest changes that,1.3333333333333333,False,1.3333333333333333,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+691,anh nói dần đến những cái thay đổi đó,0.4444444444444444,False,0.4444444444444444,False,0.1111111111111111,False,0.0,True,1,Final,False,False
+692,tiếp theo của cuộc thi ví dụ như anh có rất là nhiều những cái,0.0,True,0.06666666666666667,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+693,phần thi,0.5,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+694,hùng biện thiên về action plan tức là trình bày các hành động,0.23076923076923078,False,0.38461538461538464,False,0.23076923076923078,False,0.0,True,1,Final,False,False
+695,hoặc là ví dụ như,0.0,True,0.0,True,1.0,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+696,ờ cái phần thi cuối đó,0.3333333333333333,False,0.16666666666666666,False,0.16666666666666666,False,0.16666666666666666,False,0,,False,True
+697,cái việc mà đi debate chỉ giữa hai người á,0.2,False,0.1,False,0.1,False,0.1,False,0,,False,True
+698,nó thiên về câu chuyện là bạn định làm cái gì và tôi sẽ challenge cái,0.0,True,0.1875,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+699,ý định cái dự định của bạn để xem nó có khả thi không,0.07142857142857142,False,0.07142857142857142,False,0.07142857142857142,False,0.0,True,1,Final,False,False
+700,nó có thực tế itô có tạo được sức ảnh hưởng giống như bạn nói không bạn có phải là người thực tế sẽ làm được cái điều đó hay không,0.06451612903225806,False,0.12903225806451613,False,0.03225806451612903,False,0.03225806451612903,False,0,,False,True
+701,nó hơi hơi giống như mình thấy,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+702,một cái phần tranh cử tổng thống gì đó,0.0,True,0.1111111111111111,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+703,bởi vì em thấy là ví dụ để tranh cử những cái vị trí quan trọng đó,0.0,True,0.11764705882352941,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+704,mình thường phải có một cái mình dùng từ là,0.0,True,0.1,False,0.1,False,0.1,False,1,Whisper,False,False
+705,một cái cương lĩnh một những kế hoạch mà mình dự kiến sẽ làm ví dụ đối với y tế kinh tế chính trị xã hội mình định làm cái gì,0.03225806451612903,False,0.06451612903225806,False,0.0967741935483871,False,0.0,True,1,Final,False,False
+706,thì một cái ứng viên họ thường phải đưa ra những cái đề bài đó,0.06666666666666667,False,0.06666666666666667,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+707,thì thật ra đối với một hoa hậu nói như vậy nghe có vẻ cao xa quá không phải là anh ấy làm giống như một phần tranh cử tổng thống nhưng về cơ bản,0.05714285714285714,False,0.02857142857142857,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+708,là danh hiệu đó cũng cần mình phải đi tranh cử mình cũng phải thật sự đang ứng cử cho cái danh hiệu đó,0.041666666666666664,False,0.08333333333333333,False,0.041666666666666664,False,0.0,True,1,Final,False,False
+709,mình định làm cái gì thì mình phải nói và trong cái quá trình cái nhiệm kỳ của mình,0.10526315789473684,False,0.10526315789473684,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+710,khán giả cũng giống như công dân khi họ đánh giá,0.09090909090909091,False,0.0,True,0.09090909090909091,False,0.0,True,2,"PhoWhisper, Final",False,False
+711,cô này có làm được những cái cô nói hay không,0.2727272727272727,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+712,nhưng thực ra cái sự ràng buộc đó sẽ dễ quản lý hơn khi mà đó là hoa hậu của nước mình,0.2727272727272727,False,0.09090909090909091,False,0.045454545454545456,False,0.0,True,1,Final,False,False
+713,và cái bạn đăng quang ở cuộc thi quốc tế,0.2,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+714,anh sẽ làm thế nào để ràng buộc được họ,0.0,True,0.0,True,0.1,False,0.1,False,2,"Whisper, PhoWhisper",False,False
+715,đúng tại vì,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+716,nói trắng ra là một nhiệm kỳ chỉ có một năm thôi,0.16666666666666666,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+717,và họ,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+718,năm nào bây giờ anh nói rằng là họ có lười thì cũng chớp mắt cái là hết một năm thôi,0.047619047619047616,False,0.09523809523809523,False,0.047619047619047616,False,0.0,True,1,Final,False,False
+719,và,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+720,bởi vì,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+721,mình đặt trong trường hợp rằng là,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+722,at least trong việt nam mình cũng sẽ có hoa hậu chiến thắng cuộc thi này nhưng cho đến khi ấy thì mình sẽ có những bạn nước khác,0.10344827586206896,False,0.1724137931034483,False,0.1724137931034483,False,0.06896551724137931,False,0,,False,True
+723,họ không hiểu dư luận việt nam họ cũng không,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+724,có khi họ cũng chẳng quan tâm cái đánh giá đó họ không làm thì anh định làm như nào,0.05,False,0.2,False,0.05,False,0.05,False,0,,False,True
+725,họ không làm những cái họ hứa họ không action họ không act thì như thế nào,0.0,True,0.17647058823529413,False,1.0588235294117647,False,0.058823529411764705,False,1,Whisper,False,False
+726,thật ra thì à,0.25,False,0.25,False,1.0,False,0.0,True,1,Final,False,False
+727,bây giờ thì lại trở thành câu chuyện của dư luận của cả thế giới rồi,0.0625,False,0.0625,False,0.125,False,0.0,True,1,Final,False,False
+728,nếu mà em thấy thì thật ra không phải việt nam không mà có rất nhiều những cái cộng đồng và những cái thị trường,0.04,False,0.04,False,0.04,False,0.0,True,1,Final,False,False
+729,fan sắc đẹp lớn,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+730,và hiện tại thì anh thấy ít nhất west cosmo cũng tạo được một cái sức ảnh hưởng nhất định tới những cộng đồng yêu sắc đẹp của các nước đông nam á,0.030303030303030304,False,0.15151515151515152,False,0.09090909090909091,False,0.0,True,1,Final,False,False
+731,các nước khu vực nam mỹ la tinh và châu phi,0.18181818181818182,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+732,đối với các cộng đồng mà nó đã anh dùng từ mature thì đã phát triển rồi,0.4117647058823529,False,0.5294117647058824,False,0.5294117647058824,False,0.23529411764705882,False,0,,False,True
+733,như là bắc mỹ hoặc là châu âu hoặc bắc á thì sẽ khó hơn chút để mình tiếp cận,0.1,False,0.1,False,0.1,False,0.0,True,1,Final,False,False
+734,um,0.0,True,1.0,False,1.0,False,0.0,True,2,"Whisper, Final",False,False
+735,và,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+736,khi mà các bạn đăng quang thì cái điều đầu tiên thì chắc chắn là các bạn sẽ phải đồng hành với cái nhiệm kỳ tại việt nam,0.10714285714285714,False,0.10714285714285714,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+737,để mình có thể có một cái khoảng thời gian đồng hành với các bạn giúp các bạn triển khai kế hoạch hành động của các bạn,0.037037037037037035,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+738,tạo ra được dấu ấn đầu tiên,0.0,True,0.14285714285714285,False,0.14285714285714285,False,0.0,True,2,"Whisper, Final",False,False
+739,và truyền thông cho nó để cho,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+740,khán giả thế giới họ cũng nhìn vào,0.125,False,0.0,True,0.125,False,0.125,False,1,PhoWhisper,False,False
+741,from đó họ giống như anh nói họ cùng với mình tạo thành một cái gọng kìm nữa,0.16666666666666666,False,0.2222222222222222,False,0.1111111111111111,False,0.05555555555555555,False,0,,False,True
+742,nghe hơi áp lực đúng không nhưng mà rõ ràng danh hiệu nó phải đến cùng với áp lực thì mới phát triển được còn nếu không thì,0.03571428571428571,False,0.07142857142857142,False,0.03571428571428571,False,0.0,True,1,Final,False,False
+743,có thể các cô sẽ có xu hướng chỉ dùng cái danh hiệu này một cách,0.0,True,0.0625,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+744,xa lầu tức là hào hoa hào nhoáng phù phiếm bên ngoài thôi,0.23076923076923078,False,0.23076923076923078,False,0.15384615384615385,False,0.15384615384615385,False,0,,False,True
+745,cái điểm nữa đó là,0.0,True,0.2,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+746,rõ ràng thì một cái sự phát triển giống như anh nói nghe nó to tát đó nó cần cả một hệ sinh thái đi cùng,0.11538461538461539,False,0.038461538461538464,False,0.038461538461538464,False,0.0,True,1,Final,False,False
+747,nếu mà một mình mình làm cuộc thi quốc tế xong mình nói nghe hay ho,0.125,False,0.0625,False,0.0625,False,0.0,True,1,Final,False,False
+748,thì không đủ,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+749,cái tinh thần cuộc thi nó phải được truyền đạt đại bổ để mình có một mạng lưới khán giả,0.1,False,0.2,False,0.15,False,0.0,True,1,Final,False,False
+750,họ,1.0,False,1.0,False,0.0,True,1.0,False,1,Qwen3,False,False
+751,văn minh họ được phát triển đồng bộ để họ hiểu cái thông điệp cuộc thi,0.0,True,0.125,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+752,và họ là người giúp mình,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+753,phản ánh thông điệp cuộc thi đối với người đang quay,0.09090909090909091,False,0.18181818181818182,False,0.36363636363636365,False,0.0,True,1,Final,False,False
+754,cái thứ hai nữa là anh cũng có một cái network tại các quốc gia anh nói anh làm việc rất là cẩn thận với từng giám đốc quốc gia,0.1,False,0.16666666666666666,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+755,để,1.0,False,0.0,True,0.0,True,1.0,False,2,"PhoWhisper, Qwen3",False,False
+756,đảm bảo là à đối tác của mình tại từng quốc gia giống như mình đi franchise một cái thương hiệu toàn cầu nào đó thì đối tác nó phải là đối tác tốt,0.08823529411764706,False,0.29411764705882354,False,0.08823529411764706,False,0.029411764705882353,False,0,,False,True
+757,thì thương hiệu của mình mới phát triển tốt được,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+758,còn nếu bản thân cái quá trình tụi anh soi xét xem xét và làm việc bạn thấy là à,0.0,True,0.05,False,0.2,False,0.05,False,1,Whisper,False,False
+759,cái tổ chức quốc gia này chỉ có xu hướng là trục lợi cho bản thân họ không có xu hướng phát triển thương hiệu hoặc đại diện đi thi,0.06666666666666667,False,0.1,False,0.06666666666666667,False,0.0,True,1,Final,False,False
+760,thì cũng không làm việc được,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+761,cho nên là,0.0,True,0.0,True,0.3333333333333333,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+762,lý do mọi người hỏi là ạ tại sao năm đầu tiên tụi anh không làm việc trực tiếp với các đại diện để đảm bảo là mình mời những đại diện thật tốt vào,0.05714285714285714,False,0.05714285714285714,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+763,thì anh nói không,0.75,False,0.5,False,0.5,False,1.25,False,0,,False,True
+764,đó không phải là cái cách để mình làm việc đường dài,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+765,muốn phát triển đường dài thì anh phải làm việc giữa tổ chức với tổ chức và để cái tổ chức đó,0.18181818181818182,False,0.13636363636363635,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+766,hiểu được đầy đủ thông tin,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+767,cái cách truyền đạt thông điệp của một cuộc thi chứ không phải chỉ đơn thuần là tìm một cô gái đẹp đi thi,0.0,True,0.125,False,0.125,False,0.041666666666666664,False,1,Whisper,False,False
+768,ừm,1.0,False,1.0,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+769,xong có một ý nghĩ này tự nhiên là pop up lên trong đầu em nha,0.125,False,0.4375,False,0.3125,False,0.0625,False,0,,False,True
+770,nghe anh nói xong em mới chợt nghĩ đến,0.1111111111111111,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+771,là nếu cái cô gái đăng quang đó cô ấy muốn làm một cái dự án một cái hành động ở một cái nước xa xôi nào đó nước của cô hay cái nước xa xôi nào đó chẳng hạn,0.075,False,0.075,False,0.05,False,0.05,False,0,,False,True
+772,thì tổ chức của mình có đi theo có follow có cử người hỗ trợ và đi cùng cô không nếu như đó là một dự án dài hơi,0.06896551724137931,False,0.10344827586206896,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+773,tự nhiên nó pop up lên trong đầu em vậy đó,0.2727272727272727,False,0.18181818181818182,False,0.36363636363636365,False,0.18181818181818182,False,0,,False,True
+774,anh nghĩ là,0.0,True,0.3333333333333333,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+775,chắc chắn là có có đây có hai điểm này một là mình ở trong cái nhiệm kỳ của cổ vẫn có thể tạo điều kiện để đồng hành và phát triển cái dự án nó lên được với những cái nguồn lực,0.09302325581395349,False,0.023255813953488372,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+776,hai nữa là sau đó mình lại tiếp tục đồng hành với cái tổ chức cũ tại vì thường sau cái năm đăng quang,0.16666666666666666,False,0.20833333333333334,False,0.041666666666666664,False,0.0,True,1,Final,False,False
+777,hết cái năm mới nhiệm kỳ thì cô sẽ quay về với quốc gia của cô và,0.0,True,0.17647058823529413,False,0.17647058823529413,False,0.0,True,2,"Whisper, Final",False,False
+778,tiếp tục đồng hành với các tổ chức đã đưa cô đi thi,0.0,True,0.07692307692307693,False,0.15384615384615385,False,0.0,True,2,"Whisper, Final",False,False
+779,và cái việc đồng hành đó cũng giúp cổ có thêm nhiều nguồn lực tiếp theo tức là không phải chỉ là trong giai đoạn đăng quang nhiệm kỳ rồi làm triển khai,0.09090909090909091,False,0.12121212121212122,False,0.09090909090909091,False,0.06060606060606061,False,0,,False,True
+780,chẳng hạn như anh anh nhớ một cái trường hợp đó là,0.08333333333333333,False,0.08333333333333333,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+781,bạn hoa hậu ấn độ đang quay miss universe năm 2021,0.0,True,0.6363636363636364,False,0.8181818181818182,False,0.0,True,2,"Whisper, Final",False,False
+782,là hana hana cũng là một người mà tụi anh anh rất là quý bạn bạn cũng có một thời gian anh mời qua việt nam đó,0.14814814814814814,False,0.2222222222222222,False,0.037037037037037035,False,0.037037037037037035,False,0,,False,True
+783,thì anh có biết hana có,0.8333333333333334,False,0.16666666666666666,False,1.0,False,0.8333333333333334,False,0,,False,True
+784,ờ một cái dự án về,0.16666666666666666,False,0.0,True,0.16666666666666666,False,0.16666666666666666,False,1,PhoWhisper,False,False
+785,về sức khỏe sinh sản của phụ nữ,0.0,True,0.125,False,0.125,False,0.0,True,2,"Whisper, Final",False,False
+786,tại vì đó là một trong những vấn đề cực kỳ cấp thiết của ấn độ,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+787,đó về vệ sinh,0.25,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+788,liên quan tới phụ nữ,0.0,True,0.2,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+789,ờ bạn có cái dự án như vậy và tổ chức miss universe dưới thời img họ cũng,0.16666666666666666,False,0.16666666666666666,False,0.1111111111111111,False,0.05555555555555555,False,0,,False,True
+790,đồng hành cùng với cô trong việc thực hiện dự án đó ngay tại ấn độ,0.0,True,0.0625,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+791,tại vì rõ ràng dự án đó mà dùng ở những nước,0.0,True,0.08333333333333333,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+792,áp dụng vào những nước phát triển thì có thể không cần thiết cái tính cấp thiết đó không có,0.25,False,0.2,False,0.15,False,0.05,False,0,,False,True
+793,nhưng mà cổ là người sinh lớn lên ở ấn độ cũng muốn làm gì đó cho cái vùng đất của cổ và cái dự án rất cấp thiết,0.10344827586206896,False,0.034482758620689655,False,0.13793103448275862,False,0.0,True,1,Final,False,False
+794,thì tổ chức miss universe họ đồng hành cùng với cô để làm dự án đó và kể cả cho đến bây giờ theo anh được biết là cô vẫn tiếp tục dự án đó even là cô đang sống,0.125,False,0.175,False,0.275,False,0.05,False,0,,False,True
+795,tại mỹ nhưng cô vẫn đi đi về về để thực hiện dự án này của mình,0.17647058823529413,False,0.0,True,0.058823529411764705,False,0.0,True,2,"PhoWhisper, Final",False,False
+796,thì anh tin những người như vậy là những người có sức ảnh hưởng lâu dài đến cộng đồng,0.0,True,0.0,True,0.05263157894736842,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+797,đối với những hoa hậu hoàn vũ việt nam thật là cách tụi anh phát triển,0.25,False,0.0,True,0.25,False,0.0,True,2,"PhoWhisper, Final",False,False
+798,ừ,0.0,True,1.0,False,1.0,False,0.0,True,2,"Whisper, Final",False,False
+799,cũng trên cái cam kết như vậy cam kết đó nó nó,0.16666666666666666,False,0.25,False,0.0,True,0.25,False,1,Qwen3,False,False
+800,ít phải thành văn bản theo kiểu là,0.25,False,0.25,False,0.25,False,0.0,True,1,Final,False,False
+801,chỉ là em ký thôi em hứa là anh phải làm nữa,0.08333333333333333,False,0.25,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+802,đó là rất nhiều những cái ràng buộc và sau đó người ta phải tìm thấy niềm vui nữa,0.0,True,0.05263157894736842,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+803,giống như nói hờ hay hoặc là vâng hoặc là,0.3,False,0.5,False,0.2,False,0.1,False,0,,False,True
+804,châu em sẽ các bạn vẫn tiếp tục đồng hành với những cái hoạt động cộng đồng những cái dự án của các bạn,0.08333333333333333,False,0.0,True,0.041666666666666664,False,0.0,True,2,"PhoWhisper, Final",False,False
+805,bằng cái niềm vui mà các bạn tìm thấy trong cái việc đó,0.15384615384615385,False,0.07692307692307693,False,0.07692307692307693,False,0.07692307692307693,False,0,,False,True
+806,ừm,1.0,False,1.0,False,1.0,False,2.0,False,0,,False,True
+807,đó là nói về những bạn thí sinh đi,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+808,và nói về cái tầm của cuộc thi,0.375,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+809,nhưng mà để đến được cuộc thi thì mình có một cái ban bệ một cái lãnh đạo một cái là một cái ban lãnh đạo và một tổ chức,0.16666666666666666,False,0.13333333333333333,False,0.1,False,0.0,True,1,Final,False,False
+810,có phải là blđ tập đoàn của anh,0.375,False,0.625,False,0.125,False,0.125,False,0,,False,True
+811,thì vào cái thời điểm anh quyết định đập hết đi xây lại làm lại từ đầu đi,0.1111111111111111,False,0.0,True,0.05555555555555555,False,0.0,True,2,"PhoWhisper, Final",False,False
+812,mọi người có can không tại vì thật ra cái việc relearning một điều,0.0,True,0.21428571428571427,False,0.35714285714285715,False,0.14285714285714285,False,1,Whisper,False,False
+813,nó,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+814,với những người mà người ta muốn ở trong cái vùng an toàn của người ta cái comfort zone,0.0,True,0.2631578947368421,False,0.05263157894736842,False,0.10526315789473684,False,1,Whisper,False,False
+815,thì nghe nó rất mạo hiểm,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+816,thì thời điểm đó có ai ngăn anh không đừng đừng đừng ở đâu cứ ở đấy thôi,0.3888888888888889,False,0.4444444444444444,False,0.2777777777777778,False,0.5,False,0,,False,True
+817,anh nghĩ cái quá trình nào đầu tiên nó cũng cần một ban bệ nhé tức là để,0.1111111111111111,False,0.1111111111111111,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+818,để một cái quyết định đó,0.0,True,0.16666666666666666,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+819,nó được challenge đủ nó được,0.0,True,0.3333333333333333,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+820,thách thức đủ bởi rất nhiều những cái ý kiến khác nhau,0.16666666666666666,False,0.0,True,0.08333333333333333,False,0.0,True,2,"PhoWhisper, Final",False,False
+821,anh không nói là,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+822,không phải là câu chuyện mình phải làm mới thì có nghĩa lúc nào mình cũng mới là hay đâu,0.0,True,0.0,True,0.1,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+823,cái mới của mình nó phải được chui rèn qua rất nhiều những ý kiến khác nhau ví dụ mình muốn đưa ra một điểm mới,0.038461538461538464,False,0.0,True,0.038461538461538464,False,0.0,True,2,"PhoWhisper, Final",False,False
+824,phải vô một cái hội đồng,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+825,mình phải bảo vệ được ý kiến với hội đồng đó trong trong hội đồng nó có rất nhiều ý kiến,0.14285714285714285,False,0.19047619047619047,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+826,có những người có thể là họ bảo thủ có những người họ đổi mới có người họ thiên về thực tiễn tạo ra lợi nhuận có người họ thiên về thông điệp tạo ra tính xã hội thì một cái ý kiến nó phải được,0.10869565217391304,False,0.2826086956521739,False,0.08695652173913043,False,0.0,True,1,Final,False,False
+827,anh dùng từ là,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+828,được rèn qua tất cả những góc nhìn khác nhau thì mới tạo ra được một cái ý kiến đó hoàn thiện,0.045454545454545456,False,0.045454545454545456,False,0.045454545454545456,False,0.0,True,1,Final,False,False
+829,ờ anh may mắn ở chỗ là,0.14285714285714285,False,0.0,True,0.14285714285714285,False,0.14285714285714285,False,1,PhoWhisper,False,False
+830,ờm,1.0,False,0.0,True,1.0,False,1.0,False,1,PhoWhisper,False,False
+831,trong cái,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+832,giống như em nói cái ban bệ cái hội đồng bod của anh thì luôn luôn,0.125,False,0.3125,False,0.125,False,0.125,False,0,,False,True
+833,có chung với quan điểm đó là mình sẽ tìm cách làm mới,0.07692307692307693,False,0.0,True,0.15384615384615385,False,0.0,True,2,"PhoWhisper, Final",False,False
+834,nhưng cái làm mới như thế nào,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+835,thì bản thân cái ý kiến mới nó phải sống sót được qua hội đồng đó đã,0.058823529411764705,False,0.23529411764705882,False,0.058823529411764705,False,0.058823529411764705,False,0,,False,True
+836,là pitching qua hết một hội đồng đúng không,0.1111111111111111,False,0.2222222222222222,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+837,đúng rồi,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+838,ờ nên là để mà align được một cái điểm thật ra cũng rất là vất vả nhưng anh nghĩ đó là cái vất vã cần thiết tại nhiều khi giống như mình,0.06060606060606061,False,0.18181818181818182,False,0.18181818181818182,False,0.06060606060606061,False,0,,False,True
+839,mình sẽ gặp cái bẫy của fix mindset ở đây là gì mình thấy mình làm mới,0.11764705882352941,False,0.23529411764705882,False,0.29411764705882354,False,0.11764705882352941,False,0,,False,True
+840,bởi vì mình tin mình là một người luôn mới,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+841,xong mình thấy là ôi cái này mới quá,0.0,True,0.1111111111111111,False,0.1111111111111111,False,2.0,False,1,Whisper,False,False
+842,mình làm thôi,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+843,nhưng như vậy là mình fix á,0.14285714285714285,False,0.2857142857142857,False,0.14285714285714285,False,0.2857142857142857,False,0,,False,True
+844,mình fix ở chỗ là,0.0,True,0.4,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+845,có một mình tôi mới cái mới của tôi luôn đúng,0.0,True,0.09090909090909091,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+846,đó là mình fix mindset rồi đó,0.14285714285714285,False,0.14285714285714285,False,0.2857142857142857,False,0.0,True,1,Final,False,False
+847,chứ không phải mình nghĩ là mình làm mới là mình mình mình cải tiến đâu nha,0.11764705882352941,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+848,trong quá trình mình làm mới mà mình không mình bất chấp những yếu tố khác,0.125,False,0.0625,False,0.0,True,0.0625,False,1,Qwen3,False,False
+849,về tính thực tiễn tính khả thi tính tác động,0.1,False,0.2,False,0.0,True,0.1,False,1,Qwen3,False,False
+850,tính tất tần tật tất cả những điều khác thì rõ ràng tính lịch sử nữa,0.375,False,0.375,False,0.4375,False,0.3125,False,0,,False,True
+851,tính kế thừa nữa nếu mình bỏ hết tất cả những yếu tố đi mình chỉ quan tâm tới cái mới mà mình nghĩ thôi,0.08,False,0.04,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+852,thì có thể là mình đã fail,0.0,True,0.14285714285714285,False,0.14285714285714285,False,0.14285714285714285,False,1,Whisper,False,False
+853,đúng không,1.0,False,0.0,True,0.0,True,1.0,False,2,"PhoWhisper, Qwen3",False,False
+854,nên là khi,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+855,ví dụ anh là một người,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+856,anh dùng từ là khá là innovate nhưng mà bản thân khi mà anh initiate mình tạo ra một cái sản phẩm mới anh cũng sẽ tìm cách,0.03571428571428571,False,0.32142857142857145,False,0.07142857142857142,False,0.0,True,1,Final,False,False
+857,hỏi đáp trao đổi và anh cũng có những cuộc gặp cà phê bạn bè,0.0,True,0.06666666666666667,False,0.06666666666666667,False,0.0,True,2,"Whisper, Final",False,False
+858,ngẫu hứng thôi anh thử chia sẻ một cái idea để mọi người,0.15384615384615385,False,0.23076923076923078,False,0.07692307692307693,False,0.07692307692307693,False,0,,False,True
+859,cho anh thêm góp ý cho anh thêm góc nhìn có thể là một người trong lĩnh vực hoặc một người ngoài lãnh vực ở có những góc nhìn khác nhau,0.22580645161290322,False,0.1935483870967742,False,0.12903225806451613,False,0.0,True,1,Final,False,False
+860,thì anh nhớ là thỉnh thoảnh có những cái cuộc cà phê,0.08333333333333333,False,0.16666666666666666,False,0.16666666666666666,False,0.0,True,1,Final,False,False
+861,ngẫu hứng anh em mình anh cũng đưa một vài cái sự hướng đúng không,0.2,False,0.2,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+862,để anh nghe để xem góc nhìn của mọi người trong ngành mà mọi người nói như sao,0.2222222222222222,False,0.16666666666666666,False,0.05555555555555555,False,0.0,True,1,Final,False,False
+863,ấy nãy giờ mình nói về công việc quá nhiều rồi đi,0.08333333333333333,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+864,vậy thì nói về bản thân anh,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+865,này mình cũng unlearn rồi bây giờ relearn,0.25,False,0.75,False,0.75,False,0.5,False,0,,False,True
+866,là,1.0,False,1.0,False,0.0,True,2.0,False,1,Qwen3,False,False
+867,về cá nhân anh thì anh đã từng relearn cái gì hoặc là định relearn một điều gì chưa,0.0,True,0.15789473684210525,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+868,ừ,0.0,True,0.0,True,1.0,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+869,về cá nhân của anh hả,0.0,True,0.16666666666666666,False,0.16666666666666666,False,0.16666666666666666,False,1,Whisper,False,False
+870,hơi lâu nha,0.3333333333333333,False,0.3333333333333333,False,0.3333333333333333,False,0.3333333333333333,False,0,,False,True
+871,hơi lâu nha,1.3333333333333333,False,1.0,False,1.0,False,1.0,False,0,,False,True
+872,tại vì anh anh nghĩ là nó giống như một cái practice một cái bài thực hành của mình hàng ngày rồi á,0.13043478260869565,False,0.17391304347826086,False,0.13043478260869565,False,0.17391304347826086,False,0,,False,True
+873,thế rồi có một cái câu chuyện gì lớn đến mức anh nói với em gái mình phải nghĩ ra ngay thì anh nghĩ là chưa có,0.18518518518518517,False,0.25925925925925924,False,0.1111111111111111,False,0.0,True,1,Final,False,False
+874,nhưng ví dụ như có những lúc anh tự đóng khung mình thành mình là một người thế này,0.05263157894736842,False,0.10526315789473684,False,0.0,True,0.10526315789473684,False,1,Qwen3,False,False
+875,nhưng rõ ràng trong quá trình làm việc và để đáp ứng cái nhu cầu anh cũng tự biến mình thành một người thế kia được,0.038461538461538464,False,0.038461538461538464,False,0.038461538461538464,False,0.0,True,1,Final,False,False
+876,chẳng hạn như anh cũng hay đùa là mình là một người hướng nội,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+877,và khi anh nói gì rất tất cả mọi người đều ngạc nhiên mà người đó là người hướng nội người ta phải rụt rè người ta ngại giao tiếp,0.23333333333333334,False,0.2,False,0.03333333333333333,False,0.0,True,1,Final,False,False
+878,đúng không,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+879,nhưng không hề người nói là không hề người hướng nội vẫn có đầy đủ những kỹ năng để giao tiếp một cách thuần thục,0.24,False,0.12,False,0.08,False,0.0,True,1,Final,False,False
+880,và anh có thể giao tiếp một cách rất là thoải mái,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+881,nhưng vẫn là người hướng nội,0.3333333333333333,False,0.16666666666666666,False,0.5,False,0.16666666666666666,False,0,,False,True
+882,anh vẫn là người,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+883,tự,2.0,False,1.0,False,0.0,True,1.0,False,1,Qwen3,False,False
+884,tái tạo năng lượng,1.0,False,0.0,True,0.0,True,1.0,False,2,"PhoWhisper, Qwen3",False,False
+885,bằng bản thân mình chứ không phải tái tạo năng lượng thông qua việc gặp,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+886,người khác thì đó là người hướng nội,0.25,False,0.0,True,0.25,False,0.0,True,2,"PhoWhisper, Final",False,False
+887,nhưng trong quá trình mà anh tự định nghĩa bản thân anh hướng rồi ở giai đoạn ngày trước,0.10526315789473684,False,0.05263157894736842,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+888,anh cũng nghĩ,1.0,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+889,là thôi tôi hướng nội đi hết giờ làm cho tôi về nhà đi đừng cho tôi gặp ai hết rồi tôi không muốn gặp,0.12,False,0.2,False,0.04,False,0.0,True,1,Final,False,False
+890,nhưng mà anh ấy là khi mình tự đóng khung mình trong cái suy nghĩ đó mình tự hạn chế cơ hội,0.045454545454545456,False,0.09090909090909091,False,0.09090909090909091,False,0.0,True,1,Final,False,False
+891,về cái điều kiện học hỏi của mình đi,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+892,thì trong quá trình anh đi làm xong anh phải gặp anh tiếp xúc,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+893,và vì cái công việc này anh cũng phải gặp rất nhiều người thì anh thấy là,0.058823529411764705,False,0.058823529411764705,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+894,ồ cái việc gặp người khác hay quá,0.375,False,0.0,True,0.125,False,0.0,True,2,"PhoWhisper, Final",False,False
+895,tại vì nó giúp cho mình không bị ở lâu trong một cái dòng suy nghĩ,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+896,cho nên là anh lại tiếp tục khuyến khích,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+897,mọi người đi ra ngoài gặp người này người kia là vì gặp người này ngồi kia mang về cho mình rất là nhiều cái,0.2,False,0.16,False,0.12,False,0.0,True,1,Final,False,False
+898,ý tưởng cái nguồn năng lượng mới,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+899,và anh thấy là đó nếu anh cứ ở mãi trong cái suy nghĩ là,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+900,xin được hướng nội,1.0,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+901,thì chính anh cũng đã,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+902,fail trong cái bài toán học hỏi rồi,0.125,False,0.125,False,0.125,False,0.125,False,0,,False,True
+903,hoặc là như định nghĩa của anh ví dụ như hồi xưa anh nghĩ anh là một người vận động kém không thể vận động dở thể thao,0.10714285714285714,False,0.25,False,0.2857142857142857,False,0.0,True,1,Final,False,False
+904,nhưng mà mọi người biết anh đều biết là trong hai năm trở lại đây anh chơi rất nhiều những môn thể thao khác nhau nếu mà có điều kiện và thời gian thì,0.08823529411764706,False,0.029411764705882353,False,0.058823529411764705,False,0.0,True,1,Final,False,False
+905,môn nào anh cũng sẽ thử hết á,0.25,False,0.0,True,0.25,False,0.25,False,1,PhoWhisper,False,False
+906,anh bắt cả trâu cả tiên chạy theo anh mấy chục cây rồi,0.15384615384615385,False,0.15384615384615385,False,0.07692307692307693,False,0.07692307692307693,False,0,,False,True
+907,đúng rồi tại sao đó anh lôi những cái người xung quanh anh chơi thể thao anh từ,0.16666666666666666,False,0.1111111111111111,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+908,đó đi chạy bộ đi đánh cầu đi,0.125,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+909,đi leo núi rồi gần đây thì anh học thêm đánh golf chẳng hạn đi thì anh thấy là mỗi cái môn thể thao nó đều có niềm vui và anh thấy,0.03125,False,0.1875,False,0.03125,False,0.0,True,1,Final,False,False
+910,có nhiều môn mình chơi xong mình nhận ra là à mình,0.25,False,0.0,True,0.16666666666666666,False,0.0,True,2,"PhoWhisper, Final",False,False
+911,không dở thể thao như mình nghĩ chẳng qua là mình chưa tìm được cái môn thể thao phù hợp mà mình vui thôi hoặc là thời điểm đó mình chưa thấy niềm vui,0.11764705882352941,False,0.14705882352941177,False,0.058823529411764705,False,0.0,True,1,Final,False,False
+912,nên anh sẽ không đóng khung bản thân mình trong một cái suy nghĩ của mình là người thế này,0.05,False,0.1,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+913,hoặc mình là người thế kỷ,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+914,đó lý do mà,1.25,False,0.25,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+915,đôi khi anh cũng hơi,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+916,uhm ờm,0.5,False,0.5,False,1.0,False,0.0,True,1,Final,False,False
+917,gọi anti thì nó hơi quá,0.0,True,0.5,False,0.0,True,0.0,True,3,"Whisper, Qwen3, Final",False,False
+918,nhưng mỗi lần anh thấy bạn bè anh làm những bài test về tính cách hoặc là tìm hiểu bản thân,0.14285714285714285,False,0.047619047619047616,False,1.0,False,0.0,True,1,Final,False,False
+919,thì anh luôn nói với mọi người là,0.0,True,0.0,True,0.0,True,0.0,True,4,"Whisper, PhoWhisper, Qwen3, Final",True,False
+920,test để biết lúc đó thôi cho vui nhưng mà đừng có đóng khung mình ví dụ mình đừng nghĩ à test ra tôi là người thế này,0.07142857142857142,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+921,thì mình sẽ phải tìm cách để mình đóng khung cái hình ảnh mà hành động hành vi của mình giống như một người như thế này,0.037037037037037035,False,0.037037037037037035,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
+922,như vậy thì mình đã tự hạn chế cái điều kiện và cơ hội của mình rồi,0.058823529411764705,False,0.0,True,0.0,True,0.0,True,3,"PhoWhisper, Qwen3, Final",False,False
+923,nên là anh thường ít khi nào làm mấy cái test test lớn,0.23076923076923078,False,0.46153846153846156,False,0.15384615384615385,False,0.07692307692307693,False,0,,False,True
+924,đập tay đập tay,0.5,False,0.0,True,0.25,False,0.0,True,2,"PhoWhisper, Final",False,False
+925,em cũng không làm cái đó luôn tại vì sao em bảo em hướng nội nhưng mà em hướng nội part time thôi cần thì ấy,0.2692307692307692,False,0.11538461538461539,False,0.11538461538461539,False,0.11538461538461539,False,0,,False,True
+926,câu chuyện anh nói em thấy như vậy bản thân mình luôn á,0.07692307692307693,False,0.07692307692307693,False,0.07692307692307693,False,0.0,True,1,Final,False,False
+927,hướng nội mọi người hỏi em là ôi hướng nội mà nói chuyện như thế,0.0,True,0.2,False,0.2,False,0.0,True,2,"Whisper, Final",False,False
+928,liên quan gì đâu,0.0,True,0.0,True,0.25,False,0.0,True,3,"Whisper, PhoWhisper, Final",False,False
+929,xong em cũng những năm gần đây bắt đầu đam mê leo núi nha,0.14285714285714285,False,0.14285714285714285,False,0.07142857142857142,False,0.14285714285714285,False,0,,False,True
+930,tự nhiên cảm thấy cũng muốn nói chuyện kiểu,0.1111111111111111,False,0.1111111111111111,False,0.1111111111111111,False,0.0,True,1,Final,False,False
+931,anh thấy ông mưa xuống nắng lên nó đi lên đi xuống rồi kết thúc bằng câu chuyện của những người hướng nội,0.043478260869565216,False,0.043478260869565216,False,0.0,True,0.0,True,2,"Qwen3, Final",False,False
