@@ -12,12 +12,12 @@ from utils.audio_normalize import normalize_for_asr, remove_dc, measure
 # Segments shorter than this are padded with surrounding audio before ASR.
 CONTEXT_PAD_BELOW = 2.0
 CONTEXT_PAD_SECONDS = 2.0
-
+EDGE_PAD_SECONDS = 0.02
 class ASRService:
     """Coordinates MoE ASR models and ROVER ensemble."""
     
     def __init__(self, whisper, phowhisper, qwen3, logger=None, model_loader=None, qwen3_service=None,
-                 language: str = "vi", batch_size: int = 4, keep_models: bool = False):
+                 language: str = "vi", batch_size: int = 4, keep_models: bool = False, edge_pad: float = EDGE_PAD_SECONDS):
         self.whisper = whisper
         self.phowhisper = phowhisper
         self.qwen3 = qwen3
@@ -27,7 +27,7 @@ class ASRService:
         self.language = language
         self.batch_size = batch_size
         self.keep_models = keep_models
-
+        self.edge_pad = max(0.0, float(edge_pad))
         if not self.whisper and self.logger:
             self.logger.warning(
                 "Whisper is not loaded (requires --ASRMoE with --lang vi); "
@@ -43,6 +43,24 @@ class ASRService:
         if self.phowhisper: names.append("phowhisper")
         if self.qwen3: names.append("qwen3")
         return names
+    def _edge_pad_bounds(self, segments, total_dur: float) -> dict:
+        """Nới mỗi segment ±edge_pad, nhưng clamp để không lấn segment kế bên
+        và không pad vào vùng overlap. Trả về {id(seg): (start_mới, end_mới)}."""
+        if self.edge_pad <= 0:
+            return {id(s): (s.start, s.end) for s in segments}
+
+        ordered = sorted(segments, key=lambda s: (s.start, s.end))
+        bounds = {}
+        for i, seg in enumerate(ordered):
+            # Về sau: nếu là segment đầu -> full pad; nếu không -> tối đa nửa gap
+            back = self.edge_pad if i == 0 else min(
+                self.edge_pad, max(0.0, (seg.start - ordered[i - 1].end) / 2))
+            # Về trước: tương tự với segment sau
+            fwd = self.edge_pad if i == len(ordered) - 1 else min(
+                self.edge_pad, max(0.0, (ordered[i + 1].start - seg.end) / 2))
+            bounds[id(seg)] = (max(0.0, seg.start - back), min(total_dur, seg.end + fwd))
+        return bounds
+
 
     def _run_whisper(self, audio_16k, dummy_vad, language=None):
         if not self.whisper:
@@ -151,11 +169,13 @@ class ASRService:
         core_audios_16k = []
         dummy_vads = []
         chunk_indices = []
-
+        word_offsets = []
         sr = audio.sample_rate
 
         # 1. Prepare data
         total_samples = len(audio.waveform)
+        total_dur = total_samples / sr
+        edge_bounds = self._edge_pad_bounds(segments, total_dur)
         for seg in segments:
             # Short segments get surrounding audio as context. Whisper pads its
             # input to 30s regardless, so a 0.24s backchannel arrives as 99.2%
@@ -164,16 +184,26 @@ class ASRService:
             # gives it something to condition on. The VAD range below still
             # marks only the segment itself, so the extra audio informs the
             # encoder without being transcribed.
-            pad = CONTEXT_PAD_SECONDS if (seg.end - seg.start) < CONTEXT_PAD_BELOW else 0.0
+            core_start, core_end = edge_bounds[id(seg)]
+            pad = CONTEXT_PAD_SECONDS if (core_end - core_start) < CONTEXT_PAD_BELOW else 0.0
 
-            start_frame = int(seg.start * sr)
-            end_frame = int(seg.end * sr)
+            start_frame = int(core_start * sr)
+            end_frame = int(core_end * sr)
             pad_frames = int(pad * sr)
             lo = max(0, start_frame - pad_frames)
             hi = min(total_samples, end_frame + pad_frames)
 
             if seg.enhanced_audio is not None:
-                core = seg.enhanced_audio
+                seg_start_frame = int(seg.start * sr)
+                seg_end_frame = seg_start_frame + len(seg.enhanced_audio)
+                if start_frame < seg_start_frame or end_frame > seg_end_frame:
+                    core = np.concatenate([
+                        audio.waveform[start_frame:seg_start_frame],  # pad đầu, từ mixture
+                        seg.enhanced_audio,                            # lõi đã tách, nguyên vẹn
+                        audio.waveform[seg_end_frame:end_frame],       # pad cuối, từ mixture
+                    ])
+                else:
+                    core = seg.enhanced_audio
                 if pad > 0:
                     # Pad from the mixture: the separated track only covers the
                     # segment, and its neighbours belong to the other speaker
@@ -234,7 +264,7 @@ class ASRService:
             # Transcribe only the segment, not the padding.
             dummy_vads.append([{"start": lead, "end": min(lead + core_len, len(audio_16k) / 16000)}])
             chunk_indices.append(seg.index)
-
+            word_offsets.append(lo / sr)
         if not valid_segments:
             return []
 
@@ -316,8 +346,8 @@ class ASRService:
 
             if enable_word_timestamps and words:
                 for w in words:
-                    w["start"] += seg.start
-                    w["end"] += seg.start
+                    w["start"] += word_offsets[i]
+                    w["end"] += word_offsets[i]
 
             results.append(TranscriptSegment(
                 index=seg.index,
