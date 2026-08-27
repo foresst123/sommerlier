@@ -246,8 +246,8 @@ class ASRService:
                         f"{post['rms']:.4f} (x{gain:.2f}) peak {post['peak']:.3f}")
 
             core_len = (end_frame - start_frame) / sr
-            if core_len * 16000 < 160:
-                if self.logger: self.logger.warning(f"Segment {seg.index} too short ({core_len:.3f}s), skipping")
+            if (seg.end - seg.start) * 16000 < 160:
+                if self.logger: self.logger.warning(f"Segment {seg.index} too short ({seg.end - seg.start:.3f}s), skipping")
                 continue
 
             # Only whisperx honours an explicit VAD range, so only it can be
