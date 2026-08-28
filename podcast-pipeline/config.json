@@ -135,11 +135,11 @@
                 "whisper": {
                     "model_size": "large-v3",
                     "compute_type": "bfloat16",
-                    "batch_size": 48
+                    "batch_size": 32
                 },
                 "phowhisper": {
                     "compute_type": "bfloat16",
-                    "batch_size": 48
+                    "batch_size": 32
                 },
                 "qwen3": {
                     "batch_size": 24,
@@ -147,7 +147,7 @@
                     "torch_dtype": "bfloat16"
                 },
                 "diarizen": {
-                    "batch_size": 64,
+                    "batch_size": 32,
                     "seg_duration": 16,
                     "segmentation_step": 0.5,
                     "apply_median_filtering": false,
