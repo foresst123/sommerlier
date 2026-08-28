@@ -171,7 +171,7 @@
                     "overlap": 0.25
                 },
                 "refinement": {
-                    "model_name": "Qwen/Qwen3.5-9B",
+                    "model_name": "Qwen/Qwen3-8B",
                     "batch_size": 64,
                     "torch_dtype": "bfloat16",
                     "prefix_cache": false
