@@ -93,6 +93,17 @@ def _rows(segments, original, processed, budget):
             "note": seg.get("note") or "",
             "audio_src": _data_uri(original.get(idx), budget),
             "audio_out": _data_uri(processed.get(idx), budget),
+            # Two things a reviewer cannot hear their way to reliably: whether
+            # the detector found music under the speech, and whether an overlap
+            # was left unseparated so the audio still holds two voices.
+            "music": bool(seg.get("has_music")),
+            "demucs": bool(seg.get("demucs")),
+            "unseparated": [
+                {"start": float(u.get("start", 0.0)), "end": float(u.get("end", 0.0)),
+                 "reason": str(u.get("reason", ""))}
+                for u in (seg.get("unseparated") or [])
+            ],
+            "tse": bool(seg.get("tse")),
         })
     return out
 
@@ -139,13 +150,29 @@ PAGE = """<!doctype html>
   button:hover { filter: brightness(1.08); }
   #status { color: var(--ok); font-size: 13px; min-width: 12ch; }
   .wrap { overflow-x: auto; }
-  table { border-collapse: collapse; width: 100%; min-width: 1100px; }
+  table { border-collapse: collapse; width: 100%; min-width: 1280px; }
+  /* State reads at a glance from shape and colour together, so the two flag
+     columns can be scanned without stopping to read every cell. */
+  .flag {
+    display: inline-block; white-space: nowrap; font-size: 12px;
+    padding: 2px 7px; border-radius: 10px; border: 1px solid transparent;
+  }
+  .flag.none { color: var(--muted); }
+  .flag.ok   { color: var(--ok); border-color: var(--ok); }
+  .flag.warn { color: #b45309; border-color: #b45309; }
+  .flag.bad  { color: #dc2626; border-color: #dc2626; font-weight: 600; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .flag.warn { color: #d99331; border-color: #d99331; }
+    :root:not([data-theme="light"]) .flag.bad  { color: #f87171; border-color: #f87171; }
+  }
+  :root[data-theme="dark"] .flag.warn { color: #d99331; border-color: #d99331; }
+  :root[data-theme="dark"] .flag.bad  { color: #f87171; border-color: #f87171; }
   th, td {
     border-bottom: 1px solid var(--line); padding: 8px 10px;
     vertical-align: top; text-align: left;
   }
   th {
-    position: sticky; top: 57px; background: var(--bg); z-index: 5;
+    position: sticky; top: 0px; background: var(--bg); z-index: 5;
     font-size: 12px; text-transform: uppercase; letter-spacing: .04em;
     color: var(--muted); font-weight: 600;
   }
@@ -160,7 +187,7 @@ PAGE = """<!doctype html>
   textarea {
     width: 100%; min-width: 210px; font: inherit; padding: 6px 8px;
     border: 1px solid var(--line); border-radius: 5px; resize: vertical;
-    background: var(--edit-bg); color: var(--fg);
+    background: var(--edit-bg); color: var(--fg); min-height: 200px;
   }
   textarea.note { background: var(--bg); min-height: 42px; }
   td.final { font-size: 13px; }
@@ -212,6 +239,8 @@ PAGE = """<!doctype html>
       <th>Thời gian</th>
       <th>Audio gốc</th>
       <th>Sau xử lý</th>
+      <th>Nhạc</th>
+      <th>Tách</th>
       <th>3 bản ASR</th>
       <th>Text đã chọn</th>
       <th>Sửa</th>
@@ -248,6 +277,39 @@ function playCell(i, which, has) {
     : `<span class="no-audio">không có</span>`;
 }
 
+// A separated segment never reaches the music detector, so "no music" would be
+// a claim the pipeline never made. Say "chưa xét" instead of implying clean.
+function musicCell(r) {
+  if (r.tse) return `<span class="flag none" title="Đoạn đã tách không qua bộ dò nhạc">–</span>`;
+  if (!r.music) return `<span class="flag none">–</span>`;
+  return r.demucs
+    ? `<span class="flag ok" title="Phát hiện nhạc, đã tách nhạc bằng Demucs">♪ đã lọc</span>`
+    : `<span class="flag warn" title="Phát hiện nhạc nhưng chưa lọc">♪ còn nhạc</span>`;
+}
+
+// Reasons come from the separation report; a reviewer needs to know the audio
+// still holds two voices before trusting what they hear in it.
+const SEP_LABEL = {
+  multi_speaker: "còn 2 giọng",
+  no_enroll: "thiếu mẫu giọng",
+  empty_track: "tách ra rỗng",
+  not_a_fail: "không chắc đúng người",
+  qc_sim: "độ khớp thấp",
+  unscorable: "không chấm được",
+};
+
+function sepCell(r) {
+  const u = r.unseparated || [];
+  if (!u.length) {
+    return r.tse
+      ? `<span class="flag ok" title="Đã tách chồng tiếng thành công">✓ đã tách</span>`
+      : `<span class="flag none">–</span>`;
+  }
+  const total = u.reduce((a, x) => a + (x.end - x.start), 0);
+  const reasons = [...new Set(u.map(x => SEP_LABEL[x.reason] || x.reason))].join(", ");
+  return `<span class="flag bad" title="${esc(reasons)}">✗ ${total.toFixed(1)}s</span>`;
+}
+
 DATA.forEach((r, i) => {
   const tr = document.createElement("tr");
   tr.dataset.i = i;
@@ -256,6 +318,8 @@ DATA.forEach((r, i) => {
     <td class="time"><b>${clock(r.start)}</b>${clock(r.end)}<br>${(r.end - r.start).toFixed(2)}s</td>
     <td>${playCell(i, "src", !!r.audio_src)}</td>
     <td>${playCell(i, "out", !!r.audio_out)}</td>
+      <td>${musicCell(r)}</td>
+      <td>${sepCell(r)}</td>
     <td class="asr">
       <div><span>Whisper</span>${esc(r.whisper)}</div>
       <div><span>PhoWhisper</span>${esc(r.phowhisper)}</div>
@@ -498,8 +562,13 @@ def build_review_page(output_dir: str, target: str = None, max_mb: int = None,
     if logger:
         size_mb = os.path.getsize(target) / (1024 * 1024)
         clips = sum(bool(r["audio_src"]) + bool(r["audio_out"]) for r in rows)
+        flagged = sum(1 for r in rows if r["unseparated"])
+        music = sum(1 for r in rows if r["music"] and not r["demucs"])
         msg = (f"Review page: {len(rows)} segment(s), {clips} clip(s), "
                f"{size_mb:.1f} MB -> {target}")
+        if flagged or music:
+            msg += (f"  ({flagged} segment(s) with unseparated overlap, "
+                    f"{music} with music left in)")
         if budget[0] <= 0:
             msg += "  (size cap reached; later clips were left out)"
         logger.info(msg)

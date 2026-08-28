@@ -12,7 +12,7 @@ from utils.audio_normalize import normalize_for_asr, remove_dc, measure
 # Segments shorter than this are padded with surrounding audio before ASR.
 CONTEXT_PAD_BELOW = 2.0
 CONTEXT_PAD_SECONDS = 2.0
-EDGE_PAD_SECONDS = 0.05
+EDGE_PAD_SECONDS = 0.02
 class ASRService:
     """Coordinates MoE ASR models and ROVER ensemble."""
     
@@ -363,6 +363,14 @@ class ASRService:
                 language=lang or self.language,
                 demucs=seg.demucs,
                 tse=seg.tse,
+                has_music=getattr(seg, "has_music", False),
+                # Carried through so the review page can warn that these spans
+                # still hold two voices; without it the reviewer has no way to
+                # tell a clean segment from one separation gave up on.
+                unseparated=[
+                    {"start": float(a), "end": float(b), "reason": str(r)}
+                    for a, b, r, _detail in getattr(seg, "tse_failed_spans", []) or []
+                ] or None,
                 words=words if enable_word_timestamps else None
             ))
 

@@ -133,3 +133,58 @@ def test_the_separator_dump_is_scoped_to_one_file():
         "dump_dir must be built from output_dir, which is unique per file")
     assert "dirname(audio_path)" not in target, (
         "every file in a batch shares the audio's parent directory")
+
+
+# --- review page flag columns ----------------------------------------------
+
+def _review_module():
+    import importlib.util
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(root, "tools", "make_review_page.py")
+    spec = importlib.util.spec_from_file_location("make_review_page", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _flag_rows():
+    mod = _review_module()
+    segments = [
+        {"index": "1", "start": 0.0, "end": 1.0, "speaker": "1", "text": "a"},
+        {"index": "2", "start": 1.0, "end": 2.0, "speaker": "1", "text": "b",
+         "has_music": True, "demucs": False},
+        {"index": "3", "start": 2.0, "end": 3.0, "speaker": "1", "text": "c",
+         "has_music": True, "demucs": True},
+        {"index": "4", "start": 3.0, "end": 6.0, "speaker": "2", "text": "d", "tse": True,
+         "unseparated": [{"start": 3.0, "end": 4.2, "reason": "multi_speaker"}]},
+    ]
+    return mod, mod._rows(segments, {}, {}, [10 ** 9])
+
+
+def test_music_detection_is_reported_separately_from_removal():
+    """`demucs` says the audio was replaced; `has_music` says it was detected."""
+    _, rows = _flag_rows()
+    assert (rows[1]["music"], rows[1]["demucs"]) == (True, False)
+    assert (rows[2]["music"], rows[2]["demucs"]) == (True, True)
+
+
+def test_unseparated_spans_reach_the_page():
+    _, rows = _flag_rows()
+    assert rows[3]["unseparated"][0]["reason"] == "multi_speaker"
+    assert rows[0]["unseparated"] == []
+
+
+def test_a_transcript_without_the_new_fields_still_renders():
+    """Runs recorded before these flags existed must not crash the page."""
+    _, rows = _flag_rows()
+    assert rows[0]["music"] is False
+    assert rows[0]["unseparated"] == []
+
+
+def test_every_header_has_exactly_one_cell():
+    """A missing cell shifts every column after it, silently."""
+    import re
+    mod = _review_module()
+    headers = len(re.findall(r"<th>", mod.PAGE))
+    template = re.search(r"tr\.innerHTML = `(.*?)`;", mod.PAGE, re.S).group(1)
+    assert headers == len(re.findall(r"<td", template))

@@ -28,6 +28,10 @@ class MusicService:
         for seg in tqdm(segments, desc="[PANNs+Demucs]", leave=True):
             # Check if it was already processed by TSE, which also inherently isolates voice
             if seg.tse:
+                # Separated audio is a resynthesis, so the detector's verdict on
+                # it would say nothing about the original recording. Left unset
+                # rather than guessed: `has_music` stays False meaning "not
+                # checked", which is what the review page shows.
                 seg.demucs = False
                 continue
                 
@@ -36,7 +40,8 @@ class MusicService:
             raw_audio = waveform[start_frame:end_frame]
             
             has_music, prob = self.panns.detect_music(raw_audio, sr)
-            
+            seg.has_music = bool(has_music)
+
             if has_music:
                 if self.full_vocals is not None:
                     target_len = len(raw_audio)
