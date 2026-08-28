@@ -235,7 +235,10 @@ def diarize(pipeline, audio_path, speaker_bounds=None):
                 
         return segments
     except Exception as e:
-        return f"[ERROR] {e}"
+        import traceback
+        cause = e.__cause__ or e.__context__ or e
+        return (f"[ERROR] {type(cause).__name__}: {cause}\n"
+                + "".join(traceback.format_exception(type(cause), cause, cause.__traceback__)))
 
 
 def main():
