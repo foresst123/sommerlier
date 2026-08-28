@@ -134,20 +134,20 @@
                 },
                 "whisper": {
                     "model_size": "large-v3",
-                    "compute_type": "bfloat16",
-                    "batch_size": 64
+                    "compute_type": "float32",
+                    "batch_size": 128
                 },
                 "phowhisper": {
-                    "compute_type": "bfloat16",
-                    "batch_size": 64
+                    "compute_type": "float32",
+                    "batch_size": 128
                 },
                 "qwen3": {
-                    "batch_size": 64,
+                    "batch_size": 128,
                     "use_flash_attention": false,
-                    "torch_dtype": "bfloat16"
+                    "torch_dtype": "float32"
                 },
                 "diarizen": {
-                    "batch_size": 32,
+                    "batch_size": 64,
                     "seg_duration": 16,
                     "segmentation_step": 0.5,
                     "apply_median_filtering": false,
@@ -163,21 +163,21 @@
                     "stitch_edge_pad": 0.2
                 },
                 "sidon": {
-                    "num_steps": 60,
+                    "num_steps": 100,
                     "spectral_restore": false
                 },
                 "demucs": {
                     "segment": 30,
-                    "overlap": 0.25
+                    "overlap": 0.2
                 },
                 "refinement": {
                     "model_name": "Qwen/Qwen3-8B",
-                    "batch_size": 64,
+                    "batch_size": 128,
                     "torch_dtype": "bfloat16",
                     "prefix_cache": false
                 }
             },
-            "allow_tf32": true,
+            "allow_tf32": false,
             "batch": {
                 "max_hours_per_run": 20.0
             }
