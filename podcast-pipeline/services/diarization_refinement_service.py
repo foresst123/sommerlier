@@ -5,14 +5,14 @@ from algorithms.asr.hallucination import diacritic_ratio, foreign_script_ratio
 from algorithms.asr.rover import normalize_token
 from schemas.transcript import TranscriptSegment
 import torch
-
+import re
 # Hoisted out of the per-segment loop: this is ~1200 constant tokens that would
 # otherwise be rebuilt and re-tokenized for every single segment.
 # Below this word-level similarity to every input transcript, the refinement is
 # discarded. 0.5 keeps genuine cleanups (punctuation, a corrected word) while
 # rejecting output that came from somewhere else.
 ACCEPT_SIMILARITY = 0.5
-
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 FUSION_SYSTEM_PROMPT = (
     "Bạn hợp nhất 3 bản transcript ASR tiếng Việt của CÙNG một đoạn audio thành "
@@ -593,7 +593,8 @@ class DiarizationRefinementService:
             tokenizer.apply_chat_template(
                 [{"role": "system", "content": system_prompt},
                  {"role": "user", "content": user_msg}],
-                tokenize=False, add_generation_prompt=True
+                tokenize=False, add_generation_prompt=True,
+                 enable_thinking=False,
             )
             for _, user_msg in batch
         ]
@@ -601,12 +602,12 @@ class DiarizationRefinementService:
         try:
             inputs = tokenizer(texts, return_tensors="pt", padding=True).to(self.model.device)
             gen_kwargs = dict(
-                max_new_tokens=150,
+                max_new_tokens=512,
                 do_sample=False,
                 temperature=None,
                 top_p=None,
                 top_k=None,
-                repetition_penalty=1.2,
+                repetition_penalty=1.0,
                 pad_token_id=tokenizer.pad_token_id,
             )
 
@@ -629,7 +630,8 @@ class DiarizationRefinementService:
             )
             count = 0
             for (seg, _), refined_text in zip(batch, decoded):
-                refined_text = refined_text.strip()
+                refined_text = _THINK_RE.sub("", refined_text)
+                refined_text = refined_text.split("</think>")[-1].strip()
                 if not refined_text:
                     continue
                 if not self._accept(seg, refined_text):
