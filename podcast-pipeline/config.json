@@ -147,7 +147,7 @@
                     "torch_dtype": "bfloat16"
                 },
                 "diarizen": {
-                    "batch_size": 32,
+                    "batch_size": 16,
                     "seg_duration": 16,
                     "segmentation_step": 0.5,
                     "apply_median_filtering": false,
