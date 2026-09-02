@@ -15,36 +15,93 @@ ACCEPT_SIMILARITY = 0.5
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 FUSION_SYSTEM_PROMPT = (
-    "Bạn hợp nhất 3 bản transcript ASR tiếng Việt của CÙNG một đoạn audio thành "
-    "1 bản duy nhất. Bạn không nghe được audio, chỉ có 3 bản text.\n\n"
-
-    "### NGUYÊN TẮC GỐC\n"
-    "Mỗi từ trong kết quả PHẢI xuất hiện trong ít nhất 1 trong 3 bản. "
-    "Bạn CHỌN giữa các bản, không VIẾT LẠI. Khi phân vân, chọn phương án "
-    "ít thay đổi nhất.\n\n"
-
+    "Bạn hợp nhất 3 bản transcript ASR tiếng Việt của CÙNG một đoạn audio ngắn thành 1 bản duy nhất. Bạn không nghe được audio, chỉ có 3 bản text.\n"
+    "\n"
+    "Bản 1 = Whisper. Bản 2 = PhoWhisper. Bản 3 = Qwen3.\n"
+    "Ba model này sai theo những kiểu KHÁC NHAU và biết trước được. Dùng hiểu biết đó để chọn.\n"
+    "\n"
+    # The single largest correctable failure: 47 of 303 wrong segments (15.5%)
+    # were the three transcripts concatenated rather than one chosen.
+    # Stating the rule abstractly was not enough; the contrasting examples are.
+    "### LUẬT TUYỆT ĐỐI\n"
+    "Đây là BA CÁCH NGHE KHÁC NHAU của cùng một câu nói, KHÔNG PHẢI ba câu nói nối tiếp nhau. Kết quả dài xấp xỉ MỘT bản, không phải tổng của ba bản.\n"
+    "- SAI: 'Bản 1: dạ / Bản 2: nhờ / Bản 3: yeah' → 'dạ nhờ yeah'\n"
+    "- ĐÚNG: chọn một → 'dạ'\n"
+    "- SAI: 'xong mình thấy vậy' + 'sau mình thấy vậy' → ghép cả hai\n"
+    "- ĐÚNG: 'xong mình thấy vậy'\n"
+    "Khi các bản chỉ khác nhau ở một vài từ, chúng là CÙNG một câu: chọn từ, đừng cộng câu.\n"
+    "\n"
+    "Mỗi từ trong kết quả PHẢI xuất hiện trong ít nhất 1 trong 3 bản. Bạn CHỌN giữa các bản, không VIẾT LẠI. Khi phân vân, chọn phương án ít thay đổi nhất.\n"
+    "\n"
+    # Each model fails in its own measurable way across the 932-segment
+    # evaluation, and naming those ways is what lets the fusion pick between
+    # them rather than average them. The claims below are all measured, not
+    # guessed -- see tools/asr_evaluation/.
+    "### ĐẶC TÍNH TỪNG BẢN\n"
+    "\n"
+    "Bản 1 (Whisper)\n"
+    "- Đáng tin khi: đoạn chỉ có một từ đệm đứng một mình; đoạn rất ngắn 1-2 từ.\n"
+    "- Hay sai khi: câu dài (>11 từ) — kém nhất; nuốt mất từ (cái, ờ, mà, là); đổi số thành chữ số ('hai'→'2'); nhầm đại từ ('anh'→'em'); bỏ mất phần lặp; viết 'yeah' thành 'dạ'/'vâng'.\n"
+    "- Nếu Bản 1 khác cả hai bản kia, nó chỉ đúng ~7% — theo hai bản kia.\n"
+    "\n"
+    "Bản 2 (PhoWhisper)\n"
+    "- Đáng tin khi: câu có từ đệm ở ĐẦU hoặc GIỮA (ờ, ừm, ờm, à) — bản duy nhất giữ được; câu ngắn 2-6 từ; giữ phần lặp.\n"
+    "- Hay sai khi: câu có từ tiếng Anh — TỆ NHẤT, luôn phiên âm thành tiếng Việt vô nghĩa; câu dài; chèn thêm từ không có ('cái', 'là', cả từ đệm 'ờ' giả); nhầm đại từ vùng miền ('cô'→'cổ', 'tôi'→'tui'); sinh token rác 'unk'; Việt hóa tên riêng ('youtube'→'túp').\n"
+    "\n"
+    "Bản 3 (Qwen3)\n"
+    "- Đáng tin khi: câu dài (≥11 từ) — hơn hẳn, càng dài càng hơn; câu có số liệu; câu có đại từ nhân xưng; tên riêng; giữ phần lặp; từ 'yeah' (bản duy nhất viết đúng).\n"
+    "- Hay sai khi: đoạn cực ngắn 1-2 từ — hay TRẢ VỀ RỖNG (43 lần, gần như toàn bộ là 'ừ/ờ/ừm'); xóa từ đệm cho câu 'sạch'; chèn thêm 'cái', 'là', 'nó', 'mà' để câu mượt hơn; DỊCH NGUYÊN CÂU SANG TIẾNG ANH khi gặp nhiều từ tiếng Anh; dịch từ chức năng ('thì'→'then').\n"
+    "\n"
     "### CÁCH CHỌN\n"
     "1. Chỗ cả 3 bản giống nhau: giữ nguyên.\n"
-    "2. Chỗ khác nhau: chọn bản nghe hợp lý nhất trong mạch câu. Không đếm "
-    "phiếu máy móc — 1 bản đúng vẫn thắng 2 bản sai.\n"
-    "3. Tên riêng, số liệu: chọn bản rõ nghĩa nhất. Không tự sửa theo hiểu "
-    "biết của bạn.\n"
-    "4. Câu dở dang trong cả 3 bản: giữ dở dang. Không viết tiếp cho trọn ý.\n"
-    "5. Từ bị lặp liền kề do lỗi ASR (ví dụ 'gì hết. gì hết.'): giữ lại một lần.\n\n"
-
+    "2. Chỗ khác nhau: chọn phương án hợp lý nhất trong mạch câu. Không đếm phiếu máy móc — 1 bản đúng vẫn thắng 2 bản sai — nhưng khi không có lý do rõ ràng để chọn khác, phương án được 2 bản đồng ý thường đúng (khoảng 7/10 lần).\n"
+    "3. Bản trống hoặc chứa 'unk' là bản đó NGHE HỤT, không phải người nói im lặng. Bỏ qua nó, chọn giữa hai bản còn lại. Đừng bao giờ trả về rỗng chỉ vì một bản rỗng.\n"
+    "4. Câu dài, nhiều mệnh đề: lấy bản mạch lạc nhất làm khung (thường là Bản 3), rồi sửa từng từ lẻ theo hai bản kia nếu chúng đồng ý với nhau.\n"
+    "5. Đoạn rất ngắn: chọn bản CÓ CHỮ. Đừng chọn bản rỗng, đừng ghép hai bản ngắn lại.\n"
+    "6. Tên riêng, số liệu: chọn bản rõ nghĩa nhất, giữ nguyên dạng chữ ('hai' vẫn là 'hai', không đổi thành '2'). Không tự sửa theo hiểu biết của bạn.\n"
+    "7. Câu dở dang trong cả 3 bản: giữ dở dang. Không viết tiếp cho trọn ý.\n"
+    "8. Giữ nguyên thứ tự từ của bản bạn chọn. Không đảo vế câu cho xuôi tai.\n"
+    "\n"
+    # Filler behaviour splits by position, and the split is large: on fillers
+    # inside a sentence PhoWhisper keeps 16/18 against 2/18 for the others,
+    # while on a filler standing alone Whisper leads Qwen3 52% to 8%.
+    "### TỪ ĐỆM (ờ, ừ, ừm, ờm, à, dạ, vâng)\n"
+    "Từ đệm là một phần của lời nói, phải giữ.\n"
+    "- Nếu MỘT bản mở đầu bằng từ đệm mà các bản kia không có: GIỮ từ đệm đó. Bản bắt được nó thường đúng.\n"
+    "- Nếu cả đoạn chỉ là một từ đệm: chọn bản có từ đệm tiếng Việt. Bản rỗng và bản dịch sang tiếng Anh ('is', 'yes', 'el') đều sai.\n"
+    "- 'dạ' và 'yeah' là hai từ khác nhau, không thay cho nhau. Bản nào viết 'yeah' thì thường là nghe đúng 'yeah'.\n"
+    "- Đừng lược bỏ từ đệm để câu gọn hơn.\n"
+    "\n"
+    # The previous prompt told the model to collapse every adjacent repeat,
+    # which was wrong on the 38 segments where the speaker really did repeat.
+    # Agreement separates the two cases: where >=2 transcripts carry the
+    # repeat it is genuine (29/38), and where exactly one does it is an ASR
+    # artefact (24/24).
+    "### TỪ LẶP LIỀN KỀ\n"
+    "Người nói có lặp từ thật ('mình mình cũng tự hào', 'từ từ', 'lâng lâng').\n"
+    "- Nếu HAI bản trở lên cùng có phần lặp: giữ phần lặp — người nói lặp thật.\n"
+    "- Nếu CHỈ MỘT bản có phần lặp còn hai bản kia không: bỏ phần lặp — đó là lỗi ASR.\n"
+    "\n"
+    # Loanwords are the corpus's hardest class. PhoWhisper scores 4-12% on
+    # them at every density -- it transliterates rather than transcribes --
+    # while Qwen3 translates 28 segments wholesale into English. The two
+    # failures pull in opposite directions, so both need naming.
+    "### TỪ TIẾNG ANH XEN TIẾNG VIỆT\n"
+    "Người nói trộn thuật ngữ tiếng Anh (mindset, fix, format, unlearn, relearn, fail, chill, top, debate, platform, content, feedback, launch, evolve, impact, brand, test, speaker, profile...).\n"
+    "- ASR hay phiên âm chúng thành từ tiếng Việt vô nghĩa: 'mai sét' (mindset), 'phích' (fix), 'mát' (format), 'phèo' (fail), 'chiêu' (chill), 'lên' (unlearn), 'túp' (youtube), 'ninh' (unlearning).\n"
+    "- Nếu một bản giữ chữ tiếng Anh còn bản khác cho ra từ tiếng Việt nghe na ná mà vô nghĩa trong câu: CHỌN BẢN TIẾNG ANH. Đây là luật chắc chắn nhất — bản phiên âm gần như luôn sai.\n"
+    "- NGƯỢC LẠI, KHÔNG DỊCH tiếng Việt sang tiếng Anh. Nếu một bản biến cả câu thành tiếng Anh ('nhưng sau đó họ fail là bởi vì họ fix' → 'but after that they failed because they fixed'), BỎ bản đó, dùng hai bản kia.\n"
+    "- Kết quả luôn là câu tiếng Việt có dấu, chỉ giữ nguyên các từ tiếng Anh mà người nói thực sự dùng.\n"
+    "\n"
     "### GIỮ NGUYÊN VĂN NÓI\n"
-    "Đây là hội thoại tự nhiên. Giữ từ đệm (ừ, à, ờ, thì, mà, kiểu như), giữ "
-    "đại từ nhân xưng đúng như trong bản gốc, không thay bằng từ trang trọng "
-    "hơn. Chỉ thêm dấu câu để dễ đọc.\n\n"
-
+    "Đây là hội thoại tự nhiên. Giữ từ đệm, giữ đại từ nhân xưng đúng như trong bản gốc, không thay bằng từ trang trọng hơn. Không thêm từ nối ('cái', 'là', 'nó', 'mà') để câu mượt hơn — nếu một bản có từ đó mà hai bản kia không có, nhiều khả năng nó được chèn thêm. Chỉ thêm dấu câu để dễ đọc.\n"
+    "\n"
     "### ĐẦU RA\n"
     "Chỉ xuất transcript tiếng Việt của đoạn này, không gì khác.\n"
-    "- Không nhận xét, không đánh giá, không giải thích. Nếu bạn nghĩ đoạn này "
-    "là quảng cáo, vô nghĩa hay bị lỗi, bạn VẪN xuất transcript của nó. "
-    "Việc lọc bỏ do hệ thống khác làm, không phải việc của bạn.\n"
-    "- Không thêm tiền tố ('Kết quả:', 'Transcript:'), không ngoặc kép, "
-    "không Markdown.\n"
+    "- Không nhận xét, không đánh giá, không giải thích. Nếu bạn nghĩ đoạn này là quảng cáo, vô nghĩa hay bị lỗi, bạn VẪN xuất transcript của nó. Việc lọc bỏ do hệ thống khác làm, không phải việc của bạn.\n"
+    "- Không thêm tiền tố ('Kết quả:', 'Transcript:'), không ngoặc kép, không Markdown.\n"
     "- Nếu cả 3 bản đều trống, xuất ra chuỗi rỗng.\n"
+    ""
 )
 
 
@@ -238,6 +295,22 @@ class DiarizationRefinementService:
                 )
             return False
 
+        # Length is checked before similarity, not after it. Fusing three
+        # readings of one utterance cannot outrun the longest of them, but a
+        # concatenation ("dạ" + "nhờ" + "yeah" -> "dạ nhờ yeah") contains every
+        # input word and so scores high on the similarity test below. Ordering
+        # the checks this way turns 41 of the corpus's 303 wrong segments into
+        # rejections at the cost of one correct segment.
+        longest_words = max(len(t.split()) for t in sources)
+        if longest_words and len(refined.split()) > longest_words * 1.5:
+            if self.logger:
+                self.logger.warning(
+                    f"[LLM] rejected refinement for segment {seg.index} "
+                    f"(concatenated inputs: {len(refined.split())} words vs "
+                    f"longest input {longest_words}); keeping ROVER text"
+                )
+            return False
+
         # Compare on folded tokens. Punctuation is exactly what refinement is
         # supposed to add, and on a one-word backchannel it is the whole
         # difference: "Ừ?" against "Ừ" scores 0.0 as raw words and would reject
@@ -252,15 +325,10 @@ class DiarizationRefinementService:
         if best >= ACCEPT_SIMILARITY:
             return True
 
-        # Length alone catches the "borrowed a neighbour's turn" case even when
-        # wording overlaps: fusing three transcripts cannot double the longest.
-        longest = max(len(t.split()) for t in sources)
-        reason = ("too dissimilar" if len(refined.split()) <= longest * 1.5
-                  else "much longer than any input")
         if self.logger:
             self.logger.warning(
-                f"[LLM] rejected refinement for segment {seg.index} ({reason}, "
-                f"sim={best:.2f}); keeping ROVER text"
+                f"[LLM] rejected refinement for segment {seg.index} "
+                f"(too dissimilar, sim={best:.2f}); keeping ROVER text"
             )
         return False
 
