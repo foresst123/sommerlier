@@ -88,3 +88,24 @@ def test_restoration_preserves_the_ratio_between_two_chunks():
 
     assert abs(without - 1.0) < 0.2, "unrestored chunks land on one scale"
     assert abs(with_fix - expected) / expected < 0.1
+
+def test_the_worker_does_not_renormalise_what_infer_already_scaled():
+    """sidon_infer returns each chunk multiplied back by (max_val / 0.9), so the
+    tracks already sit on the mixture's scale when the worker receives them.
+
+    The worker used to divide both tracks by their joint peak and scale that to
+    0.9 a second time. Dividing by a *shared* peak does preserve the ratio
+    between the two speakers -- which is what the comment claimed -- but it
+    discards the ratio between the pair and the mixture, and nothing downstream
+    puts it back: `restore_track` only resamples and pads. Across the 22 windows
+    of one run every pair came back at a peak of exactly 0.9000, standing 3.5% to
+    56% above the mixture's own peak, and rms(A+B)/rms(mix) ran 1.08 to 1.71
+    where separation should leave it near 1. `match_splice_level` then spent its
+    +/-3x budget absorbing that factor at every join instead of correcting the
+    real level step it exists for.
+    """
+    src = _source("sidon_worker.py")
+    assert "global_max" not in src, (
+        "the worker must not renormalise the tracks; sidon_infer already returns "
+        "them on the mixture's scale")
+    assert "/ global_max * 0.9" not in src

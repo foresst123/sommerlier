@@ -105,14 +105,22 @@ def serve():
                     track_1 = est_sources[0].cpu().numpy()
                     track_2 = est_sources[1].cpu().numpy()
                     
-                    # Print original peak amplitude for debugging ECAPA issues
+                    # The tracks are left on the scale run_separation_chunked
+                    # returned them at, which is the scale of the mixture that
+                    # was handed in -- sidon_infer already multiplies each chunk
+                    # back by (max_val / 0.9) after separating it.
+                    #
+                    # A second normalisation here used to divide both tracks by
+                    # their joint peak and scale to 0.9. That kept the ratio
+                    # between the two speakers, but it discarded the ratio
+                    # between the pair and the mixture, which nothing downstream
+                    # restores: across 22 windows of one run every pair came back
+                    # at a peak of exactly 0.9000, sitting 3.5-56% above the
+                    # mixture's own peak, and rms(A+B)/rms(mix) landed between
+                    # 1.08 and 1.71 where it should be ~1. match_splice_level
+                    # then had to absorb that arbitrary factor at every join.
                     raw_peak = max(np.abs(track_1).max(), np.abs(track_2).max())
                     print(f"[SidonWorker] Raw output peak amplitude = {raw_peak:.6f}", file=sys.stderr)
-                    
-                    # Joint normalization to preserve energy correlation between speakers
-                    global_max = max(raw_peak, 1e-6)
-                    track_1 = np.clip(track_1 / global_max * 0.9, -1.0, 1.0)
-                    track_2 = np.clip(track_2 / global_max * 0.9, -1.0, 1.0)
                 else:
                     raise ValueError(f"Unexpected DialogueSidon output shape: {est_sources.shape}")
                 
