@@ -57,3 +57,7 @@ new_data_run/
 # A/B listening samples generated to check the spectral EQ by ear. Audio,
 # regenerated on demand from the run output -- never source.
 podcast-pipeline/eq_samples/
+
+# Same idea for the inpainting comparison: tools/try_inpaint.py --dump writes
+# mixture/sidon/bridge per span so the two methods can be judged by ear.
+podcast-pipeline/inpaint_samples/
