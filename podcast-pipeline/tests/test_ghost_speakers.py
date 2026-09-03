@@ -129,3 +129,59 @@ def test_the_hull_is_used_when_no_overlaps_are_given():
     by_spk = {"1": [(0.0, 100.0)], "2": [(10.0, 11.0)], "0": [(50.0, 51.0)]}
     built, reason = svc._build_window(by_spk, "1", "2", 10.0, 60.0, 200.0)
     assert reason == "multi_speaker"
+
+
+# --- overlaps that need no separation still have to be recorded -------------
+
+def test_a_speaker_overlapping_themselves_is_recorded_not_dropped():
+    """Merging a ghost into a neighbour turns its overlaps into same-speaker ones.
+
+    There is nothing to separate -- one voice is already one source -- but the
+    invariant is that every overlap lands in tse_spans or tse_failed_spans.
+    Before this, _group_jobs skipped the pair with a bare `continue`.
+    """
+    import numpy as np
+
+    from schemas.audio import AudioData
+    from schemas.segment import Segment
+    import services.separation_service as sep
+
+    class Stub:
+        def separate_two_speakers(self, mixture, *a, **k):
+            n = len(mixture)
+            return (np.zeros(n), np.zeros(n), 0.6, 0.6,
+                    {"anchor_self": 0.6, "anchor_other": 0.1, "other_rms": 0.1})
+
+        def reset_speakers(self):
+            pass
+
+    segments = [Segment(index="00001", start=0.0, end=5.0, speaker="A"),
+                Segment(index="00002", start=4.0, end=9.0, speaker="A")]
+    service = sep.TargetExtractionService(Stub(), logger=None)
+    audio = AudioData(name="t", waveform=np.zeros(24000 * 10, dtype=np.float32),
+                      sample_rate=24000, duration=10.0, audio_segment=None)
+
+    out = service.process_overlaps(segments, audio, overlap_threshold=0.1)
+    spliced = sum(len(s.tse_spans) for s in out)
+    failed = [f for s in out for f in s.tse_failed_spans]
+    assert spliced + len(failed) == 2, "the overlap vanished from both lists"
+    assert all(f[2] == "same_speaker" for f in failed)
+
+
+def test_fusing_sorts_before_merging():
+    """An unsorted list must not lose entries.
+
+    The merge compares each pair with the last kept one, so out of order it
+    silently drops whatever precedes its predecessor -- losing an overlap
+    rather than failing.
+    """
+    import services.separation_service as sep
+
+    def pair(start, end):
+        return {"overlap_start": start, "overlap_end": end,
+                "overlap_duration": end - start,
+                "seg1": {"speaker": "1"}, "seg2": {"speaker": "2"}}
+
+    fused = sep.TargetExtractionService._fuse_adjacent([pair(5.0, 5.2), pair(1.0, 1.2)])
+    assert len(fused) == 2
+    assert fused[0]["overlap_start"] == 1.0

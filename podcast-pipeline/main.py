@@ -190,6 +190,12 @@ _restore = env_profile.get("models", {}).get("sidon", {}).get("spectral_restore"
 if _restore is not None and "SIDON_SPECTRAL_RESTORE" not in os.environ:
     os.environ["SIDON_SPECTRAL_RESTORE"] = "1" if _restore else "0"
 
+# Enrollment memory is read at import by separation_service, so it is published
+# here with the TSE thresholds rather than at call time.
+_memory = env_profile.get("models", {}).get("tse", {}).get("enrollment_memory")
+if _memory is not None and "TSE_MEMORY" not in os.environ:
+    os.environ["TSE_MEMORY"] = "1" if _memory else "0"
+
 from services.model_loader import ModelLoader
 from services.audio_service import AudioService
 from services.diarization_service import DiarizationService

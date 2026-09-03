@@ -10,6 +10,11 @@ from algorithms.diarization.overlap import detect_overlapping_segments
 from utils.audio_normalize import match_splice_level, safe_limit
 from utils import spectral_restore
 from utils.music_map import MusicMap
+from utils.enrollment_memory import EnrollmentMemory, ENABLED as TSE_MEMORY
+
+# Stand-in for a service constructed without one, so the separation path does
+# not have to branch on its presence.
+_NO_MEMORY = EnrollmentMemory(enabled=False)
 
 # --- Window ---------------------------------------------------------------
 # Sidon processes 20s chunks (CHUNK_SECONDS in sidon_infer.py). Start there and
@@ -65,6 +70,18 @@ TSE_STITCH_GUARD = float(os.environ.get("TSE_STITCH_GUARD", "0.25"))
 
 # --- Job grouping ---------------------------------------------------------
 TSE_JOB_MERGE_GAP = float(os.environ.get("TSE_JOB_MERGE_GAP", "8.0"))
+# Overlaps this close together are treated as one span rather than as a job of
+# several. The stitched window -- the thing that puts both voices in front of
+# the separator in equal measure -- only builds for a single overlap, because
+# its assembled timeline cannot locate two of them at different offsets. So a
+# pair 0.4s apart lost the balancing and fell back to a plain window, where the
+# measured cost is real: across this file the spans whose window held under 40%
+# target audio scored 0.518 similarity against 0.613 for the rest.
+#
+# Merging them instead splices the sliver between the two overlaps as well. That
+# sliver is single-speaker audio the separator handles trivially, and 0.5s of it
+# is a smaller price than separating the pair unbalanced.
+TSE_OVERLAP_FUSE_GAP = float(os.environ.get("TSE_OVERLAP_FUSE_GAP", "0.6"))
 TSE_JOB_MAX_SPAN = float(os.environ.get("TSE_JOB_MAX_SPAN", "120.0"))
 TSE_RETRY_SPLIT = os.environ.get("TSE_RETRY_SPLIT", "1") not in ("0", "false", "False")
 
@@ -102,6 +119,7 @@ REASONS = (
     "already_spliced",  # another job already wrote this span
     "short_track",      # separator returned too few samples
     "empty_track",      # track is silent exactly where the mixture has speech
+    "same_speaker",     # both sides are the same speaker; nothing to separate
 )
 
 
@@ -128,6 +146,10 @@ class TargetExtractionService:
         # means "no reason to avoid anything", which is the right default both
         # when there is no music and when the detector never ran.
         self.music_map = MusicMap()
+        # Speaker labels are per-file, so this is cleared in reset_stats() along
+        # with the counters -- carrying it across files would attach one file's
+        # voice to another file's speaker "1".
+        self.memory = EnrollmentMemory(logger=logger)
 
     # The model is fetched from the loader on use, not captured at
     # construction. PipelineService loads each stage's models when that stage
@@ -156,6 +178,14 @@ class TargetExtractionService:
         self.sims = []
         self.overlap_durations = []
         self.failures = []
+        # Same reason the separator's own cache is cleared below: speaker "1"
+        # in the next file is a different person, and a memory carried across
+        # would enrol them on this file's voice. getattr because a service built
+        # for a narrower purpose -- a test, a script -- has no memory to clear,
+        # and that is not an error.
+        memory = getattr(self, "memory", None)
+        if memory is not None:
+            memory.reset()
         # The separator caches enrollment embeddings under the diarizer's
         # speaker labels, and those restart at "1" for every file.
         reset = getattr(self.tse_model, "reset_speakers", None)
@@ -235,6 +265,9 @@ class TargetExtractionService:
             "spectral_restore": spectral_restore.enabled(),
             # How much of the recording the enrollment search had to avoid. A
             # run with music but an empty map means the sweep did not happen.
+            "enrollment_memory": (self.memory.summary()
+                                  if TSE_MEMORY and getattr(self, "memory", None)
+                                  else None),
             "music_map": {"spans": len(self.music_map),
                           "seconds": round(self.music_map.total, 2)},
             "stats": dict(self.stats),
@@ -720,7 +753,42 @@ class TargetExtractionService:
                 out.append((i, j))
         return out
 
+    @staticmethod
+    def _fuse_adjacent(plist, gap=None):
+        """Join overlaps separated by less than `gap` into single spans.
+
+        Two overlaps half a second apart are one interruption as far as the
+        separator is concerned, but as two entries they make a job of several --
+        and a multi-overlap job cannot use the stitched window, which is what
+        balances the two voices. Fusing them keeps the balancing at the cost of
+        splicing the short single-speaker sliver between them.
+
+        Only the span is widened; the pair keeps its first entry's speakers and
+        segments, which is what the caller reads.
+        """
+        gap = TSE_OVERLAP_FUSE_GAP if gap is None else gap
+        if gap <= 0 or len(plist) < 2:
+            return plist
+
+        # Sorted here as well as by the caller. The merge walks forward and
+        # compares each entry with the last kept one, so an out-of-order list
+        # silently drops whatever precedes its predecessor -- losing an overlap
+        # rather than failing, which is the worst way for this to go wrong.
+        plist = sorted(plist, key=lambda p: p["overlap_start"])
+
+        fused = [dict(plist[0])]
+        for p in plist[1:]:
+            if p["overlap_start"] - fused[-1]["overlap_end"] <= gap:
+                fused[-1]["overlap_end"] = max(fused[-1]["overlap_end"],
+                                               p["overlap_end"])
+                fused[-1]["overlap_duration"] = (fused[-1]["overlap_end"]
+                                                 - fused[-1]["overlap_start"])
+            else:
+                fused.append(dict(p))
+        return fused
+
     def _group_jobs(self, pairs):
+        """Overlaps that need no separation are collected, not dropped."""
         """One separation call per (speaker pair, neighbourhood).
 
         Two overlaps a few seconds apart would otherwise each get their own
@@ -736,9 +804,19 @@ class TargetExtractionService:
         jobs = []
         for spk_pair, plist in buckets.items():
             if len(spk_pair) != 2:
+                # A speaker overlapping themselves. Diarization can produce
+                # this on its own, and merging a ghost speaker into a
+                # neighbour creates more of it. There is nothing to separate --
+                # one voice is already one source -- but it must not vanish
+                # silently: every overlap ends up in tse_spans or
+                # tse_failed_spans, and the caller records these from here.
+                if not hasattr(self, "_same_speaker_pairs"):
+                    self._same_speaker_pairs = []
+                self._same_speaker_pairs.extend(plist)
                 continue
             spk_a, spk_b = sorted(spk_pair)
             plist.sort(key=lambda p: p["overlap_start"])
+            plist = self._fuse_adjacent(plist)
             current = []
             for p in plist:
                 if current:
@@ -813,7 +891,15 @@ class TargetExtractionService:
         by_spk = self._intervals_by_speaker(segments)
         seg_by_index = {s.index: s for s in enhanced}
 
+        self._same_speaker_pairs = []
         queue = self._group_jobs(pairs)
+        # Record them against both segments, the same way a real failure is.
+        by_index = {e.index: e for e in enhanced}
+        for p in self._same_speaker_pairs:
+            for side in ("seg1", "seg2"):
+                self._fail(by_index.get(p[side].get("index")),
+                           p["overlap_start"], p["overlap_end"],
+                           "same_speaker", f"speaker={p[side].get('speaker')}")
         if self.logger:
             self.logger.info(f"[TSE] {len(pairs)} overlap pairs -> {len(queue)} separation jobs")
 
@@ -882,9 +968,16 @@ class TargetExtractionService:
                 probe_a_s = self._to_samples(solo_a, win_lo, sr, n)
                 probe_b_s = self._to_samples(solo_b, win_lo, sr, n)
 
+            # Enrolments grown from earlier well-separated spans of this same
+            # conversation, when the memory is on. The mined clips stay at the
+            # front; this only appends.
+            memory = getattr(self, "memory", None) or _NO_MEMORY
+            enroll_a = memory.extend(spk_a, enrollments[spk_a], sr)
+            enroll_b = memory.extend(spk_b, enrollments[spk_b], sr)
+
             track_A, track_B, sim_A, sim_B, diag = self.tse_model.separate_two_speakers(
                 window_audio,
-                enroll_A=enrollments[spk_a], enroll_B=enrollments[spk_b],
+                enroll_A=enroll_a, enroll_B=enroll_b,
                 sample_rate=sr, id_A=spk_a, id_B=spk_b,
                 probe_A=probe_a_s,
                 probe_B=probe_b_s,
@@ -908,6 +1001,13 @@ class TargetExtractionService:
             for sim in (sim_A, sim_B):
                 if sim is not None:
                     self.sims.append(sim)
+
+            # Offer both tracks to the memory. Only ones well above the QC
+            # threshold are kept, so a mis-assigned track cannot teach a speaker
+            # its own mistake. Offered after the spectral correction because
+            # that is the audio the rest of the pipeline uses.
+            for spk, track, sim in ((spk_a, track_A, sim_A), (spk_b, track_B, sim_B)):
+                memory.offer(spk, track, sim, sr)
 
             # Per-track gating. Discarding both whenever one fails threw away a
             # clean extraction of the dominant speaker because a 0.3s
