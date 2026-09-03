@@ -172,6 +172,28 @@ def test_every_overlap_is_accounted_for():
 
 
 def test_window_rejects_three_speakers():
+    """Three voices *in the overlap* is unseparable: Sidon emits two sources.
+
+    The test is on the overlap, not the window. A window is padded out to 20s
+    and merged jobs span more, so a third speaker who talks somewhere in that
+    stretch -- but not during the overlap being extracted -- is audio the
+    separator has to cope with, not a reason to refuse. On the measured corpus
+    that distinction was eight of thirteen failures.
+    """
+    segs = [
+        Segment(index="00001", start=0.0, end=30.0, speaker="SPEAKER_00"),
+        Segment(index="00002", start=14.0, end=14.4, speaker="SPEAKER_01"),
+        Segment(index="00003", start=14.1, end=14.3, speaker="SPEAKER_02"),
+        Segment(index="00004", start=32.0, end=40.0, speaker="SPEAKER_01"),
+    ]
+    svc = TargetExtractionService(FakeTSE(), logger=None)
+    by_spk = svc._intervals_by_speaker(segs)
+    built, reason = svc._build_window(by_spk, "SPEAKER_00", "SPEAKER_01", 14.0, 14.4, 60.0)
+    assert built is None and reason == "multi_speaker"
+
+
+def test_a_third_speaker_outside_the_overlap_does_not_reject_the_window():
+    """The other half of the rule above, and the case that was failing."""
     segs = [
         Segment(index="00001", start=0.0, end=30.0, speaker="SPEAKER_00"),
         Segment(index="00002", start=14.0, end=14.4, speaker="SPEAKER_01"),
@@ -181,7 +203,7 @@ def test_window_rejects_three_speakers():
     svc = TargetExtractionService(FakeTSE(), logger=None)
     by_spk = svc._intervals_by_speaker(segs)
     built, reason = svc._build_window(by_spk, "SPEAKER_00", "SPEAKER_01", 14.0, 14.4, 60.0)
-    assert built is None and reason == "multi_speaker"
+    assert reason != "multi_speaker"
 
 
 def test_no_window_does_not_block_later_overlaps():

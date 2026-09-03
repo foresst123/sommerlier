@@ -237,3 +237,84 @@ def build_chunk_ranges(total_duration, silence_intervals, max_duration):
         chunk_ranges.append((chunk_start, chunk_end))
         chunk_start = chunk_end
     return chunk_ranges if chunk_ranges else [(0.0, total_duration)]
+
+
+# A speaker holding less than this share of the spoken time is treated as a
+# clustering artefact rather than a participant. Set from what these look like
+# in practice: on a 41-minute two-person podcast the diarizer produced a third
+# speaker with 3.2s across three segments -- 0.13% -- and every one of its
+# segments sat inside another speaker's turn. A real third participant in a
+# recording of that length holds whole turns, not fragments.
+GHOST_SPEAKER_SHARE = 0.005
+
+# Never dissolve a speaker on share alone: a genuine guest who says one thing
+# in an hour is rare but real, and merging them corrupts the transcript rather
+# than tidying it. Their segments must also be short enough to be fragments.
+GHOST_SPEAKER_MAX_SEGMENT = 2.0
+
+
+def merge_ghost_speakers(segment_list: list, share=GHOST_SPEAKER_SHARE,
+                         max_segment=GHOST_SPEAKER_MAX_SEGMENT, logger=None) -> list:
+    """Fold vanishingly small speakers into whoever is speaking around them.
+
+    Diarization sometimes splits a handful of frames into a speaker of their
+    own -- a cough, a laugh, one word landing between two turns. Downstream
+    this is expensive out of proportion to its size: target extraction refuses
+    any overlap whose window contains three speakers, and it cannot build an
+    enrollment for someone with under 1.5s of clean audio, so a 3-second ghost
+    blocked eleven of thirteen separable overlaps on one file here.
+
+    Each ghost segment is relabelled to its nearest neighbour in time, which is
+    the speaker whose turn it interrupted. Returns a new list; the input is not
+    modified.
+    """
+    if not segment_list:
+        return segment_list
+
+    spoken = {}
+    for seg in segment_list:
+        spoken[seg["speaker"]] = spoken.get(seg["speaker"], 0.0) + (seg["end"] - seg["start"])
+    total = sum(spoken.values())
+    if total <= 0 or len(spoken) < 3:
+        # With two speakers there is no third to dissolve, and the smaller of
+        # the two is a participant however quiet.
+        return segment_list
+
+    ghosts = set()
+    for speaker, held in spoken.items():
+        if held / total >= share:
+            continue
+        longest = max((s["end"] - s["start"]) for s in segment_list
+                      if s["speaker"] == speaker)
+        if longest <= max_segment:
+            ghosts.add(speaker)
+
+    if not ghosts:
+        return segment_list
+    if len(set(spoken) - ghosts) < 1:
+        # Everything looks like a ghost: the threshold is wrong for this file,
+        # so change nothing rather than empty it.
+        return segment_list
+
+    ordered = sorted(segment_list, key=lambda s: s["start"])
+    real = [s for s in ordered if s["speaker"] not in ghosts]
+    if not real:
+        return segment_list
+
+    out, moved = [], 0
+    for seg in ordered:
+        if seg["speaker"] not in ghosts:
+            out.append(seg)
+            continue
+        centre = (seg["start"] + seg["end"]) / 2.0
+        nearest = min(real, key=lambda r: abs((r["start"] + r["end"]) / 2.0 - centre))
+        merged = dict(seg)
+        merged["speaker"] = nearest["speaker"]
+        out.append(merged)
+        moved += 1
+
+    if logger:
+        logger.info(
+            f"Merged {len(ghosts)} ghost speaker(s) ({', '.join(sorted(ghosts))}) "
+            f"into their neighbours: {moved} segment(s) relabelled")
+    return sorted(out, key=lambda s: s["start"])
