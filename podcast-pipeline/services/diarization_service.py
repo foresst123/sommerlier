@@ -13,7 +13,8 @@ from utils.segment_utils import (
     df_to_list,
     deduplicate_segments_by_index,
     split_long_segments,
-    cut_by_speaker_label
+    cut_by_speaker_label,
+    merge_ghost_speakers,
 )
 from algorithms.diarization.fusion import align_speakers_across_chunks
 from algorithms.diarization.overlap import detect_overlapping_segments
@@ -21,12 +22,43 @@ from algorithms.diarization.overlap import detect_overlapping_segments
 class DiarizationService:
     """Handles audio chunking, model inference (Pyannote/Sortformer), and cross-chunk fusion."""
     
-    def __init__(self, diarizer, vad_model=None, embedder=None, logger=None, diarizer_config=None):
-        self.diarizer = diarizer
-        self.vad_model = vad_model
-        self.embedder = embedder
+    def __init__(self, diarizer=None, vad_model=None, embedder=None, logger=None,
+                 diarizer_config=None, model_loader=None):
+        self._diarizer = diarizer
+        self._vad_model = vad_model
+        self._embedder = embedder
+        self.model_loader = model_loader
         self.logger = logger
         self.diarizer_config = diarizer_config or {}
+
+    # Models are fetched from the loader on use, not captured at construction.
+    # PipelineService loads each stage's models when that stage runs, so a
+    # reference taken here would be None for every stage that had not loaded
+    # yet -- and would stay None after it did.
+    def _model(self, held, name):
+        if held is not None:
+            return held
+        return self.model_loader.get(name) if self.model_loader else None
+
+    @property
+    def diarizer(self):
+        return self._model(self._diarizer, "diarizer")
+
+    @diarizer.setter
+    def diarizer(self, model):
+        self._diarizer = model
+
+    @property
+    def vad_model(self):
+        return self._model(self._vad_model, "vad")
+
+    @vad_model.setter
+    def vad_model(self, model):
+        self._vad_model = model
+
+    @property
+    def embedder(self):
+        return self._model(self._embedder, "embedder")
         
     def _log_segment_stats(self, stage: str, seg_list: list):
         """One line per pipeline stage so segment loss can be attributed."""
@@ -43,6 +75,10 @@ class DiarizationService:
             f"dur min={durs[0]:.2f} p50={durs[n // 2]:.2f} max={durs[-1]:.2f} | "
             f"<0.5s={sum(d < 0.5 for d in durs)} <0.2s={sum(d < 0.2 for d in durs)}"
         )
+
+    @embedder.setter
+    def embedder(self, model):
+        self._embedder = model
 
     def prepare_chunks(self, audio: AudioData, max_duration: float = 120.0, min_silence: float = 0.5) -> Tuple[List[DiarizationChunk], str]:
         """Deprecated. Returns a single dummy chunk since diarization now processes the full audio natively."""
@@ -136,6 +172,14 @@ class DiarizationService:
         smoothed_list = cut_by_speaker_label(
             raw_list, merge_gap=merge_gap, max_segment_length=max_seg, logger=self.logger)
         self._log_segment_stats(f"post-merge(gap={merge_gap} max={max_seg})", smoothed_list)
+
+        # Dissolve speakers too small to be participants before anything
+        # downstream has to reason about them. Target extraction is the caller
+        # that cares: it refuses an overlap whose window holds three speakers
+        # and cannot enrol anyone with under 1.5s of clean audio, so a
+        # three-second cluster costs far more than its length.
+        smoothed_list = merge_ghost_speakers(smoothed_list, logger=self.logger)
+        self._log_segment_stats("post-ghost-merge", smoothed_list)
 
         # Split segments that are too long. Passing the waveform lets the cut
         # land on a pause instead of on the stopwatch, so a forced split stops

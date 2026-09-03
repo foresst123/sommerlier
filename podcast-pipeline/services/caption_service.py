@@ -5,9 +5,24 @@ from schemas.transcript import TranscriptSegment
 class CaptionService:
     """Adds audio captions using Qwen3-Omni."""
     
-    def __init__(self, captioner, logger=None):
-        self.captioner = captioner
+    def __init__(self, captioner=None, logger=None, model_loader=None):
+        self._captioner = captioner
+        self.model_loader = model_loader
         self.logger = logger
+
+    # Models are fetched from the loader on use, not captured at construction.
+    # PipelineService loads each stage's models when that stage runs, so a
+    # reference taken here would be None for every stage that had not loaded
+    # yet -- and would stay None after it did.
+    @property
+    def captioner(self):
+        if self._captioner is not None:
+            return self._captioner
+
+    @captioner.setter
+    def captioner(self, model):
+        self._captioner = model
+        return self.model_loader.get("captioner") if self.model_loader else None
         
     def add_captions(self, segments: List[TranscriptSegment], audio: AudioData, segments_audio_data: dict) -> List[TranscriptSegment]:
         if not self.captioner:

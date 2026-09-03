@@ -16,11 +16,12 @@ EDGE_PAD_SECONDS = 0.02
 class ASRService:
     """Coordinates MoE ASR models and ROVER ensemble."""
     
-    def __init__(self, whisper, phowhisper, qwen3, logger=None, model_loader=None, qwen3_service=None,
+    def __init__(self, whisper=None, phowhisper=None, qwen3=None, logger=None,
+                 model_loader=None, qwen3_service=None,
                  language: str = "vi", batch_size: int = 4, keep_models: bool = False, edge_pad: float = EDGE_PAD_SECONDS):
-        self.whisper = whisper
-        self.phowhisper = phowhisper
-        self.qwen3 = qwen3
+        self._whisper = whisper
+        self._phowhisper = phowhisper
+        self._qwen3 = qwen3
         self.logger = logger
         self.model_loader = model_loader
         self.qwen3_service = qwen3_service
@@ -28,12 +29,56 @@ class ASRService:
         self.batch_size = batch_size
         self.keep_models = keep_models
         self.edge_pad = max(0.0, float(edge_pad))
-        if not self.whisper and self.logger:
+        self._warned = False
+
+    # Models are fetched from the loader on use, not captured at construction.
+    # PipelineService loads each stage's models when that stage runs, so a
+    # reference taken here would be None for every stage that had not loaded
+    # yet -- and would stay None after it did.
+    def _model(self, held, name):
+        if held is not None:
+            return held
+        return self.model_loader.get(name) if self.model_loader else None
+
+    @property
+    def whisper(self):
+        return self._model(self._whisper, "whisper")
+
+    @whisper.setter
+    def whisper(self, model):
+        self._whisper = model
+
+    @property
+    def phowhisper(self):
+        return self._model(self._phowhisper, "phowhisper")
+
+    @phowhisper.setter
+    def phowhisper(self, model):
+        self._phowhisper = model
+
+    @property
+    def qwen3(self):
+        return self._model(self._qwen3, "qwen3")
+
+    @qwen3.setter
+    def qwen3(self, model):
+        self._qwen3 = model
+
+    def _warn_missing(self):
+        """Report absent voters once, after the models have had a chance to load.
+
+        Warning from __init__ instead would fire before this stage's loader has
+        run and name every model as missing on every run.
+        """
+        if self._warned or not self.logger:
+            return
+        self._warned = True
+        if not self.whisper:
             self.logger.warning(
                 "Whisper is not loaded (requires --ASRMoE with --lang vi); "
                 "ROVER will vote without it."
             )
-        if not self.qwen3 and self.logger:
+        if not self.qwen3:
             self.logger.warning("Qwen3-ASR is not loaded; ROVER will vote without it.")
 
     def active_models(self) -> List[str]:
@@ -155,6 +200,7 @@ class ASRService:
         return results
 
     def process(self, segments: List[EnhancedSegment], audio: AudioData, enable_word_timestamps: bool = False) -> List[TranscriptSegment]:
+        self._warn_missing()
         import tempfile
         tmp_dir = tempfile.mkdtemp(prefix="qwen3_asr_")
         results = []

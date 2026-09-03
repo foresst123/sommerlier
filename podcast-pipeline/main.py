@@ -289,37 +289,32 @@ def main():
             _svc.wait_ready()
 
     try:
-        # 2. Load Models
+        # 2. Build the loader, but load nothing yet.
+        #
+        # PipelineService calls the loader for each stage at the point that
+        # stage runs, so peak VRAM is the largest pair of stages rather than
+        # the sum of every model. Loading here instead put DiariZen (5.15GB),
+        # Sidon (2.62GB), PhoWhisper, Whisper, Demucs and the captioner on the
+        # card before the first stage had produced anything -- and a run that
+        # resumes from a checkpoint paid for models it never called.
         model_loader = ModelLoader(config, args, logger=logger)
-        model_loader.load_base_models()
-        model_loader.load_diarization_models(diarizen_service)
-        model_loader.load_separation_models(sidon_service)
-        model_loader.load_music_models()
-        model_loader.load_asr_models(qwen3_service)
-        model_loader.load_caption_model()
 
         # 3. Initialize Services
         audio_svc = AudioService(logger=logger)
         diarization_svc = DiarizationService(
-            diarizer=model_loader.get("diarizer"),
-            vad_model=model_loader.get("vad"),
-            embedder=model_loader.get("embedder"),
+            model_loader=model_loader,
             logger=logger,
             diarizer_config=env_profile.get("models", {}).get("diarizen", {})
         )
         separation_svc = TargetExtractionService(
-            tse_model=model_loader.get("separator"),
+            model_loader=model_loader,
             logger=logger
         )
         music_svc = MusicService(
-            panns_model=model_loader.get("panns"),
-            demucs_model=model_loader.get("demucs"),
+            model_loader=model_loader,
             logger=logger
         )
         asr_svc = ASRService(
-            whisper=model_loader.get("whisper"),
-            phowhisper=model_loader.get("phowhisper"),
-            qwen3=model_loader.get("qwen3"),
             logger=logger,
             model_loader=model_loader,
             qwen3_service=qwen3_service,
@@ -328,7 +323,7 @@ def main():
             keep_models=args.keep_models
         )
         caption_svc = CaptionService(
-            captioner=model_loader.get("captioner"),
+            model_loader=model_loader,
             logger=logger
         )
         refinement_cfg = env_profile.get("models", {}).get("refinement", {})

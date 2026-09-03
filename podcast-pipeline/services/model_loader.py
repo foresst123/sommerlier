@@ -17,7 +17,14 @@ from models.qwen3_asr import Qwen3ASRClient
 from services.qwen3_worker_service import Qwen3WorkerService
 
 class ModelLoader:
-    """Orchestrates loading and unloading of models onto GPU/CPU."""
+    """Orchestrates loading and unloading of models onto GPU/CPU.
+
+    Every loader is idempotent: calling it again when its models are already
+    resident is a no-op. That is what lets PipelineService call the loader for
+    a stage at the point the stage runs, rather than loading everything up
+    front -- under stage-major execution the same loader is reached once per
+    file, and only the first call should pay for it.
+    """
     
     def __init__(self, config: Dict[str, Any], args: Any, logger=None):
         self.config = config
@@ -30,6 +37,8 @@ class ModelLoader:
         
     def load_base_models(self):
         """Load essential models (VAD, DNSMOS)."""
+        if "vad" in self.models:
+            return
         if self.logger: self.logger.info(f"Loading Base models on {self.device_1}")
         vad_cfg = self.config.get("environments", {}).get(
             self.args.env, {}).get("models", {}).get("vad", {})
@@ -37,6 +46,8 @@ class ModelLoader:
         
     def load_diarization_models(self, diarizen_service=None):
         """Load Pyannote/DiariZen based on args."""
+        if "diarizer" in self.models and "embedder" in self.models:
+            return
         if self.args.dia3:
             if self.logger: self.logger.info(f"Loading Pyannote Diarization on {self.device_1}")
             self.models["diarizer"] = PyannoteDiarizer(
@@ -59,6 +70,8 @@ class ModelLoader:
             
     def load_separation_models(self, sidon_service=None):
         """Load Target Speaker Extractor (TSE) if enabled."""
+        if "separator" in self.models:
+            return
         if getattr(self.args, "tse", False):
             if self.logger: self.logger.info(f"Loading Target Speaker Extractor on {self.device_1}")
             self.models["separator"] = TargetSpeakerExtractor(
@@ -66,11 +79,28 @@ class ModelLoader:
                 process=sidon_service.process if sidon_service else None
             )
             
-    def load_music_models(self):
-        """Load PANNS and Demucs if background music removal is enabled."""
+    def load_panns(self):
+        """Load just the music detector.
+
+        Separate from load_music_models because the music sweep that runs after
+        diarization needs the tagger and nothing else: pulling Demucs in with it
+        would hold a source-separation model in VRAM from diarization all the
+        way to music removal, for a check that never uses it.
+        """
+        if "panns" in self.models:
+            return
         if getattr(self.args, "panns", False):
             if self.logger: self.logger.info("Loading PANNS detector")
             self.models["panns"] = PANNSDetector(device=str(self.device_1))
+
+    def load_music_models(self):
+        """Load PANNS and Demucs if background music removal is enabled."""
+        # Keyed on demucs alone: panns may already be resident from the music
+        # sweep, and testing it here would skip loading Demucs entirely.
+        if "demucs" in self.models:
+            return
+        if getattr(self.args, "panns", False):
+            self.load_panns()
 
             # GPU 1 hosts the DiariZen worker plus the embedder, TSE and ASR
             # models; separating a full podcast needs ~1GB of headroom that is
@@ -81,6 +111,8 @@ class ModelLoader:
             
     def load_asr_models(self, qwen3_service: Qwen3WorkerService = None):
         """Load ASR models (Whisper, PhoWhisper, Qwen3)."""
+        if "phowhisper" in self.models:
+            return
         # --stop_after names the last stage to run, so anything that halts
         # before ASR must not pay for a 3GB model it will never call.
         stop_after = getattr(self.args, "stop_after", None)
@@ -117,6 +149,8 @@ class ModelLoader:
                 
     def load_caption_model(self):
         """Load Omni caption client if enabled."""
+        if "captioner" in self.models:
+            return
         if getattr(self.args, "qwen3omni", False):
             if self.logger: self.logger.info("Initializing Qwen3-Omni Client")
             self.models["captioner"] = Qwen3OmniCaptioner()

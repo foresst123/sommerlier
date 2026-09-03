@@ -5,11 +5,38 @@ from schemas.segment import EnhancedSegment
 class MusicService:
     """Detects and removes background music from segments."""
     
-    def __init__(self, panns_model, demucs_model, logger=None):
-        self.panns = panns_model
-        self.demucs = demucs_model
+    def __init__(self, panns_model=None, demucs_model=None, logger=None,
+                 model_loader=None):
+        self._panns = panns_model
+        self._demucs = demucs_model
+        self.model_loader = model_loader
         self.logger = logger
         self.full_vocals = None
+
+    # Models are fetched from the loader on use, not captured at construction.
+    # PipelineService loads each stage's models when that stage runs, so a
+    # reference taken here would be None for every stage that had not loaded
+    # yet -- and would stay None after it did.
+    def _model(self, held, name):
+        if held is not None:
+            return held
+        return self.model_loader.get(name) if self.model_loader else None
+
+    @property
+    def panns(self):
+        return self._model(self._panns, "panns")
+
+    @panns.setter
+    def panns(self, model):
+        self._panns = model
+
+    @property
+    def demucs(self):
+        return self._model(self._demucs, "demucs")
+
+    @demucs.setter
+    def demucs(self, model):
+        self._demucs = model
         
     def _prepare_full_vocals(self, audio: AudioData):
         if self.demucs and self.full_vocals is None:

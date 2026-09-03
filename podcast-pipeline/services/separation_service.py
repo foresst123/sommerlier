@@ -9,6 +9,7 @@ from schemas.segment import Segment, EnhancedSegment
 from algorithms.diarization.overlap import detect_overlapping_segments
 from utils.audio_normalize import match_splice_level, safe_limit
 from utils import spectral_restore
+from utils.music_map import MusicMap
 
 # --- Window ---------------------------------------------------------------
 # Sidon processes 20s chunks (CHUNK_SECONDS in sidon_infer.py). Start there and
@@ -112,8 +113,10 @@ class TargetExtractionService:
     dropped silently -- test_every_overlap_is_accounted_for enforces that.
     """
 
-    def __init__(self, tse_model, logger=None, dump_dir: Optional[str] = None):
-        self.tse_model = tse_model
+    def __init__(self, tse_model=None, logger=None, dump_dir: Optional[str] = None,
+                 model_loader=None):
+        self._tse_model = tse_model
+        self.model_loader = model_loader
         self.logger = logger
         self.dump_dir = dump_dir
         self.stats = collections.Counter()
@@ -121,6 +124,26 @@ class TargetExtractionService:
         self.overlap_durations = []
         self.failures = []          # (start, end, speaker, reason, detail)
         self._dump_warned = False
+        # Set by the pipeline after the post-diarization music sweep. Empty
+        # means "no reason to avoid anything", which is the right default both
+        # when there is no music and when the detector never ran.
+        self.music_map = MusicMap()
+
+    # The model is fetched from the loader on use, not captured at
+    # construction. PipelineService loads each stage's models when that stage
+    # runs, so a reference taken here would be None for every stage that had
+    # not loaded yet -- and would stay None after it did.
+    @property
+    def tse_model(self):
+        if self._tse_model is not None:
+            return self._tse_model
+        return getattr(self, "model_loader", None) and self.model_loader.get("separator")
+
+    @tse_model.setter
+    def tse_model(self, model):
+        """Assigning the model directly still works, which is how callers that
+        build the service by hand -- the tests among them -- supply one."""
+        self._tse_model = model
 
     def reset_stats(self):
         """Clear per-file counters.
@@ -210,6 +233,10 @@ class TargetExtractionService:
             # Recorded per run because it changes what the audio sounds like:
             # a report from a run without it is not comparable to one with it.
             "spectral_restore": spectral_restore.enabled(),
+            # How much of the recording the enrollment search had to avoid. A
+            # run with music but an empty map means the sweep did not happen.
+            "music_map": {"spans": len(self.music_map),
+                          "seconds": round(self.music_map.total, 2)},
             "stats": dict(self.stats),
             "sim_percentiles": (
                 {p: float(np.percentile(self.sims, p)) for p in (10, 50, 90)}
@@ -423,7 +450,8 @@ class TargetExtractionService:
         return {spk for spk, ivals in by_spk.items()
                 if any(b > lo and a < hi for a, b in ivals)}
 
-    def _build_window(self, by_spk, spk_a, spk_b, ov_lo, ov_hi, total_dur):
+    def _build_window(self, by_spk, spk_a, spk_b, ov_lo, ov_hi, total_dur,
+                      overlaps=None):
         """Grow a window around the overlap until one speaker can be scored.
 
         Returns (lo, hi, solo_a, solo_b, anchor) on success, or (None, reason).
@@ -445,13 +473,28 @@ class TargetExtractionService:
             elif hi >= total_dur:
                 lo = max(0.0, hi - TSE_WINDOW_TARGET)
 
+        # Sidon emits exactly two sources, so a third voice inside the span
+        # being separated would be folded into one of them. That test belongs on
+        # the overlap, not on the window: the window is padded out to 20s and
+        # jobs merge overlaps up to 8s apart, so on this corpus a 43s job made
+        # of eight two-speaker overlaps was rejected because a third speaker
+        # said something once, in a gap between them. Eight of the file's
+        # thirteen failures were that, and in none of them was the third voice
+        # actually overlapping.
+        #
+        # Judged over the overlaps only. A speaker who talks elsewhere in the
+        # window is audio the separator has to cope with either way -- which is
+        # what the solo-span search below is for -- but is not a reason to
+        # refuse the job.
+        # `overlaps` is the job's individual overlap spans. ov_lo..ov_hi is
+        # their hull, which for a merged job spans the quiet stretches between
+        # them too -- exactly where the extra speaker turned out to be.
+        for span_lo, span_hi in (overlaps or [(ov_lo, ov_hi)]):
+            if len(self._speakers_in(by_spk, span_lo, span_hi)) > 2:
+                return None, "multi_speaker"
+
         best_single = None
         for _ in range(24):
-            present = self._speakers_in(by_spk, lo, hi)
-            if len(present) > 2:
-                # Sidon emits exactly two sources; a third voice would be folded
-                # into one of them. Growing the window only makes that worse.
-                return None, "multi_speaker"
 
             solo_a = self._solo_spans(by_spk, spk_a, lo, hi)
             solo_b = self._solo_spans(by_spk, spk_b, lo, hi)
@@ -533,8 +576,26 @@ class TargetExtractionService:
         """
         search = TSE_STITCH_SEARCH if search is None else search
         lo, hi = max(0.0, centre - search), centre + search
-        pieces = [p for p in self._solo_spans(by_spk, spk, lo, hi)
-                  if p[1] - p[0] >= TSE_STITCH_MIN_PIECE]
+        pieces = self._solo_spans(by_spk, spk, lo, hi)
+
+        # Drop anything playing over music. This stage runs before music
+        # removal, so a "solo" span is only solo in the sense that one person is
+        # talking -- the music bed underneath is still there, and an enrollment
+        # taken from it describes the speaker plus the backing track. The map
+        # comes from the sweep after diarization; when it is empty, either there
+        # was no music or PANNs was off, and both mean nothing to avoid.
+        # getattr, not self.music_map: the attribute is set in __init__ and
+        # again by the pipeline, but a service built for a narrower purpose --
+        # tests, a one-off script -- has neither, and a missing map must read as
+        # "nothing to avoid" rather than raise.
+        music_map = getattr(self, "music_map", None)
+        if music_map:
+            clean = []
+            for a, b in pieces:
+                clean.extend(music_map.clean_parts(a, b))
+            pieces = clean
+
+        pieces = [p for p in pieces if p[1] - p[0] >= TSE_STITCH_MIN_PIECE]
         pieces.sort(key=lambda ab: abs((ab[0] + ab[1]) / 2.0 - centre))
 
         out, total = [], 0.0
@@ -806,7 +867,9 @@ class TargetExtractionService:
                         f"(solo {spk_a}={layout['solo_a']:.1f}s {spk_b}={layout['solo_b']:.1f}s, "
                         f"balance {layout['ratio']:.1f}:1)")
             else:
-                built, reason = self._build_window(by_spk, spk_a, spk_b, job_lo, job_hi, total_dur)
+                built, reason = self._build_window(
+                by_spk, spk_a, spk_b, job_lo, job_hi, total_dur,
+                overlaps=[(p["overlap_start"], p["overlap_end"]) for p in plist])
                 if built is None:
                     fail_all(reason, f"span={job_hi - job_lo:.2f}s")
                     continue

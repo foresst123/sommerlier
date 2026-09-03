@@ -1,6 +1,7 @@
 import os
 from typing import Any
 from utils.checkpoint import CheckpointManager
+from utils.music_map import MusicMap, build as build_music_map
 from services.stage_output_service import StageOutputService
 from schemas.audio import AudioData
 
@@ -36,6 +37,32 @@ class PipelineService:
         # releases collect here instead of firing at the end of each file.
         self.defer_free = None
         self.defer_workers = None
+
+    def _load(self, group: str):
+        """Load one stage's models, at the point that stage runs.
+
+        Loading everything up front put DiariZen (5.15GB), Sidon (2.62GB),
+        PhoWhisper, Whisper, Demucs and the captioner on the card before the
+        first stage had produced anything, so peak VRAM was the sum of every
+        model rather than the largest pair. Each loader is idempotent, so under
+        stage-major execution -- where this is reached once per file -- only the
+        first call pays for it.
+
+        A stage that loads from checkpoint never calls this, which is the point:
+        a resumed run does not pay for models it will not use.
+        """
+        if self.model_loader is None:
+            return
+        w = self.worker_services
+        {
+            "base":        lambda: self.model_loader.load_base_models(),
+            "diarization": lambda: self.model_loader.load_diarization_models(w.get("diarizen")),
+            "separation":  lambda: self.model_loader.load_separation_models(w.get("sidon")),
+            "music":       lambda: self.model_loader.load_music_models(),
+            "panns":       lambda: self.model_loader.load_panns(),
+            "asr":         lambda: self.model_loader.load_asr_models(w.get("qwen3")),
+            "caption":     lambda: self.model_loader.load_caption_model(),
+        }[group]()
 
     def _free(self, args, *model_names):
         """Unload finished models unless the caller asked to keep them.
@@ -237,6 +264,8 @@ class PipelineService:
             if self.logger: self.logger.info("Loading Diarization from checkpoint")
             diarization_result = checkpoint.load("diarization")
         else:
+            self._load("base")
+            self._load("diarization")
             chunks, _ = self.diarization_svc.prepare_chunks(audio_data)
             diarization_result = self.diarization_svc.run_diarization(chunks, audio_data, args)
             if self.logger: self.logger.info(f"[DEBUG] Diarization returned {len(diarization_result.segments)} segments via {diarization_result.method}")
@@ -255,6 +284,28 @@ class PipelineService:
 
         if "diarization" in computed:
             stage_out.write_diarization(diarization_result.segments, audio_data.duration)
+
+        # Where the music is, recorded now so separation can avoid enrolling on
+        # it. Separation runs before music removal, so its search for clean solo
+        # speech is otherwise done over audio that still has the music bed in
+        # it -- and an ECAPA embedding taken from speech-over-music describes
+        # both. Swept here because the waveform is already loaded and PANNs is
+        # cheap next to the diarizer that just ran.
+        if checkpoint.exists("music_map"):
+            music_map = MusicMap.from_json(checkpoint.load("music_map"))
+        else:
+            music_map = MusicMap()
+            if getattr(args, "panns", False):
+                # The tagger only. Demucs is loaded by the music_removal stage
+                # when it actually needs it, so nothing carries a source
+                # separator through diarization for a check that never uses it.
+                self._load("panns")
+                detector = self.model_loader.get("panns") if self.model_loader else None
+                music_map = build_music_map(
+                    audio_data.waveform, audio_data.sample_rate, detector,
+                    logger=self.logger)
+                checkpoint.save("music_map", music_map.to_json())
+        self.separation_svc.music_map = music_map
 
         self._free(args, "diarizer", "vad")
         # Unloading the client does not touch the subprocess holding the weights.
@@ -278,6 +329,7 @@ class PipelineService:
             # filenames carry a timestamp and speaker pair but not the audio
             # name, so a shared directory means later files silently overwrite
             # earlier ones -- the collision _resolve_output_dir exists to avoid.
+            self._load("separation")
             self.separation_svc.dump_dir = os.path.join(
                 output_dir, "02_separation", "audio", "raw")
             enhanced_segments = self.separation_svc.process_overlaps(diarization_result.segments, audio_data)
@@ -313,6 +365,7 @@ class PipelineService:
             if self.logger: self.logger.info("Loading Music Removal from checkpoint")
             enhanced_segments = checkpoint.load("music_removal")
         else:
+            self._load("music")
             enhanced_segments = self.music_svc.process_segments(enhanced_segments, audio_data)
             if self.logger: self.logger.info(f"[DEBUG] After Music Removal: {len(enhanced_segments)} segments")
             checkpoint.save("music_removal", enhanced_segments)
@@ -334,6 +387,7 @@ class PipelineService:
             if self.logger: self.logger.info("Loading ASR from checkpoint")
             transcripts = checkpoint.load("asr")
         else:
+            self._load("asr")
             if self.logger: self.logger.info(f"[DEBUG] Sending {len(enhanced_segments)} segments to ASR")
             transcripts = self.asr_svc.process(enhanced_segments, audio_data)
             if self.logger: self.logger.info(f"[DEBUG] ASR returned {len(transcripts)} transcripts")
@@ -358,10 +412,16 @@ class PipelineService:
                 if self.logger: self.logger.info("Loading Captioning from checkpoint")
                 transcripts = checkpoint.load("captioning")
             else:
+                self._load("caption")
                 enhanced_audio_dict = {s.index: s.enhanced_audio for s in enhanced_segments if s.enhanced_audio is not None}
                 transcripts = self.caption_svc.add_captions(transcripts, audio_data, enhanced_audio_dict)
                 checkpoint.save("captioning", transcripts)
-                
+
+        # No release here on purpose. Qwen3OmniCaptioner is an HTTP client to a
+        # server the pipeline does not start, not a model on this card, so it
+        # holds nothing to free -- the same reason "qwen3" is absent from the
+        # ASR stage's release list.
+        
         if getattr(args, "stop_after", None) == "captioning":
             if self.logger: self.logger.info("Stopping pipeline after captioning as requested by --stop_after.")
             stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
