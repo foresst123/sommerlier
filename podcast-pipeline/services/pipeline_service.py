@@ -2,8 +2,15 @@ import os
 from typing import Any
 from utils.checkpoint import CheckpointManager
 from utils.music_map import MusicMap, build as build_music_map
+from utils.excise import TimelineMap, excise
 from services.stage_output_service import StageOutputService
 from schemas.audio import AudioData
+
+# Above this share of a recording marked for removal, the map is not trusted:
+# a podcast that is mostly singing is either mis-tagged or the wrong file, and
+# either way an empty waveform downstream is the worst possible answer.
+CUT_SHARE_LIMIT = float(os.environ.get("MUSIC_CUT_SHARE_LIMIT", "0.60"))
+
 
 class PipelineService:
     """Orchestrates the entire ASR pipeline using the defined services and Checkpoint mechanism."""
@@ -63,6 +70,27 @@ class PipelineService:
             "asr":         lambda: self.model_loader.load_asr_models(w.get("qwen3")),
             "caption":     lambda: self.model_loader.load_caption_model(),
         }[group]()
+
+    # A stage's switch in the profile, falling back to the flag that used to
+    # control it. Named separately from those flags because several of them --
+    # `panns`, `tse` -- gate more than one stage, and the profile now needs to
+    # say which stages run rather than which models load.
+    _LEGACY_FLAG = {
+        "music_analysis": "panns",
+        "music_removal": "panns",
+        "separation": "tse",
+        "captioning": "qwen3omni",
+        "refinement": "llm_refinement",
+    }
+
+    @classmethod
+    def step_enabled(cls, args, name: str) -> bool:
+        """Whether `name` runs. Unlisted steps run, which is the old behaviour."""
+        explicit = getattr(args, f"step_{name}", None)
+        if explicit is not None:
+            return bool(explicit)
+        legacy = cls._LEGACY_FLAG.get(name)
+        return bool(getattr(args, legacy, True)) if legacy else True
 
     def _free(self, args, *model_names):
         """Unload finished models unless the caller asked to keep them.
@@ -252,7 +280,141 @@ class PipelineService:
         # 1. Audio Preprocessing
         audio_data = self.audio_svc.load_audio(audio_path, target_sr=24000)
         
-        # 2. Diarization (with VAD & Chunking)
+        # Stage artifacts are written once per file, not once per run() entry:
+        # under stage-major execution this method is re-entered per stage.
+        computed_stages = set()
+
+        # 2. What is playing, before anything else looks at the audio.
+        #
+        # PANNs' frame-level tagger labels every 10ms as speech, singing or
+        # music, and the three need different handling: singing is skipped
+        # entirely (song lyrics scored as dialogue are dirty data for a
+        # full-duplex corpus), a music bed under speech is stripped, and clean
+        # speech is left alone -- which on this corpus is almost all of it.
+        #
+        # Swept first so that everything downstream sees the verdict:
+        # diarization segments cleaned audio, and separation's search for solo
+        # speech to enrol on can avoid the beds.
+        if checkpoint.exists("music_map"):
+            music_map = MusicMap.from_json(checkpoint.load("music_map"))
+        else:
+            music_map = MusicMap()
+            if self.step_enabled(args, "music_analysis"):
+                # The tagger only. The vocal separator is loaded below, and
+                # only when the map actually found a bed to strip.
+                self._load("panns")
+                detector = self.model_loader.get("panns") if self.model_loader else None
+                music_map = build_music_map(
+                    audio_data.waveform, audio_data.sample_rate, detector,
+                    logger=self.logger)
+                checkpoint.save("music_map", music_map.to_json())
+        # Strip the beds now, so the diarizer -- and everything after it --
+        # works on audio without music under the speech.
+        #
+        # The result is cached as the replaced stretches rather than as the
+        # whole waveform. Under stage-major execution run() is re-entered once
+        # per stage and reloads the audio from disk each time, so the strip has
+        # to be re-applied on every entry or later stages would see the bed
+        # again; caching a 50-minute waveform to achieve that would cost
+        # ~290MB per file, while the stretches themselves are seconds.
+        from utils.music_map import MUSIC
+        if music_map.total_of(MUSIC) > 0 and self.step_enabled(args, "music_removal"):
+            patches = checkpoint.load("music_patches")
+            if patches is None:
+                # Loaded only now: the map found something, so the separator
+                # has work. A recording with no bed never pays for it.
+                self._load("music")
+                self.music_svc.demucs = (self.model_loader.get("demucs")
+                                         if self.model_loader else None)
+                patches = self.music_svc.strip_music_spans(
+                    audio_data, music_map, logger=self.logger)
+                checkpoint.save("music_patches", patches)
+                self._free(args, "demucs")
+            else:
+                self.music_svc.apply_music_patches(audio_data, patches)
+                if self.logger:
+                    self.logger.info(f"Re-applied {len(patches)} cached music "
+                                     "patch(es) to the waveform")
+
+        # Cut the sung and standalone-music stretches out before anything else
+        # sees the audio. Marking them and letting later stages skip does not
+        # work: the diarizer still clusters on them and ASR still receives them,
+        # so song lyrics reach the transcript scored as dialogue.
+        #
+        # This shortens the recording, so every timestamp downstream is in the
+        # cut timeline and has to be translated back at export. The map is
+        # checkpointed for exactly that.
+        timeline = TimelineMap.from_json(checkpoint.load("timeline", fmt="json"))
+        cuts = (music_map.excised_spans()
+                if self.step_enabled(args, "cut_singing") else [])
+
+        # Refuse to cut away the recording. A tagger that calls most of a
+        # podcast singing has gone wrong -- thresholds set too low, or a file
+        # that is genuinely music and does not belong in this corpus -- and
+        # deleting the audio would turn that into a run that produces nothing
+        # and says why only in a log line.
+        if cuts:
+            share = sum(b - a for a, b, _ in cuts) / max(audio_data.duration, 1e-9)
+            if share > CUT_SHARE_LIMIT:
+                if self.logger:
+                    self.logger.warning(
+                        f"Music analysis wants to cut {share * 100:.0f}% of "
+                        f"{os.path.basename(audio_path)}; keeping the audio "
+                        "whole. Check MUSIC_MAP_* thresholds, or whether this "
+                        "file is a recording of music.")
+                cuts = []
+
+        if cuts and not timeline:
+            trimmed, timeline = excise(audio_data.waveform,
+                                       audio_data.sample_rate,
+                                       [(a, b) for a, b, _ in cuts])
+            audio_data.waveform = trimmed
+            audio_data.duration = len(trimmed) / float(audio_data.sample_rate)
+            checkpoint.save("timeline", timeline.to_json(), fmt="json")
+            if self.logger:
+                self.logger.info(
+                    f"Cut {timeline.removed:.1f}s of singing/music from "
+                    f"{len(cuts)} stretch(es); {audio_data.duration / 60:.1f} min remain")
+        elif timeline:
+            # A later run() entry: the audio was reloaded whole, so re-cut it to
+            # match the timeline the earlier stages already worked in.
+            trimmed, _ = excise(audio_data.waveform, audio_data.sample_rate,
+                                [(a, b) for a, b, _ in cuts])
+            audio_data.waveform = trimmed
+            audio_data.duration = len(trimmed) / float(audio_data.sample_rate)
+        self.timeline = timeline
+
+        # Everything after the cut works in the shortened timeline, so the map
+        # separation consults has to move with it.
+        self.separation_svc.music_map = (music_map.remap(timeline) if timeline
+                                         else music_map)
+
+        if "music" not in computed_stages:
+            stage_out.write_music(music_map, timeline,
+                                  audio_data.waveform, audio_data.sample_rate)
+            computed_stages.add("music")
+
+        if getattr(args, "stop_after", None) == "music":
+            if self.logger:
+                self.logger.info("Stopping after music analysis as requested by --stop_after.")
+            stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
+                                      "stopped_after": "music"})
+            return None
+
+        # Diarization, ASR and export are load-bearing: nothing downstream has
+        # an input without them. Turning one off therefore ends the run here
+        # rather than producing a file with the stage quietly missing.
+        for _required in ("diarization", "asr", "export"):
+            if not self.step_enabled(args, _required):
+                if self.logger:
+                    self.logger.info(
+                        f"Step '{_required}' is off in the profile; stopping after "
+                        "music analysis. Nothing downstream of it has an input.")
+                stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
+                                          "stopped_before": _required})
+                return None
+
+        # 3. Diarization (with VAD & Chunking)
         # Stage artifacts are written only when a stage actually computes.
         # Under stage-major execution run() is re-entered once per stage, so a
         # later stage re-reads every earlier checkpoint; rewriting their output
@@ -285,27 +447,6 @@ class PipelineService:
         if "diarization" in computed:
             stage_out.write_diarization(diarization_result.segments, audio_data.duration)
 
-        # Where the music is, recorded now so separation can avoid enrolling on
-        # it. Separation runs before music removal, so its search for clean solo
-        # speech is otherwise done over audio that still has the music bed in
-        # it -- and an ECAPA embedding taken from speech-over-music describes
-        # both. Swept here because the waveform is already loaded and PANNs is
-        # cheap next to the diarizer that just ran.
-        if checkpoint.exists("music_map"):
-            music_map = MusicMap.from_json(checkpoint.load("music_map"))
-        else:
-            music_map = MusicMap()
-            if getattr(args, "panns", False):
-                # The tagger only. Demucs is loaded by the music_removal stage
-                # when it actually needs it, so nothing carries a source
-                # separator through diarization for a check that never uses it.
-                self._load("panns")
-                detector = self.model_loader.get("panns") if self.model_loader else None
-                music_map = build_music_map(
-                    audio_data.waveform, audio_data.sample_rate, detector,
-                    logger=self.logger)
-                checkpoint.save("music_map", music_map.to_json())
-        self.separation_svc.music_map = music_map
 
         self._free(args, "diarizer", "vad")
         # Unloading the client does not touch the subprocess holding the weights.
@@ -317,7 +458,7 @@ class PipelineService:
                                       "stopped_after": "diarization"})
             return None
             
-        # 3. Speech Separation (Overlap)
+        # 4. Speech Separation (Overlap)
         if checkpoint.exists("separation"):
             if self.logger: self.logger.info("Loading Separation from checkpoint")
             enhanced_segments = checkpoint.load("separation")
@@ -329,10 +470,19 @@ class PipelineService:
             # filenames carry a timestamp and speaker pair but not the audio
             # name, so a shared directory means later files silently overwrite
             # earlier ones -- the collision _resolve_output_dir exists to avoid.
-            self._load("separation")
-            self.separation_svc.dump_dir = os.path.join(
-                output_dir, "02_separation", "audio", "raw")
-            enhanced_segments = self.separation_svc.process_overlaps(diarization_result.segments, audio_data)
+            if not self.step_enabled(args, "separation"):
+                # Skipped, not failed: every segment still becomes an
+                # EnhancedSegment carrying its slice of the mixture, so ASR and
+                # export downstream see the same shape either way.
+                if self.logger:
+                    self.logger.info("Separation is off in the profile; segments pass through unseparated")
+                enhanced_segments = self.separation_svc.passthrough(
+                    diarization_result.segments, audio_data)
+            else:
+                self._load("separation")
+                self.separation_svc.dump_dir = os.path.join(
+                    output_dir, "03_separation", "audio", "raw")
+                enhanced_segments = self.separation_svc.process_overlaps(diarization_result.segments, audio_data)
             if self.logger: self.logger.info(f"[DEBUG] After Separation: {len(enhanced_segments)} segments")
             checkpoint.save("separation", enhanced_segments)
             # The counters live on the service and reset_stats() clears them at
@@ -360,8 +510,26 @@ class PipelineService:
                                       "stopped_after": "separation"})
             return None
             
-        # 4. Background Music Removal
-        if checkpoint.exists("music_removal"):
+        # 5. Background Music Removal -- the fallback for runs with no map.
+        #
+        # When the sweep ran, the beds were already taken out of the waveform
+        # before diarization, and every segment here is a slice of that cleaned
+        # audio. Running this pass as well would hand a vocal separator its own
+        # output and ask it to find a voice in it a second time -- and would
+        # reload the separator to do it.
+        # Off by default. It predates the waveform pass and does the same job a
+        # stage later and one segment at a time, so with a map it is redundant
+        # and without one it is a slower, coarser version of the same thing.
+        # Kept behind a switch rather than deleted: a run with music_analysis
+        # off has nothing else that would strip a bed.
+        _has_map = self.step_enabled(args, "music_analysis") and bool(music_map)
+        if _has_map or not self.step_enabled(args, "music_removal_fallback"):
+            if self.logger:
+                self.logger.info(
+                    "Skipping the per-segment music pass "
+                    + ("(the waveform was already cleaned)" if _has_map
+                       else "(turned off in the profile)"))
+        elif checkpoint.exists("music_removal"):
             if self.logger: self.logger.info("Loading Music Removal from checkpoint")
             enhanced_segments = checkpoint.load("music_removal")
         else:
@@ -382,7 +550,7 @@ class PipelineService:
                                       "stopped_after": "music_removal"})
             return None
             
-        # 5. ASR Ensemble (MoE)
+        # 6. ASR Ensemble (MoE)
         if checkpoint.exists("asr"):
             if self.logger: self.logger.info("Loading ASR from checkpoint")
             transcripts = checkpoint.load("asr")
@@ -406,8 +574,8 @@ class PipelineService:
                                       "stopped_after": "asr"})
             return transcripts
             
-        # 6. Qwen3-Omni Captioning
-        if getattr(args, "qwen3omni", False):
+        # 7. Qwen3-Omni Captioning
+        if self.step_enabled(args, "captioning"):
             if checkpoint.exists("captioning"):
                 if self.logger: self.logger.info("Loading Captioning from checkpoint")
                 transcripts = checkpoint.load("captioning")
@@ -428,8 +596,8 @@ class PipelineService:
                                       "stopped_after": "captioning"})
             return transcripts
                 
-        # 7. LLM Refinement
-        if getattr(args, "llm_refinement", False):
+        # 8. LLM Refinement
+        if self.step_enabled(args, "refinement"):
             # Checkpointed like every other stage. It is the most expensive one
             # -- 200 segments took 12 minutes on a T4, about half the run -- so
             # without this a retry after a failure anywhere downstream, or a
@@ -458,7 +626,7 @@ class PipelineService:
                 self.refinement_svc.unload()
 
         
-        # 8. Export Results
+        # 9. Export Results
         save_path = output_dir
         os.makedirs(save_path, exist_ok=True)
         base_name = os.path.splitext(os.path.basename(audio_path))[0]

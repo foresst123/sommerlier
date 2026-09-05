@@ -12,7 +12,7 @@ Usage:
     python tools/make_review_page.py OUTPUT_DIR [-o review.html]
 
 OUTPUT_DIR is a per-file directory under _final/, the one holding
-{name}.json alongside 01_diarization/ and the rest.
+{name}.json alongside 02_diarization/ and the rest.
 """
 
 import argparse

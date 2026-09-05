@@ -2,7 +2,19 @@ import os
 
 import numpy as np
 import torch
-from panns_inference import AudioTagging
+from panns_inference import AudioTagging, SoundEventDetection
+
+# AudioSet label groups this pipeline routes on. Cnn14 predicts all 527 on
+# every call; reading only "Music" is what left singing indistinguishable from
+# speech, so song lyrics reached ASR as dialogue.
+#
+# Matched by name rather than index: panns_inference exposes `labels` and the
+# ordering is not guaranteed stable across releases.
+SPEECH_LABELS = ("Speech",)
+SINGING_LABELS = ("Singing", "Choir", "Male singing", "Female singing",
+                  "Rapping", "Yodeling", "Chant", "Humming", "Song")
+MUSIC_LABELS = ("Music", "Musical instrument", "Background music")
+
 
 class PANNSDetector:
     """Wrapper for PANNS Audio Tagging (background music detection)."""
@@ -35,7 +47,78 @@ class PANNSDetector:
         if isinstance(inner, torch.nn.DataParallel):
             self.model.model = inner.module.to(self.device)
             self.model.device = self.device
+
+        # Frame-level tagger, loaded on first use: it is a second 312MB
+        # checkpoint and only the timeline sweep needs it.
+        self._sed = None
         
+    # Frame rate of Cnn14_DecisionLevelMax: 32000 Hz / hop 320 = 100 fps.
+    SED_FPS = 100.0
+
+    def _get_sed(self):
+        """Load the frame-level tagger, once and only if asked for.
+
+        AudioTagging answers "is there music in this clip" and nothing about
+        *where*, so locating music meant sliding a 2s window -- 200x coarser
+        than this model, which labels every 10ms.
+
+        The trade is real and worth stating: the SED checkpoint scores
+        mAP 0.385 against AudioTagging's 0.43. Time resolution is bought with
+        about ten percent of label accuracy.
+        """
+        if getattr(self, "_sed", None) is not None:
+            return self._sed
+        panns_device = "cuda" if str(self.device).startswith("cuda") else "cpu"
+        checkpoint = os.environ.get("PANNS_SED_CHECKPOINT") or None
+        self._sed = SoundEventDetection(checkpoint_path=checkpoint, device=panns_device)
+
+        # Same DataParallel unwrap as AudioTagging: inference runs at batch 1,
+        # so a second replica only burns VRAM on the GPU hosting other workers.
+        inner = getattr(self._sed, "model", None)
+        if isinstance(inner, torch.nn.DataParallel):
+            self._sed.model = inner.module.to(self.device)
+            self._sed.device = self.device
+        return self._sed
+
+    def _label_columns(self, names):
+        """Column indices of `names` in this build's label list."""
+        wanted = {n.lower() for n in names}
+        return [i for i, label in enumerate(self.model.labels)
+                if label.lower() in wanted]
+
+    def tag_framewise(self, audio_array, sample_rate: int = 32000):
+        """Speech / singing / music strength every 10ms.
+
+        Returns (scores, fps) where scores is a dict of 1-D arrays over frames.
+        Each group takes the strongest of its labels rather than their sum:
+        "Singing" and "Male singing" fire together on the same voice, and
+        adding them would double-count it.
+        """
+        import librosa
+
+        audio = np.asarray(audio_array, dtype=np.float32).reshape(-1)
+        if sample_rate != 32000:
+            audio = librosa.resample(audio, orig_sr=sample_rate, target_sr=32000)
+        if len(audio) < 32000:
+            # Below one second the pooling stack has nothing to reduce.
+            empty = np.zeros(0, dtype=np.float32)
+            return {"speech": empty, "singing": empty, "music": empty}, self.SED_FPS
+
+        peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+        if peak > 0:
+            audio = (audio / peak) * 0.9
+
+        framewise = self._get_sed().inference(audio[None, :])[0]   # (frames, 527)
+
+        out = {}
+        for key, names in (("speech", SPEECH_LABELS),
+                           ("singing", SINGING_LABELS),
+                           ("music", MUSIC_LABELS)):
+            cols = self._label_columns(names)
+            out[key] = (framewise[:, cols].max(axis=1) if cols
+                        else np.zeros(len(framewise), dtype=np.float32))
+        return out, self.SED_FPS
+
     def detect_music(self, audio_array, sample_rate: int = 32000, threshold: float = 0.5) -> tuple:
         """Detect if music is present in audio."""
         import librosa

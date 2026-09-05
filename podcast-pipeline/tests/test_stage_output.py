@@ -29,9 +29,9 @@ def test_each_stage_writes_its_own_directory(tmp_path):
     so.write_asr([_Seg(index="00000", text="xin chào")])
     so.write_manifest({"audio_file": "a.mp3"})
 
-    assert (tmp_path / "01_diarization" / "segments.json").exists()
-    assert (tmp_path / "01_diarization" / "stats.json").exists()
-    assert (tmp_path / "04_asr" / "transcripts.json").exists()
+    assert (tmp_path / "02_diarization" / "segments.json").exists()
+    assert (tmp_path / "02_diarization" / "stats.json").exists()
+    assert (tmp_path / "05_asr" / "transcripts.json").exists()
     assert (tmp_path / "manifest.json").exists()
 
 
@@ -42,7 +42,7 @@ def test_waveforms_never_reach_the_json(tmp_path):
     so = StageOutputService(str(tmp_path))
     so.write_diarization([seg], 1.0)
 
-    raw = (tmp_path / "01_diarization" / "segments.json").read_text()
+    raw = (tmp_path / "02_diarization" / "segments.json").read_text()
     assert "enhanced_audio" not in raw
     json.loads(raw)                       # and it is still valid JSON
 
@@ -111,10 +111,10 @@ def test_refinement_records_what_the_llm_rewrote(tmp_path):
     so = StageOutputService(str(tmp_path))
     so.write_refinement(after, before=before)
 
-    changes = json.loads((tmp_path / "05_refinement" / "changes.json").read_text())
+    changes = json.loads((tmp_path / "06_refinement" / "changes.json").read_text())
     assert len(changes) == 1 and changes[0]["index"] == "0"
     assert json.loads(
-        (tmp_path / "05_refinement" / "stats.json").read_text())["segments_changed"] == 1
+        (tmp_path / "06_refinement" / "stats.json").read_text())["segments_changed"] == 1
 
 
 def test_rewriting_most_segments_is_not_itself_a_warning(tmp_path):
@@ -129,7 +129,7 @@ def test_rewriting_most_segments_is_not_itself_a_warning(tmp_path):
     so = StageOutputService(str(tmp_path))
     so.write_refinement(after, before=before)
 
-    stats = json.loads((tmp_path / "05_refinement" / "stats.json").read_text())
+    stats = json.loads((tmp_path / "06_refinement" / "stats.json").read_text())
     assert stats["segments_changed"] == 20
     assert "warnings" not in stats
 
@@ -140,7 +140,7 @@ def test_bulk_word_deletion_is_flagged(tmp_path):
     so = StageOutputService(str(tmp_path))
     so.write_refinement(after, before=before)
 
-    stats = json.loads((tmp_path / "05_refinement" / "stats.json").read_text())
+    stats = json.loads((tmp_path / "06_refinement" / "stats.json").read_text())
     assert stats["word_drop_pct"] > 15.0
     assert any("removed" in w for w in stats["warnings"])
 

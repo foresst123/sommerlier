@@ -218,12 +218,12 @@ def main():
     if run is None:
         found = glob.glob(os.path.join(root, "..", "kaggle*", "working", "vi_audio",
                                        "_final", "*", "*"))
-        found = [p for p in found if os.path.isdir(os.path.join(p, "02_separation"))]
+        found = [p for p in found if os.path.isdir(os.path.join(p, "03_separation"))]
         if not found:
             sys.exit("no run directory found; pass one explicitly")
         run = found[0]
 
-    pairs_dir = os.path.join(run, "02_separation", "audio", "raw", "separated")
+    pairs_dir = os.path.join(run, "03_separation", "audio", "raw", "separated")
     mixes = sorted(glob.glob(os.path.join(pairs_dir, "*_mix.wav")))
     if args.limit:
         mixes = mixes[:args.limit]

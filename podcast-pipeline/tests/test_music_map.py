@@ -14,20 +14,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.music_map import MusicMap, build
-
-
-class FakeDetector:
-    """Reports music wherever the sample values are above a marker level."""
-
-    def __init__(self, threshold=0.5):
-        self.threshold = threshold
-        self.calls = 0
-
-    def detect_music(self, audio, sample_rate):
-        self.calls += 1
-        loud = float(np.abs(audio).mean()) > self.threshold
-        return loud, 0.9 if loud else 0.1
+from utils.music_map import MUSIC, SINGING, MusicMap, build
 
 
 # --- querying the map -------------------------------------------------------
@@ -75,50 +62,106 @@ def test_several_musical_stretches_are_all_removed():
     assert music.clean_parts(0.0, 10.0) == [(0.0, 2.0), (3.0, 6.0), (7.0, 10.0)]
 
 
-# --- building it ------------------------------------------------------------
+# --- building it -----------------------------------------------------------
+
+class FrameDetector:
+    """Stands in for PANNs SED: returns the scores it was handed."""
+
+    def __init__(self, speech=None, singing=None, music=None, frames=500, fps=100.0):
+        def _arr(v):
+            return np.full(frames, v, dtype=np.float32) if np.isscalar(v) else np.asarray(v, np.float32)
+        self.scores = {"speech": _arr(speech if speech is not None else 0.0),
+                       "singing": _arr(singing if singing is not None else 0.0),
+                       "music": _arr(music if music is not None else 0.0)}
+        self.fps = fps
+        self.calls = 0
+
+    def tag_framewise(self, waveform, sample_rate):
+        self.calls += 1
+        return self.scores, self.fps
+
+
+def _audio(seconds=5.0, sr=24000):
+    return np.zeros(int(sr * seconds), dtype=np.float32)
+
 
 def test_no_detector_gives_an_empty_map():
     """PANNs off is not the same as an error; it means the check did not run."""
-    assert not build(np.zeros(48000), 24000, None)
+    assert not build(_audio(), 24000, None)
 
 
-def test_a_silent_recording_has_no_music():
-    detector = FakeDetector()
-    assert not build(np.zeros(24000 * 5), 24000, detector)
-    assert detector.calls > 0, "the sweep should have run"
+def test_a_detector_without_frame_tagging_is_reported_not_guessed_at():
+    class Old:
+        def detect_music(self, audio, sr):
+            return True, 0.9
+    assert not build(_audio(), 24000, Old())
 
 
-def test_music_is_found_where_it_plays():
-    sr = 24000
-    audio = np.full(sr * 10, 0.1)
-    audio[sr * 4:sr * 6] = 1.0          # two loud seconds
-    found = build(audio, sr, FakeDetector())
-    assert found
-    assert found.overlaps(4.5, 5.5)
+def test_a_clean_recording_has_no_spans():
+    detector = FrameDetector(speech=0.9, singing=0.01, music=0.02)
+    assert not build(_audio(), 24000, detector)
+    assert detector.calls == 1
 
 
-def test_adjacent_detections_merge_into_one_stretch():
-    sr = 24000
-    audio = np.full(sr * 10, 0.1)
-    audio[sr * 2:sr * 8] = 1.0
-    found = build(audio, sr, FakeDetector())
-    # Six seconds of music should read as one stretch, not six.
+def test_music_under_speech_is_marked_music_not_singing():
+    """The common case: a bed to remove, with someone talking over it."""
+    detector = FrameDetector(speech=0.9, singing=0.05, music=0.8)
+    found = build(_audio(), 24000, detector)
+    assert found.total_of(MUSIC) > 0
+    assert found.total_of(SINGING) == 0
+
+
+def test_a_sung_stretch_is_marked_singing():
+    """Singing must be skipped, not cleaned: the thing to remove is the voice."""
+    detector = FrameDetector(speech=0.2, singing=0.9, music=0.8)
+    found = build(_audio(), 24000, detector)
+    assert found.total_of(SINGING) > 0
+    assert found.total_of(MUSIC) == 0, "a sung frame is not also a bed to strip"
+
+
+def test_speech_over_music_is_not_mistaken_for_singing():
+    """Both light up the vocal range; singing has to lead by a margin.
+
+    Without it, ordinary speech with a bed under it reads as singing and gets
+    dropped from the transcript."""
+    detector = FrameDetector(speech=0.85, singing=0.40, music=0.7)
+    found = build(_audio(), 24000, detector)
+    assert found.total_of(SINGING) == 0
+    assert found.total_of(MUSIC) > 0
+
+
+def test_a_brief_flicker_is_not_a_span():
+    frames = np.zeros(500, dtype=np.float32)
+    frames[100:110] = 0.9              # 0.1s, under MIN_SPAN_SECONDS
+    found = build(_audio(), 24000, FrameDetector(music=frames))
+    assert not found
+
+
+def test_a_dip_below_the_threshold_does_not_split_one_stretch():
+    """Music dips on a beat rest without stopping."""
+    frames = np.zeros(500, dtype=np.float32)
+    frames[100:200] = 0.9
+    frames[200:220] = 0.0              # 0.2s gap, under MERGE_GAP_SECONDS
+    frames[220:320] = 0.9
+    found = build(_audio(), 24000, FrameDetector(music=frames))
     assert len(found) == 1
+
+
+def test_the_frame_rate_survives_into_the_map():
+    found = build(_audio(), 24000, FrameDetector(music=0.9, fps=50.0))
+    assert found.fps == 50.0
 
 
 def test_a_detector_that_raises_does_not_take_the_run_down():
     class Broken:
-        def detect_music(self, audio, sample_rate):
+        def tag_framewise(self, waveform, sample_rate):
             raise RuntimeError("model died")
+    assert not build(_audio(), 24000, Broken())
 
-    assert not build(np.ones(24000 * 4), 24000, Broken())
 
-
-def test_a_recording_shorter_than_one_window_is_not_guessed_at():
-    """PANNs needs about a second; below that its verdict means nothing."""
-    detector = FakeDetector()
-    assert not build(np.ones(1000), 24000, detector)
-    assert detector.calls == 0
+def test_empty_scores_are_not_a_division_by_zero():
+    detector = FrameDetector(frames=0)
+    assert not build(_audio(), 24000, detector)
 
 
 # --- surviving a checkpoint -------------------------------------------------

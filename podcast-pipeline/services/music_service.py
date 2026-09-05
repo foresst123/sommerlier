@@ -1,3 +1,4 @@
+import numpy as np
 from typing import List
 from schemas.audio import AudioData
 from schemas.segment import EnhancedSegment
@@ -43,6 +44,62 @@ class MusicService:
             if self.logger: self.logger.info("Running Demucs on full audio to extract vocals.")
             self.full_vocals = self.demucs.separate_full(audio.waveform, audio.sample_rate)
             
+    def strip_music_spans(self, audio: AudioData, music_map, logger=None):
+        """Replace the music-bed stretches of the waveform with their vocals.
+
+        Runs before diarization, so the diarizer segments audio that no longer
+        has a bed under it -- and so does everything after it. The per-segment
+        pass below stays as a fallback for runs without a map.
+
+        Only stretches the map calls `music` are touched: `singing` is skipped
+        rather than cleaned, because there the thing to remove would be the
+        voice itself.
+
+        The waveform is modified in place, which is what lets the rest of the
+        pipeline stay unchanged. Returns the patches as (start_sample, audio)
+        so they can be cached and re-applied without running the separator
+        again -- run() is re-entered once per stage and reloads the audio each
+        time.
+        """
+        from utils.music_map import MUSIC
+
+        if not self.demucs or not music_map:
+            return []
+
+        sr = audio.sample_rate
+        total = len(audio.waveform)
+        patches = []
+        for start, end, kind in music_map.spans:
+            if kind != MUSIC:
+                continue
+            i, j = max(0, int(start * sr)), min(total, int(end * sr))
+            if j - i < sr // 2:
+                # Under half a second there is not enough for the separator to
+                # work with, and the seams would cost more than the bed does.
+                continue
+            vocals = self.demucs.separate_segment(audio.waveform[i:j], sr)
+            if vocals is None or len(vocals) != j - i:
+                continue
+            audio.waveform[i:j] = vocals
+            patches.append((i, np.asarray(vocals, dtype=np.float32)))
+
+        if logger and patches:
+            seconds = sum(len(p) for _, p in patches) / sr
+            logger.info(f"Stripped music from {seconds:.1f}s of the recording "
+                        f"before diarization ({len(patches)} stretch(es))")
+        return patches
+
+    @staticmethod
+    def apply_music_patches(audio: AudioData, patches):
+        """Write cached vocal stretches back over the waveform."""
+        if not patches:
+            return
+        total = len(audio.waveform)
+        for start, chunk in patches:
+            end = min(total, start + len(chunk))
+            if end > start:
+                audio.waveform[start:end] = chunk[:end - start]
+
     def process_segments(self, segments: List[EnhancedSegment], audio: AudioData) -> List[EnhancedSegment]:
         if not self.panns or not self.demucs:
             return segments

@@ -268,8 +268,7 @@ class TargetExtractionService:
             "enrollment_memory": (self.memory.summary()
                                   if TSE_MEMORY and getattr(self, "memory", None)
                                   else None),
-            "music_map": {"spans": len(self.music_map),
-                          "seconds": round(self.music_map.total, 2)},
+            "music_map": self.music_map.summary(),
             "stats": dict(self.stats),
             "sim_percentiles": (
                 {p: float(np.percentile(self.sims, p)) for p in (10, 50, 90)}
@@ -861,6 +860,20 @@ class TargetExtractionService:
         self._dump_tracks("failed", tag, mixture, track_1, track_2, sr)
 
     # ------------------------------------------------------------------
+    def passthrough(self, segments, audio):
+        """EnhancedSegments carrying the mixture, with nothing separated.
+
+        What the separation stage returns when the profile turns it off. The
+        shape has to match `process_overlaps` exactly -- ASR and the exporters
+        read `enhanced_audio` either way -- so the difference is only that no
+        overlap is replaced.
+        """
+        sr = audio.sample_rate
+        enhanced = [EnhancedSegment(**s.__dict__) for s in segments]
+        for e in enhanced:
+            e.enhanced_audio = audio.waveform[int(e.start * sr):int(e.end * sr)].copy()
+        return enhanced
+
     def process_overlaps(self, segments: List[Segment], audio: AudioData, overlap_threshold: float = 0.1) -> List[EnhancedSegment]:
         if not self.tse_model:
             return [EnhancedSegment(**s.__dict__) for s in segments]
@@ -993,7 +1006,13 @@ class TargetExtractionService:
             # would only measure how much the EQ moved ECAPA's embedding. The
             # gate therefore keeps judging separation, and this keeps fixing
             # timbre, without either one standing in for the other.
-            if spectral_restore.enabled():
+            # Only for Sidon. The curve is the inverse of a tilt measured on
+            # DialogueSidon's VAE decoder specifically -- -4.2 dB at 100-200 Hz,
+            # +3.5 dB at 1-2 kHz across 43 of its tracks. A masking separator
+            # does not have that tilt, so applying the correction to one would
+            # impose an error rather than remove it.
+            backend = getattr(getattr(self, "tse_model", None), "backend", None)
+            if spectral_restore.enabled() and getattr(backend, "name", None) == "sidon":
                 track_A = spectral_restore.restore(track_A, sr)
                 track_B = spectral_restore.restore(track_B, sr)
                 self.stats["spectral_restored"] += 1

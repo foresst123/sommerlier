@@ -74,9 +74,17 @@ class ModelLoader:
             return
         if getattr(self.args, "tse", False):
             if self.logger: self.logger.info(f"Loading Target Speaker Extractor on {self.device_1}")
+            # Same resolution order the extractor uses: an explicit flag wins,
+            # then the profile (published as TSE_SEPARATOR in main.py), then the
+            # default. Resolved here too so the log line names what actually ran.
+            separator = (getattr(self.args, "separator", None)
+                         or os.environ.get("TSE_SEPARATOR") or "usef")
+            if self.logger: self.logger.info(f"  separator backend: {separator}")
             self.models["separator"] = TargetSpeakerExtractor(
                 device=self.device_1,
-                process=sidon_service.process if sidon_service else None
+                process=sidon_service.process if sidon_service else None,
+                separator=separator,
+                logger=self.logger,
             )
             
     def load_panns(self):
@@ -105,9 +113,27 @@ class ModelLoader:
             # GPU 1 hosts the DiariZen worker plus the embedder, TSE and ASR
             # models; separating a full podcast needs ~1GB of headroom that is
             # not there, so Demucs runs on GPU 2 alongside the Qwen3 worker.
-            demucs_cfg = self.config.get("environments", {}).get(self.args.env, {}).get("models", {}).get("demucs", {})
-            if self.logger: self.logger.info(f"Loading Demucs on {self.device_1}")
-            self.models["demucs"] = DemucsRemover(device=str(self.device_1), logger=self.logger, **demucs_cfg)
+            demucs_cfg = dict(self.config.get("environments", {}).get(self.args.env, {})
+                              .get("models", {}).get("demucs", {}))
+            # Which model isolates vocals. Same interface either way, so
+            # MusicService does not know the difference; the key stays "demucs"
+            # because that is what the service and the free-list call it.
+            #
+            # `model` is popped rather than forwarded: the rest of the block is
+            # constructor kwargs, and leaving it in would reach DemucsRemover as
+            # an argument it does not take.
+            which = (getattr(self.args, "music_separator", None)
+                     or demucs_cfg.pop("model", None)
+                     or os.environ.get("MUSIC_SEPARATOR") or "demucs")
+            if which == "bs_roformer":
+                from models.bs_roformer import BSRoformerRemover
+                if self.logger: self.logger.info(f"Loading BS-RoFormer on {self.device_1}")
+                self.models["demucs"] = BSRoformerRemover(
+                    device=str(self.device_1), logger=self.logger, **demucs_cfg)
+            else:
+                if self.logger: self.logger.info(f"Loading Demucs on {self.device_1}")
+                self.models["demucs"] = DemucsRemover(
+                    device=str(self.device_1), logger=self.logger, **demucs_cfg)
             
     def load_asr_models(self, qwen3_service: Qwen3WorkerService = None):
         """Load ASR models (Whisper, PhoWhisper, Qwen3)."""

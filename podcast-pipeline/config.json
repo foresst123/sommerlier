@@ -26,6 +26,18 @@
             "offline_mode": false,
             "gpu_1": 0,
             "gpu_2": 1,
+            "steps": {
+                "music_analysis": true,
+                "music_removal": true,
+                "music_removal_fallback": false,
+                "cut_singing": true,
+                "diarization": true,
+                "separation": true,
+                "asr": true,
+                "captioning": false,
+                "refinement": true,
+                "export": true
+            },
             "pipeline": {
                 "vad": true,
                 "tse": true,
@@ -81,13 +93,15 @@
                     "min_voiced_sec": 1.0,
                     "stitch_solo": 5.0,
                     "stitch_edge_pad": 0.2,
-                    "enrollment_memory": false
+                    "enrollment_memory": false,
+                    "separator": "usef"
                 },
                 "sidon": {
                     "num_steps": 100,
                     "spectral_restore": false
                 },
                 "demucs": {
+                    "model": "bs_roformer",
                     "segment": 10,
                     "overlap": 0.1
                 },
@@ -107,6 +121,18 @@
             "offline_mode": false,
             "gpu_1": 0,
             "gpu_2": 0,
+            "steps": {
+                "music_analysis": true,
+                "music_removal": true,
+                "music_removal_fallback": false,
+                "cut_singing": true,
+                "diarization": true,
+                "separation": true,
+                "asr": true,
+                "captioning": false,
+                "refinement": true,
+                "export": true
+            },
             "pipeline": {
                 "vad": true,
                 "tse": true,
@@ -162,13 +188,15 @@
                     "min_voiced_sec": 1.0,
                     "stitch_solo": 5.0,
                     "stitch_edge_pad": 0.2,
-                    "enrollment_memory": false
+                    "enrollment_memory": false,
+                    "separator": "usef"
                 },
                 "sidon": {
                     "num_steps": 100,
                     "spectral_restore": false
                 },
                 "demucs": {
+                    "model": "bs_roformer",
                     "segment": 30,
                     "overlap": 0.2
                 },

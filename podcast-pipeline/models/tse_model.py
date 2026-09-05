@@ -52,8 +52,11 @@ class TargetSpeakerExtractor:
     Uses SidonWorker for separation and ECAPA-TDNN natively for verification.
     """
     
-    def __init__(self, device: torch.device, process=None, checkpoint_path: str = None):
+    def __init__(self, device: torch.device, process=None, checkpoint_path: str = None,
+                 separator: str = None, logger=None):
         import tempfile
+
+        from models.separation_backends import make_backend
 
         self.device = device
         self.process = process
@@ -61,6 +64,13 @@ class TargetSpeakerExtractor:
         self.target_embed_cache: Dict[str, torch.Tensor] = {}
         self._temp_dir = tempfile.mkdtemp(prefix="tse_exchange_")
         self._req_counter = 0
+
+        # Which separator produces the two tracks. Everything else in this
+        # class -- enrollment embeddings, QC scoring, the not-A test -- is the
+        # same whichever one runs, which is what makes them comparable.
+        name = separator or os.environ.get("TSE_SEPARATOR", "usef")
+        self.backend = make_backend(name, process=process, temp_dir=self._temp_dir,
+                                    device=device, logger=logger)
 
         self._load_model()
 
@@ -256,77 +266,19 @@ class TargetSpeakerExtractor:
         """
         if not self.classifier:
             raise RuntimeError("ECAPA is not loaded.")
-        if not self.process:
-            raise RuntimeError("Sidon worker process is not connected.")
-            
         if len(mixture_audio) == 0:
             raise ValueError("Input mixture_audio is empty.")
 
         import torchaudio.functional as F_audio
-        import json
 
-        self._req_counter += 1
-        req_id = str(self._req_counter)
+        # Which separator runs is a profile setting; everything below -- the
+        # enrollment embeddings, the QC scoring, the not-A test -- is the same
+        # whichever produced the tracks.
+        track_1_np, track_2_np, target_sr = self.backend.separate(
+            mixture_audio, sample_rate, enroll_A=enroll_A, enroll_B=enroll_B)
+        track_1_np = np.asarray(track_1_np, dtype=np.float32)
+        track_2_np = np.asarray(track_2_np, dtype=np.float32)
 
-        # One reusable scratch dir instead of mkstemp per overlap; the exchange
-        # runs thousands of times on a full podcast.
-        temp_path = os.path.join(self._temp_dir, f"mix_{req_id}.npy")
-        np.save(temp_path, np.ascontiguousarray(mixture_audio, dtype=np.float32))
-
-        produced_paths = [temp_path]
-        try:
-            req = {
-                "id": req_id,
-                "audio_path": temp_path,
-                "sample_rate": sample_rate
-            }
-
-            self.process.stdin.write(json.dumps(req) + "\n")
-            self.process.stdin.flush()
-
-            resp = None
-            while True:
-                line = self.process.stdout.readline()
-                if not line:
-                    raise RuntimeError("Sidon worker crashed or closed stdout")
-
-                line_str = line.strip()
-                if not line_str:
-                    continue
-
-                try:
-                    parsed = json.loads(line_str)
-                    if parsed.get("id") == req_id:
-                        resp = parsed
-                        break
-                except Exception:
-                    pass
-
-            for key in ("track_1_path", "track_2_path"):
-                if resp.get(key):
-                    produced_paths.append(resp[key])
-
-            if resp.get("error"):
-                raise RuntimeError(f"Sidon worker error: {resp.get('error')}")
-
-            # The separator decodes to its own native rate (DialogueSidon's VAE
-            # decoder emits 24 kHz), which is independent of the pipeline's rate.
-            # Trusting the rate the worker reports is what keeps ECAPA and the
-            # resample-back honest.
-            target_sr = int(resp.get("target_sr") or sample_rate)
-
-            # Load results
-            track_1_np = np.load(resp["track_1_path"])
-            track_2_np = np.load(resp["track_2_path"])
-        finally:
-            # Always clean up, including on worker errors, so a long run does not
-            # accumulate one leaked .npy per failed overlap.
-            for path in produced_paths:
-                try:
-                    if os.path.exists(path):
-                        os.remove(path)
-                except OSError:
-                    pass
 
         track_1_tensor = torch.from_numpy(track_1_np).to(self.device)
         track_2_tensor = torch.from_numpy(track_2_np).to(self.device)
@@ -338,8 +290,14 @@ class TargetSpeakerExtractor:
         # Repair chunk-seam inversions before scoring. The assignment below
         # picks one orientation for the whole window, so a track that flips
         # speakers midway cannot be labelled correctly at any price.
-        track_1_np, track_2_np, n_flips = self._repair_chunk_swaps(
-            track_1_np, track_2_np, target_sr, embed_A, embed_B)
+        # Only blind separators can invert channels mid-window: a
+        # target-conditioned one was told whose voice to follow, so there is
+        # nothing to repair and running the check would only risk creating the
+        # swap it is meant to fix.
+        n_flips = 0
+        if not getattr(self.backend, "ordered", False):
+            track_1_np, track_2_np, n_flips = self._repair_chunk_swaps(
+                track_1_np, track_2_np, target_sr, embed_A, embed_B)
         if n_flips:
             track_1_tensor = torch.from_numpy(track_1_np).to(self.device)
             track_2_tensor = torch.from_numpy(track_2_np).to(self.device)
@@ -370,7 +328,19 @@ class TargetSpeakerExtractor:
             # A missing score must not win the comparison by default.
             return -1.0 if x is None else x
 
-        if (_n(s_1A) + _n(s_2B)) >= (_n(s_2A) + _n(s_1B)):
+        # A target-conditioned separator was told whose voice to extract, so
+        # track 1 is A by construction and there is nothing to decide. Scoring
+        # still happens -- QC gates on sim, and the not-A test below needs the
+        # numbers -- but the tracks are never swapped. This removes the whole
+        # class of assignment errors that `_maybe_swap`, `not_a_fail` and
+        # `qc_sim` exist to contain: measured similarity here sits at p50 0.58
+        # where natural speech scores 0.70-0.90, so those decisions are made on
+        # thin evidence.
+        if getattr(self.backend, "ordered", False):
+            out_A_tensor, out_B_tensor = track_1_tensor, track_2_tensor
+            out_A_np, out_B_np = track_1_np, track_2_np
+            sim_A, sim_B = s_1A, s_2B
+        elif (_n(s_1A) + _n(s_2B)) >= (_n(s_2A) + _n(s_1B)):
             out_A_tensor, out_B_tensor = track_1_tensor, track_2_tensor
             out_A_np, out_B_np = track_1_np, track_2_np
             sim_A, sim_B = s_1A, s_2B

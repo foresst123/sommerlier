@@ -92,12 +92,17 @@ def _as_dict(obj) -> dict:
 class StageOutputService:
     """Writes one directory per pipeline stage."""
 
+    # Numbered by the order they run, which changed when music analysis moved
+    # ahead of diarization: the diarizer now segments audio whose music bed has
+    # already been stripped, rather than seeing it and being told about it
+    # afterwards.
     STAGES = {
-        "diarization": "01_diarization",
-        "separation": "02_separation",
-        "music_removal": "03_music_removal",
-        "asr": "04_asr",
-        "refinement": "05_refinement",
+        "music": "01_music",
+        "diarization": "02_diarization",
+        "separation": "03_separation",
+        "music_removal": "04_music_removal",
+        "asr": "05_asr",
+        "refinement": "06_refinement",
     }
 
     def __init__(self, output_dir: str, logger=None, enabled: bool = True):
@@ -291,6 +296,35 @@ class StageOutputService:
                 self.logger.warning(f"[stage-out] {stage}: {msg}")
         return d
 
+    def write_music(self, music_map, timeline=None, audio=None, sample_rate=None):
+        """What the tagger found, and what was done about it.
+
+        Written before diarization runs, so a `--stop_after music` run leaves
+        the whole verdict on disk: which stretches were called singing, which
+        were beds, how much left the recording, and the audio that remains.
+        """
+        if not self.enabled:
+            return
+        stage = self.stage_dir("music")
+
+        payload = dict(music_map.summary())
+        payload["spans"] = [{"start": round(a, 3), "end": round(b, 3), "kind": k}
+                            for a, b, k in music_map.spans]
+        if timeline is not None:
+            payload["removed_seconds"] = round(timeline.removed, 2)
+            payload["kept_stretches"] = len(timeline.kept)
+        self._write_json(os.path.join(stage, "music_map.json"), payload)
+
+        # The trimmed recording itself, so the cuts and their joins can be
+        # judged by ear rather than from counters.
+        if audio is not None and sample_rate:
+            try:
+                import soundfile as sf
+                sf.write(os.path.join(stage, "after_music.wav"), audio, sample_rate)
+            except Exception as exc:
+                if self.logger:
+                    self.logger.warning(f"Could not write after_music.wav: {exc}")
+
     def write_diarization(self, segments, total_dur=None):
         return self._finish("diarization", "segments.json", segments,
                             self.segment_stats(segments, total_dur))
@@ -342,7 +376,7 @@ class StageOutputService:
                 stats.setdefault("warnings", []).append(
                     f"refinement removed {drop_pct:.1f}% of the words it touched "
                     f"({words_before - words_after} of {words_before}): check "
-                    "05_refinement/changes.json for deleted content")
+                    "06_refinement/changes.json for deleted content")
             extra = {"changes.json": changes}
         return self._finish("refinement", "transcripts.json", transcripts, stats, extra)
 

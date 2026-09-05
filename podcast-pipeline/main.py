@@ -30,7 +30,18 @@ def _build_parser():
     parser.add_argument("--ASRMoE", action="store_true", help="Enable MoE ASR")
     parser.add_argument("--dia3", action="store_true", help="Use Pyannote community model (default is DiariZen if false)")
     parser.add_argument("--tse", action="store_true", help="Enable Target Speaker Extraction (TSE) for overlapping speech")
+    parser.add_argument("--separator", choices=["sidon", "usef"], default=None,
+                        help="Which model produces the two tracks. usef (default) "
+                             "is target-conditioned TF-GridNet at 8kHz: it needs no "
+                             "channel assignment, but discards everything above "
+                             "4kHz. sidon is the older blind diffusion model at "
+                             "24kHz, kept only so the two can be compared.")
     parser.add_argument("--panns", action="store_true", help="Enable background music removal")
+    parser.add_argument("--music_separator", choices=["demucs", "bs_roformer"], default=None,
+                        help="Which model isolates vocals once PANNs finds music. "
+                             "demucs (default) is htdemucs; bs_roformer is the "
+                             "band-split rotary transformer the SiSEC entries use, "
+                             "roughly 2dB better SDR. Defaults to the profile.")
     parser.add_argument("--qwen3omni", action="store_true", help="Enable Qwen3-Omni audio captioning")
     parser.add_argument("--llm_refinement", action="store_true", help="Enable LLM label refinement")
     parser.add_argument("--sortformer_pad_onset", default=0.0, type=float, help="Sortformer start padding")
@@ -72,7 +83,7 @@ def _build_parser():
                              "worth turning off when only the transcripts matter.")
     parser.add_argument("--review_max_mb", type=int, default=None,
                         help="Cap on audio embedded in the review page (default 400).")
-    parser.add_argument("--stop_after", type=str, choices=["diarization", "separation", "music_removal", "asr", "captioning"], help="Stop pipeline gracefully after this stage")
+    parser.add_argument("--stop_after", type=str, choices=["music", "diarization", "separation", "music_removal", "asr", "captioning"], help="Stop pipeline gracefully after this stage")
     return parser
 
 
@@ -133,6 +144,12 @@ def _from_config(key, value):
 # thresholds can live in the profile instead of the command line.
 for k, v in env_profile.get("pipeline", {}).items():
     _from_config(k, v)
+
+# "steps" is the on/off list, kept apart from the tuning values above: each key
+# is one stage, and false skips it. Landed as step_<name> so a stage's switch
+# cannot collide with a threshold that happens to share its name.
+for k, v in env_profile.get("steps", {}).items():
+    setattr(args, f"step_{k}", bool(v))
 
 for k in ("gpu_1", "gpu_2"):
     if k in env_profile:
@@ -195,6 +212,17 @@ if _restore is not None and "SIDON_SPECTRAL_RESTORE" not in os.environ:
 _memory = env_profile.get("models", {}).get("tse", {}).get("enrollment_memory")
 if _memory is not None and "TSE_MEMORY" not in os.environ:
     os.environ["TSE_MEMORY"] = "1" if _memory else "0"
+
+# The separator is read at TargetSpeakerExtractor construction, not at import,
+# but it is published here with the other TSE settings so one profile switch
+# controls it like everything else.
+_sep = env_profile.get("models", {}).get("tse", {}).get("separator")
+if _sep and "TSE_SEPARATOR" not in os.environ:
+    os.environ["TSE_SEPARATOR"] = str(_sep)
+
+_music_sep = env_profile.get("models", {}).get("demucs", {}).get("model")
+if _music_sep and "MUSIC_SEPARATOR" not in os.environ:
+    os.environ["MUSIC_SEPARATOR"] = str(_music_sep)
 
 from services.model_loader import ModelLoader
 from services.audio_service import AudioService
@@ -282,9 +310,14 @@ def main():
         diarizen_service = DiarizenWorkerService(diarizen_env_bin, diarizen_worker_script, device_id=args.gpu_1, logger=logger, env_name=args.env, config_path=args.config)
         diarizen_service.spawn()
         
-    # 1c. Start Sidon Worker (if TSE enabled)
+    # 1c. Start the Sidon worker only when Sidon is the separator. It is a
+    # separate process holding ~2.6GB of VRAM and a slow start, and the default
+    # separator no longer uses it -- spawning it regardless would pay both costs
+    # for a model that never receives a request.
+    _separator = (getattr(args, "separator", None)
+                  or os.environ.get("TSE_SEPARATOR") or "usef")
     sidon_service = None
-    if args.tse:
+    if args.tse and _separator == "sidon":
         sidon_service = SidonWorkerService(config, args, logger)
         sidon_service.spawn()
 

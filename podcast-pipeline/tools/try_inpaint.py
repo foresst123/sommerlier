@@ -225,7 +225,7 @@ def main():
     if not spans:
         sys.exit("no spliced spans in this run")
 
-    audio_dir = os.path.join(run, "02_separation", "audio", "separated")
+    audio_dir = os.path.join(run, "03_separation", "audio", "separated")
     if args.dump:
         os.makedirs(args.dump, exist_ok=True)
 
