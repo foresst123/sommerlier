@@ -307,3 +307,71 @@ def test_the_interpreter_is_resolved_at_spawn():
     else:
         raise AssertionError("a missing interpreter must still fail, at spawn")
     assert calls == [1]
+
+
+# --- saying it on the command line -------------------------------------------
+
+def _parse(argv):
+    """main.py's own parsing, run in a subprocess: the steps block is applied
+    at module scope, so importing main is the only way to exercise it."""
+    import json as _json
+    import subprocess
+    import tempfile
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    probe = (
+        "import sys, json, runpy, types\n"
+        "sys.argv = ['main.py'] + " + repr(argv) + "\n"
+        "mod = types.ModuleType('probe')\n"
+        "src = open('main.py').read().split('# 2. DELAYED IMPORTS')[0]\n"
+        "ns = {'__name__': 'probe'}\n"
+        "exec(compile(src, 'main.py', 'exec'), ns)\n"
+        "print(json.dumps({k: v for k, v in vars(ns['args']).items() "
+        "if k.startswith('step_')}))\n"
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, dir=root) as fh:
+        fh.write(probe)
+        path = fh.name
+    try:
+        out = subprocess.run([sys.executable, path], cwd=root,
+                             capture_output=True, text=True)
+        assert out.returncode == 0, out.stderr[-2000:]
+        return _json.loads(out.stdout.strip().splitlines()[-1])
+    finally:
+        os.unlink(path)
+
+
+BASE = ["--audio", "x.wav", "--env", "kaggle"]
+
+
+def test_the_profile_supplies_the_steps():
+    assert _parse(BASE)["step_diarization"] is True
+
+
+def test_the_command_line_overrides_the_profile():
+    """The reason this flag exists: editing config.json is reverted by a
+    re-clone, silently, and the run then does something else entirely."""
+    parsed = _parse(BASE + ["--steps", "diarization=off"])
+    assert parsed["step_diarization"] is False
+    assert parsed["step_music_analysis"] is True, "only the named step moves"
+
+
+def test_several_steps_at_once():
+    parsed = _parse(BASE + ["--steps", "diarization=off,separation=off,asr=on"])
+    assert parsed["step_diarization"] is False
+    assert parsed["step_separation"] is False
+    assert parsed["step_asr"] is True
+
+
+def test_a_bare_name_means_on():
+    assert _parse(BASE + ["--steps", "captioning"])["step_captioning"] is True
+
+
+def test_every_spelling_of_off():
+    for word in ("off", "false", "no", "0"):
+        assert _parse(BASE + ["--steps", f"diarization={word}"])["step_diarization"] is False, word
+
+
+def test_a_step_the_profile_never_mentions_can_be_added():
+    parsed = _parse(BASE + ["--steps", "brand_new=off"])
+    assert parsed["step_brand_new"] is False

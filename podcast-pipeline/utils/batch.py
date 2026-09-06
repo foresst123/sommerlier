@@ -2,6 +2,8 @@
 
 import os
 
+from utils.steps import LOAD_BEARING, step_enabled
+
 
 def audio_duration(path: str) -> float:
     """Length of `path` in seconds, or 0.0 if it cannot be read.
@@ -112,7 +114,17 @@ def plan_batches(paths, max_hours: float, logger=None):
 
 # Stage order must match the pipeline's own sequence; `None` means "run to the
 # end", which covers refinement and export.
-PIPELINE_STAGES = ("diarization", "separation", "music_removal", "asr", "captioning", None)
+#
+# "music" leads because it is a stage like any other: it loads PANNs and a
+# vocal separator, and running it as its own pass loads them once for the whole
+# batch instead of once inside each file's diarization pass. It is also the
+# stage a run keeps when everything after it is switched off, so it has to be
+# reachable on its own.
+PIPELINE_STAGES = ("music", "diarization", "separation", "music_removal", "asr", "captioning", None)
+
+
+def label_of(stage):
+    return stage or "refinement+export"
 
 
 def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELINE_STAGES):
@@ -146,7 +158,23 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
         if stage == "captioning" and not getattr(args, "qwen3omni", False):
             continue
 
-        label = stage or "refinement+export"
+        # Stop once the pipeline's own guard would. PipelineService ends a run
+        # at the music stage when any load-bearing step is off, so every pass
+        # after that one reloads the audio, re-reads the checkpoints and
+        # returns at the same guard -- five passes of nothing, and the ledger
+        # then does the whole lot again on the next attempt.
+        #
+        # Only the load-bearing steps are consulted. A pass whose own stage is
+        # switched off still has to run: it is what carries the pipeline from
+        # the previous stage to the next one.
+        if stage != "music" and not all(step_enabled(args, r) for r in LOAD_BEARING):
+            if logger:
+                off = ", ".join(r for r in LOAD_BEARING if not step_enabled(args, r))
+                logger.info(f"Stopping after the music stage: {off} switched off, "
+                            "and nothing downstream has an input")
+            break
+
+        label = label_of(stage)
         pending = [p for p in batch if p not in failures]
         if not pending:
             break

@@ -128,7 +128,36 @@ def test_stop_after_is_respected():
     pipe = FakePipeline()
     run_batch_by_stage(pipe, _args(stop_after="separation"), {}, ["f1", "f2"])
     stages = {s for s, _ in pipe.calls}
-    assert stages == {"diarization", "separation"}, f"ran {stages}"
+    assert stages == {"music", "diarization", "separation"}, f"ran {stages}"
+
+
+def test_the_music_stage_gets_its_own_pass():
+    """It loads PANNs and a vocal separator; a pass loads them once for the
+    batch rather than once inside each file's diarization pass."""
+    pipe = FakePipeline()
+    run_batch_by_stage(pipe, _args(stop_after=None), {}, ["f1", "f2"])
+    assert [s for s, _ in pipe.calls][:2] == ["music", "music"]
+
+
+def test_a_run_that_stops_after_music_runs_one_pass():
+    """The regression: five later passes each reloaded the audio, re-read the
+    checkpoints and returned at the same guard, and the ledger then repeated
+    the lot on a second attempt."""
+    pipe = FakePipeline()
+    run_batch_by_stage(pipe, _args(stop_after=None, step_diarization=False),
+                       {}, ["f1", "f2"])
+    assert {s for s, _ in pipe.calls} == {"music"}
+
+
+def test_a_stage_switched_off_still_gets_its_pass():
+    """Only the load-bearing steps end the run. A pass whose own stage is off
+    still carries the pipeline from the previous stage to the next."""
+    pipe = FakePipeline()
+    run_batch_by_stage(pipe, _args(stop_after=None, step_separation=False),
+                       {}, ["f1"])
+    stages = {s for s, _ in pipe.calls}
+    assert "separation" in stages
+    assert None in stages, "the run must still reach the end"
 
 
 def test_caller_args_are_not_mutated():

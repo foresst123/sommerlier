@@ -31,30 +31,12 @@ def step_enabled(args, name: str) -> bool:
     return bool(getattr(args, legacy, True)) if legacy else True
 
 
-# The three stages nothing downstream has an input without. PipelineService
-# stops the run at the music stage when any one of them is off, which is what
-# makes reachability a different question from whether a step is switched on.
-LOAD_BEARING = ("diarization", "asr", "export")
-
-# Stages that run before that check, and so run whatever else is off.
-BEFORE_THE_CHECK = ("music_analysis", "music_removal", "cut_singing")
-
-
 def will_run(args, name: str) -> bool:
     """Whether this run actually reaches `name`.
 
-    `step_enabled` answers whether a stage is switched on; this answers whether
-    the run gets there at all. The two differ whenever a load-bearing stage is
-    off: with diarization disabled the run stops after the music stage, so ASR
-    is still "enabled" and will never execute.
-
-    Worker processes are the reason this matters. They are spawned before the
-    first file is opened, each with its own interpreter and weights, so asking
-    the wrong question starts a subprocess for a stage that never comes -- or,
-    on an install that has no interpreter for it, ends the run there.
+    Now simplified: a step runs if and only if it is enabled in the config.
+    There is no longer a concept of "load-bearing" stages that block everything
+    downstream -- each stage independently checks its own `step_enabled` flag
+    and whether its prerequisite data is available.
     """
-    if not step_enabled(args, name):
-        return False
-    if name in BEFORE_THE_CHECK:
-        return True
-    return all(step_enabled(args, required) for required in LOAD_BEARING)
+    return step_enabled(args, name)

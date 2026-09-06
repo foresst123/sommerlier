@@ -83,6 +83,12 @@ def _build_parser():
                              "worth turning off when only the transcripts matter.")
     parser.add_argument("--review_max_mb", type=int, default=None,
                         help="Cap on audio embedded in the review page (default 400).")
+    parser.add_argument("--steps", type=str, default=None,
+                        help="Turn stages on or off for this run, overriding the "
+                             "profile's `steps` block: --steps diarization=off, or "
+                             "several as name=on,name=off. Exists so a run does not "
+                             "have to edit config.json -- which a re-clone reverts "
+                             "without saying so.")
     parser.add_argument("--stop_after", type=str, choices=["music", "diarization", "separation", "music_removal", "asr", "captioning"], help="Stop pipeline gracefully after this stage")
     return parser
 
@@ -148,8 +154,33 @@ for k, v in env_profile.get("pipeline", {}).items():
 # "steps" is the on/off list, kept apart from the tuning values above: each key
 # is one stage, and false skips it. Landed as step_<name> so a stage's switch
 # cannot collide with a threshold that happens to share its name.
-for k, v in env_profile.get("steps", {}).items():
+_steps = dict(env_profile.get("steps", {}))
+
+# --steps wins over the profile. The command line is the only place a run can
+# say what it wants without editing a tracked file, and editing config.json is
+# a trap: a re-clone restores it and the run silently does something else.
+_TRUTHY = {"1", "true", "yes", "on"}
+_FALSY = {"0", "false", "no", "off"}
+for _pair in (args.steps or "").replace(";", ",").split(","):
+    _pair = _pair.strip()
+    if not _pair:
+        continue
+    _name, _, _value = _pair.partition("=")
+    _name, _value = _name.strip(), _value.strip().lower()
+    # A bare name means on, so `--steps music_analysis` reads the way it looks.
+    if _value and _value not in _TRUTHY and _value not in _FALSY:
+        raise SystemExit(f"main.py: error: --steps {_pair!r}: expected on/off")
+    _steps[_name] = _value not in _FALSY
+
+for k, v in _steps.items():
     setattr(args, f"step_{k}", bool(v))
+
+# Printed, not left to be deduced from what did not happen. A stage silently
+# off is the hardest kind of run to read: the log shows work that happened and
+# nothing about the work that was never asked for.
+_off = sorted(k for k, v in _steps.items() if not v)
+_STEPS_NOTE = ("all stages on" if not _off
+               else "stages OFF: " + ", ".join(_off))
 
 for k in ("gpu_1", "gpu_2"):
     if k in env_profile:
@@ -263,6 +294,7 @@ def main():
         
     logger = Logger.get_logger()
     logger.info(f"Starting Sommelier Pipeline for Job: {args.job_id}")
+    logger.info(f"Steps ({args.env} profile{', +--steps' if args.steps else ''}): {_STEPS_NOTE}")
     from utils.cpu_plan import usable_cores
     # Workers inherit this through os.environ.copy() in base_worker_service.
     logger.info(f"CPU: {usable_cores()} core(s) usable, "
