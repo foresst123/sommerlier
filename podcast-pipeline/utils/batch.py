@@ -2,7 +2,7 @@
 
 import os
 
-from utils.steps import LOAD_BEARING, step_enabled
+from utils.steps import step_enabled
 
 
 def audio_duration(path: str) -> float:
@@ -149,30 +149,27 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
             if _stage_index(stage) > _stage_index(original_stop):
                 break
 
-        # captioning is the one stage whose flag can be honoured from here: with
-        # qwen3omni off it returns without touching the transcripts, so skipping
-        # it costs nothing and saves a pass that reloads the audio and re-reads
-        # four checkpoints to do nothing. The others are not safe to skip --
-        # separation and music_removal each produce or forward the
-        # enhanced_segments that ASR consumes, flag or no flag.
-        if stage == "captioning" and not getattr(args, "qwen3omni", False):
-            continue
-
-        # Stop once the pipeline's own guard would. PipelineService ends a run
-        # at the music stage when any load-bearing step is off, so every pass
-        # after that one reloads the audio, re-reads the checkpoints and
-        # returns at the same guard -- five passes of nothing, and the ledger
-        # then does the whole lot again on the next attempt.
-        #
-        # Only the load-bearing steps are consulted. A pass whose own stage is
-        # switched off still has to run: it is what carries the pipeline from
-        # the previous stage to the next one.
-        if stage != "music" and not all(step_enabled(args, r) for r in LOAD_BEARING):
-            if logger:
-                off = ", ".join(r for r in LOAD_BEARING if not step_enabled(args, r))
-                logger.info(f"Stopping after the music stage: {off} switched off, "
-                            "and nothing downstream has an input")
-            break
+        # Skip this pass entirely when the stage is switched off in the config.
+        # The None stage covers refinement+export; skip it only if both are off.
+        _stage_step_map = {
+            "music": "music_analysis",
+            "diarization": "diarization",
+            "separation": "separation",
+            "music_removal": "music_removal_fallback",
+            "asr": "asr",
+            "captioning": "captioning",
+        }
+        if stage is not None:
+            step_name = _stage_step_map.get(stage, stage)
+            if not step_enabled(args, step_name):
+                if logger:
+                    logger.info(f"Stage '{label}' is off in the profile; skipping batch pass")
+                continue
+        elif stage is None:
+            if not step_enabled(args, "refinement") and not step_enabled(args, "export"):
+                if logger:
+                    logger.info("Both refinement and export are off; skipping batch pass")
+                continue
 
         label = label_of(stage)
         pending = [p for p in batch if p not in failures]
