@@ -508,7 +508,38 @@ def test_the_pipeline_replays_from_the_timeline_not_from_the_map():
     source = open(os.path.join(root, "services", "pipeline_service.py"),
                   encoding="utf-8").read()
     start = source.index("elif timeline:")
-    block = source[start:start + 1600]
-    assert "timeline.removed_spans(" in block
-    assert "for a, b, _ in cuts]" not in block, (
-        "the replay must not be rebuilt from the music map")
+    block = source[start:source.index("self.timeline = timeline", start)]
+    assert "replay = timeline.removed_spans(" in block
+    # What matters is what reaches excise, not whether `cuts` is mentioned --
+    # the warning beside it legitimately reads the map to compare the two.
+    assert "excise(audio_data.waveform, audio_data.sample_rate, replay)" in block, (
+        "the replay handed to excise must come from the timeline")
+
+
+def test_overlapping_cuts_do_not_look_like_a_settings_change():
+    """The music map pads `music`, `song` and `singing` separately, so two
+    spans that were adjacent overlap after padding and a raw sum counts the
+    overlap twice. Comparing that sum against the timeline made the re-entry
+    path warn "music settings have changed" on every ordinary run -- naming a
+    difference that was only the double count."""
+    from utils.excise import _merge
+    sr = 1000
+    waveform = np.arange(20 * sr, dtype=np.float32) / sr
+    cuts = [(5.0, 8.3), (8.0, 11.0)]          # overlap 0.3s, as padding produces
+
+    _, timeline = excise(waveform, sr, cuts)
+    raw    = sum(b - a for a, b in cuts)
+    merged = sum(b - a for a, b in _merge(cuts))
+    have   = sum(b - a for a, b in timeline.removed_spans(20.0))
+
+    assert raw - merged == pytest.approx(0.3), "the raw sum double counts"
+    assert merged == pytest.approx(have), "merged, the two agree exactly"
+
+
+def test_the_reentry_warning_compares_merged_spans():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    source = open(os.path.join(root, "services", "pipeline_service.py"),
+                  encoding="utf-8").read()
+    start = source.index("elif timeline:")
+    block = source[start:source.index("self.timeline = timeline", start)]
+    assert "_merge([(a, b) for a, b, _ in cuts])" in block

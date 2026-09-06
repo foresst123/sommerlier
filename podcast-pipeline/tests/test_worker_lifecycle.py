@@ -356,3 +356,38 @@ def test_a_worker_that_cannot_start_stops_its_stage():
         raise AssertionError("a stage with no worker must not proceed")
 
     assert pipe.model_loader.order == [], "models must not load without it"
+
+
+# --- when a worker starts ----------------------------------------------------
+
+def test_workers_wait_for_their_stage_by_default():
+    """Starting both up front hides their load time behind the music stage,
+    but parks them in VRAM for the whole run: Qwen3-ASR is a 1.7B model that
+    sits on its GPU from the first second until the ASR stage. On a two-file
+    run that measured a quarter of an hour of memory held and unused."""
+    import json
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "config.json"), encoding="utf-8") as fh:
+        config = json.load(fh)
+    for env, profile in config["environments"].items():
+        assert profile["pipeline"]["prefetch_workers"] is False, env
+
+
+def test_the_lazy_path_is_the_one_that_already_existed():
+    """_ensure_worker runs immediately before each stage loads its models, so
+    not pre-starting costs a wait rather than a failure. This is what makes the
+    default safe."""
+    source = open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "services", "pipeline_service.py"),
+        encoding="utf-8").read()
+    load = source.index("def _load(self, group: str):")
+    body = source[load:source.index("def ", load + 10)]
+    assert "self._ensure_worker(worker)" in body, (
+        "_load must start the stage's worker before loading its models")
+
+
+def test_prefetch_is_reachable_for_a_box_with_room():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    main = open(os.path.join(root, "main.py"), encoding="utf-8").read()
+    assert '"--prefetch_workers"' in main
+    assert 'getattr(args, "prefetch_workers", False)' in main

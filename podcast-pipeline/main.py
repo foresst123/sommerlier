@@ -80,6 +80,11 @@ def _build_parser():
                              "limit be finished across several sessions -- progress "
                              "is kept in the input directory's ledger, so the next "
                              "run picks up where this one stopped.")
+    parser.add_argument("--prefetch_workers", action="store_true",
+                        help="Start the DiariZen and Qwen3 workers at launch "
+                             "instead of when their stage runs. Hides their "
+                             "load time behind earlier stages, at the cost of "
+                             "holding their VRAM for the whole run.")
     parser.add_argument("--keep_models", action="store_true",
                         help="Keep models in VRAM between stages instead of unloading them. "
                              "Saves reload time when processing many files, at the cost of a "
@@ -348,8 +353,24 @@ def main():
     # The interpreter is resolved inside spawn() rather than now, so a missing
     # venv for a stage this run never reaches costs nothing.
     def _prefetch(service):
+        """Start a worker now, or leave it for the stage that needs it.
+
+        Off by default. Starting both workers up front hides their model-load
+        time behind the music stage, but it also parks them in VRAM for the
+        whole run: Qwen3-ASR sits on its GPU from the first second until the
+        ASR stage, which on a two-file run is a quarter of an hour of a 1.7B
+        model holding memory it is not using. `_ensure_worker` already starts
+        each one immediately before its stage loads models, so the lazy path
+        costs a wait, not a failure.
+
+        Turn it back on with `pipeline.prefetch_workers` when the GPUs have
+        room to spare and the wall clock matters more.
+        """
         if service is None:
             return None
+        if not getattr(args, "prefetch_workers", False):
+            logger.info(f"{service.name} worker will start when its stage does")
+            return service
         try:
             service.spawn()
         except Exception as e:

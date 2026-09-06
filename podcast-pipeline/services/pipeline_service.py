@@ -420,7 +420,13 @@ class PipelineService:
             # another. The timeline is the record of what actually happened.
             replay = timeline.removed_spans(audio_data.duration)
             if self.logger:
-                wanted = sum(b - a for a, b, _ in cuts)
+                # Both sides have to be merged before they can be compared.
+                # `cuts` is the raw span list and the music map pads each kind
+                # separately, so overlapping spans are counted twice in it --
+                # which made this warn on every ordinary re-entry, naming a
+                # difference that was only the overlap.
+                from utils.excise import _merge
+                wanted = sum(b - a for a, b in _merge([(a, b) for a, b, _ in cuts]))
                 have = sum(b - a for a, b in replay)
                 if abs(wanted - have) > 0.5:
                     self.logger.warning(
