@@ -543,3 +543,55 @@ def test_the_reentry_warning_compares_merged_spans():
     start = source.index("elif timeline:")
     block = source[start:source.index("self.timeline = timeline", start)]
     assert "_merge([(a, b) for a, b, _ in cuts])" in block
+
+
+# --- islands too short to be worth their joins -------------------------------
+
+def test_a_sub_second_island_is_dropped_with_the_cuts_around_it():
+    """An island this short, flanked by removed music, has no conversation
+    around it: nothing before to answer, nothing after to answer to. Keeping it
+    costs a join on each side -- two places where parts of the recording that
+    were never adjacent now touch."""
+    from utils.excise import MIN_KEEP_SECONDS
+    sr = 1000
+    waveform = np.arange(30 * sr, dtype=np.float32) / sr
+    # 0.5s of speech marooned between two musical stretches.
+    _, timeline = excise(waveform, sr, [(5.0, 10.0), (10.5, 15.0)])
+
+    assert len(timeline.seams()) == 1, "the two cuts became one"
+    assert all(b - a >= MIN_KEEP_SECONDS for a, b, _ in timeline.kept)
+
+
+def test_an_island_over_the_level_survives():
+    sr = 1000
+    waveform = np.arange(30 * sr, dtype=np.float32) / sr
+    _, timeline = excise(waveform, sr, [(5.0, 10.0), (12.0, 15.0)])
+    assert len(timeline.seams()) == 2, "2s of speech is worth its two joins"
+
+
+def test_the_level_is_reachable_without_editing_code():
+    """Two of four recordings measured had no islands at all; a corpus that
+    fragments differently may want a different level."""
+    import importlib
+    import os as _os
+    import utils.excise as ex
+    old = _os.environ.get("EXCISE_MIN_KEEP")
+    try:
+        _os.environ["EXCISE_MIN_KEEP"] = "2.0"
+        assert importlib.reload(ex).MIN_KEEP_SECONDS == 2.0
+    finally:
+        if old is None:
+            _os.environ.pop("EXCISE_MIN_KEEP", None)
+        else:
+            _os.environ["EXCISE_MIN_KEEP"] = old
+        importlib.reload(ex)
+
+
+def test_dropping_an_island_still_replays_exactly():
+    """The re-entry path reads the timeline, so a dropped island must stay
+    dropped when the cut is reproduced for a later stage."""
+    sr = 1000
+    waveform = np.arange(30 * sr, dtype=np.float32) / sr
+    once, timeline = excise(waveform, sr, [(5.0, 10.0), (10.5, 15.0)])
+    again, _ = excise(waveform, sr, timeline.removed_spans(30.0))
+    assert np.allclose(again, once)

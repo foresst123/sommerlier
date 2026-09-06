@@ -27,6 +27,25 @@ import numpy as np
 # a median of 0.40s, so a fade of this size touches under a tenth of one.
 FADE_SECONDS = float(os.environ.get("EXCISE_FADE", "0.030"))
 
+# Shortest island of kept audio worth the two joins it costs.
+#
+# A stretch this short, flanked on both sides by removed music, carries no
+# conversational context: nothing before it to answer, nothing after it to
+# answer to. For a full-duplex corpus that is noise, and keeping it is paid for
+# twice -- a join on each side, each one a place where two parts of the
+# recording that were never adjacent now touch.
+#
+# Measured across the two recordings that fragment at all:
+#
+#     min_keep   islands   joins   extra audio dropped
+#       0.05       11/17    10/16          --
+#       1.00        9/14     8/13        1.4s / 2.0s
+#       2.00        7/13     6/12        4.0s / 3.4s
+#
+# 1.0s removes five joins for 3.4 seconds. 2.0s buys two more at twice the
+# price and starts taking stretches that could still be used.
+MIN_KEEP_SECONDS = float(os.environ.get("EXCISE_MIN_KEEP", "1.0"))
+
 
 class TimelineMap:
     """Translates between the shortened recording and the original one.
@@ -189,14 +208,15 @@ def _merge(spans):
     return out
 
 
-def excise(waveform, sample_rate, spans, fade=FADE_SECONDS, min_keep=0.05):
+def excise(waveform, sample_rate, spans, fade=FADE_SECONDS, min_keep=None):
     """Remove `spans` from `waveform`, crossfading each join.
 
     Returns (audio, TimelineMap). Kept stretches shorter than `min_keep` are
-    dropped with the span beside them: a 20ms island between two cuts is not
-    speech anyone can use, and keeping it would put two crossfades back to back
-    over almost nothing.
+    dropped along with the spans beside them, which merges those two cuts into
+    one and removes a join with it. See MIN_KEEP_SECONDS for why a second is
+    the level and what it costs.
     """
+    min_keep = MIN_KEEP_SECONDS if min_keep is None else min_keep
     audio = np.asarray(waveform, dtype=np.float32).reshape(-1)
     total = len(audio)
     if total == 0:
