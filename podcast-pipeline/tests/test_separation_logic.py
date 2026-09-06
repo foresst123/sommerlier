@@ -318,3 +318,58 @@ def test_qc_accepts_a_quieter_track_and_rejects_an_empty_one():
     # Nothing to preserve where the mixture is silent.
     z = np.zeros(n, dtype=np.float32)
     assert TargetExtractionService._track_has_speech(z, z) is True
+
+
+def test_the_run_report_can_actually_be_built():
+    """It could not, and no test noticed for a whole change set.
+
+    _report_payload named TSE_MIN_SOLO, TSE_WINDOW_TARGET and TSE_WINDOW_MAX,
+    three constants deleted with the Sidon window strategy. Every test called
+    process_overlaps directly; only the pipeline calls this, and only after
+    separation finishes -- so the run reached the end of the separation stage
+    and died there with NameError, on both files, after 34 minutes."""
+    fake = FakeTSE()
+    svc = TargetExtractionService(fake, logger=None)
+    svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
+
+    payload = svc.report_payload()
+    assert set(payload) >= {"thresholds", "music_map", "stats", "failures"}
+    assert payload["thresholds"]["model_window"] == 2.0
+
+
+def test_no_module_reads_a_constant_nobody_defines():
+    """The static version of the same failure: a deleted constant that some
+    other line still names shows up only when that line runs."""
+    import ast
+    import builtins
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    dangling = []
+    for folder, _dirs, files in os.walk(root):
+        if any(skip in folder for skip in ("__pycache__", ".git", "tests")):
+            continue
+        for name in files:
+            if not name.endswith(".py"):
+                continue
+            path = os.path.join(folder, name)
+            try:
+                tree = ast.parse(open(path, encoding="utf-8").read())
+            except SyntaxError:
+                continue
+            bound = set(dir(builtins))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.alias):
+                    bound.add((node.asname or node.name).split(".")[0])
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    bound.add(node.name)
+                elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                    bound.add(node.id)
+                elif isinstance(node, ast.arg):
+                    bound.add(node.arg)
+            for node in ast.walk(tree):
+                # Constants only: lowercase names are far more likely to be a
+                # false positive from a scope this walk does not model.
+                if (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+                        and node.id.isupper() and node.id not in bound):
+                    dangling.append(f"{os.path.relpath(path, root)}:{node.lineno} {node.id}")
+    assert not dangling, "constants used but never defined:\n  " + "\n  ".join(sorted(set(dangling)))

@@ -8,7 +8,7 @@ from schemas.audio import AudioData
 from schemas.segment import Segment, EnhancedSegment
 from algorithms.diarization.overlap import detect_overlapping_segments
 from utils.audio_normalize import match_splice_level, safe_limit
-from utils.mixture_window import window_for
+from utils.mixture_window import MODEL_WINDOW, window_for
 from utils.music_map import MusicMap
 from utils.enrollment_memory import EnrollmentMemory, ENABLED as TSE_MEMORY
 
@@ -205,10 +205,15 @@ class TargetExtractionService:
 
     def _report_payload(self) -> dict:
         payload = {
+            # What this run was judged and sized by. `window` is the model's
+            # own fixed mixture length, not a preference: overlaps shorter than
+            # it are widened, longer ones are chunked by the graph.
             "thresholds": {
                 "qc_sim": TSE_QC_SIM_THRESHOLD, "not_a_margin": TSE_NOT_A_MARGIN,
-                "min_solo": TSE_MIN_SOLO, "window_target": TSE_WINDOW_TARGET,
-                "window_max": TSE_WINDOW_MAX,
+                "model_window": MODEL_WINDOW,
+                "enroll_budget": TSE_ENROLL_BUDGET,
+                "enroll_min_clip": TSE_ENROLL_MIN_CLIP,
+                "enroll_min_total": TSE_ENROLL_MIN_TOTAL,
             },
             # Recorded per run because it changes what the audio sounds like:
             # a report from a run without it is not comparable to one with it.
