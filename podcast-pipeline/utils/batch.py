@@ -149,6 +149,8 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
             if _stage_index(stage) > _stage_index(original_stop):
                 break
 
+        label = label_of(stage)
+
         # Skip this pass entirely when the stage is switched off in the config.
         # The None stage covers refinement+export; skip it only if both are off.
         _stage_step_map = {
@@ -170,8 +172,6 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
                 if logger:
                     logger.info("Both refinement and export are off; skipping batch pass")
                 continue
-
-        label = label_of(stage)
         pending = [p for p in batch if p not in failures]
         if not pending:
             break
