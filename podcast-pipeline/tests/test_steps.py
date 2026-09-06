@@ -277,3 +277,33 @@ def test_an_old_profile_reaches_every_stage_it_used_to():
     args = _args(tse=True, ASRMoE=True, panns=True)
     for stage in ("music_analysis", "diarization", "separation", "asr", "export"):
         assert steps.will_run(args, stage), stage
+
+
+# --- the interpreter is found when the worker starts, not before -------------
+
+def test_the_interpreter_is_resolved_at_spawn():
+    """A callable python_bin is what lets a missing venv stay a stage's problem.
+
+    Resolving at construction is what turned a music-only run into
+    `FileNotFoundError: No interpreter found for the 'qwen3' worker`, thrown
+    before any audio was opened, for a stage the run never reaches.
+    """
+    from services.base_worker_service import WorkerProcessService
+
+    calls = []
+
+    def resolve():
+        calls.append(1)
+        return "/definitely/not/here/bin/python"
+
+    worker = WorkerProcessService(name="Probe", python_bin=resolve,
+                                  worker_script="worker.py")
+    assert calls == [], "constructing it must not go looking"
+
+    try:
+        worker.spawn()
+    except FileNotFoundError:
+        pass
+    else:
+        raise AssertionError("a missing interpreter must still fail, at spawn")
+    assert calls == [1]

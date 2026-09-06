@@ -109,6 +109,13 @@ class WorkerProcessService:
         if self.process is not None:
             return
 
+        # The interpreter may be given as a callable, resolved here rather than
+        # at construction. Finding it can fail -- a missing venv raises -- and
+        # that failure belongs to the stage that needs the worker, not to the
+        # start of a run that may never reach it.
+        if callable(self.python_bin):
+            self.python_bin = self.python_bin()
+
         if not os.path.exists(self.python_bin):
             raise FileNotFoundError(
                 f"{self.name} worker interpreter not found: {self.python_bin}"

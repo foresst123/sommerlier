@@ -62,6 +62,16 @@ class PipelineService:
         if self.model_loader is None:
             return
         w = self.worker_services
+
+        # A stage's worker is started here, at the stage, not at the start of
+        # the run. main() also launches them up front so several warm up at
+        # once, but that is a prefetch and is allowed to fail quietly: this is
+        # the call that has to succeed, and it is made only by a stage that is
+        # actually running. A worker already up is a no-op.
+        worker = self.WORKER_FOR_STAGE.get(group)
+        if worker:
+            self._ensure_worker(worker)
+
         {
             "base":        lambda: self.model_loader.load_base_models(),
             "diarization": lambda: self.model_loader.load_diarization_models(w.get("diarizen")),
@@ -71,6 +81,15 @@ class PipelineService:
             "asr":         lambda: self.model_loader.load_asr_models(w.get("qwen3")),
             "caption":     lambda: self.model_loader.load_caption_model(),
         }[group]()
+
+    # Which worker subprocess a stage needs before its models will load. The
+    # loader reads `service.process`, so a worker that has not started yet
+    # hands it None and the stage connects to nothing.
+    WORKER_FOR_STAGE = {
+        "diarization": "diarizen",
+        "separation": "sidon",
+        "asr": "qwen3",
+    }
 
     # A stage's switch in the profile, falling back to the flag that used to
     # control it. The answer lives in utils.steps because the model loader has
@@ -163,16 +182,19 @@ class PipelineService:
         client = getattr(service, attr, None)
         if client is None:
             return
-        process = self._ensure_worker(args, worker_name)
+        process = self._ensure_worker(worker_name)
         if process is not None and getattr(client, "process", None) is not process:
             client.process = process
 
-    def _ensure_worker(self, args, name: str):
-        """Bring a worker back up if an earlier file released it.
+    def _ensure_worker(self, name: str):
+        """Start `name` if it is not already running, and return its process.
 
-        Pairs with _release_worker: without --keep_models a stage frees its
-        worker's VRAM when it finishes, so the next file has to start it again.
-        Returns the live process, or None when there is no such worker.
+        Called from two places, for the same reason: a stage cannot talk to a
+        worker that is not up. _load calls it when the stage begins -- the
+        first time, or after --keep_models-off released it at the end of the
+        previous file -- and _rebind_worker calls it to hand the live process
+        to a client that already exists. Returns None when there is no such
+        worker, which is how an optional one stays optional.
         """
         service = self.worker_services.get(name)
         if service is None:
@@ -180,14 +202,18 @@ class PipelineService:
         if getattr(service, "process", None) is not None:
             return service.process
         if self.logger:
-            self.logger.info(f"Restarting {name} worker for this file")
+            self.logger.info(f"Starting {name} worker for this stage")
         try:
             service.spawn()
             service.wait_ready()
         except Exception as e:
+            # Raised, not swallowed: the stage that asked for this worker is
+            # about to run and has nothing to run on. Returning None here made
+            # the loader build a client wired to no process, and the failure
+            # then surfaced as an empty result several steps later.
             if self.logger:
-                self.logger.error(f"Failed to restart {name} worker: {e}")
-            return None
+                self.logger.error(f"Could not start the {name} worker: {e}")
+            raise
         return getattr(service, "process", None)
 
 

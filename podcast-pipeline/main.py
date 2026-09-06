@@ -295,13 +295,35 @@ def main():
 
 
 
-    # 1. Start Qwen3 Worker (if MoE enabled)
+    # 1. Workers, built here and started here only as a head start.
+    #
+    # The stage that needs a worker is what actually starts it, in
+    # PipelineService._load. This block exists because starting them one at a
+    # time serialised ~100s of model loading, so the ones this run will reach
+    # are launched together and joined once below. That makes it a prefetch:
+    # it may fail, and a failure here is not the run's problem -- the stage
+    # will try again and raise properly if the worker genuinely cannot start.
+    #
+    # The interpreter is resolved inside spawn() rather than now, so a missing
+    # venv for a stage this run never reaches costs nothing.
+    def _prefetch(service):
+        if service is None:
+            return None
+        try:
+            service.spawn()
+        except Exception as e:
+            logger.warning(f"Could not pre-start the {service.name} worker ({e}); "
+                           "its stage will start it when it gets there")
+        return service
+
     qwen3_service = None
     if args.ASRMoE and will_run(args, "asr"):
-        qwen3_env_bin = resolve_worker_python("qwen3", config=config, env_profile=env_profile, logger=logger)
         qwen3_worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qwen3_worker.py")
-        qwen3_service = Qwen3WorkerService(qwen3_env_bin, qwen3_worker_script, device_id=args.gpu_2, logger=logger, env_name=args.env, config_path=args.config)
-        qwen3_service.spawn()
+        qwen3_service = _prefetch(Qwen3WorkerService(
+            lambda: resolve_worker_python("qwen3", config=config,
+                                          env_profile=env_profile, logger=logger),
+            qwen3_worker_script, device_id=args.gpu_2, logger=logger,
+            env_name=args.env, config_path=args.config))
 
     # 1b. Start DiariZen Worker (if dia3 is not used)
     #
@@ -313,10 +335,12 @@ def main():
     # for.
     diarizen_service = None
     if not args.dia3 and will_run(args, "diarization"):
-        diarizen_env_bin = resolve_worker_python("diarizen", config=config, env_profile=env_profile, logger=logger)
         diarizen_worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diarizen_worker.py")
-        diarizen_service = DiarizenWorkerService(diarizen_env_bin, diarizen_worker_script, device_id=args.gpu_1, logger=logger, env_name=args.env, config_path=args.config)
-        diarizen_service.spawn()
+        diarizen_service = _prefetch(DiarizenWorkerService(
+            lambda: resolve_worker_python("diarizen", config=config,
+                                          env_profile=env_profile, logger=logger),
+            diarizen_worker_script, device_id=args.gpu_1, logger=logger,
+            env_name=args.env, config_path=args.config))
         
     # 1c. Start the Sidon worker only when Sidon is the separator. It is a
     # separate process holding ~2.6GB of VRAM and a slow start, and the default
@@ -326,14 +350,26 @@ def main():
                   or os.environ.get("TSE_SEPARATOR") or "usef")
     sidon_service = None
     if args.tse and _separator == "sidon" and will_run(args, "separation"):
-        sidon_service = SidonWorkerService(config, args, logger)
-        sidon_service.spawn()
+        sidon_service = _prefetch(SidonWorkerService(config, args, logger))
 
-    # 1d. Join. All three were spawned above without blocking, so total startup
-    # is now bounded by the slowest worker rather than the sum of all three.
+    # 1d. Join whichever actually started. They were launched without blocking,
+    # so startup is bounded by the slowest rather than the sum -- that is the
+    # whole point of doing it here. One that did not start is simply skipped;
+    # its stage will start and join it.
     for _svc in (qwen3_service, diarizen_service, sidon_service):
-        if _svc is not None:
-            _svc.wait_ready()
+        if _svc is not None and getattr(_svc, "process", None) is not None:
+            try:
+                _svc.wait_ready()
+            except Exception as e:
+                # Torn down, not left half-alive: _ensure_worker treats a
+                # non-None process as a working one, so a spawned-but-never-
+                # ready worker would be handed to the stage as if it were fine.
+                logger.warning(f"{_svc.name} worker did not come up ({e}); "
+                               "its stage will start it again")
+                try:
+                    _svc.stop()
+                except Exception:
+                    pass
 
     try:
         # 2. Build the loader, but load nothing yet.

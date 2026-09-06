@@ -83,7 +83,7 @@ def test_a_released_worker_is_restarted_for_the_next_file():
     pipe = _pipeline(worker)
 
     pipe._release_worker(_args(False), "diarizen")     # end of file 1
-    process = pipe._ensure_worker(_args(False), "diarizen")   # start of file 2
+    process = pipe._ensure_worker("diarizen")   # start of file 2
 
     assert process is not None
     assert worker.spawns == 2
@@ -91,7 +91,7 @@ def test_a_released_worker_is_restarted_for_the_next_file():
 
 def test_a_live_worker_is_not_restarted():
     worker = _FakeWorkerService()
-    process = _pipeline(worker)._ensure_worker(_args(False), "diarizen")
+    process = _pipeline(worker)._ensure_worker("diarizen")
 
     assert process is worker.process
     assert worker.spawns == 1
@@ -128,7 +128,7 @@ def test_an_absent_worker_is_tolerated():
     pipe = _pipeline(_FakeWorkerService())
     pipe.worker_services = {}
 
-    assert pipe._ensure_worker(_args(False), "diarizen") is None
+    assert pipe._ensure_worker("diarizen") is None
     pipe._rebind_worker(_args(False), "diarizen", None, "diarizer")
 
 
@@ -254,3 +254,106 @@ def test_a_stage_scope_closes_even_when_the_stage_blows_up():
 
     assert pipe.opened == 1
     assert pipe.closed == 1, "the scope was left open after the stage failed"
+
+
+# --- the stage is what starts its worker -------------------------------------
+
+class _NeverStarted(_FakeWorkerService):
+    """A worker main() never managed to launch: constructed, not running."""
+
+    def __init__(self, fails=False):
+        self.process = None
+        self.spawns = 0
+        self.stops = 0
+        self.fails = fails
+
+    def spawn(self):
+        if self.fails:
+            raise FileNotFoundError("no interpreter for this worker")
+        super().spawn()
+
+
+class _RecordingLoader:
+    """Records the order of calls, so 'worker first' is checkable."""
+
+    def __init__(self, worker):
+        self.worker = worker
+        self.order = []
+
+    def _note(self, what):
+        self.order.append((what, self.worker.process is not None))
+
+    def load_diarization_models(self, service=None):
+        self._note("diarization")
+
+    def load_base_models(self):
+        self._note("base")
+
+    def load_panns(self):
+        self._note("panns")
+
+
+def _staged(worker):
+    p = _pipeline(worker)
+    p.model_loader = _RecordingLoader(worker)
+    return p
+
+
+def test_a_stage_starts_the_worker_it_needs():
+    """The point of the change: main() is a head start, not the authority.
+
+    A run whose worker never launched -- prefetch failed, or the stage was not
+    reachable when main() decided -- still has to work when the stage arrives.
+    """
+    worker = _NeverStarted()
+    pipe = _staged(worker)
+
+    pipe._load("diarization")
+
+    assert worker.spawns == 1
+    assert worker.process is not None
+
+
+def test_the_worker_is_up_before_the_models_load():
+    """The loader reads service.process; starting after it would pass None."""
+    worker = _NeverStarted()
+    pipe = _staged(worker)
+
+    pipe._load("diarization")
+
+    assert pipe.model_loader.order == [("diarization", True)]
+
+
+def test_a_stage_with_no_worker_loads_normally():
+    worker = _NeverStarted()
+    pipe = _staged(worker)
+
+    pipe._load("panns")
+
+    assert worker.spawns == 0
+    assert pipe.model_loader.order == [("panns", False)]
+
+
+def test_a_live_worker_is_not_started_twice():
+    worker = _FakeWorkerService()
+    pipe = _staged(worker)
+
+    pipe._load("diarization")
+
+    assert worker.spawns == 1, "already running; nothing to do"
+
+
+def test_a_worker_that_cannot_start_stops_its_stage():
+    """Loudly, and here. Returning None built a client wired to no process,
+    and the failure surfaced several steps later as an empty result."""
+    worker = _NeverStarted(fails=True)
+    pipe = _staged(worker)
+
+    try:
+        pipe._load("diarization")
+    except FileNotFoundError:
+        pass
+    else:
+        raise AssertionError("a stage with no worker must not proceed")
+
+    assert pipe.model_loader.order == [], "models must not load without it"
