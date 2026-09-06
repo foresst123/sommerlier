@@ -1,6 +1,27 @@
-# Thread budget first: torch reads OMP_NUM_THREADS at import and caches it, so
-# this has to run before anything pulls torch in transitively.
+# Two things have to happen before anything pulls torch or matplotlib in
+# transitively, and both are settings a caller's environment can poison.
 import os as _os
+
+# 1. A batch pipeline must never get an interactive matplotlib backend.
+#
+# Nothing here plots. matplotlib arrives anyway, five imports deep --
+# whisperx -> pyannote.audio -> lightning -> torchmetrics -> matplotlib -- and
+# on import it does `rcParams['backend'] = os.environ.get('MPLBACKEND')`. A
+# notebook kernel exports `module://matplotlib_inline.backend_inline`, which
+# only exists inside that kernel's own interpreter, so a run launched from
+# Kaggle or Jupyter dies with ValueError before reaching a single stage.
+#
+# Fixing this from the caller does not hold: IPython rewrites MPLBACKEND when
+# matplotlib is first configured, and an `!env VAR=... cmd` line is rewritten
+# again by the shell. The process that needs the value is this one, so it sets
+# it here. An explicit non-notebook choice is left alone.
+if _os.environ.get("MPLBACKEND", "").startswith("module://"):
+    _os.environ["MPLBACKEND"] = "Agg"
+else:
+    _os.environ.setdefault("MPLBACKEND", "Agg")
+
+# 2. Thread budget: torch reads OMP_NUM_THREADS at import and caches it, so
+# this has to run before anything pulls torch in transitively.
 import sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 from utils.cpu_plan import configure_process as _configure_cpu

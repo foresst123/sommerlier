@@ -397,3 +397,48 @@ def test_requirements_do_not_pull_in_a_disabled_model():
     assert sortformer_live == nemo_required, (
         "Sortformer is enabled" if sortformer_live else "Sortformer is disabled"
     ) + f" but nemo-toolkit is {'listed' if nemo_required else 'not listed'} in requirements.txt"
+
+
+def test_an_interactive_matplotlib_backend_cannot_reach_the_pipeline():
+    """A notebook kernel exports MPLBACKEND=module://matplotlib_inline...,
+    which exists only inside that kernel's interpreter. matplotlib arrives here
+    five imports deep (whisperx -> pyannote -> lightning -> torchmetrics) and
+    reads the variable on import, so an inherited one killed every run launched
+    from Kaggle before it reached a stage.
+
+    The caller cannot fix it reliably -- IPython rewrites the variable when
+    matplotlib is first configured -- so main.py sets it, ahead of every other
+    import."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    source = open(os.path.join(root, "main.py"), encoding="utf-8").read()
+
+    guard = source.index('MPLBACKEND')
+    first_real_import = min(
+        source.index("\nimport argparse"),
+        source.index("from utils.cpu_plan import"))
+    assert guard < first_real_import, (
+        "the backend must be pinned before anything can import matplotlib")
+    assert 'startswith("module://")' in source, (
+        "an explicit non-notebook backend should be left alone")
+
+
+def test_the_backend_guard_actually_replaces_a_notebook_backend():
+    import subprocess
+    import sys as _sys
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    snippet = (
+        "import os\n"
+        "if os.environ.get('MPLBACKEND', '').startswith('module://'):\n"
+        "    os.environ['MPLBACKEND'] = 'Agg'\n"
+        "else:\n"
+        "    os.environ.setdefault('MPLBACKEND', 'Agg')\n"
+        "print(os.environ['MPLBACKEND'])\n")
+    poisoned = dict(os.environ, MPLBACKEND="module://matplotlib_inline.backend_inline")
+    out = subprocess.run([_sys.executable, "-c", snippet], capture_output=True,
+                         text=True, env=poisoned, cwd=root).stdout.strip()
+    assert out == "Agg", out
+
+    chosen = dict(os.environ, MPLBACKEND="pdf")
+    out = subprocess.run([_sys.executable, "-c", snippet], capture_output=True,
+                         text=True, env=chosen, cwd=root).stdout.strip()
+    assert out == "pdf", "a deliberate backend must survive"
