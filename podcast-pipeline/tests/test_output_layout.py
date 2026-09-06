@@ -152,9 +152,9 @@ def _flag_rows():
     segments = [
         {"index": "1", "start": 0.0, "end": 1.0, "speaker": "1", "text": "a"},
         {"index": "2", "start": 1.0, "end": 2.0, "speaker": "1", "text": "b",
-         "has_music": True, "demucs": False},
+         "has_music": True, "bs_roformer": False},
         {"index": "3", "start": 2.0, "end": 3.0, "speaker": "1", "text": "c",
-         "has_music": True, "demucs": True},
+         "has_music": True, "bs_roformer": True},
         {"index": "4", "start": 3.0, "end": 6.0, "speaker": "2", "text": "d", "tse": True,
          "unseparated": [{"start": 3.0, "end": 4.2, "reason": "multi_speaker"}]},
     ]
@@ -162,10 +162,10 @@ def _flag_rows():
 
 
 def test_music_detection_is_reported_separately_from_removal():
-    """`demucs` says the audio was replaced; `has_music` says it was detected."""
+    """`bs_roformer` says the audio was replaced; `has_music` says it was detected."""
     _, rows = _flag_rows()
-    assert (rows[1]["music"], rows[1]["demucs"]) == (True, False)
-    assert (rows[2]["music"], rows[2]["demucs"]) == (True, True)
+    assert (rows[1]["music"], rows[1]["bs_roformer"]) == (True, False)
+    assert (rows[2]["music"], rows[2]["bs_roformer"]) == (True, True)
 
 
 def test_unseparated_spans_reach_the_page():

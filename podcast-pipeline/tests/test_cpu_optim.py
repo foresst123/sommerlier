@@ -136,14 +136,14 @@ def test_existing_settings_are_respected(monkeypatch):
     assert env["MKL_NUM_THREADS"] == "2"
 
 
-# --- demucs chunking -----------------------------------------------------
+# --- bs_roformer chunking -----------------------------------------------------
 
-# models/demucs imports torch, which is not installed in the test env; the
+# models/bs_roformer imports torch, which is not installed in the test env; the
 # windowing is plain arithmetic, so the defaults are restated here.
 GPU_CHUNK_SEC, GPU_CHUNK_OVERLAP_SEC = 60.0, 1.0
 
 
-def test_demucs_windows_do_not_grow_with_file_length():
+def test_bs_roformer_windows_do_not_grow_with_file_length():
     """The OOM was VRAM scaling with duration; windows keep the peak flat."""
     class d:
         gpu_chunk_sec, gpu_chunk_overlap_sec = GPU_CHUNK_SEC, GPU_CHUNK_OVERLAP_SEC
@@ -159,7 +159,7 @@ def test_demucs_windows_do_not_grow_with_file_length():
         )
 
 
-def test_demucs_windows_cover_every_sample():
+def test_bs_roformer_windows_cover_every_sample():
     class d:
         gpu_chunk_sec, gpu_chunk_overlap_sec = GPU_CHUNK_SEC, GPU_CHUNK_OVERLAP_SEC
 

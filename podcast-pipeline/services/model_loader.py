@@ -13,7 +13,6 @@ from models.pyannote_embedding import PyannoteEmbedder
 # from models.sortformer import SortformerDiarizer
 from models.tse_model import TargetSpeakerExtractor
 from models.panns import PANNSDetector
-from models.demucs import DemucsRemover
 from models.qwen3_omni import Qwen3OmniCaptioner
 from models.qwen3_asr import Qwen3ASRClient
 from services.qwen3_worker_service import Qwen3WorkerService
@@ -104,42 +103,22 @@ class ModelLoader:
             self.models["panns"] = PANNSDetector(device=str(self.device_1))
 
     def load_music_models(self):
-        """Load PANNS and Demucs if background music removal is enabled."""
-        # Keyed on demucs alone: panns may already be resident from the music
-        # sweep, and testing it here would skip loading Demucs entirely.
-        if "demucs" in self.models:
+        """Load PANNS and BS-RoFormer if background music removal is enabled."""
+        if "bs_roformer" in self.models:
             return
         if step_enabled(self.args, "music_removal"):
             self.load_panns()
 
             # GPU 1 hosts the DiariZen worker plus the embedder, TSE and ASR
             # models; separating a full podcast needs ~1GB of headroom that is
-            # not there, so Demucs runs on GPU 2 alongside the Qwen3 worker.
-            demucs_cfg = dict(self.config.get("environments", {}).get(self.args.env, {})
-                              .get("models", {}).get("demucs", {}))
-            # Which model isolates vocals. Same interface either way, so
-            # MusicService does not know the difference; the key stays "demucs"
-            # because that is what the service and the free-list call it.
-            #
-            # `model` is popped rather than forwarded: the rest of the block is
-            # constructor kwargs, and leaving it in would reach DemucsRemover as
-            # an argument it does not take.
-            # Popped unconditionally: the rest of the block is constructor
-            # kwargs, and short-circuiting past the pop when --music_separator
-            # was given left `model` in there to reach DemucsRemover, which
-            # does not take it.
-            configured = demucs_cfg.pop("model", None)
-            which = (getattr(self.args, "music_separator", None) or configured
-                     or os.environ.get("MUSIC_SEPARATOR") or "demucs")
-            if which == "bs_roformer":
-                from models.bs_roformer import BSRoformerRemover
-                if self.logger: self.logger.info(f"Loading BS-RoFormer on {self.device_1}")
-                self.models["demucs"] = BSRoformerRemover(
-                    device=str(self.device_1), logger=self.logger, **demucs_cfg)
-            else:
-                if self.logger: self.logger.info(f"Loading Demucs on {self.device_1}")
-                self.models["demucs"] = DemucsRemover(
-                    device=str(self.device_1), logger=self.logger, **demucs_cfg)
+            # not there, so BS-RoFormer runs on GPU 2 alongside the Qwen3 worker.
+            bs_roformer_cfg = dict(self.config.get("environments", {}).get(self.args.env, {})
+                              .get("models", {}).get("bs_roformer", {}))
+            
+            from models.bs_roformer import BSRoformerRemover
+            if self.logger: self.logger.info(f"Loading BS-RoFormer on {self.device_1}")
+            self.models["bs_roformer"] = BSRoformerRemover(
+                device=str(self.device_1), logger=self.logger, **bs_roformer_cfg)
             
     def load_asr_models(self, qwen3_service: Qwen3WorkerService = None):
         """Load ASR models (Whisper, PhoWhisper, Qwen3)."""

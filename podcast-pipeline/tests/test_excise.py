@@ -167,7 +167,7 @@ def test_stripping_then_cutting_leaves_each_where_it_belongs():
     music_map = MusicMap([(2.0, 4.0, MUSIC), (10.0, 12.0, SINGING)])
     audio = AudioData(name="t", waveform=np.ones(20 * SR, dtype=np.float32),
                       sample_rate=SR, duration=20.0, audio_segment=None)
-    service = MusicService(panns_model=None, demucs_model=HalvingSeparator(), logger=None)
+    service = MusicService(panns_model=None, bs_roformer_model=HalvingSeparator(), logger=None)
 
     service.strip_music_spans(audio, music_map)
     assert audio.waveform[3 * SR] == 0.5, "the bed should have been stripped"
@@ -198,7 +198,7 @@ def test_applying_cached_patches_twice_changes_nothing():
         return AudioData(name="t", waveform=np.ones(20 * SR, dtype=np.float32),
                          sample_rate=SR, duration=20.0, audio_segment=None)
 
-    service = MusicService(panns_model=None, demucs_model=HalvingSeparator(), logger=None)
+    service = MusicService(panns_model=None, bs_roformer_model=HalvingSeparator(), logger=None)
     once = fresh()
     patches = service.strip_music_spans(once, MusicMap([(5.0, 8.0, MUSIC)]))
 
@@ -224,7 +224,7 @@ def test_stripping_music_accepts_read_only_cached_waveform():
                       duration=20.0, audio_segment=None)
 
     patches = MusicService(
-        panns_model=None, demucs_model=HalvingSeparator(), logger=None
+        panns_model=None, bs_roformer_model=HalvingSeparator(), logger=None
     ).strip_music_spans(audio, MusicMap([(5.0, 8.0, MUSIC)]))
 
     assert patches

@@ -343,7 +343,7 @@ class StageOutputService:
     def write_music_removal(self, segments, total_dur=None):
         items = [_as_dict(s) for s in segments]
         stats = {"segments_total": len(items),
-                 "segments_demucs": sum(1 for d in items if d.get("demucs"))}
+                 "segments_bs_roformer": sum(1 for d in items if d.get("bs_roformer"))}
         stats["segments"] = self.segment_stats(segments, total_dur)
         return self._finish("music_removal", "segments.json", segments, stats)
 

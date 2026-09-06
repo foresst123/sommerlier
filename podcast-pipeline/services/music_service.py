@@ -6,10 +6,10 @@ from schemas.segment import EnhancedSegment
 class MusicService:
     """Detects and removes background music from segments."""
     
-    def __init__(self, panns_model=None, demucs_model=None, logger=None,
+    def __init__(self, panns_model=None, bs_roformer_model=None, logger=None,
                  model_loader=None):
         self._panns = panns_model
-        self._demucs = demucs_model
+        self._bs_roformer = bs_roformer_model
         self.model_loader = model_loader
         self.logger = logger
         self.full_vocals = None
@@ -32,12 +32,12 @@ class MusicService:
         self._panns = model
 
     @property
-    def demucs(self):
-        return self._model(self._demucs, "demucs")
+    def bs_roformer(self):
+        return self._model(self._bs_roformer, "bs_roformer")
 
-    @demucs.setter
-    def demucs(self, model):
-        self._demucs = model
+    @bs_roformer.setter
+    def bs_roformer(self, model):
+        self._bs_roformer = model
 
     @staticmethod
     def _writable_waveform(audio: AudioData) -> np.ndarray:
@@ -55,9 +55,9 @@ class MusicService:
         return waveform
         
     def _prepare_full_vocals(self, audio: AudioData):
-        if self.demucs and self.full_vocals is None:
-            if self.logger: self.logger.info("Running Demucs on full audio to extract vocals.")
-            self.full_vocals = self.demucs.separate_full(audio.waveform, audio.sample_rate)
+        if self.bs_roformer and self.full_vocals is None:
+            if self.logger: self.logger.info("Running BS-RoFormer on full audio to extract vocals.")
+            self.full_vocals = self.bs_roformer.separate_full(audio.waveform, audio.sample_rate)
             
     def strip_music_spans(self, audio: AudioData, music_map, logger=None):
         """Replace the music-bed stretches of the waveform with their vocals.
@@ -78,7 +78,7 @@ class MusicService:
         """
         from utils.music_map import MUSIC
 
-        if not self.demucs or not music_map:
+        if not self.bs_roformer or not music_map:
             return []
 
         sr = audio.sample_rate
@@ -93,7 +93,7 @@ class MusicService:
                 # Under half a second there is not enough for the separator to
                 # work with, and the seams would cost more than the bed does.
                 continue
-            vocals = self.demucs.separate_segment(waveform[i:j], sr)
+            vocals = self.bs_roformer.separate_segment(waveform[i:j], sr)
             if vocals is None or len(vocals) != j - i:
                 continue
             waveform[i:j] = vocals
@@ -118,7 +118,7 @@ class MusicService:
                 waveform[start:end] = chunk[:end - start]
 
     def process_segments(self, segments: List[EnhancedSegment], audio: AudioData) -> List[EnhancedSegment]:
-        if not self.panns or not self.demucs:
+        if not self.panns or not self.bs_roformer:
             return segments
             
         self._prepare_full_vocals(audio)
@@ -126,14 +126,14 @@ class MusicService:
         waveform = audio.waveform
         
         from tqdm import tqdm
-        for seg in tqdm(segments, desc="[PANNs+Demucs]", leave=True):
+        for seg in tqdm(segments, desc="[PANNs+BSRoformer]", leave=True):
             # Check if it was already processed by TSE, which also inherently isolates voice
             if seg.tse:
                 # Separated audio is a resynthesis, so the detector's verdict on
                 # it would say nothing about the original recording. Left unset
                 # rather than guessed: `has_music` stays False meaning "not
                 # checked", which is what the review page shows.
-                seg.demucs = False
+                seg.bs_roformer = False
                 continue
                 
             start_frame = int(seg.start * sr)
@@ -157,9 +157,9 @@ class MusicService:
                         
                     seg.enhanced_audio = vocal_slice
                 else:
-                    seg.enhanced_audio = self.demucs.separate_segment(raw_audio, sr)
-                seg.demucs = True
+                    seg.enhanced_audio = self.bs_roformer.separate_segment(raw_audio, sr)
+                seg.bs_roformer = True
             else:
-                seg.demucs = False
+                seg.bs_roformer = False
                 
         return segments

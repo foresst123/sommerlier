@@ -407,7 +407,7 @@ class ASRService:
                 # Only Whisper detects language; without it, report the requested
                 # language rather than inventing one.
                 language=lang or self.language,
-                demucs=seg.demucs,
+                bs_roformer=seg.bs_roformer,
                 tse=seg.tse,
                 has_music=getattr(seg, "has_music", False),
                 # Carried through so the review page can warn that these spans

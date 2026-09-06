@@ -13,7 +13,7 @@ class Segment:
 class EnhancedSegment(Segment):
     enhanced_audio: Optional[np.ndarray] = None  # Audio đã qua TSE
     tse: bool = False                            # Có được xử lý bởi TSE không
-    demucs: bool = False                         # Có được xử lý bởi Demucs không
+    bs_roformer: bool = False                    # Có được xử lý bởi BS-RoFormer không
     # What PANNs decided, separate from what Demucs then did about it. Kept
     # because the two answers differ: music can be detected and left in place,
     # and a TSE segment never reaches the detector at all.

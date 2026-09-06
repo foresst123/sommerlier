@@ -11,9 +11,9 @@ speechbrain==1.0.2
 faster-whisper==1.2.0
 whisperx==3.8.6
 ctranslate2==4.5.0
-demucs>=4.0.1
-# BS-RoFormer for vocal isolation, selected by models.demucs.model in the
-# profile. Pulls the UVR checkpoints on first use; Demucs stays as the fallback
+bs_roformer>=4.0.1
+# BS-RoFormer for vocal isolation, selected by models.bs_roformer.model in the
+# profile. Pulls the UVR checkpoints on first use; BS-RoFormer stays as the fallback
 # and as the thing to compare against.
 audio-separator>=0.47.0
 panns-inference

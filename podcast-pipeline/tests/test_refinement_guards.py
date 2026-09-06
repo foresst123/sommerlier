@@ -37,7 +37,7 @@ def _seg(text, start=0.0, end=5.0, index="1"):
     return TranscriptSegment(
         index=index, start=start, end=end, speaker="SPEAKER_00",
         text=text, text_whisper=text, text_phowhisper=text, text_qwen3=text,
-        language="vi", demucs=False, tse=False,
+        language="vi", bs_roformer=False, tse=False,
     )
 
 
@@ -152,7 +152,7 @@ def _accept(sources, refined, index="1"):
         index=index, start=0.0, end=5.0, speaker="SPEAKER_00",
         text=padded[0], text_whisper=padded[0],
         text_phowhisper=padded[1], text_qwen3=padded[2],
-        language="vi", demucs=False, tse=False,
+        language="vi", bs_roformer=False, tse=False,
     )
     return svc._accept(seg, refined)
 

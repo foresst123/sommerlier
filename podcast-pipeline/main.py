@@ -37,9 +37,9 @@ def _build_parser():
                              "4kHz. sidon is the older blind diffusion model at "
                              "24kHz, kept only so the two can be compared.")
     parser.add_argument("--panns", action="store_true", help="Enable background music removal")
-    parser.add_argument("--music_separator", choices=["demucs", "bs_roformer"], default=None,
+    parser.add_argument("--music_separator", choices=["bs_roformer", "bs_roformer"], default=None,
                         help="Which model isolates vocals once PANNs finds music. "
-                             "demucs (default) is htdemucs; bs_roformer is the "
+                             "bs_roformer (default) is htbs_roformer; bs_roformer is the "
                              "band-split rotary transformer the SiSEC entries use, "
                              "roughly 2dB better SDR. Defaults to the profile.")
     parser.add_argument("--qwen3omni", action="store_true", help="Enable Qwen3-Omni audio captioning")
@@ -252,7 +252,7 @@ _sep = env_profile.get("models", {}).get("tse", {}).get("separator")
 if _sep and "TSE_SEPARATOR" not in os.environ:
     os.environ["TSE_SEPARATOR"] = str(_sep)
 
-_music_sep = env_profile.get("models", {}).get("demucs", {}).get("model")
+_music_sep = env_profile.get("models", {}).get("bs_roformer", {}).get("model")
 if _music_sep and "MUSIC_SEPARATOR" not in os.environ:
     os.environ["MUSIC_SEPARATOR"] = str(_music_sep)
 
@@ -302,7 +302,7 @@ def main():
 
     import torch
 
-    # TF32 on the fp32 paths: DiariZen, Demucs, PANNS and ECAPA all run in
+    # TF32 on the fp32 paths: DiariZen, BS-RoFormer, PANNS and ECAPA all run in
     # fp32, and on Ampere and later their matmuls and convolutions can use
     # TF32 tensor cores instead. Same code, same memory, roughly an order of
     # magnitude more throughput on those ops, at a precision that is ample for
@@ -409,7 +409,7 @@ def main():
         # PipelineService calls the loader for each stage at the point that
         # stage runs, so peak VRAM is the largest pair of stages rather than
         # the sum of every model. Loading here instead put DiariZen (5.15GB),
-        # Sidon (2.62GB), PhoWhisper, Whisper, Demucs and the captioner on the
+        # Sidon (2.62GB), PhoWhisper, Whisper, BS-RoFormer and the captioner on the
         # card before the first stage had produced anything -- and a run that
         # resumes from a checkpoint paid for models it never called.
         model_loader = ModelLoader(config, args, logger=logger)

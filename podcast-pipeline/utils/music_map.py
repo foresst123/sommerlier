@@ -55,6 +55,9 @@ MIN_SPAN_SECONDS = float(os.environ.get("MUSIC_MAP_MIN_SPAN", "0.30"))
 # threshold on a beat rest without stopping.
 MERGE_GAP_SECONDS = float(os.environ.get("MUSIC_MAP_MERGE_GAP", "0.50"))
 
+# Margin to pad around detected music/singing spans to catch the fade-in/out
+PAD_SECONDS = float(os.environ.get("MUSIC_MAP_PAD", "0.30"))
+
 # What a span can be, and what each one means for the audio.
 #
 #   MUSIC    a bed with someone talking over it. Strip the bed, keep the speech.
@@ -188,7 +191,7 @@ class MusicMap:
                 "song_seconds": round(self.total_of(SONG), 2)}
 
 
-def _runs(flags, fps, min_span, merge_gap):
+def _runs(flags, fps, min_span, merge_gap, pad=0.0):
     """Contiguous True runs of `flags`, merged and filtered, in seconds."""
     if not len(flags):
         return []
@@ -196,14 +199,29 @@ def _runs(flags, fps, min_span, merge_gap):
     starts = np.flatnonzero(edges == 1)
     ends = np.flatnonzero(edges == -1)
 
-    spans = []
+    raw_spans = []
     for i, j in zip(starts, ends):
         a, b = i / fps, j / fps
-        if spans and a - spans[-1][1] <= merge_gap:
-            spans[-1] = (spans[-1][0], b)
+        if raw_spans and a - raw_spans[-1][1] <= merge_gap:
+            raw_spans[-1] = (raw_spans[-1][0], b)
+        else:
+            raw_spans.append((a, b))
+            
+    max_dur = len(flags) / fps
+    spans = []
+    for a, b in raw_spans:
+        if b - a < min_span:
+            continue
+            
+        a = max(0.0, a - pad)
+        b = min(max_dur, b + pad)
+        
+        if spans and a <= spans[-1][1]:
+            spans[-1] = (spans[-1][0], max(spans[-1][1], b))
         else:
             spans.append((a, b))
-    return [s for s in spans if s[1] - s[0] >= min_span]
+            
+    return spans
 
 
 def build(waveform, sample_rate, detector, logger=None,
@@ -247,11 +265,11 @@ def build(waveform, sample_rate, detector, logger=None,
     is_music = loud_music & ~is_song
 
     spans = ([(a, b, SINGING) for a, b in
-              _runs(is_singing, fps, MIN_SPAN_SECONDS, MERGE_GAP_SECONDS)]
+              _runs(is_singing, fps, MIN_SPAN_SECONDS, MERGE_GAP_SECONDS, PAD_SECONDS)]
              + [(a, b, SONG) for a, b in
-                _runs(is_song, fps, MIN_SPAN_SECONDS, MERGE_GAP_SECONDS)]
+                _runs(is_song, fps, MIN_SPAN_SECONDS, MERGE_GAP_SECONDS, PAD_SECONDS)]
              + [(a, b, MUSIC) for a, b in
-                _runs(is_music, fps, MIN_SPAN_SECONDS, MERGE_GAP_SECONDS)])
+                _runs(is_music, fps, MIN_SPAN_SECONDS, MERGE_GAP_SECONDS, PAD_SECONDS)])
 
     found = MusicMap(spans, fps=fps)
     if logger:

@@ -1,6 +1,6 @@
 """Swapping the vocal-isolation model without MusicService noticing.
 
-Demucs and BS-RoFormer answer the same three questions, so the choice is a
+BS-RoFormer and BS-RoFormer answer the same three questions, so the choice is a
 profile setting. What these pin is the seam: the interface both must satisfy,
 and the two failure paths where a wrong answer would enter the dataset silently.
 
@@ -26,14 +26,14 @@ def _remover(**kw):
 
 # --- the interface MusicService relies on -----------------------------------
 
-def test_it_answers_the_same_three_questions_as_demucs():
-    from models.demucs import DemucsRemover
+def test_it_answers_the_same_three_questions_as_bs_roformer():
+    from models.bs_roformer import BS-RoFormerRemover
     for name in ("separate_full", "separate_segment", "unload"):
         assert hasattr(BSRoformerRemover, name), name
-        assert hasattr(DemucsRemover, name), name
+        assert hasattr(BS-RoFormerRemover, name), name
 
 
-def test_demucs_tuning_knobs_are_accepted_and_ignored():
+def test_bs_roformer_tuning_knobs_are_accepted_and_ignored():
     """The same profile block drives either model, so the loader does not have
     to branch on which keys apply."""
     assert _remover(segment=10, overlap=0.1).model_filename == DEFAULT_MODEL
@@ -97,13 +97,13 @@ def test_both_profiles_name_a_music_separator():
     with open(os.path.join(root, "config.json"), encoding="utf-8") as fh:
         config = json.load(fh)
     for name, profile in config["environments"].items():
-        assert profile["models"]["demucs"]["model"] in ("demucs", "bs_roformer"), name
+        assert profile["models"]["bs_roformer"]["model"] in ("bs_roformer", "bs_roformer"), name
 
 
 def test_the_loader_strips_model_before_passing_kwargs():
     """`model` names the class; the rest of the block is constructor arguments.
-    Forwarding it would reach DemucsRemover as an argument it does not take."""
+    Forwarding it would reach BS-RoFormerRemover as an argument it does not take."""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     source = open(os.path.join(root, "services", "model_loader.py"), encoding="utf-8").read()
-    assert 'demucs_cfg.pop("model", None)' in source
-    assert "demucs_cfg = dict(" in source, "the profile dict must be copied before popping"
+    assert 'bs_roformer_cfg.pop("model", None)' in source
+    assert "bs_roformer_cfg = dict(" in source, "the profile dict must be copied before popping"

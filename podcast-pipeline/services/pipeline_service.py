@@ -238,7 +238,7 @@ class PipelineService:
             root = os.path.join(
                 os.path.dirname(audio_path), "_final",
                 f"-tse-{getattr(args, 'tse', False)}"
-                f"-demucs-{getattr(args, 'panns', False)}"
+                f"-bs_roformer-{getattr(args, 'panns', False)}"
                 f"-vad-{getattr(args, 'vad', False)}"
                 f"-diaModel-{suffix}-initPrompt-True"
                 f"-merge_gap-{getattr(args, 'merge_gap', 2.0)}"
@@ -340,12 +340,12 @@ class PipelineService:
                 # Loaded only now: the map found something, so the separator
                 # has work. A recording with no bed never pays for it.
                 self._load("music")
-                self.music_svc.demucs = (self.model_loader.get("demucs")
+                self.music_svc.bs_roformer = (self.model_loader.get("bs_roformer")
                                          if self.model_loader else None)
                 patches = self.music_svc.strip_music_spans(
                     audio_data, music_map, logger=self.logger)
                 checkpoint.save("music_patches", patches)
-                self._free(args, "demucs")
+                self._free(args, "bs_roformer")
             else:
                 self.music_svc.apply_music_patches(audio_data, patches)
                 if self.logger:
@@ -534,7 +534,7 @@ class PipelineService:
         if "music_removal" in computed:
             stage_out.write_music_removal(enhanced_segments, audio_data.duration)
 
-        self._free(args, "panns", "demucs")
+        self._free(args, "panns", "bs_roformer")
             
         if getattr(args, "stop_after", None) == "music_removal":
             if self.logger: self.logger.info("Stopping pipeline after music_removal as requested by --stop_after.")

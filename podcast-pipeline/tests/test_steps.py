@@ -165,11 +165,11 @@ def _stub_model_modules():
     for name in ("models.whisper", "models.whisper_wrapper", "models.phowhisper",
                  "models.silero_vad", "models.pyannote", "models.diarizen_model",
                  "models.pyannote_embedding", "models.tse_model", "models.panns",
-                 "models.demucs", "models.qwen3_omni", "models.qwen3_asr"):
+                 "models.bs_roformer", "models.qwen3_omni", "models.qwen3_asr"):
         module = types.ModuleType(name)
         for attr in ("WhisperASR", "PhoWhisperASR", "SileroVAD", "PyannoteDiarizer",
                      "DiariZenDiarizer", "PyannoteEmbedder", "TargetSpeakerExtractor",
-                     "PANNSDetector", "DemucsRemover", "Qwen3OmniCaptioner",
+                     "PANNSDetector", "BS-RoFormerRemover", "Qwen3OmniCaptioner",
                      "Qwen3ASRClient", "load_asr_model"):
             setattr(module, attr, type(attr, (), {"__init__": lambda self, *a, **k: None}))
         sys.modules.setdefault(name, module)
@@ -193,7 +193,7 @@ def _loader(monkeypatch, **flags):
     loader.logger = None
     loader.device_1 = "cpu"
     loader.device_2 = "cpu"
-    loader.config = {"environments": {"kaggle": {"models": {"demucs": {}}}}}
+    loader.config = {"environments": {"kaggle": {"models": {"bs_roformer": {}}}}}
     return loader
 
 

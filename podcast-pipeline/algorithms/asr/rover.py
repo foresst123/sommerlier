@@ -398,7 +398,7 @@ def asr(vad_segments, audio, asr_model):
 
 
 @time_logger
-def asr_MoE(vad_segments, audio, asr_model, asr_model_2, canary_model, segment_demucs_flags=None, enable_word_timestamps=False, device="cuda"):
+def asr_MoE(vad_segments, audio, asr_model, asr_model_2, canary_model, segment_bs_roformer_flags=None, enable_word_timestamps=False, device="cuda"):
     """
     Perform Automatic Speech Recognition (ASR) on the VAD segments using MoE with Parallel Execution.
     [Updated] Runs Whisper, Parakeet, and Canary in parallel using ThreadPoolExecutor.
@@ -406,8 +406,8 @@ def asr_MoE(vad_segments, audio, asr_model, asr_model_2, canary_model, segment_d
     if len(vad_segments) == 0:
         return [], 0.0, 0.0
 
-    if segment_demucs_flags is None:
-        segment_demucs_flags = [False] * len(vad_segments)
+    if segment_bs_roformer_flags is None:
+        segment_bs_roformer_flags = [False] * len(vad_segments)
 
     # Full audio (for fallback)
     full_waveform = audio["waveform"]
@@ -560,7 +560,7 @@ def asr_MoE(vad_segments, audio, asr_model, asr_model_2, canary_model, segment_d
                 "text_canary": text_canary,
                 "speaker": speaker,
                 "language": detected_language,
-                "demucs": segment_demucs_flags[idx] if idx < len(segment_demucs_flags) else False,
+                "bs_roformer": segment_bs_roformer_flags[idx] if idx < len(segment_bs_roformer_flags) else False,
                 "is_separated": is_enhanced,
                 "sepreformer": segment.get("sepreformer", False)
             }

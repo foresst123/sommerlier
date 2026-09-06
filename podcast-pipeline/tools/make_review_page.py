@@ -97,7 +97,7 @@ def _rows(segments, original, processed, budget):
             # the detector found music under the speech, and whether an overlap
             # was left unseparated so the audio still holds two voices.
             "music": bool(seg.get("has_music")),
-            "demucs": bool(seg.get("demucs")),
+            "bs_roformer": bool(seg.get("bs_roformer")),
             "unseparated": [
                 {"start": float(u.get("start", 0.0)), "end": float(u.get("end", 0.0)),
                  "reason": str(u.get("reason", ""))}
@@ -282,8 +282,8 @@ function playCell(i, which, has) {
 function musicCell(r) {
   if (r.tse) return `<span class="flag none" title="Đoạn đã tách không qua bộ dò nhạc">–</span>`;
   if (!r.music) return `<span class="flag none">–</span>`;
-  return r.demucs
-    ? `<span class="flag ok" title="Phát hiện nhạc, đã tách nhạc bằng Demucs">♪ đã lọc</span>`
+  return r.bs_roformer
+    ? `<span class="flag ok" title="Phát hiện nhạc, đã tách nhạc bằng BS-RoFormer">♪ đã lọc</span>`
     : `<span class="flag warn" title="Phát hiện nhạc nhưng chưa lọc">♪ còn nhạc</span>`;
 }
 
@@ -563,7 +563,7 @@ def build_review_page(output_dir: str, target: str = None, max_mb: int = None,
         size_mb = os.path.getsize(target) / (1024 * 1024)
         clips = sum(bool(r["audio_src"]) + bool(r["audio_out"]) for r in rows)
         flagged = sum(1 for r in rows if r["unseparated"])
-        music = sum(1 for r in rows if r["music"] and not r["demucs"])
+        music = sum(1 for r in rows if r["music"] and not r["bs_roformer"])
         msg = (f"Review page: {len(rows)} segment(s), {clips} clip(s), "
                f"{size_mb:.1f} MB -> {target}")
         if flagged or music:
