@@ -42,6 +42,13 @@ SINGING_MARGIN = float(os.environ.get("MUSIC_MAP_SINGING_MARGIN", "0.15"))
 
 # Shortest run worth recording. Below this the label is a flicker between two
 # genuinely different stretches rather than a stretch of its own.
+#
+# Measured against what the tagger can actually resolve, 0.30 filters nothing:
+# Cnn14_DecisionLevelMax decides once per 320ms and repeats that decision
+# across the 32 frames it covers, so the shortest run it can produce is already
+# longer than this. Raising it above 0.32 is what would make it a filter --
+# left at the old value until a run on real audio says which flickers are worth
+# dropping, because raising it silently drops real short stretches too.
 MIN_SPAN_SECONDS = float(os.environ.get("MUSIC_MAP_MIN_SPAN", "0.30"))
 
 # Gap below which two runs of the same kind are one. Music dips under the

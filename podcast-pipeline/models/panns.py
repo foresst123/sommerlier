@@ -56,6 +56,17 @@ class PANNSDetector:
     SED_FPS = 100.0
     SED_HOP = 320                  # samples per output frame, at 32kHz
 
+    # Cnn14_DecisionLevelMax pools time by 2 five times over, so it makes one
+    # decision per 32 output frames and then repeats it -- `interpolate` in
+    # panns_inference is a repeat, not a smoothing. The 100 fps the model
+    # advertises is therefore a presentation: the real resolution is
+    # 32 * 10ms = 320ms, and every frame inside one of those blocks carries
+    # exactly the same number.
+    SED_DECISION_FRAMES = 32
+
+    # Below one second the pooling stack has nothing left to reduce.
+    SED_MIN_SAMPLES = 32000
+
     # How much audio goes through the frame tagger at once. panns_inference
     # runs one forward pass over whatever it is handed, and the framewise stack
     # keeps an activation per frame: a 50-minute podcast is 96M samples, which
@@ -99,6 +110,26 @@ class PANNSDetector:
         return [i for i, label in enumerate(self.model.labels)
                 if label.lower() in wanted]
 
+    def _chunking(self):
+        """(chunk, context) in samples, both whole decision blocks.
+
+        The model's 320ms grid is aligned to the start of whatever it is
+        handed, so a chunk that is not a whole number of blocks starts the next
+        one on a different phase: the grid would shift every 60 seconds and a
+        boundary's error would depend on where in the recording it fell.
+        Rounding both to the block keeps one grid across the whole file.
+
+        The chunk rounds down and the context rounds up, and the asymmetry is
+        deliberate -- context is fed and then discarded, so too much of it
+        costs a little compute, while too little (rounding 0.25s down to zero)
+        silently removes the thing it exists for.
+        """
+        block = self.SED_HOP * self.SED_DECISION_FRAMES
+        chunk = max(int(self.SED_CHUNK_SECONDS * 32000) // block, 1) * block
+        wanted = self.SED_CONTEXT_SECONDS * 32000
+        context = 0 if wanted <= 0 else max(1, round(wanted / block)) * block
+        return chunk, context
+
     def _sed_framewise(self, audio):
         """Frame-level scores for a whole recording, a chunk at a time.
 
@@ -110,12 +141,7 @@ class PANNSDetector:
         sed = self._get_sed()
         total = len(audio)
         hop = self.SED_HOP
-
-        # Chunk and context in whole frames, so cropping is exact rather than
-        # rounded: a half-frame slip per chunk would accumulate into a
-        # timestamp error over a fifty-minute file.
-        chunk = max(int(self.SED_CHUNK_SECONDS * 32000) // hop, 1) * hop
-        context = max(int(self.SED_CONTEXT_SECONDS * 32000) // hop, 0) * hop
+        chunk, context = self._chunking()
 
         if total <= chunk:
             return sed.inference(audio[None, :])[0]
@@ -126,10 +152,15 @@ class PANNSDetector:
 
             fed_start = max(0, start - context)
             fed_end = min(total, end + context)
-            # The model needs a second of audio to survive its pooling stack;
-            # a short final chunk borrows the length from behind it.
-            if fed_end - fed_start < 32000:
-                fed_start = max(0, fed_end - 32000)
+            # The model needs a second of audio to survive its pooling stack.
+            # Borrow it from behind first -- that keeps the block grid, since
+            # everything here is a whole number of blocks -- and only reach
+            # forward when there is nothing behind, which is the first chunk of
+            # a recording barely longer than one chunk.
+            if fed_end - fed_start < self.SED_MIN_SAMPLES:
+                fed_start = max(0, fed_end - self.SED_MIN_SAMPLES)
+                if fed_end - fed_start < self.SED_MIN_SAMPLES:
+                    fed_end = min(total, fed_start + self.SED_MIN_SAMPLES)
 
             frames = sed.inference(audio[None, fed_start:fed_end])[0]
 
