@@ -18,10 +18,21 @@ def apply_sortformer_segment_padding(df: pd.DataFrame, pad_onset: float = 0.0, p
     df["end"] = df[["start", "end"]].max(axis=1)
     return df
 
-def cut_by_speaker_label(vad_list: list, merge_gap: float = 0.5, min_segment_length: float = 0.2, max_segment_length: float = 30.0, logger=None) -> list:
-    """Merge and trim VAD segments by speaker labels robustly."""
+def cut_by_speaker_label(vad_list: list, merge_gap: float = 0.5, min_segment_length: float = 0.2, max_segment_length: float = 30.0, logger=None, seams=None) -> list:
+    """Merge and trim VAD segments by speaker labels robustly.
+
+    `seams` are the joins left by excising. Merging must not bridge one: two
+    turns of the same speaker either side of a join sit a few hundredths of a
+    second apart in the cut timeline -- well inside merge_gap -- while in the
+    recording they are minutes apart with a song between them. Bridging one
+    would put the join back inside a segment after split_at_seams had taken it
+    out, and hand every later stage a segment that is two pieces of the
+    conversation glued together.
+    """
     if not vad_list:
         return []
+
+    joins = sorted(float(s) for s in (seams or ()))
 
     # Phase 1: Group by speaker and merge gaps
     speaker_tracks = {}
@@ -44,7 +55,8 @@ def cut_by_speaker_label(vad_list: list, merge_gap: float = 0.5, min_segment_len
             gap = vad["start"] - last_vad["end"]
             merged_dur = max(last_vad["end"], vad["end"]) - min(last_vad["start"], vad["start"])
             
-            if gap <= merge_gap and merged_dur <= max_segment_length:
+            bridges_join = any(last_vad["end"] <= j <= vad["start"] for j in joins)
+            if gap <= merge_gap and merged_dur <= max_segment_length and not bridges_join:
                 last_vad["end"] = max(last_vad["end"], vad["end"])
                 last_vad["start"] = min(last_vad["start"], vad["start"])
             else:
@@ -334,10 +346,11 @@ def split_at_seams(segment_list: list, seams, min_piece: float = 0.05) -> list:
     reconstruction, anything measuring turn timing -- is simpler and safer when
     a segment is guaranteed to be one contiguous piece of the source.
 
-    Run last, after merging and length-splitting. Merging is what most often
-    creates the problem: two turns of the same speaker either side of a join
-    look 0.05s apart in the cut timeline, so a merge_gap of 0.3s swallows the
-    join whole.
+    Run first, before VAD: the joins are the boundaries of what is genuinely
+    continuous audio, so every later step should be working inside one piece
+    rather than repairing a segment that spans two. `cut_by_speaker_label`
+    takes the same seams for the same reason -- merging is the one step that
+    could put a join back inside a segment.
 
     A sliver shorter than `min_piece` on one side of a join is dropped rather
     than kept: at that length it is the tail of a crossfade, not speech.

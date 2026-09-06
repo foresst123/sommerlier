@@ -152,7 +152,33 @@ class DiarizationService:
         # and split, so it cannot show whether a low segment count came from the
         # diarizer or from cut_by_speaker_label. Log both ends.
         self._log_segment_stats("raw", df_to_list(combined_df))
-        
+
+        # Cut at the joins first, before anything else looks at these segments.
+        #
+        # Excising the sung and standalone-music stretches leaves points where
+        # two parts of the recording that were never adjacent now touch. Those
+        # joins are the boundaries of what is genuinely continuous audio, so
+        # every step after this works inside one piece rather than repairing a
+        # segment that spans two: VAD sub-divides a piece, merging cannot
+        # bridge one, and a length split never has to reason about it.
+        #
+        # Read through getattr for the same reason music_map is: the pipeline
+        # sets it, a service built for a test has none, and no timeline must
+        # read as "nothing was cut".
+        timeline = getattr(self, "timeline", None)
+        seams = timeline.seams() if timeline else []
+        raw_list = df_to_list(combined_df)
+        if seams:
+            before = len(raw_list)
+            raw_list = split_at_seams(raw_list, seams)
+            if self.logger and len(raw_list) != before:
+                self.logger.info(
+                    f"Split {len(raw_list) - before} segment(s) at {len(seams)} "
+                    "cut join(s) before VAD; each piece is now one contiguous "
+                    "stretch of the source")
+            self._log_segment_stats("post-seam-split", raw_list)
+            combined_df = pd.DataFrame(raw_list)
+
         # Apply VAD to split long continuous segments if VAD is available
         if getattr(args, "vad", False) and self.vad_model:
             vad_audio = {"waveform": audio.waveform, "sample_rate": audio.sample_rate}
@@ -171,7 +197,8 @@ class DiarizationService:
         max_seg = getattr(args, "max_segment_length", None) or 30.0
         self._log_segment_stats("post-vad", raw_list)
         smoothed_list = cut_by_speaker_label(
-            raw_list, merge_gap=merge_gap, max_segment_length=max_seg, logger=self.logger)
+            raw_list, merge_gap=merge_gap, max_segment_length=max_seg,
+            logger=self.logger, seams=seams)
         self._log_segment_stats(f"post-merge(gap={merge_gap} max={max_seg})", smoothed_list)
 
         # Dissolve speakers too small to be participants before anything
@@ -189,25 +216,6 @@ class DiarizationService:
             smoothed_list, max_duration=max_seg,
             waveform=audio.waveform, sample_rate=audio.sample_rate)
         self._log_segment_stats("post-split", final_list)
-
-        # Last, and last on purpose: no segment may straddle a join left by
-        # excising. Merging is what creates them -- two turns of one speaker
-        # either side of a join sit 0.05s apart in the cut timeline, well
-        # inside merge_gap -- so this has to come after merge, not before.
-        #
-        # Read through getattr for the same reason music_map is: the pipeline
-        # sets it, a service built for a test has none, and no timeline must
-        # read as "nothing was cut".
-        timeline = getattr(self, "timeline", None)
-        seams = timeline.seams() if timeline else []
-        if seams:
-            before = len(final_list)
-            final_list = split_at_seams(final_list, seams)
-            self._log_segment_stats(f"post-seam-split({len(seams)} join(s))", final_list)
-            if self.logger and len(final_list) != before:
-                self.logger.info(
-                    f"Split {len(final_list) - before} segment(s) that spanned a "
-                    "cut; each piece is now one contiguous stretch of the source")
 
         # Build schemas
         final_segments = []

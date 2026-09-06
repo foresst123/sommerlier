@@ -81,14 +81,29 @@ def test_total_speech_time_is_preserved():
 
 # --- the case that actually produces these ----------------------------------
 
-def test_a_merge_across_a_join_is_undone():
-    """This is where they come from. Two turns of one speaker either side of a
-    join sit 0.05s apart in the cut timeline -- well inside merge_gap of 0.3s
-    -- so the merge swallows the join whole. Which is why the split has to run
-    after merging, not before."""
-    merged = [_seg(4.0, 6.0)]        # what merge produced across a join at 5.0
-    out = split_at_seams(merged, seams=[5.0])
-    assert len(out) == 2
+def test_merging_cannot_put_a_join_back_inside_a_segment():
+    """The split runs before VAD, so the one step that could undo it is the
+    merge: two turns of one speaker either side of a join sit 0.05s apart in
+    the cut timeline, well inside merge_gap of 0.3s, while in the recording
+    they are minutes apart with a song between them."""
+    from utils.segment_utils import cut_by_speaker_label
+    pieces = [_seg(4.0, 5.0), _seg(5.05, 6.0)]
+
+    joined = cut_by_speaker_label(pieces, merge_gap=0.3, max_segment_length=20.0)
+    assert len(joined) == 1, "without seams the merge bridges the join"
+
+    kept = cut_by_speaker_label(pieces, merge_gap=0.3, max_segment_length=20.0,
+                                seams=[5.0])
+    assert len(kept) == 2, "with seams it must not"
+
+
+def test_a_gap_that_is_not_a_join_still_merges():
+    """The guard has to be about joins, not about gaps in general."""
+    from utils.segment_utils import cut_by_speaker_label
+    pieces = [_seg(4.0, 5.0), _seg(5.05, 6.0)]
+    out = cut_by_speaker_label(pieces, merge_gap=0.3, max_segment_length=20.0,
+                               seams=[12.0])
+    assert len(out) == 1
 
 
 def test_the_seams_come_from_the_timeline_the_cut_produced():
@@ -110,13 +125,24 @@ def test_every_piece_maps_to_one_contiguous_span_of_the_source():
 
 # --- wiring ------------------------------------------------------------------
 
-def test_diarization_splits_at_seams_after_merging_not_before():
+def test_diarization_splits_at_seams_before_vad():
+    """The joins bound what is genuinely continuous, so everything downstream
+    should work inside one piece rather than repair a segment spanning two."""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     source = open(os.path.join(root, "services", "diarization_service.py"),
                   encoding="utf-8").read()
-    merge = source.index("cut_by_speaker_label(")
     split = source.index("split_at_seams(")
-    assert merge < split, "merging is what creates the straddling segments"
+    vad = source.index("self.vad_model.vad(")
+    merge = source.index("cut_by_speaker_label(\n")
+    assert split < vad < merge, "seam split, then VAD, then merge"
+
+
+def test_the_merge_is_told_about_the_seams():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    source = open(os.path.join(root, "services", "diarization_service.py"),
+                  encoding="utf-8").read()
+    assert "seams=seams)" in source, (
+        "merging is the only step that could undo the split")
 
 
 def test_the_pipeline_hands_diarization_the_timeline():
