@@ -12,7 +12,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from schemas.segment import EnhancedSegment
+from schemas.segment import SpeechSegment
 from services.export_service import ExportService
 from services.pipeline_service import PipelineService
 from utils.batch import find_name_collisions
@@ -86,8 +86,8 @@ def test_separated_audio_of_two_files_cannot_overwrite_each_other(tmp_path):
     for name, value in (("talk_a", 0.25), ("talk_b", 0.75)):
         out = p._resolve_output_dir(_args(save_path=str(tmp_path)), f"/audio/{name}.mp3")
         os.makedirs(out, exist_ok=True)
-        seg = EnhancedSegment(index="00000", start=0.0, end=1.0, speaker="SPEAKER_00")
-        seg.enhanced_audio = np.full(16000, value, dtype=np.float32)
+        seg = SpeechSegment(index="00000", start=0.0, end=1.0, speaker="SPEAKER_00")
+        seg.audio = np.full(16000, value, dtype=np.float32)
         svc.export_separated_audio([seg], 16000, out)
         written.append(os.path.join(out, "separation", "00000_SPEAKER_00_separated.wav"))
 

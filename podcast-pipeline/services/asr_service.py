@@ -2,7 +2,7 @@ import concurrent.futures
 import librosa
 from typing import List
 from schemas.audio import AudioData
-from schemas.segment import EnhancedSegment
+from schemas.segment import SpeechSegment
 from schemas.transcript import TranscriptSegment
 from algorithms.asr.rover import RoverEnsembler
 import numpy as np
@@ -199,7 +199,7 @@ class ASRService:
         # leave a dead Popen behind that a second process() call would write to.
         return results
 
-    def process(self, segments: List[EnhancedSegment], audio: AudioData, enable_word_timestamps: bool = False) -> List[TranscriptSegment]:
+    def process(self, segments: List[SpeechSegment], audio: AudioData, enable_word_timestamps: bool = False) -> List[TranscriptSegment]:
         self._warn_missing()
         import tempfile
         tmp_dir = tempfile.mkdtemp(prefix="qwen3_asr_")
@@ -239,17 +239,17 @@ class ASRService:
             lo = max(0, start_frame - pad_frames)
             hi = min(total_samples, end_frame + pad_frames)
 
-            if seg.enhanced_audio is not None:
+            if seg.audio is not None:
                 seg_start_frame = int(seg.start * sr)
-                seg_end_frame = seg_start_frame + len(seg.enhanced_audio)
+                seg_end_frame = seg_start_frame + len(seg.audio)
                 if start_frame < seg_start_frame or end_frame > seg_end_frame:
                     core = np.concatenate([
                         audio.waveform[start_frame:seg_start_frame],  # pad đầu, từ mixture
-                        seg.enhanced_audio,                            # lõi đã tách, nguyên vẹn
+                        seg.audio,                            # lõi đã tách, nguyên vẹn
                         audio.waveform[seg_end_frame:end_frame],       # pad cuối, từ mixture
                     ])
                 else:
-                    core = seg.enhanced_audio
+                    core = seg.audio
                 if pad > 0:
                     # Pad from the mixture: the separated track only covers the
                     # segment, and its neighbours belong to the other speaker

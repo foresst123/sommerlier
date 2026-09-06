@@ -519,32 +519,42 @@ class PipelineService:
             return None
             
         # 4. Speech Separation (Overlap)
-        enhanced_segments = None
+        speech_segments = None
         if not self.step_enabled(args, "separation"):
             if self.logger:
                 self.logger.info("Step 'separation' is off in the profile; skipping")
             # Even when separation is off, downstream stages need
-            # EnhancedSegments. Passthrough wraps raw diarization segments.
+            # SpeechSegments. Passthrough wraps raw diarization segments.
             if diarization_result is not None:
                 if checkpoint.exists("separation"):
-                    enhanced_segments = checkpoint.load("separation")
+                    speech_segments = checkpoint.load("separation")
                 else:
-                    enhanced_segments = self.separation_svc.passthrough(
+                    speech_segments = self.separation_svc.passthrough(
                         diarization_result.segments, audio_data)
-                    checkpoint.save("separation", enhanced_segments)
+                    checkpoint.save("separation", speech_segments)
         elif diarization_result is None:
             if self.logger:
                 self.logger.info("Skipping separation (no diarization segments)")
         elif checkpoint.exists("separation"):
             if self.logger: self.logger.info("Loading Separation from checkpoint")
-            enhanced_segments = checkpoint.load("separation")
+            try:
+                speech_segments = checkpoint.load("separation")
+            except (AttributeError, ModuleNotFoundError) as exc:
+                # A checkpoint pickled before EnhancedSegment was renamed names
+                # a class that no longer exists. Recomputing is cheap next to
+                # leaving the operator with an unreadable traceback.
+                if self.logger:
+                    self.logger.warning(
+                        f"Separation checkpoint predates a rename ({exc}); "
+                        "recomputing this stage")
+                speech_segments = None
         else:
             self._load("separation")
             self.separation_svc.dump_dir = os.path.join(
                 output_dir, "03_separation", "audio", "raw")
-            enhanced_segments = self.separation_svc.process_overlaps(diarization_result.segments, audio_data)
-            if self.logger: self.logger.info(f"[DEBUG] After Separation: {len(enhanced_segments)} segments")
-            checkpoint.save("separation", enhanced_segments)
+            speech_segments = self.separation_svc.process_overlaps(diarization_result.segments, audio_data)
+            if self.logger: self.logger.info(f"[DEBUG] After Separation: {len(speech_segments)} segments")
+            checkpoint.save("separation", speech_segments)
             if hasattr(self.separation_svc, "report_payload"):
                 checkpoint.save("separation_report",
                                 self.separation_svc.report_payload())
@@ -552,10 +562,10 @@ class PipelineService:
 
         if "separation" in computed:
             stage_out.write_separation(
-                enhanced_segments, audio_data.duration,
+                speech_segments, audio_data.duration,
                 report=self.separation_svc.report_payload()
                 if hasattr(self.separation_svc, "report_payload") else None)
-            stage_out.write_separated_audio(enhanced_segments, audio_data.sample_rate)
+            stage_out.write_separated_audio(speech_segments, audio_data.sample_rate)
 
         self._free(args, "separator", "embedder")
 
@@ -570,7 +580,7 @@ class PipelineService:
         if not self.step_enabled(args, "music_removal_fallback"):
             if self.logger:
                 self.logger.info("Step 'music_removal_fallback' is off in the profile; skipping")
-        elif enhanced_segments is None:
+        elif speech_segments is None:
             if self.logger:
                 self.logger.info("Skipping music_removal_fallback (no segments available)")
         else:
@@ -580,16 +590,16 @@ class PipelineService:
                     self.logger.info("Skipping the per-segment music pass (the waveform was already cleaned)")
             elif checkpoint.exists("music_removal"):
                 if self.logger: self.logger.info("Loading Music Removal from checkpoint")
-                enhanced_segments = checkpoint.load("music_removal")
+                speech_segments = checkpoint.load("music_removal")
             else:
                 self._load("music")
-                enhanced_segments = self.music_svc.process_segments(enhanced_segments, audio_data)
-                if self.logger: self.logger.info(f"[DEBUG] After Music Removal: {len(enhanced_segments)} segments")
-                checkpoint.save("music_removal", enhanced_segments)
+                speech_segments = self.music_svc.process_segments(speech_segments, audio_data)
+                if self.logger: self.logger.info(f"[DEBUG] After Music Removal: {len(speech_segments)} segments")
+                checkpoint.save("music_removal", speech_segments)
                 computed.add("music_removal")
 
         if "music_removal" in computed:
-            stage_out.write_music_removal(enhanced_segments, audio_data.duration)
+            stage_out.write_music_removal(speech_segments, audio_data.duration)
 
         self._free(args, "panns", "bs_roformer")
             
@@ -604,7 +614,7 @@ class PipelineService:
         if not self.step_enabled(args, "asr"):
             if self.logger:
                 self.logger.info("Step 'asr' is off in the profile; skipping")
-        elif enhanced_segments is None:
+        elif speech_segments is None:
             if self.logger:
                 self.logger.info("Skipping ASR (no segments available)")
         elif checkpoint.exists("asr"):
@@ -612,8 +622,8 @@ class PipelineService:
             transcripts = checkpoint.load("asr")
         else:
             self._load("asr")
-            if self.logger: self.logger.info(f"[DEBUG] Sending {len(enhanced_segments)} segments to ASR")
-            transcripts = self.asr_svc.process(enhanced_segments, audio_data)
+            if self.logger: self.logger.info(f"[DEBUG] Sending {len(speech_segments)} segments to ASR")
+            transcripts = self.asr_svc.process(speech_segments, audio_data)
             if self.logger: self.logger.info(f"[DEBUG] ASR returned {len(transcripts)} transcripts")
             checkpoint.save("asr", transcripts)
             computed.add("asr")
@@ -633,7 +643,7 @@ class PipelineService:
         if not self.step_enabled(args, "captioning"):
             if self.logger:
                 self.logger.info("Step 'captioning' is off in the profile; skipping")
-        elif transcripts is None or enhanced_segments is None:
+        elif transcripts is None or speech_segments is None:
             if self.logger:
                 self.logger.info("Skipping captioning (no transcripts or segments available)")
         elif checkpoint.exists("captioning"):
@@ -641,8 +651,8 @@ class PipelineService:
             transcripts = checkpoint.load("captioning")
         else:
             self._load("caption")
-            enhanced_audio_dict = {s.index: s.enhanced_audio for s in enhanced_segments if s.enhanced_audio is not None}
-            transcripts = self.caption_svc.add_captions(transcripts, audio_data, enhanced_audio_dict)
+            segment_audio = {s.index: s.audio for s in speech_segments if s.audio is not None}
+            transcripts = self.caption_svc.add_captions(transcripts, audio_data, segment_audio)
             checkpoint.save("captioning", transcripts)
         
         if getattr(args, "stop_after", None) == "captioning":
@@ -739,8 +749,8 @@ class PipelineService:
         self.export_svc.export_srt(transcripts, os.path.join(save_path, f"{base_name}.srt"))
         self.export_svc.export_mp3_segments(transcripts, audio_data, save_path, base_name)
         
-        if enhanced_segments is not None:
-            self.export_svc.export_separated_audio(enhanced_segments, audio_data.sample_rate, save_path)
+        if speech_segments is not None:
+            self.export_svc.export_separated_audio(speech_segments, audio_data.sample_rate, save_path)
         
         import json
         try:
@@ -748,12 +758,12 @@ class PipelineService:
                 with open(os.path.join(save_path, f"{base_name}_intermediate_diarization.json"), "w", encoding="utf-8") as f:
                     json.dump([seg.__dict__ for seg in diarization_result.segments], f, ensure_ascii=False, indent=2)
             
-            if enhanced_segments is not None:
+            if speech_segments is not None:
                 with open(os.path.join(save_path, f"{base_name}_intermediate_separation.json"), "w", encoding="utf-8") as f:
                     sep_data = []
-                    for s in enhanced_segments:
+                    for s in speech_segments:
                         s_dict = s.__dict__.copy()
-                        s_dict.pop('enhanced_audio', None)
+                        s_dict.pop('audio', None)
                         sep_data.append(s_dict)
                     json.dump(sep_data, f, ensure_ascii=False, indent=2)
         except Exception as e:

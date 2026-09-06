@@ -36,14 +36,14 @@ def test_each_stage_writes_its_own_directory(tmp_path):
 
 
 def test_waveforms_never_reach_the_json(tmp_path):
-    """enhanced_audio is megabytes of float32; serialising it would be fatal."""
+    """audio is megabytes of float32; serialising it would be fatal."""
     seg = _Seg(index="00000", start=0.0, end=1.0, speaker="1",
-               enhanced_audio=np.zeros(24000, dtype=np.float32))
+               audio=np.zeros(24000, dtype=np.float32))
     so = StageOutputService(str(tmp_path))
     so.write_diarization([seg], 1.0)
 
     raw = (tmp_path / "02_diarization" / "segments.json").read_text()
-    assert "enhanced_audio" not in raw
+    assert "audio" not in raw
     json.loads(raw)                       # and it is still valid JSON
 
 

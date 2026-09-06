@@ -80,7 +80,7 @@ def _gap_profile(merged, span) -> dict:
 def _as_dict(obj) -> dict:
     """Plain dict for one segment/transcript, without any waveform payload."""
     d = dict(obj.__dict__) if hasattr(obj, "__dict__") else dict(obj)
-    d.pop("enhanced_audio", None)
+    d.pop("audio", None)
     for k, v in list(d.items()):
         if isinstance(v, np.ndarray):
             d[k] = {"_ndarray": True, "shape": list(v.shape), "dtype": str(v.dtype)}
@@ -411,7 +411,7 @@ class StageOutputService:
         ok_dir = self.stage_dir("separation", "audio", "separated")
         bad_dir = self.stage_dir("separation", "audio", "failed")
         for seg in segments:
-            audio = getattr(seg, "enhanced_audio", None)
+            audio = getattr(seg, "audio", None)
             spans = getattr(seg, "tse_spans", None) or []
             fails = getattr(seg, "tse_failed_spans", None) or []
             if audio is None or not len(audio):

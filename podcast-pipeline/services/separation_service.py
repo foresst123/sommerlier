@@ -5,7 +5,7 @@ import os
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 from schemas.audio import AudioData
-from schemas.segment import Segment, EnhancedSegment
+from schemas.segment import Segment, SpeechSegment
 from algorithms.diarization.overlap import detect_overlapping_segments
 from utils.audio_normalize import match_splice_level, safe_limit
 from utils.mixture_window import MODEL_WINDOW, window_for
@@ -76,7 +76,7 @@ REASONS = (
 class TargetExtractionService:
     """Isolate overlapping speech with blind separation plus ECAPA assignment.
 
-    Every overlap ends up in exactly one of two places on its EnhancedSegment:
+    Every overlap ends up in exactly one of two places on its SpeechSegment:
     tse_spans (separated) or tse_failed_spans (not, with a reason). Nothing is
     dropped silently -- test_every_overlap_is_accounted_for enforces that.
     """
@@ -549,22 +549,22 @@ class TargetExtractionService:
 
     # ------------------------------------------------------------------
     def passthrough(self, segments, audio):
-        """EnhancedSegments carrying the mixture, with nothing separated.
+        """SpeechSegments carrying the mixture, with nothing separated.
 
         What the separation stage returns when the profile turns it off. The
         shape has to match `process_overlaps` exactly -- ASR and the exporters
-        read `enhanced_audio` either way -- so the difference is only that no
+        read `audio` either way -- so the difference is only that no
         overlap is replaced.
         """
         sr = audio.sample_rate
-        enhanced = [EnhancedSegment(**s.__dict__) for s in segments]
-        for e in enhanced:
-            e.enhanced_audio = audio.waveform[int(e.start * sr):int(e.end * sr)].copy()
-        return enhanced
+        speech = [SpeechSegment(**s.__dict__) for s in segments]
+        for e in speech:
+            e.audio = audio.waveform[int(e.start * sr):int(e.end * sr)].copy()
+        return speech
 
-    def process_overlaps(self, segments: List[Segment], audio: AudioData, overlap_threshold: float = 0.1) -> List[EnhancedSegment]:
+    def process_overlaps(self, segments: List[Segment], audio: AudioData, overlap_threshold: float = 0.1) -> List[SpeechSegment]:
         if not self.tse_model:
-            return [EnhancedSegment(**s.__dict__) for s in segments]
+            return [SpeechSegment(**s.__dict__) for s in segments]
 
         if self.logger:
             self.logger.info("Processing overlaps with Target Speaker Extraction (TSE)")
@@ -573,29 +573,29 @@ class TargetExtractionService:
         # lọc ra những bộ key value có overlap >= overlap_threshold
         pairs = detect_overlapping_segments(seg_dicts, overlap_threshold=overlap_threshold, logger=self.logger)
 
-        # Tạo danh sách các EnhancedSegment từ danh sách segments
-        enhanced = [EnhancedSegment(**s.__dict__) for s in segments]
+        # Tạo danh sách các SpeechSegment từ danh sách segments
+        speech = [SpeechSegment(**s.__dict__) for s in segments]
         sr = audio.sample_rate
         waveform = audio.waveform
         total_dur = len(waveform) / sr
-        for e in enhanced:
-            e.enhanced_audio = waveform[int(e.start * sr):int(e.end * sr)].copy()
+        for e in speech:
+            e.audio = waveform[int(e.start * sr):int(e.end * sr)].copy()
 
         if not pairs:
             if self.logger:
                 self.logger.info(
                     f"[TSE] no overlap >= {overlap_threshold}s among {len(segments)} segments"
                 )
-            return enhanced
+            return speech
 
         enrollments = self.mine_enrollments(segments, audio)
         by_spk = self._intervals_by_speaker(segments)
-        seg_by_index = {s.index: s for s in enhanced}
+        seg_by_index = {s.index: s for s in speech}
 
         self._same_speaker_pairs = []
         queue = self._group_jobs(pairs)
         # Record them against both segments, the same way a real failure is.
-        by_index = {e.index: e for e in enhanced}
+        by_index = {e.index: e for e in speech}
         for p in self._same_speaker_pairs:
             for side in ("seg1", "seg2"):
                 self._fail(by_index.get(p[side].get("index")),
@@ -765,7 +765,7 @@ class TargetExtractionService:
                         self._fail(enh, ov_lo, ov_hi, "short_track", "negative offset")
                         continue
                     limit = min(int((ov_hi - ov_lo) * sr), len(track) - src,
-                                len(enh.enhanced_audio) - dst)
+                                len(enh.audio) - dst)
                     if limit <= 0:
                         self._fail(enh, ov_lo, ov_hi, "short_track", f"limit={limit}")
                         continue
@@ -779,7 +779,7 @@ class TargetExtractionService:
                     # one case scored sim=0.67 from solo audio 19s earlier while
                     # the track was flat silence across the backchannel itself,
                     # and that silence went into the dataset labelled as speech.
-                    host = enh.enhanced_audio[dst:dst + limit]
+                    host = enh.audio[dst:dst + limit]
                     if not self._track_has_speech(host, track[src:src + limit]):
                         self._fail(enh, ov_lo, ov_hi, "empty_track",
                                    "silent where mixture has speech")
@@ -793,9 +793,9 @@ class TargetExtractionService:
                     # clip. Matching RMS to the audio being replaced closes it
                     # with a scalar, before the crossfade smooths the edges.
                     patch = match_splice_level(
-                        enh.enhanced_audio[dst:dst + limit], track[src:src + limit])
-                    enh.enhanced_audio[dst:dst + limit] = self._cross_fade(
-                        enh.enhanced_audio[dst:dst + limit], patch, fade_samples)
+                        enh.audio[dst:dst + limit], track[src:src + limit])
+                    enh.audio[dst:dst + limit] = self._cross_fade(
+                        enh.audio[dst:dst + limit], patch, fade_samples)
                     enh.tse = True
                     enh.tse_spans.append((ov_lo, ov_lo + limit / sr,
                                           float(sim) if sim is not None else -1.0))
@@ -810,10 +810,10 @@ class TargetExtractionService:
 
         pbar.close()
         self._report_stats()
-        return enhanced
+        return speech
 
     # ------------------------------------------------------------------
-    def export_sdlm_dual_channel(self, enhanced_segments: List[EnhancedSegment], audio_duration: float, sr: int,
+    def export_sdlm_dual_channel(self, speech_segments: List[SpeechSegment], audio_duration: float, sr: int,
                                  strict: bool = True) -> Tuple[np.ndarray, np.ndarray]:
         """Reconstruct two continuous tracks for SDLM / full-duplex training.
 
@@ -826,7 +826,7 @@ class TargetExtractionService:
         track_0 = np.zeros(total_samples, dtype=np.float32)
         track_1 = np.zeros(total_samples, dtype=np.float32)
 
-        speakers = sorted({s.speaker for s in enhanced_segments})
+        speakers = sorted({s.speaker for s in speech_segments})
         if not speakers:
             return track_0, track_1
         if len(speakers) > 2 and self.logger:
@@ -838,14 +838,14 @@ class TargetExtractionService:
         spk_1 = speakers[1] if len(speakers) > 1 else None
 
         written = dropped = 0
-        for seg in enhanced_segments:
-            if seg.speaker not in (spk_0, spk_1) or seg.enhanced_audio is None:
+        for seg in speech_segments:
+            if seg.speaker not in (spk_0, spk_1) or seg.audio is None:
                 continue
             start_idx = int(seg.start * sr)
-            end_idx = min(total_samples, start_idx + len(seg.enhanced_audio))
+            end_idx = min(total_samples, start_idx + len(seg.audio))
             if end_idx <= start_idx:
                 continue
-            chunk = seg.enhanced_audio[: end_idx - start_idx].copy()
+            chunk = seg.audio[: end_idx - start_idx].copy()
 
             if strict:
                 keep = np.ones(end_idx - start_idx, dtype=bool)

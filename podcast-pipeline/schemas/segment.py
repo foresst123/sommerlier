@@ -10,8 +10,8 @@ class Segment:
     speaker: str                  # "SPEAKER_00", "SPEAKER_01"...
 
 @dataclass
-class EnhancedSegment(Segment):
-    enhanced_audio: Optional[np.ndarray] = None  # Audio đã qua TSE
+class SpeechSegment(Segment):
+    audio: Optional[np.ndarray] = None  # Audio đã qua TSE
     tse: bool = False                            # Có được xử lý bởi TSE không
     bs_roformer: bool = False                    # Có được xử lý bởi BS-RoFormer không
     # What PANNs decided, separate from what Demucs then did about it. Kept

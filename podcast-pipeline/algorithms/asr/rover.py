@@ -293,7 +293,7 @@ class RepetitionFilter:
 def asr(vad_segments, audio, asr_model):
     """
     Perform Automatic Speech Recognition (ASR) on the VAD segments of the given audio.
-    [Updated] Now processes segments iteratively exactly like asr_MoE to ensure 'enhanced_audio'
+    [Updated] Now processes segments iteratively exactly like asr_MoE to ensure 'audio'
     is correctly utilized without relying on global buffer sandwiching.
     """
     if len(vad_segments) == 0:
@@ -320,18 +320,18 @@ def asr(vad_segments, audio, asr_model):
         # 1. Audio Selection Logic (Identical to asr_MoE)
         # ---------------------------------------------------------------------
         segment_audio = None
-        is_enhanced = False
+        is_separated_track = False
 
-        if "enhanced_audio" in segment:
+        if "audio" in segment:
             # Use SepReformer-separated audio if available
-            raw_audio = segment["enhanced_audio"]
-            is_enhanced = True
+            raw_audio = segment["audio"]
+            is_separated_track = True
         else:
             # Otherwise, slice the corresponding segment from the full audio
             start_frame = int(start_time * global_sample_rate)
             end_frame = int(end_time * global_sample_rate)
             raw_audio = full_waveform[start_frame:end_frame]
-            is_enhanced = False
+            is_separated_track = False
 
         # Resample to 16kHz (for Whisper input)
         if global_sample_rate != 16000:
@@ -377,10 +377,10 @@ def asr(vad_segments, audio, asr_model):
                         res_seg["speaker"] = speaker
                         res_seg["language"] = transcribe_result.get("language", language)
                         res_seg["sepreformer"] = segment.get("sepreformer", False)
-                        res_seg["is_separated"] = is_enhanced
+                        res_seg["is_separated"] = is_separated_track
 
-                        if is_enhanced:
-                            res_seg["enhanced_audio"] = raw_audio
+                        if is_separated_track:
+                            res_seg["audio"] = raw_audio
 
                         # 4. Adjust word timestamps if present
                         if "words" in res_seg:
@@ -502,11 +502,11 @@ def asr_MoE(vad_segments, audio, asr_model, asr_model_2, canary_model, segment_b
 
             # 1. Audio Selection Logic
             segment_audio = None
-            is_enhanced = False
+            is_separated_track = False
 
-            if "enhanced_audio" in segment:
-                raw_audio = segment["enhanced_audio"]
-                is_enhanced = True
+            if "audio" in segment:
+                raw_audio = segment["audio"]
+                is_separated_track = True
             else:
                 start_frame = int(start_time * global_sample_rate)
                 end_frame = int(end_time * global_sample_rate)
@@ -561,12 +561,12 @@ def asr_MoE(vad_segments, audio, asr_model, asr_model_2, canary_model, segment_b
                 "speaker": speaker,
                 "language": detected_language,
                 "bs_roformer": segment_bs_roformer_flags[idx] if idx < len(segment_bs_roformer_flags) else False,
-                "is_separated": is_enhanced,
+                "is_separated": is_separated_track,
                 "sepreformer": segment.get("sepreformer", False)
             }
 
-            if is_enhanced:
-                seg_result["enhanced_audio"] = raw_audio
+            if is_separated_track:
+                seg_result["audio"] = raw_audio
 
             if enable_word_timestamps and words:
                 for w in words:

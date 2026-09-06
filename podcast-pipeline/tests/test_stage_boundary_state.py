@@ -27,7 +27,7 @@ def test_the_separation_report_is_checkpointed_where_it_is_produced():
     batch wrote stats={} while stats.json held spliced=3."""
     src = _source("services/pipeline_service.py")
     save = src.index('checkpoint.save("separation_report"')
-    assert 'checkpoint.save("separation", enhanced_segments)' in src[:save], (
+    assert 'checkpoint.save("separation", speech_segments)' in src[:save], (
         "the report must be captured in the same branch that computed it")
 
 

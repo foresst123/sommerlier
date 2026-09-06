@@ -246,9 +246,9 @@ def test_old_checkpoint_unpickles_without_new_fields():
     without __setstate__ the first append raises AttributeError mid-pipeline.
     """
     import pickle
-    from schemas.segment import EnhancedSegment
+    from schemas.segment import SpeechSegment
 
-    seg = EnhancedSegment(index="00001", start=0.0, end=1.0, speaker="SPEAKER_00")
+    seg = SpeechSegment(index="00001", start=0.0, end=1.0, speaker="SPEAKER_00")
     del seg.__dict__["tse_spans"]
     del seg.__dict__["tse_failed_spans"]
 
@@ -257,7 +257,7 @@ def test_old_checkpoint_unpickles_without_new_fields():
     assert loaded.tse_status == "failed"
 
     svc = TargetExtractionService(FakeTSE(), logger=None)
-    loaded.enhanced_audio = np.ones(SR, dtype=np.float32)
+    loaded.audio = np.ones(SR, dtype=np.float32)
     t0, _ = svc.export_sdlm_dual_channel([loaded], 2.0, SR, strict=True)
     assert np.allclose(t0[:SR], 0.0), "failed span must still be masked after unpickling"
 
@@ -373,3 +373,47 @@ def test_no_module_reads_a_constant_nobody_defines():
                         and node.id.isupper() and node.id not in bound):
                     dangling.append(f"{os.path.relpath(path, root)}:{node.lineno} {node.id}")
     assert not dangling, "constants used but never defined:\n  " + "\n  ".join(sorted(set(dangling)))
+
+
+def test_no_identifier_names_a_processing_step_that_does_not_exist():
+    """No model here alters speech to improve it -- that was ruled out for this
+    corpus, because what a denoiser invents becomes training data for a
+    conversation that never happened.
+
+    The names said otherwise. A segment's audio was `enhanced_audio` on an
+    `EnhancedSegment`, which reads as a stage that does not exist, and did
+    mislead a reader into believing one did. It is a slice of the recording;
+    for an overlap it is the separated track. Neither improves anything.
+
+    Read through the parse tree, not the text: prose explaining why enhancement
+    is absent is the point of that prose, and a comment recording the old name
+    is how someone finds their way from an old checkpoint.
+    """
+    import ast
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    here = os.path.basename(__file__)
+    offenders = []
+    for folder, _dirs, files in os.walk(root):
+        if any(skip in folder for skip in ("__pycache__", ".git")):
+            continue
+        for name in files:
+            if not name.endswith(".py") or name == here:
+                continue
+            path = os.path.join(folder, name)
+            try:
+                tree = ast.parse(open(path, encoding="utf-8").read())
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                named = None
+                if isinstance(node, (ast.Name, ast.arg)):
+                    named = getattr(node, "id", None) or node.arg
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                       ast.ClassDef, ast.Attribute)):
+                    named = getattr(node, "name", None) or getattr(node, "attr", None)
+                if named and "enhanc" in named.lower():
+                    offenders.append(
+                        f"{os.path.relpath(path, root)}:{node.lineno} {named}")
+    assert not offenders, ("identifiers naming a stage that does not exist:\n  "
+                           + "\n  ".join(sorted(set(offenders))))

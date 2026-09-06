@@ -98,7 +98,7 @@ def test_the_service_stops_rather_than_running_without_diarization():
 
 
 def test_separation_off_still_produces_segments_of_the_same_shape():
-    """ASR and the exporters read enhanced_audio either way; only the overlap
+    """ASR and the exporters read audio either way; only the overlap
     replacement is missing."""
     import numpy as np
 
@@ -114,7 +114,7 @@ def test_separation_off_still_produces_segments_of_the_same_shape():
 
     out = service.passthrough(segments, audio)
     assert len(out) == 2
-    assert all(s.enhanced_audio is not None and len(s.enhanced_audio) for s in out)
+    assert all(s.audio is not None and len(s.audio) for s in out)
     assert all(not s.tse for s in out)
 
 

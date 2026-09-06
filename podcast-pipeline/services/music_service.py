@@ -1,7 +1,7 @@
 import numpy as np
 from typing import List
 from schemas.audio import AudioData
-from schemas.segment import EnhancedSegment
+from schemas.segment import SpeechSegment
 
 class MusicService:
     """Detects and removes background music from segments."""
@@ -136,7 +136,7 @@ class MusicService:
             if end > start:
                 waveform[start:end] = chunk[:end - start]
 
-    def process_segments(self, segments: List[EnhancedSegment], audio: AudioData) -> List[EnhancedSegment]:
+    def process_segments(self, segments: List[SpeechSegment], audio: AudioData) -> List[SpeechSegment]:
         if not self.panns or not self.bs_roformer:
             return segments
             
@@ -174,9 +174,9 @@ class MusicService:
                         pad_width = target_len - len(vocal_slice)
                         vocal_slice = np.pad(vocal_slice, (0, pad_width), mode='constant')
                         
-                    seg.enhanced_audio = vocal_slice
+                    seg.audio = vocal_slice
                 else:
-                    seg.enhanced_audio = self.bs_roformer.separate_segment(raw_audio, sr)
+                    seg.audio = self.bs_roformer.separate_segment(raw_audio, sr)
                 seg.bs_roformer = True
             else:
                 seg.bs_roformer = False

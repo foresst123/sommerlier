@@ -4,7 +4,7 @@ import numpy as np
 from typing import List
 from schemas.audio import AudioData
 from schemas.transcript import TranscriptSegment
-from schemas.segment import EnhancedSegment
+from schemas.segment import SpeechSegment
 from pydub import AudioSegment as PydubAudioSegment
 
 class ExportService:
@@ -23,7 +23,7 @@ class ExportService:
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
             
-    def export_separated_audio(self, enhanced_segments: List[EnhancedSegment], sample_rate: int, save_dir: str):
+    def export_separated_audio(self, speech_segments: List[SpeechSegment], sample_rate: int, save_dir: str):
         import soundfile as sf
         separated_dir = os.path.join(save_dir, "separation")
         os.makedirs(separated_dir, exist_ok=True)
@@ -31,22 +31,22 @@ class ExportService:
         if self.logger: self.logger.info(f"Exporting separation audio to {separated_dir}")
         
         # Determine total length for the stitched full audio
-        max_end = max((seg.end for seg in enhanced_segments), default=0.0)
+        max_end = max((seg.end for seg in speech_segments), default=0.0)
         full_length = int(max_end * sample_rate)
         full_audio = np.zeros(full_length, dtype=np.float32)
         
-        for seg in enhanced_segments:
-            if seg.enhanced_audio is not None:
+        for seg in speech_segments:
+            if seg.audio is not None:
                 # Save individual chunk
                 file_path = os.path.join(separated_dir, f"{seg.index}_{seg.speaker}_separated.wav")
                 try:
-                    sf.write(file_path, seg.enhanced_audio, sample_rate, subtype='PCM_16')
+                    sf.write(file_path, seg.audio, sample_rate, subtype='PCM_16')
                 except Exception as e:
                     if self.logger: self.logger.warning(f"Failed to export separated audio for {seg.index}: {e}")
                     
                 # Mix into full audio
                 start_sample = int(seg.start * sample_rate)
-                end_sample = start_sample + len(seg.enhanced_audio)
+                end_sample = start_sample + len(seg.audio)
                 
                 if end_sample > full_length:
                     # Pad if necessary
@@ -54,7 +54,7 @@ class ExportService:
                     full_audio = np.pad(full_audio, (0, pad_len))
                     full_length = end_sample
                     
-                full_audio[start_sample:end_sample] += seg.enhanced_audio
+                full_audio[start_sample:end_sample] += seg.audio
                 
         # Save the stitched full audio
         full_audio_path = os.path.join(save_dir, "after_separation.wav")
@@ -86,8 +86,8 @@ class ExportService:
         for seg in segments:
             file_path = os.path.join(segments_dir, f"{seg.index}_{seg.speaker}.mp3")
             # If SR-CorrNet or Demucs modified the audio, it's not present in TranscriptSegment (only text is there)
-            # Oh wait, we need enhanced_audio. If so, ExportService must receive the EnhancedSegment or a dict mapping index -> enhanced_audio
-            # But the original code was: if seg.get('enhanced_audio') ...
+            # Oh wait, we need audio. If so, ExportService must receive the SpeechSegment or a dict mapping index -> audio
+            # But the original code was: if seg.get('audio') ...
             # We'll stick to extracting from original audio for now, as that's the safe path when separating text from audio logic.
             start_ms = int(seg.start * 1000)
             end_ms = int(seg.end * 1000)
