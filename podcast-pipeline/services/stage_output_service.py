@@ -313,6 +313,11 @@ class StageOutputService:
         if timeline is not None:
             payload["removed_seconds"] = round(timeline.removed, 2)
             payload["kept_stretches"] = len(timeline.kept)
+            # The map itself, not just its size: the spans above are in the
+            # original recording's time and after_music.wav is in the cut one,
+            # so without this nothing can line the two up -- not export, and
+            # not a person trying to hear what a join sounds like.
+            payload["timeline"] = timeline.to_json()
         self._write_json(os.path.join(stage, "music_map.json"), payload)
 
         # The trimmed recording itself, so the cuts and their joins can be

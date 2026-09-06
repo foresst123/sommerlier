@@ -133,3 +133,87 @@ def test_the_fallback_is_skipped_for_either_reason():
                   encoding="utf-8").read()
     assert 'not self.step_enabled(args, "music_removal_fallback")' in source
     assert "turned off in the profile" in source
+
+
+# --- the loader has to reach the same verdict --------------------------------
+
+def _stub_model_modules():
+    """Import services.model_loader without the model stack behind it.
+
+    It imports eleven model wrappers at module level, each pulling a framework
+    that has no bearing on which switch decides whether a model loads.
+    """
+    import types
+
+    import importlib.util
+
+    # Only what is genuinely absent. A stub left in sys.modules for something
+    # real -- librosa, pandas -- would be inherited by every test that runs
+    # after this one, and they would fail somewhere unrelated.
+    for name in ("faster_whisper", "whisperx", "whisperx.audio", "whisperx.asr",
+                 "panns_inference", "pyannote", "pyannote.audio", "librosa",
+                 "onnxruntime", "soundfile", "pandas"):
+        if name in sys.modules:
+            continue
+        try:
+            if importlib.util.find_spec(name) is not None:
+                continue
+        except (ImportError, ValueError):
+            pass
+        sys.modules[name] = types.ModuleType(name)
+    for name in ("models.whisper", "models.whisper_wrapper", "models.phowhisper",
+                 "models.silero_vad", "models.pyannote", "models.diarizen_model",
+                 "models.pyannote_embedding", "models.tse_model", "models.panns",
+                 "models.demucs", "models.qwen3_omni", "models.qwen3_asr"):
+        module = types.ModuleType(name)
+        for attr in ("WhisperASR", "PhoWhisperASR", "SileroVAD", "PyannoteDiarizer",
+                     "DiariZenDiarizer", "PyannoteEmbedder", "TargetSpeakerExtractor",
+                     "PANNSDetector", "DemucsRemover", "Qwen3OmniCaptioner",
+                     "Qwen3ASRClient", "load_asr_model"):
+            setattr(module, attr, type(attr, (), {"__init__": lambda self, *a, **k: None}))
+        sys.modules.setdefault(name, module)
+
+    from services.model_loader import ModelLoader
+    return ModelLoader
+
+
+def _loader(monkeypatch, **flags):
+    ModelLoader = _stub_model_modules()
+
+    # Patched on the loader module rather than left to the stubs: by the time
+    # the whole suite runs, models.panns may already be imported for real, and
+    # the real detector would try to build a 312MB checkpoint.
+    import services.model_loader as ml
+    monkeypatch.setattr(ml, "PANNSDetector", lambda *a, **k: object())
+
+    loader = ModelLoader.__new__(ModelLoader)
+    loader.args = _args(**flags)
+    loader.models = {}
+    loader.logger = None
+    loader.device_1 = "cpu"
+    loader.device_2 = "cpu"
+    loader.config = {"environments": {"kaggle": {"models": {"demucs": {}}}}}
+    return loader
+
+
+def test_the_profile_alone_is_enough_to_load_the_tagger(monkeypatch):
+    """`steps.music_analysis: true` with no --panns used to load nothing.
+
+    The stage then ran, found no detector, and reported an empty music map --
+    a run that says it swept the audio and did not.
+    """
+    loader = _loader(monkeypatch, env="kaggle", step_music_analysis=True)
+    loader.load_panns()
+    assert "panns" in loader.models
+
+
+def test_turning_the_step_off_leaves_the_tagger_unloaded(monkeypatch):
+    loader = _loader(monkeypatch, env="kaggle", panns=True, step_music_analysis=False)
+    loader.load_panns()
+    assert "panns" not in loader.models
+
+
+def test_the_old_flag_still_loads_it(monkeypatch):
+    loader = _loader(monkeypatch, env="kaggle", panns=True)
+    loader.load_panns()
+    assert "panns" in loader.models

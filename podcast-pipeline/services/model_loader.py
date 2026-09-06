@@ -2,6 +2,8 @@ import os
 import torch
 from typing import Dict, Any
 
+from utils.steps import step_enabled
+
 from models.whisper_wrapper import WhisperASR
 from models.phowhisper import PhoWhisperASR
 from models.silero_vad import SileroVAD
@@ -97,7 +99,7 @@ class ModelLoader:
         """
         if "panns" in self.models:
             return
-        if getattr(self.args, "panns", False):
+        if step_enabled(self.args, "music_analysis"):
             if self.logger: self.logger.info("Loading PANNS detector")
             self.models["panns"] = PANNSDetector(device=str(self.device_1))
 
@@ -107,7 +109,7 @@ class ModelLoader:
         # sweep, and testing it here would skip loading Demucs entirely.
         if "demucs" in self.models:
             return
-        if getattr(self.args, "panns", False):
+        if step_enabled(self.args, "music_removal"):
             self.load_panns()
 
             # GPU 1 hosts the DiariZen worker plus the embedder, TSE and ASR
@@ -122,8 +124,12 @@ class ModelLoader:
             # `model` is popped rather than forwarded: the rest of the block is
             # constructor kwargs, and leaving it in would reach DemucsRemover as
             # an argument it does not take.
-            which = (getattr(self.args, "music_separator", None)
-                     or demucs_cfg.pop("model", None)
+            # Popped unconditionally: the rest of the block is constructor
+            # kwargs, and short-circuiting past the pop when --music_separator
+            # was given left `model` in there to reach DemucsRemover, which
+            # does not take it.
+            configured = demucs_cfg.pop("model", None)
+            which = (getattr(self.args, "music_separator", None) or configured
                      or os.environ.get("MUSIC_SEPARATOR") or "demucs")
             if which == "bs_roformer":
                 from models.bs_roformer import BSRoformerRemover

@@ -3,6 +3,7 @@ from typing import Any
 from utils.checkpoint import CheckpointManager
 from utils.music_map import MusicMap, build as build_music_map
 from utils.excise import TimelineMap, excise
+from utils.steps import LEGACY_FLAG, step_enabled
 from services.stage_output_service import StageOutputService
 from schemas.audio import AudioData
 
@@ -72,25 +73,14 @@ class PipelineService:
         }[group]()
 
     # A stage's switch in the profile, falling back to the flag that used to
-    # control it. Named separately from those flags because several of them --
-    # `panns`, `tse` -- gate more than one stage, and the profile now needs to
-    # say which stages run rather than which models load.
-    _LEGACY_FLAG = {
-        "music_analysis": "panns",
-        "music_removal": "panns",
-        "separation": "tse",
-        "captioning": "qwen3omni",
-        "refinement": "llm_refinement",
-    }
+    # control it. The answer lives in utils.steps because the model loader has
+    # to reach the same verdict -- see the note there.
+    _LEGACY_FLAG = LEGACY_FLAG
 
     @classmethod
     def step_enabled(cls, args, name: str) -> bool:
         """Whether `name` runs. Unlisted steps run, which is the old behaviour."""
-        explicit = getattr(args, f"step_{name}", None)
-        if explicit is not None:
-            return bool(explicit)
-        legacy = cls._LEGACY_FLAG.get(name)
-        return bool(getattr(args, legacy, True)) if legacy else True
+        return step_enabled(args, name)
 
     def _free(self, args, *model_names):
         """Unload finished models unless the caller asked to keep them.

@@ -54,6 +54,19 @@ class PANNSDetector:
         
     # Frame rate of Cnn14_DecisionLevelMax: 32000 Hz / hop 320 = 100 fps.
     SED_FPS = 100.0
+    SED_HOP = 320                  # samples per output frame, at 32kHz
+
+    # How much audio goes through the frame tagger at once. panns_inference
+    # runs one forward pass over whatever it is handed, and the framewise stack
+    # keeps an activation per frame: a 50-minute podcast is 96M samples, which
+    # asks for tens of gigabytes and dies on any GPU here. Chunking is not an
+    # optimisation, it is what makes a full recording possible at all.
+    SED_CHUNK_SECONDS = float(os.environ.get("PANNS_SED_CHUNK", "60"))
+
+    # Context carried either side of each chunk and then thrown away. The model
+    # has a receptive field; frames at a chunk edge would otherwise be judged
+    # with silence on one side, which reads as a boundary that is not there.
+    SED_CONTEXT_SECONDS = float(os.environ.get("PANNS_SED_CONTEXT", "1.0"))
 
     def _get_sed(self):
         """Load the frame-level tagger, once and only if asked for.
@@ -86,6 +99,49 @@ class PANNSDetector:
         return [i for i, label in enumerate(self.model.labels)
                 if label.lower() in wanted]
 
+    def _sed_framewise(self, audio):
+        """Frame-level scores for a whole recording, a chunk at a time.
+
+        Each chunk is fed with context on both sides and then cropped back to
+        its own span, so the result is the same array a single pass would have
+        produced -- minus the edge effects of judging a frame with silence
+        beside it, and minus the memory that pass would need.
+        """
+        sed = self._get_sed()
+        total = len(audio)
+        hop = self.SED_HOP
+
+        # Chunk and context in whole frames, so cropping is exact rather than
+        # rounded: a half-frame slip per chunk would accumulate into a
+        # timestamp error over a fifty-minute file.
+        chunk = max(int(self.SED_CHUNK_SECONDS * 32000) // hop, 1) * hop
+        context = max(int(self.SED_CONTEXT_SECONDS * 32000) // hop, 0) * hop
+
+        if total <= chunk:
+            return sed.inference(audio[None, :])[0]
+
+        pieces = []
+        for start in range(0, total, chunk):
+            end = min(start + chunk, total)
+
+            fed_start = max(0, start - context)
+            fed_end = min(total, end + context)
+            # The model needs a second of audio to survive its pooling stack;
+            # a short final chunk borrows the length from behind it.
+            if fed_end - fed_start < 32000:
+                fed_start = max(0, fed_end - 32000)
+
+            frames = sed.inference(audio[None, fed_start:fed_end])[0]
+
+            # Keep only the frames this chunk is responsible for. The model
+            # pads its output to the input length, so frame i covers sample
+            # i * hop of what it was fed.
+            lo = (start - fed_start) // hop
+            hi = min(lo + (end - start) // hop, len(frames))
+            pieces.append(frames[lo:hi])
+
+        return np.concatenate(pieces, axis=0) if pieces else np.zeros((0, 527), np.float32)
+
     def tag_framewise(self, audio_array, sample_rate: int = 32000):
         """Speech / singing / music strength every 10ms.
 
@@ -104,11 +160,15 @@ class PANNSDetector:
             empty = np.zeros(0, dtype=np.float32)
             return {"speech": empty, "singing": empty, "music": empty}, self.SED_FPS
 
+        # Normalised once over the whole recording rather than per chunk: a
+        # quiet chunk scaled up on its own would be judged against a different
+        # loudness from its neighbours, and the labels would step at every
+        # chunk boundary.
         peak = float(np.max(np.abs(audio))) if audio.size else 0.0
         if peak > 0:
             audio = (audio / peak) * 0.9
 
-        framewise = self._get_sed().inference(audio[None, :])[0]   # (frames, 527)
+        framewise = self._sed_framewise(audio)                     # (frames, 527)
 
         out = {}
         for key, names in (("speech", SPEECH_LABELS),

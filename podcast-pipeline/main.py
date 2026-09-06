@@ -187,6 +187,7 @@ install_torch_load_shim()
 
 from utils.batch import audio_duration, find_audio_files, find_name_collisions, plan_batches, run_batch_by_stage
 from utils.progress import ProgressLedger
+from utils.steps import step_enabled
 from utils.worker_env import resolve_worker_python
 # TSE thresholds live in the profile, but separation_service and tse_model read
 # them at import time. Publish them as environment variables here -- before those
@@ -296,15 +297,22 @@ def main():
 
     # 1. Start Qwen3 Worker (if MoE enabled)
     qwen3_service = None
-    if args.ASRMoE:
+    if args.ASRMoE and step_enabled(args, "asr"):
         qwen3_env_bin = resolve_worker_python("qwen3", config=config, env_profile=env_profile, logger=logger)
         qwen3_worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qwen3_worker.py")
         qwen3_service = Qwen3WorkerService(qwen3_env_bin, qwen3_worker_script, device_id=args.gpu_2, logger=logger, env_name=args.env, config_path=args.config)
         qwen3_service.spawn()
 
     # 1b. Start DiariZen Worker (if dia3 is not used)
+    #
+    # Gated on the step as well as the flag: these workers are separate
+    # processes with their own interpreter and weights, spawned before the
+    # first file is opened. A run that stops after the music stage was
+    # starting a diarizer it would never speak to -- and on an install without
+    # DiariZen, dying there instead of producing the music output it was asked
+    # for.
     diarizen_service = None
-    if not args.dia3:
+    if not args.dia3 and step_enabled(args, "diarization"):
         diarizen_env_bin = resolve_worker_python("diarizen", config=config, env_profile=env_profile, logger=logger)
         diarizen_worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diarizen_worker.py")
         diarizen_service = DiarizenWorkerService(diarizen_env_bin, diarizen_worker_script, device_id=args.gpu_1, logger=logger, env_name=args.env, config_path=args.config)
@@ -317,7 +325,7 @@ def main():
     _separator = (getattr(args, "separator", None)
                   or os.environ.get("TSE_SEPARATOR") or "usef")
     sidon_service = None
-    if args.tse and _separator == "sidon":
+    if args.tse and _separator == "sidon" and step_enabled(args, "separation"):
         sidon_service = SidonWorkerService(config, args, logger)
         sidon_service.spawn()
 
