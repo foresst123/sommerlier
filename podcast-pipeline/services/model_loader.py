@@ -108,9 +108,12 @@ class ModelLoader:
         if step_enabled(self.args, "music_removal"):
             self.load_panns()
 
-            # GPU 1 hosts the DiariZen worker plus the embedder, TSE and ASR
-            # models; separating a full podcast needs ~1GB of headroom that is
-            # not there, so BS-RoFormer runs on GPU 2 alongside the Qwen3 worker.
+            # Loaded onto device_1, the same card as the DiariZen worker.
+            # An earlier note here claimed it ran on GPU 2 alongside Qwen3;
+            # it never did, and the placement below is what actually happens.
+            # What keeps the two from colliding is time rather than space: the
+            # music stage releases both PANNs and this before diarization
+            # starts, so they are not resident together.
             # Copied before popping: self.config is the live profile, and
             # load_music_models runs once per file in a batch.
             bs_roformer_cfg = dict(self.config.get("environments", {}).get(self.args.env, {})

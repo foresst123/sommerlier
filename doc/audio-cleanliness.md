@@ -162,30 +162,66 @@ change giả, không nối thì mảnh quá ngắn để clustering làm gì. Đ
 
 ---
 
-## 4. Nợ kỹ thuật phát hiện dọc đường
+## 4. Đã làm thêm sau lần viết đầu (2026-09-07)
 
-Chưa sửa, không nằm trong phạm vi đã làm.
+Chạy thật trên Kaggle sinh ra một loạt thay đổi, ghi lại ở đây vì phần 1–3 ở trên
+không còn mô tả đúng hệ thống.
 
-- **Span chồng lên nhau.** `hoahau`: `music 26.58–27.5` nằm gọn trong
-  `song 26.90–37.74`. `lm8`: `music 7.38–10.22` chồng `song 9.62–13.10`.
-  Nguyên nhân: `PAD_SECONDS=0.30` cộng vào từng span độc lập. Hệ quả:
-  BS-RoFormer chạy trên đoạn sắp bị xoá hoàn toàn — công vô ích. Và `remap()`
-  phải xử lý span chồng nhau, chỗ chưa được kiểm chứng.
+**Sidon bị xoá, chỉ còn USEF.** 13 file, ~280 dòng trong `separation_service`.
+Cửa sổ mixture cũ (5s solo A + 5s solo B + overlap, 6–12s) tồn tại vì Sidon tách
+mù. USEF được điều kiện hoá bằng enrollment 8s nên mixture chỉ cần **chính đoạn
+overlap, nới tới 2s** — đúng cửa sổ graph ONNX nhận.
 
-- **`singing_seconds = 0` trên cả 4 file / 79 span.** Nhánh `SINGING` có thể
-  chưa từng kích hoạt trong thực tế; mọi thứ có nhạc đều rơi vào `SONG` hoặc
-  `MUSIC`. Với một reaction video có 209s nhạc mà không giây hát nào thì
-  `SINGING_MARGIN=0.15` đáng nghi.
+Mất theo: bộ chặn người-thứ-ba (lý do của nó là Sidon chỉ ra đúng 2 nguồn) và bộ
+tool so sánh hai backend.
 
-- **`MUSIC_THRESHOLD` phục vụ hai mục đích ngược chiều nhau.** Comment biện minh
-  ngưỡng thấp (0.10) bằng lý do *enrolment*: gán nhầm chỉ mất một ứng viên trong
-  hàng trăm. Nhưng cùng map đó giờ điều khiển việc **ghi đè waveform** bằng
-  BS-RoFormer. Hai consumer, hai bất đối xứng ngược nhau, chung một ngưỡng.
-  Nên tách làm hai hằng số.
+**Mối nối được xử lý ở cả ba tầng**, thay vì chỉ đánh dấu sau khi đã xảy ra:
 
-- **14 test fail có sẵn** trong `test_steps` / `test_batch` / `test_config_driven`
-  / `test_prefix_cache` — hệ quả commit `c33ce45` tắt các stage. Chúng có từ
-  trước và đang che tín hiệu của test thật.
+```
+excise         bỏ đảo <1s      →  hai vết cắt gộp làm một, bớt mối nối
+diarization    cắt tại mối nối TRƯỚC VAD  →  mảnh vào chuỗi đã liền mạch
+merge          không bắc qua mối nối      →  không dán lại được
+```
 
-- **Comment lệch** ở `services/model_loader.py`: nói BS-RoFormer chạy GPU 2,
-  code truyền `device_1`.
+`crosses_cut` vì thế chuyển từ cảnh báo thành bất biến được kiểm chứng.
+
+**`SINGING_THRESHOLD` 0.35 → 0.12** và `MIN_SPAN` tách đôi: `0.32` khi tách nhạc
+(hoàn tác được), `0.96` khi cắt bỏ (không hoàn tác được). Lần chạy thật đầu tiên
+cho `8.4s singing` trên `lm8` — trước đó là 0.0 trên mọi file.
+
+**Không còn định danh nào tên "enhance".** `EnhancedSegment` → `SpeechSegment`,
+`enhanced_audio` → `audio`. Cái tên mô tả một bước không tồn tại và đã thật sự
+làm người đọc hiểu nhầm là có. `models/separate_fast.py` xoá luôn — 289 dòng
+không ai import, và là nơi cuối cùng còn nhánh `denoise`.
+
+## 5. Nợ kỹ thuật còn lại
+
+**Span chồng lên nhau — CHƯA SỬA.** `PAD_SECONDS=0.30` vẫn cộng vào từng loại
+span độc lập, nên hai span kề nhau đè lên nhau đúng 0.60s. Đo trên dữ liệu thật:
+69–100% span `music` chồng lên vùng sắp bị cắt. Hệ quả là BS-RoFormer tách nhạc
+trên khúc rồi bị vứt. Cách sửa đúng là hoà giải nhãn ở mức frame trước khi tạo
+span, thay vì pad ba lần rồi dọn.
+
+**`MUSIC_THRESHOLD` vẫn phục vụ hai mục đích ngược chiều.** Ngưỡng lỏng 0.10 hợp
+lý cho việc tránh lấy enrollment trên nền nhạc (sai thì mất một ứng viên trong
+hàng trăm), nhưng cùng con số đó quyết định ghi đè waveform bằng separator (sai
+thì hỏng audio). Nên tách làm hai hằng số.
+
+**`SINGING_MARGIN = 0.15` giờ là ràng buộc chặn thật sự** và chưa từng được hiệu
+chỉnh. Sau khi hạ ngưỡng xuống 0.12, chính margin mới là thứ giới hạn: trên `lm8`
+ngưỡng cho 23.0s còn margin cắt xuống 10.2s.
+
+**`qc_sim_threshold = 0.2`** — comment trong code tự ghi "NOT calibrated".
+
+**Điểm nhiễu chưa gặp bản ghi ngoài trời.** Ngưỡng 0.10 đặt từ ba file trong nhà,
+trần đo được là 0.28. Lần chạy thật cho `max=0.323` và `max=0.378` — **đã vượt
+trần hiệu chỉnh**, nên có dữ liệu để đặt lại.
+
+**14 test fail có sẵn** trong `test_steps` / `test_batch` / `test_config_driven` /
+`test_prefix_cache`, từ commit `c33ce45` tắt các stage mà test vẫn kỳ vọng bật.
+Đối chiếu với baseline `41d8c73`: đúng 14 cái đó, không có cái nào mới.
+
+**`export_sdlm_dual_channel` chưa được gọi.** Hai track full-duplex — sản phẩm
+chính — hiện không được ghi ra; đầu ra là mono. Hàm có sẵn, có test, chưa nối vào
+pipeline. Và khi nối thì phải cắt track tại `seams()`, nếu không sẽ có những chỗ
+nhịp hội thoại bịa ra.
