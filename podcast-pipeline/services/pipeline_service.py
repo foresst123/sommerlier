@@ -459,6 +459,8 @@ class PipelineService:
         # The joins the cut left behind. Separation widens its mixture windows
         # and must not reach across one.
         self.separation_svc.timeline = timeline
+        # Diarization needs them too, to keep a segment from straddling a join.
+        self.diarization_svc.timeline = timeline
 
         if "music" not in computed_stages:
             stage_out.write_music(music_map, timeline,

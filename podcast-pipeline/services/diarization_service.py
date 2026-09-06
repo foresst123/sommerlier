@@ -13,6 +13,7 @@ from utils.segment_utils import (
     df_to_list,
     deduplicate_segments_by_index,
     split_long_segments,
+    split_at_seams,
     cut_by_speaker_label,
     merge_ghost_speakers,
 )
@@ -188,7 +189,26 @@ class DiarizationService:
             smoothed_list, max_duration=max_seg,
             waveform=audio.waveform, sample_rate=audio.sample_rate)
         self._log_segment_stats("post-split", final_list)
-        
+
+        # Last, and last on purpose: no segment may straddle a join left by
+        # excising. Merging is what creates them -- two turns of one speaker
+        # either side of a join sit 0.05s apart in the cut timeline, well
+        # inside merge_gap -- so this has to come after merge, not before.
+        #
+        # Read through getattr for the same reason music_map is: the pipeline
+        # sets it, a service built for a test has none, and no timeline must
+        # read as "nothing was cut".
+        timeline = getattr(self, "timeline", None)
+        seams = timeline.seams() if timeline else []
+        if seams:
+            before = len(final_list)
+            final_list = split_at_seams(final_list, seams)
+            self._log_segment_stats(f"post-seam-split({len(seams)} join(s))", final_list)
+            if self.logger and len(final_list) != before:
+                self.logger.info(
+                    f"Split {len(final_list) - before} segment(s) that spanned a "
+                    "cut; each piece is now one contiguous stretch of the source")
+
         # Build schemas
         final_segments = []
         for d in final_list:

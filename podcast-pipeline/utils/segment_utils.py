@@ -318,3 +318,51 @@ def merge_ghost_speakers(segment_list: list, share=GHOST_SPEAKER_SHARE,
             f"Merged {len(ghosts)} ghost speaker(s) ({', '.join(sorted(ghosts))}) "
             f"into their neighbours: {moved} segment(s) relabelled")
     return sorted(out, key=lambda s: s["start"])
+
+
+def split_at_seams(segment_list: list, seams, min_piece: float = 0.05) -> list:
+    """Break any segment that straddles a join left by excising.
+
+    Cutting the sung and standalone-music stretches out leaves points where two
+    parts of the recording that were never adjacent now touch. A segment
+    spanning one is not a stretch of speech at all: it is two pieces of the
+    conversation glued together, minutes apart in the original, and whatever
+    ASR makes of the seam it invents.
+
+    Marking such a segment afterwards is not the same as never producing one.
+    Every later stage -- the separator's mixture window, the dual-channel
+    reconstruction, anything measuring turn timing -- is simpler and safer when
+    a segment is guaranteed to be one contiguous piece of the source.
+
+    Run last, after merging and length-splitting. Merging is what most often
+    creates the problem: two turns of the same speaker either side of a join
+    look 0.05s apart in the cut timeline, so a merge_gap of 0.3s swallows the
+    join whole.
+
+    A sliver shorter than `min_piece` on one side of a join is dropped rather
+    than kept: at that length it is the tail of a crossfade, not speech.
+    """
+    if not seams:
+        return segment_list
+
+    ordered = sorted(float(s) for s in seams)
+    out = []
+    for seg in segment_list:
+        start, end = float(seg["start"]), float(seg["end"])
+        inside = [s for s in ordered if start < s < end]
+        if not inside:
+            out.append(seg)
+            continue
+
+        for lo, hi in zip([start] + inside, inside + [end]):
+            if hi - lo < min_piece:
+                continue
+            piece = dict(seg)
+            piece["start"], piece["end"] = lo, hi
+            out.append(piece)
+
+    # Indices are handed out again: the callers downstream treat them as dense
+    # and ordered, and a split has just made them neither.
+    for i, seg in enumerate(out):
+        seg["index"] = str(i).zfill(5)
+    return out
