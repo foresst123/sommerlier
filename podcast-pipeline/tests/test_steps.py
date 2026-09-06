@@ -375,3 +375,25 @@ def test_every_spelling_of_off():
 def test_a_step_the_profile_never_mentions_can_be_added():
     parsed = _parse(BASE + ["--steps", "brand_new=off"])
     assert parsed["step_brand_new"] is False
+
+
+def test_requirements_do_not_pull_in_a_disabled_model():
+    """nemo-toolkit is imported by models/sortformer.py and nothing else, and
+    model_loader's import of that module is commented out. Listing it made the
+    file unresolvable -- nemo 2.2.0 pins numba==0.61.0 against the 0.61.2 here
+    -- so `uv pip install -r requirements.txt` failed before installing
+    anything. If Sortformer is switched back on, this test is the reminder that
+    the numba pin has to move with it."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    loader = open(os.path.join(root, "services", "model_loader.py"), encoding="utf-8").read()
+    reqs = open(os.path.join(root, "requirements.txt"), encoding="utf-8").read()
+
+    sortformer_live = any(
+        line.strip().startswith("from models.sortformer import")
+        for line in loader.splitlines())
+    nemo_required = any(
+        line.strip().startswith("nemo-toolkit") for line in reqs.splitlines())
+
+    assert sortformer_live == nemo_required, (
+        "Sortformer is enabled" if sortformer_live else "Sortformer is disabled"
+    ) + f" but nemo-toolkit is {'listed' if nemo_required else 'not listed'} in requirements.txt"

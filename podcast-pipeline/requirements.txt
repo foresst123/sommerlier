@@ -5,7 +5,13 @@ torchvision==0.23.0
 lightning==2.4.0
 torchmetrics==1.6.2
 onnxruntime-gpu==1.19.2
-nemo-toolkit[asr]==2.2.0
+# nemo-toolkit[asr]==2.2.0
+# Removed: it is imported by models/sortformer.py alone, and that module's
+# import in services/model_loader.py is commented out -- nothing loads it. It
+# also made this file unsatisfiable: nemo 2.2.0 requires numba==0.61.0 while
+# librosa/whisperx here want 0.61.2, so `uv pip install -r` failed outright.
+# Re-enabling Sortformer means installing nemo alongside, and pinning numba to
+# whatever that build of nemo wants.
 pyannote.audio==4.0.7
 speechbrain==1.0.2
 faster-whisper==1.2.0
