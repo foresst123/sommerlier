@@ -38,6 +38,21 @@ class MusicService:
     @demucs.setter
     def demucs(self, model):
         self._demucs = model
+
+    @staticmethod
+    def _writable_waveform(audio: AudioData) -> np.ndarray:
+        """Return a waveform that can be edited in place.
+
+        Cached audio is loaded with ``mmap_mode="r"`` by AudioService. That is
+        perfect for read-only stages, but music stripping writes vocal patches
+        back into the waveform before diarization. Copy only when the backing
+        array is read-only or not already float32.
+        """
+        waveform = np.asarray(audio.waveform, dtype=np.float32)
+        if waveform is not audio.waveform or not waveform.flags.writeable:
+            waveform = np.array(waveform, dtype=np.float32, copy=True)
+            audio.waveform = waveform
+        return waveform
         
     def _prepare_full_vocals(self, audio: AudioData):
         if self.demucs and self.full_vocals is None:
@@ -67,7 +82,8 @@ class MusicService:
             return []
 
         sr = audio.sample_rate
-        total = len(audio.waveform)
+        waveform = self._writable_waveform(audio)
+        total = len(waveform)
         patches = []
         for start, end, kind in music_map.spans:
             if kind != MUSIC:
@@ -77,10 +93,10 @@ class MusicService:
                 # Under half a second there is not enough for the separator to
                 # work with, and the seams would cost more than the bed does.
                 continue
-            vocals = self.demucs.separate_segment(audio.waveform[i:j], sr)
+            vocals = self.demucs.separate_segment(waveform[i:j], sr)
             if vocals is None or len(vocals) != j - i:
                 continue
-            audio.waveform[i:j] = vocals
+            waveform[i:j] = vocals
             patches.append((i, np.asarray(vocals, dtype=np.float32)))
 
         if logger and patches:
@@ -94,11 +110,12 @@ class MusicService:
         """Write cached vocal stretches back over the waveform."""
         if not patches:
             return
-        total = len(audio.waveform)
+        waveform = MusicService._writable_waveform(audio)
+        total = len(waveform)
         for start, chunk in patches:
             end = min(total, start + len(chunk))
             if end > start:
-                audio.waveform[start:end] = chunk[:end - start]
+                waveform[start:end] = chunk[:end - start]
 
     def process_segments(self, segments: List[EnhancedSegment], audio: AudioData) -> List[EnhancedSegment]:
         if not self.panns or not self.demucs:

@@ -208,6 +208,48 @@ def test_applying_cached_patches_twice_changes_nothing():
     assert np.array_equal(once.waveform, twice.waveform)
 
 
+def test_stripping_music_accepts_read_only_cached_waveform():
+    """Cached audio may be backed by a read-only mmap; stripping still edits it."""
+    from schemas.audio import AudioData
+    from services.music_service import MusicService
+    from utils.music_map import MUSIC, MusicMap
+
+    class HalvingSeparator:
+        def separate_segment(self, audio, sr):
+            return (np.asarray(audio) * 0.5).astype(np.float32)
+
+    waveform = np.ones(20 * SR, dtype=np.float32)
+    waveform.setflags(write=False)
+    audio = AudioData(name="t", waveform=waveform, sample_rate=SR,
+                      duration=20.0, audio_segment=None)
+
+    patches = MusicService(
+        panns_model=None, demucs_model=HalvingSeparator(), logger=None
+    ).strip_music_spans(audio, MusicMap([(5.0, 8.0, MUSIC)]))
+
+    assert patches
+    assert audio.waveform.flags.writeable
+    assert audio.waveform[6 * SR] == 0.5
+
+
+def test_applying_cached_patches_accepts_read_only_cached_waveform():
+    """Re-entered stage runs can reload the waveform from a read-only cache."""
+    from schemas.audio import AudioData
+    from services.music_service import MusicService
+
+    waveform = np.ones(20 * SR, dtype=np.float32)
+    waveform.setflags(write=False)
+    audio = AudioData(name="t", waveform=waveform, sample_rate=SR,
+                      duration=20.0, audio_segment=None)
+
+    MusicService.apply_music_patches(
+        audio, [(5 * SR, np.full(3 * SR, 0.25, dtype=np.float32))]
+    )
+
+    assert audio.waveform.flags.writeable
+    assert audio.waveform[6 * SR] == 0.25
+
+
 def test_a_span_past_the_end_is_clamped():
     out, _ = excise(np.zeros(5 * SR, dtype=np.float32), SR, [(3.0, 999.0)], fade=0.0)
     assert abs(len(out) / SR - 3.0) < 0.01
