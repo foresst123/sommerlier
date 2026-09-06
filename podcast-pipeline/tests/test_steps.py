@@ -14,6 +14,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from services.pipeline_service import PipelineService
+from utils import steps
 
 STEPS = ("music_analysis", "music_removal", "music_removal_fallback",
          "cut_singing", "diarization", "separation", "asr", "captioning",
@@ -217,3 +218,62 @@ def test_the_old_flag_still_loads_it(monkeypatch):
     loader = _loader(monkeypatch, env="kaggle", panns=True)
     loader.load_panns()
     assert "panns" in loader.models
+
+
+# --- reachability, which is not the same question ----------------------------
+
+def _music_only(**kw):
+    """A profile that stops after the music stage: diarization off, rest on."""
+    base = dict(step_music_analysis=True, step_music_removal=True,
+                step_cut_singing=True, step_diarization=False,
+                step_separation=True, step_asr=True, step_export=True,
+                ASRMoE=True, tse=True, dia3=False)
+    base.update(kw)
+    return _args(**base)
+
+
+def test_a_stage_behind_a_disabled_one_is_not_reached():
+    """The bug this exists for.
+
+    ASR is switched on, so `step_enabled` says yes -- but the run stops after
+    the music stage, and the Qwen3 worker was being spawned for it. On Kaggle
+    that meant a FileNotFoundError for an interpreter the music stage does not
+    need, before any audio was opened.
+    """
+    args = _music_only()
+    assert steps.step_enabled(args, "asr"), "ASR is still switched on"
+    assert not steps.will_run(args, "asr"), "but the run never gets there"
+    assert not steps.will_run(args, "separation")
+
+
+def test_the_music_stages_run_regardless():
+    """They come before the load-bearing check, which is the point of them."""
+    args = _music_only()
+    for stage in ("music_analysis", "music_removal", "cut_singing"):
+        assert steps.will_run(args, stage), stage
+
+
+def test_everything_on_means_everything_runs():
+    args = _music_only(step_diarization=True)
+    for stage in ("music_analysis", "diarization", "separation", "asr", "export"):
+        assert steps.will_run(args, stage), stage
+
+
+def test_a_stage_switched_off_is_not_reached_either():
+    args = _music_only(step_diarization=True, step_separation=False)
+    assert not steps.will_run(args, "separation")
+    assert steps.will_run(args, "asr"), "separation is not load-bearing"
+
+
+def test_export_off_stops_the_run_before_diarization():
+    """The pipeline checks all three up front, so export gates diarization."""
+    args = _music_only(step_diarization=True, step_export=False)
+    assert not steps.will_run(args, "diarization")
+    assert steps.will_run(args, "music_removal")
+
+
+def test_an_old_profile_reaches_every_stage_it_used_to():
+    """Nothing in `steps` at all: reachability must not become a new gate."""
+    args = _args(tse=True, ASRMoE=True, panns=True)
+    for stage in ("music_analysis", "diarization", "separation", "asr", "export"):
+        assert steps.will_run(args, stage), stage
