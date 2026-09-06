@@ -73,6 +73,99 @@ class TimelineMap:
                 return cut_start + (t - start)
         return None
 
+    def seams(self):
+        """Where the joins are, in cut-timeline seconds.
+
+        Each one is a point where two stretches of the recording that were
+        never adjacent now are. Anything that widens a span has to stop at
+        them: reaching across a seam picks up audio from somewhere else in the
+        recording entirely.
+        """
+        out, position = [], 0.0
+        for start, end, _cut_start in self.kept[:-1]:
+            position += end - start
+            out.append(position)
+        return out
+
+    def removed_spans(self, duration: float = None):
+        """What this timeline took out, in original time.
+
+        The complement of `kept`, and the reason it exists: re-entering the
+        pipeline for a later stage reloads the whole recording and has to cut
+        it the same way again. Recomputing the cuts from the music map is not
+        the same thing -- the map is rebuilt from settings that may have
+        changed since, and a mismatch there silently puts diarization on a
+        different timeline from every timestamp that follows it. This is the
+        record of what actually happened.
+
+        `duration` is the original length, needed only to notice a recording
+        that ended inside a cut; without it the tail is assumed kept.
+        """
+        if not self.kept:
+            return []
+        out = []
+        first_start = self.kept[0][0]
+        if first_start > 0:
+            out.append((0.0, first_start))
+        for (_, prev_end, _), (next_start, _, _) in zip(self.kept, self.kept[1:]):
+            if next_start > prev_end:
+                out.append((prev_end, next_start))
+        last_end = self.kept[-1][1]
+        if duration is not None and duration > last_end:
+            out.append((last_end, duration))
+        return out
+
+    def spans_to_original(self, start: float, end: float):
+        """The original ranges a cut-timeline interval is actually made of.
+
+        `to_original` maps an instant, which is not enough for an interval that
+        crosses a join: [to_original(start), to_original(end)] would name a
+        range in the recording that includes the stretch removed between them --
+        audio this interval does not contain and never did. A segment straddling
+        a join is two pieces of the original glued together, and the honest
+        answer is both of them.
+
+        Returns [] for an empty or reversed interval, and a single span covering
+        the whole request when nothing was cut.
+        """
+        if end <= start:
+            return []
+        if not self.kept:
+            return [(start, end)]
+
+        out = []
+        for orig_start, orig_end, cut_start in self.kept:
+            cut_end = cut_start + (orig_end - orig_start)
+            lo, hi = max(start, cut_start), min(end, cut_end)
+            if hi <= lo:
+                continue
+            out.append((orig_start + (lo - cut_start),
+                        orig_start + (hi - cut_start)))
+        return out
+
+    def crosses_cut(self, start: float, end: float) -> bool:
+        """Whether this interval is made of more than one piece of the original."""
+        return len(self.spans_to_original(start, end)) > 1
+
+    def cut_between(self, start: float, end: float) -> bool:
+        """Whether a join lies in the cut-timeline interval [start, end].
+
+        This is what makes a silence between two turns trustworthy or not. A
+        pause measured across a join is not a pause: the speakers were separated
+        by however much was removed there, and a full-duplex corpus that reads
+        it as turn timing learns a gap that never happened.
+
+        Touching endpoints count. A turn ending exactly on a join is followed by
+        removed audio whatever the arithmetic says.
+        """
+        if end < start or not self.kept:
+            return False
+        for orig_start, orig_end, cut_start in self.kept[:-1]:
+            join = cut_start + (orig_end - orig_start)
+            if start <= join <= end:
+                return True
+        return False
+
     def to_json(self) -> dict:
         return {"fade": self.fade,
                 "kept": [[round(a, 4), round(b, 4), round(c, 4)] for a, b, c in self.kept]}

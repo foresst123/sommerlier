@@ -169,7 +169,7 @@ def _stub_model_modules():
         module = types.ModuleType(name)
         for attr in ("WhisperASR", "PhoWhisperASR", "SileroVAD", "PyannoteDiarizer",
                      "DiariZenDiarizer", "PyannoteEmbedder", "TargetSpeakerExtractor",
-                     "PANNSDetector", "BS-RoFormerRemover", "Qwen3OmniCaptioner",
+                     "PANNSDetector", "BSRoformerRemover", "Qwen3OmniCaptioner",
                      "Qwen3ASRClient", "load_asr_model"):
             setattr(module, attr, type(attr, (), {"__init__": lambda self, *a, **k: None}))
         sys.modules.setdefault(name, module)

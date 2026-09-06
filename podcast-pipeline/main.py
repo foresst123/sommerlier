@@ -30,18 +30,17 @@ def _build_parser():
     parser.add_argument("--ASRMoE", action="store_true", help="Enable MoE ASR")
     parser.add_argument("--dia3", action="store_true", help="Use Pyannote community model (default is DiariZen if false)")
     parser.add_argument("--tse", action="store_true", help="Enable Target Speaker Extraction (TSE) for overlapping speech")
-    parser.add_argument("--separator", choices=["sidon", "usef"], default=None,
+    parser.add_argument("--separator", choices=["usef"], default=None,
                         help="Which model produces the two tracks. usef (default) "
                              "is target-conditioned TF-GridNet at 8kHz: it needs no "
                              "channel assignment, but discards everything above "
-                             "4kHz. sidon is the older blind diffusion model at "
-                             "24kHz, kept only so the two can be compared.")
+                             "4kHz.")
     parser.add_argument("--panns", action="store_true", help="Enable background music removal")
-    parser.add_argument("--music_separator", choices=["bs_roformer", "bs_roformer"], default=None,
-                        help="Which model isolates vocals once PANNs finds music. "
-                             "bs_roformer (default) is htbs_roformer; bs_roformer is the "
-                             "band-split rotary transformer the SiSEC entries use, "
-                             "roughly 2dB better SDR. Defaults to the profile.")
+    parser.add_argument("--music_separator", default=None, metavar="CKPT",
+                        help="Which BS-RoFormer checkpoint isolates vocals once "
+                             "PANNs finds music, as an audio-separator model "
+                             "filename (e.g. model_bs_roformer_ep_368_sdr_12.9628.ckpt). "
+                             "Defaults to models.bs_roformer.model in the profile.")
     parser.add_argument("--qwen3omni", action="store_true", help="Enable Qwen3-Omni audio captioning")
     parser.add_argument("--llm_refinement", action="store_true", help="Enable LLM label refinement")
     parser.add_argument("--sortformer_pad_onset", default=0.0, type=float, help="Sortformer start padding")
@@ -225,19 +224,12 @@ from utils.worker_env import resolve_worker_python
 # imports run -- or the modules capture the defaults instead. An env var set by
 # hand still wins, which keeps a quick sweep possible without editing config.
 for _cfg_key, _env_key in (("qc_sim_threshold", "TSE_QC_SIM_THRESHOLD"),
-                           ("min_voiced_sec", "TSE_MIN_VOICED_SEC"),
-                           ("stitch_solo", "TSE_STITCH_SOLO"),
-                           ("stitch_edge_pad", "TSE_STITCH_EDGE_PAD")):
+                           ("min_voiced_sec", "TSE_MIN_VOICED_SEC")):
     _value = env_profile.get("models", {}).get("tse", {}).get(_cfg_key)
     if _value is not None and _env_key not in os.environ:
         os.environ[_env_key] = str(_value)
 
-# Spectral restoration is a Sidon setting rather than a TSE threshold, and it
-# is read at call time rather than at import -- but it is published the same way
-# so that one profile switch controls it like everything else.
-_restore = env_profile.get("models", {}).get("sidon", {}).get("spectral_restore")
-if _restore is not None and "SIDON_SPECTRAL_RESTORE" not in os.environ:
-    os.environ["SIDON_SPECTRAL_RESTORE"] = "1" if _restore else "0"
+
 
 # Enrollment memory is read at import by separation_service, so it is published
 # here with the TSE thresholds rather than at call time.
@@ -252,10 +244,6 @@ _sep = env_profile.get("models", {}).get("tse", {}).get("separator")
 if _sep and "TSE_SEPARATOR" not in os.environ:
     os.environ["TSE_SEPARATOR"] = str(_sep)
 
-_music_sep = env_profile.get("models", {}).get("bs_roformer", {}).get("model")
-if _music_sep and "MUSIC_SEPARATOR" not in os.environ:
-    os.environ["MUSIC_SEPARATOR"] = str(_music_sep)
-
 from services.model_loader import ModelLoader
 from services.audio_service import AudioService
 from services.diarization_service import DiarizationService
@@ -268,7 +256,7 @@ from services.export_service import ExportService
 from services.pipeline_service import PipelineService
 from services.qwen3_worker_service import Qwen3WorkerService
 from services.diarizen_worker_service import DiarizenWorkerService
-from services.sidon_worker_service import SidonWorkerService
+
 
 def _discard_partial(ledger, args, audio_path, logger, pipeline=None):
     """Remove a failed file's checkpoint and output so the retry starts clean.
@@ -374,21 +362,13 @@ def main():
             diarizen_worker_script, device_id=args.gpu_1, logger=logger,
             env_name=args.env, config_path=args.config))
         
-    # 1c. Start the Sidon worker only when Sidon is the separator. It is a
-    # separate process holding ~2.6GB of VRAM and a slow start, and the default
-    # separator no longer uses it -- spawning it regardless would pay both costs
-    # for a model that never receives a request.
-    _separator = (getattr(args, "separator", None)
-                  or os.environ.get("TSE_SEPARATOR") or "usef")
-    sidon_service = None
-    if args.tse and _separator == "sidon" and will_run(args, "separation"):
-        sidon_service = _prefetch(SidonWorkerService(config, args, logger))
+
 
     # 1d. Join whichever actually started. They were launched without blocking,
     # so startup is bounded by the slowest rather than the sum -- that is the
     # whole point of doing it here. One that did not start is simply skipped;
     # its stage will start and join it.
-    for _svc in (qwen3_service, diarizen_service, sidon_service):
+    for _svc in (qwen3_service, diarizen_service):
         if _svc is not None and getattr(_svc, "process", None) is not None:
             try:
                 _svc.wait_ready()
@@ -452,7 +432,6 @@ def main():
             model_loader=model_loader,
             worker_services={
                 "diarizen": diarizen_service,
-                "sidon": sidon_service,
                 "qwen3": qwen3_service,
             }
         )
@@ -569,8 +548,7 @@ def main():
             qwen3_service.stop()
         if diarizen_service:
             diarizen_service.stop()
-        if sidon_service:
-            sidon_service.stop()
+
         logger.info("Pipeline execution finished.")
 
 if __name__ == "__main__":

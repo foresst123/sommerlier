@@ -1,7 +1,8 @@
 import os
 from typing import Any
 from utils.checkpoint import CheckpointManager
-from utils.music_map import MusicMap, build as build_music_map
+from utils.music_map import MusicMap, build_maps
+from utils.noise_map import NoiseTrack
 from utils.excise import TimelineMap, excise
 from utils.steps import LEGACY_FLAG, step_enabled
 from services.stage_output_service import StageOutputService
@@ -38,9 +39,16 @@ class PipelineService:
         self.export_svc = export_svc
         self.logger = logger
         self.model_loader = model_loader
-        # {"diarizen": svc, "sidon": svc, ...} so each worker's VRAM can be
+        # {"diarizen": svc, "qwen3": svc, ...} so each worker's VRAM can be
         # released as soon as its stage is done rather than at process exit.
         self.worker_services = worker_services or {}
+        # The cut timeline this run works in, set once music analysis has
+        # decided what to remove. Empty means nothing was cut, which is also
+        # the right answer for a run that never reaches that stage.
+        self.timeline = TimelineMap()
+        # Framewise non-speech noise, when the detector ran. None means the
+        # check did not happen -- not that the recording is clean.
+        self.noise_track = None
         # Non-None while a stage-major pass is running: model and worker
         # releases collect here instead of firing at the end of each file.
         self.defer_free = None
@@ -49,7 +57,7 @@ class PipelineService:
     def _load(self, group: str):
         """Load one stage's models, at the point that stage runs.
 
-        Loading everything up front put DiariZen (5.15GB), Sidon (2.62GB),
+        Loading everything up front put DiariZen (5.15GB),
         PhoWhisper, Whisper, Demucs and the captioner on the card before the
         first stage had produced anything, so peak VRAM was the sum of every
         model rather than the largest pair. Each loader is idempotent, so under
@@ -75,7 +83,7 @@ class PipelineService:
         {
             "base":        lambda: self.model_loader.load_base_models(),
             "diarization": lambda: self.model_loader.load_diarization_models(w.get("diarizen")),
-            "separation":  lambda: self.model_loader.load_separation_models(w.get("sidon")),
+            "separation":  lambda: self.model_loader.load_separation_models(),
             "music":       lambda: self.model_loader.load_music_models(),
             "panns":       lambda: self.model_loader.load_panns(),
             "asr":         lambda: self.model_loader.load_asr_models(w.get("qwen3")),
@@ -87,7 +95,6 @@ class PipelineService:
     # hands it None and the stage connects to nothing.
     WORKER_FOR_STAGE = {
         "diarization": "diarizen",
-        "separation": "sidon",
         "asr": "qwen3",
     }
 
@@ -283,13 +290,12 @@ class PipelineService:
         # so a second file arrives with dead workers and they have to be
         # restarted. Only the ones this call will actually reach, though:
         # reviving all three at the top meant that by the refinement stage the
-        # diarizer (5.15GB) and Sidon (2.62GB) were both resident again, and
+        # diarizer (5.15GB) and the separator were both resident again, and
         # the LLM hit OOM with 0.03GB free on a card that had just been emptied
         # for it. A checkpointed stage does not need its worker at all.
         if not checkpoint.exists("diarization"):
             self._rebind_worker(args, "diarizen", self.diarization_svc, "diarizer")
-        if not checkpoint.exists("separation"):
-            self._rebind_worker(args, "sidon", self.separation_svc, "tse_model")
+
         if not checkpoint.exists("asr"):
             self._rebind_worker(args, "qwen3", self.asr_svc, "qwen3")
         
@@ -311,8 +317,13 @@ class PipelineService:
         # Swept first so that everything downstream sees the verdict:
         # diarization segments cleaned audio, and separation's search for solo
         # speech to enrol on can avoid the beds.
+        # The same sweep also reads the non-speech, non-music AudioSet groups.
+        # Nothing is removed for those: they mark segments so a dirty one can
+        # be left out of the corpus rather than repaired. Enhancement is
+        # deliberately not an option here -- see doc/audio-cleanliness.md.
         if checkpoint.exists("music_map"):
             music_map = MusicMap.from_json(checkpoint.load("music_map"))
+            self.noise_track = NoiseTrack.from_json(checkpoint.load("noise_track", fmt="json"))
         else:
             music_map = MusicMap()
             if self.step_enabled(args, "music_analysis"):
@@ -320,10 +331,13 @@ class PipelineService:
                 # only when the map actually found a bed to strip.
                 self._load("panns")
                 detector = self.model_loader.get("panns") if self.model_loader else None
-                music_map = build_music_map(
+                music_map, self.noise_track = build_maps(
                     audio_data.waveform, audio_data.sample_rate, detector,
                     logger=self.logger)
                 checkpoint.save("music_map", music_map.to_json())
+                # Kept in the ORIGINAL timeline, like the map it came from:
+                # provenance hands it original-time spans to score against.
+                checkpoint.save("noise_track", self.noise_track.to_json(), fmt="json")
         # Strip the beds now, so the diarizer -- and everything after it --
         # works on audio without music under the speech.
         #
@@ -343,7 +357,8 @@ class PipelineService:
                 self.music_svc.bs_roformer = (self.model_loader.get("bs_roformer")
                                          if self.model_loader else None)
                 patches = self.music_svc.strip_music_spans(
-                    audio_data, music_map, logger=self.logger)
+                    audio_data, music_map, logger=self.logger,
+                    source_path=audio_path)
                 checkpoint.save("music_patches", patches)
                 self._free(args, "bs_roformer")
             else:
@@ -394,8 +409,27 @@ class PipelineService:
         elif timeline:
             # A later run() entry: the audio was reloaded whole, so re-cut it to
             # match the timeline the earlier stages already worked in.
-            trimmed, _ = excise(audio_data.waveform, audio_data.sample_rate,
-                                [(a, b) for a, b, _ in cuts])
+            #
+            # The spans come from the timeline, not from the map. `cuts` is
+            # rebuilt on every entry out of thresholds that may have moved and
+            # a `cut_singing` flag that may have been switched off since --
+            # and when it comes back empty, re-cutting with it leaves the audio
+            # whole while `self.timeline` still says it was shortened. Nothing
+            # downstream would notice: diarization would run on one timeline
+            # and every timestamp after the first cut would be read against
+            # another. The timeline is the record of what actually happened.
+            replay = timeline.removed_spans(audio_data.duration)
+            if self.logger:
+                wanted = sum(b - a for a, b, _ in cuts)
+                have = sum(b - a for a, b in replay)
+                if abs(wanted - have) > 0.5:
+                    self.logger.warning(
+                        f"Music settings have changed since this file was "
+                        f"checkpointed ({wanted:.1f}s would be cut now, "
+                        f"{have:.1f}s was cut then). Replaying the checkpointed "
+                        "cut so the stages already computed stay valid; delete "
+                        "the music_map and timeline checkpoints to re-cut.")
+            trimmed, _ = excise(audio_data.waveform, audio_data.sample_rate, replay)
             audio_data.waveform = trimmed
             audio_data.duration = len(trimmed) / float(audio_data.sample_rate)
         self.timeline = timeline
@@ -404,6 +438,9 @@ class PipelineService:
         # separation consults has to move with it.
         self.separation_svc.music_map = (music_map.remap(timeline) if timeline
                                          else music_map)
+        # The joins the cut left behind. Separation widens its mixture windows
+        # and must not reach across one.
+        self.separation_svc.timeline = timeline
 
         if "music" not in computed_stages:
             stage_out.write_music(music_map, timeline,
@@ -501,7 +538,7 @@ class PipelineService:
             stage_out.write_separated_audio(enhanced_segments, audio_data.sample_rate)
 
         self._free(args, "separator", "embedder")
-        self._release_worker(args, "sidon")
+
 
         if getattr(args, "stop_after", None) == "separation":
             if self.logger: self.logger.info("Stopping pipeline after separation as requested by --stop_after.")
@@ -642,6 +679,21 @@ class PipelineService:
             if self.logger: self.logger.info(f"Pipeline completed successfully. Results saved to {save_path}")
             return transcripts
 
+        # Everything above ran in the cut timeline. Write down what that
+        # corresponds to in the recording as delivered before anything leaves
+        # this process: the timestamps in the export are otherwise unusable for
+        # going back to the source, and the gaps between turns are unusable for
+        # measuring turn taking without knowing which ones a join broke.
+        from utils.provenance import annotate as annotate_provenance, summary as provenance_summary
+        annotate_provenance(transcripts, self.timeline,
+                            noise=getattr(self, "noise_track", None))
+        provenance = provenance_summary(transcripts)
+        if self.logger and provenance.get("gaps_broken_by_a_cut"):
+            self.logger.info(
+                f"{provenance['gaps_broken_by_a_cut']} turn gap(s) span a cut "
+                f"and carry no duration; {provenance['segments_crossing_a_cut']} "
+                "segment(s) are glued from two stretches")
+
         if hasattr(self.separation_svc, "write_report"):
             self.separation_svc.write_report(
                 save_path, base_name,
@@ -656,7 +708,11 @@ class PipelineService:
             "vad_enabled": getattr(args, "vad", False),
             "tse_enabled": getattr(args, "tse", False),
             "llm_refinement": getattr(args, "llm_refinement", False),
-            "qwen3omni_caption": getattr(args, "qwen3omni", False)
+            "qwen3omni_caption": getattr(args, "qwen3omni", False),
+            # Timestamps in `segments` are in the cut timeline; `orig_spans` on
+            # each segment is the same audio in this file's own clock.
+            "timeline": self.timeline.to_json() if self.timeline else None,
+            "provenance": provenance,
         }
         
         self.export_svc.export_json(transcripts, os.path.join(save_path, f"{base_name}.json"), metadata=metadata)

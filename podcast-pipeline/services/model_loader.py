@@ -69,7 +69,7 @@ class ModelLoader:
             device=self.device_1
         )
             
-    def load_separation_models(self, sidon_service=None):
+    def load_separation_models(self):
         """Load Target Speaker Extractor (TSE) if enabled."""
         if "separator" in self.models:
             return
@@ -83,7 +83,6 @@ class ModelLoader:
             if self.logger: self.logger.info(f"  separator backend: {separator}")
             self.models["separator"] = TargetSpeakerExtractor(
                 device=self.device_1,
-                process=sidon_service.process if sidon_service else None,
                 separator=separator,
                 logger=self.logger,
             )
@@ -112,9 +111,21 @@ class ModelLoader:
             # GPU 1 hosts the DiariZen worker plus the embedder, TSE and ASR
             # models; separating a full podcast needs ~1GB of headroom that is
             # not there, so BS-RoFormer runs on GPU 2 alongside the Qwen3 worker.
+            # Copied before popping: self.config is the live profile, and
+            # load_music_models runs once per file in a batch.
             bs_roformer_cfg = dict(self.config.get("environments", {}).get(self.args.env, {})
                               .get("models", {}).get("bs_roformer", {}))
-            
+            # `model` names the checkpoint, and is the one key that is not a
+            # constructor argument under its own name. Forwarding it would
+            # reach BSRoformerRemover as an argument it does not take.
+            checkpoint = bs_roformer_cfg.pop("model", None)
+            # --music_separator overrides the profile, the profile overrides
+            # the module default. Set here rather than through an env var so
+            # one batch run cannot leak a checkpoint into the next.
+            checkpoint = getattr(self.args, "music_separator", None) or checkpoint
+            if checkpoint:
+                bs_roformer_cfg["model_filename"] = checkpoint
+
             from models.bs_roformer import BSRoformerRemover
             if self.logger: self.logger.info(f"Loading BS-RoFormer on {self.device_1}")
             self.models["bs_roformer"] = BSRoformerRemover(
@@ -134,7 +145,7 @@ class ModelLoader:
             return
 
         # PhoWhisper goes on GPU 2, not alongside everything else. GPU 1 already
-        # hosts the DiariZen worker, the embedder, ECAPA, the Sidon worker and
+        # hosts the DiariZen worker, the embedder, ECAPA, and
         # Whisper; adding a second 3.1GB model there took the card to ~15.2GB
         # against a 14.56GB T4, and the first thing to ask for memory afterwards
         # was diarization. It failed on chunk 0 with DiariZen reporting

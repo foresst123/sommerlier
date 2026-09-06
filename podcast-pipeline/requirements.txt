@@ -12,9 +12,10 @@ faster-whisper==1.2.0
 whisperx==3.8.6
 ctranslate2==4.5.0
 
-# BS-RoFormer for vocal isolation, selected by models.bs_roformer.model in the
-# profile. Pulls the UVR checkpoints on first use; BS-RoFormer stays as the fallback
-# and as the thing to compare against.
+# BS-RoFormer for vocal isolation. The checkpoint is models.bs_roformer.model in
+# the profile; the windowing knobs beside it are passed through as mdxc_params.
+# Checkpoints are pulled from UVR (not the HF hub) on first use, so an offline
+# run needs download_offline_weights.py and BS_ROFORMER_MODEL_DIR.
 audio-separator>=0.47.0
 panns-inference
 librosa==0.10.2.post1

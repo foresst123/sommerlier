@@ -6,20 +6,17 @@ and swapping it is how a different separator gets evaluated without touching
 the enrollment mining, the QC thresholds, or the splice logic that were tuned
 against this corpus.
 
-The two families behave differently in a way the caller has to know about:
+Only one backend ships now: USEF-TFGridNet, which is target-conditioned. It
+runs once per enrollment, so track 1 *is* speaker A and the whole "which track
+is whom" question disappears -- `ordered = True` says so.
 
-    BSS   (Sidon, MossFormer2)  two outputs in unknown order.
-                                ECAPA has to decide which is which, and that
-                                decision is measurably shaky here -- similarity
-                                sits at p50 0.58 where natural speech scores
-                                0.70-0.90, and `_maybe_swap` / `not_a_fail` /
-                                `qc_sim` all exist to cope with it.
-
-    TSE   (USEF-TFGridNet)      one output per enrollment, run twice. The order
-                                is known by construction, so the whole
-                                assignment question disappears.
-
-`ordered` is what tells the caller which case it is.
+The blind case is still described by the interface because it is what the
+assignment and QC layer around it was built for. A blind separator returns two
+tracks in unknown order, ECAPA has to decide which is which, and on this corpus
+that decision was measurably shaky: similarity sat at p50 0.58 where natural
+speech scores 0.70-0.90. `_maybe_swap`, `not_a_fail` and `qc_sim` exist for
+that case; with an ordered backend they are cheap no-ops rather than dead code,
+and they are what a future blind backend would plug into.
 """
 
 import os
@@ -40,86 +37,13 @@ class SeparationBackend:
     def separate(self, mixture, sample_rate, enroll_A=None, enroll_B=None):
         """Return (track_1, track_2, output_sample_rate) as float32 arrays.
 
-        The rate is returned rather than assumed: DialogueSidon decodes at
-        24 kHz and USEF runs at 8 kHz, and the caller resamples back.
+        The rate is returned rather than assumed: USEF runs at 8 kHz while
+        the pipeline carries 16 kHz, and the caller resamples back.
         """
         raise NotImplementedError
 
     def close(self):
         pass
-
-
-# --------------------------------------------------------------------------
-# Sidon -- diffusion, blind, out-of-process
-# --------------------------------------------------------------------------
-
-class SidonBackend(SeparationBackend):
-    """DialogueSidon over the worker's stdin/stdout protocol.
-
-    Kept out-of-process because the model is exported with `torch.export` and
-    pins its own torch state; the exchange is via .npy files in a scratch dir
-    rather than the pipe, since a 48s window of float32 is megabytes.
-    """
-
-    name = "sidon"
-    ordered = False          # blind: ECAPA decides which track is whom
-
-    def __init__(self, process, temp_dir):
-        self.process = process
-        self._temp_dir = temp_dir
-        self._counter = 0
-
-    def separate(self, mixture, sample_rate, enroll_A=None, enroll_B=None):
-        import json
-
-        if not self.process:
-            raise RuntimeError("Sidon worker process is not connected.")
-
-        self._counter += 1
-        req_id = str(self._counter)
-        temp_path = os.path.join(self._temp_dir, f"mix_{req_id}.npy")
-        np.save(temp_path, np.ascontiguousarray(mixture, dtype=np.float32))
-
-        produced = [temp_path]
-        try:
-            self.process.stdin.write(json.dumps({
-                "id": req_id, "audio_path": temp_path, "sample_rate": sample_rate,
-            }) + "\n")
-            self.process.stdin.flush()
-
-            resp = None
-            while True:
-                line = self.process.stdout.readline()
-                if not line:
-                    raise RuntimeError("Sidon worker crashed or closed stdout")
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    parsed = json.loads(line)
-                except Exception:
-                    continue
-                if parsed.get("id") == req_id:
-                    resp = parsed
-                    break
-
-            for key in ("track_1_path", "track_2_path"):
-                if resp.get(key):
-                    produced.append(resp[key])
-            if resp.get("error"):
-                raise RuntimeError(f"Sidon worker error: {resp['error']}")
-
-            out_sr = int(resp.get("target_sr") or sample_rate)
-            return np.load(resp["track_1_path"]), np.load(resp["track_2_path"]), out_sr
-        finally:
-            # Always, including on worker errors: a long run would otherwise
-            # leak one .npy per failed overlap.
-            for path in produced:
-                try:
-                    if os.path.exists(path):
-                        os.remove(path)
-                except OSError:
-                    pass
 
 
 # --------------------------------------------------------------------------
@@ -148,8 +72,9 @@ class UsefOnnxBackend(SeparationBackend):
       * it runs at 8 kHz, so everything above 4 kHz is discarded on the way in.
         On this corpus that is 0.0075% of total energy but 18.2% of the energy
         in fricative frames -- the band that carries /s/, /x/, final /c/ and
-        /t/. Whether that costs more than Sidon's 46% frame gating and 4.8 dB
-        run-to-run spread is exactly what having both backends lets us measure.
+        /t/. That was measured against DialogueSidon's 46% frame gating and
+        4.8 dB run-to-run spread before that backend was removed; the number
+        stands on its own as the price of running at 8 kHz.
 
       * the mixture window is fixed at 2s. Longer audio is chunked and the
         outputs concatenated, which is what the export's own README prescribes.
@@ -251,19 +176,21 @@ class UsefOnnxBackend(SeparationBackend):
 
 # --------------------------------------------------------------------------
 
-BACKENDS = {"sidon": SidonBackend, "usef": UsefOnnxBackend}
+BACKENDS = {"usef": UsefOnnxBackend}
 
 
-def make_backend(name, *, process=None, temp_dir=None, device=None, logger=None):
+def make_backend(name, *, device=None, logger=None, **_retired):
     """Build the separator named in the profile.
 
     Unknown names fail here rather than silently falling back: a typo in a
     config that quietly kept the old model would make two runs look comparable
     when they are not.
+
+    `**_retired` swallows `process` and `temp_dir`, which only an
+    out-of-process backend ever needed. Callers that still pass them keep
+    working instead of failing on a keyword.
     """
-    key = (name or "sidon").strip().lower()
+    key = (name or "usef").strip().lower()
     if key not in BACKENDS:
         raise ValueError(f"unknown separator {name!r}; choose from {sorted(BACKENDS)}")
-    if key == "sidon":
-        return SidonBackend(process=process, temp_dir=temp_dir)
-    return UsefOnnxBackend(device=device, logger=logger)
+    return BACKENDS[key](device=device, logger=logger)

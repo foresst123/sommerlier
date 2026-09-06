@@ -1,7 +1,7 @@
 """Deciding how many CPU threads each process may use.
 
 The pipeline runs four processes at once -- the main one plus the DiariZen,
-Qwen3 and Sidon workers -- and every one of them links against OpenMP/MKL
+Qwen3 and DiariZen workers -- and every one of them links against OpenMP/MKL
 through torch. Left alone, each grabs a thread per visible core, so four
 processes on sixteen cores spawn sixty-four threads that fight over sixteen.
 On the two-core allocation this pipeline was last run on, that contention made

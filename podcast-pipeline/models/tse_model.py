@@ -49,7 +49,7 @@ TSE_MIN_VOICED_SEC = float(os.environ.get("TSE_MIN_VOICED_SEC", "1.0"))
 class TargetSpeakerExtractor:
     """
     Dialogue Separation + ECAPA Speaker Matching.
-    Uses SidonWorker for separation and ECAPA-TDNN natively for verification.
+    Uses the configured separation backend and ECAPA-TDNN for verification.
     """
     
     def __init__(self, device: torch.device, process=None, checkpoint_path: str = None,

@@ -136,36 +136,57 @@ def test_existing_settings_are_respected(monkeypatch):
     assert env["MKL_NUM_THREADS"] == "2"
 
 
-# --- bs_roformer chunking -----------------------------------------------------
+# --- bs_roformer peak memory --------------------------------------------------
 
-# models/bs_roformer imports torch, which is not installed in the test env; the
-# windowing is plain arithmetic, so the defaults are restated here.
-GPU_CHUNK_SEC, GPU_CHUNK_OVERLAP_SEC = 60.0, 1.0
-
-
-def test_bs_roformer_windows_do_not_grow_with_file_length():
-    """The OOM was VRAM scaling with duration; windows keep the peak flat."""
-    class d:
-        gpu_chunk_sec, gpu_chunk_overlap_sec = GPU_CHUNK_SEC, GPU_CHUNK_OVERLAP_SEC
-
-    for seconds in (60, 600, 3000):
-        n = seconds * SR
-        chunk = int(d.gpu_chunk_sec * SR)
-        pad = int(d.gpu_chunk_overlap_sec * SR)
-        widest = max(min(n, s + chunk + pad) - max(0, s - pad)
-                     for s in range(0, n, chunk))
-        assert widest <= chunk + 2 * pad, (
-            f"a {seconds}s file would hand {widest / SR:.0f}s to the GPU at once"
-        )
+# The OOM these replace was memory scaling with file duration, fixed at the
+# time by chunking inside the Demucs wrapper. audio-separator has that same
+# control built in as `chunk_duration`, and leaves it off by default: without
+# it the overlap-add result and counter buffers are allocated for the whole
+# track. On CUDA `should_accumulate_on_device` puts those on the host, so an
+# unbounded run is a RAM OOM on a Kaggle box rather than a VRAM one -- which is
+# why it did not look like the same bug the second time.
 
 
-def test_bs_roformer_windows_cover_every_sample():
-    class d:
-        gpu_chunk_sec, gpu_chunk_overlap_sec = GPU_CHUNK_SEC, GPU_CHUNK_OVERLAP_SEC
+def _bs_roformer_profiles():
+    import json
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "config.json"), encoding="utf-8") as fh:
+        config = json.load(fh)
+    return {name: profile["models"]["bs_roformer"]
+            for name, profile in config["environments"].items()}
 
-    n = 3000 * SR
-    chunk = int(d.gpu_chunk_sec * SR)
-    covered = 0
-    for start in range(0, n, chunk):
-        covered += min(n, start + chunk) - start
-    assert covered == n, "chunking dropped or double-counted samples"
+
+# 2 instruments x 2 channels x 4 bytes, for the result and the counter both.
+BUFFER_BYTES_PER_SECOND = 2 * 2 * 44100 * 4 * 2
+
+
+def test_every_profile_bounds_its_own_buffers():
+    for name, block in _bs_roformer_profiles().items():
+        assert block.get("chunk_duration"), name
+
+
+def test_the_bound_leaves_room_on_the_box_it_names():
+    """A 50-minute recording unbounded is ~4.2GB of float32 buffers. These are
+    the numbers that make that a fixed cost instead."""
+    budgets = {"kaggle": 1.0, "a100": 2.0}          # GiB the stage may hold
+    for name, block in _bs_roformer_profiles().items():
+        if name not in budgets:
+            continue
+        gib = block["chunk_duration"] * BUFFER_BYTES_PER_SECOND / 1024 ** 3
+        assert gib <= budgets[name], f"{name}: {gib:.2f}GiB > {budgets[name]}GiB"
+
+
+def test_the_smaller_box_does_not_ask_for_more_than_the_bigger_one():
+    """kaggle shares its RAM with DiariZen, the embedder, TSE and ASR."""
+    profiles = _bs_roformer_profiles()
+    if {"kaggle", "a100"} <= set(profiles):
+        assert profiles["kaggle"]["chunk_duration"] <= profiles["a100"]["chunk_duration"]
+
+
+def test_a_segment_size_is_only_honoured_when_the_override_is_asked_for():
+    """audio-separator ignores segment_size unless override_model_segment_size
+    is set, so a profile naming one without the flag is a knob that looks live
+    and is not -- exactly the failure the Demucs block was."""
+    for name, block in _bs_roformer_profiles().items():
+        if "segment_size" in block:
+            assert block.get("override_model_segment_size") is True, name

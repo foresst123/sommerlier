@@ -14,7 +14,7 @@ def install_torch_load_shim():
 
     PyTorch 2.6 flipped the default to ``weights_only=True``, which rejects the
     pickled checkpoints several models in this pipeline ship (pyannote, DiariZen,
-    Silero and the Sidon export all carry non-tensor objects). Call this before
+    Silero and several exported graphs carry non-tensor objects). Call this before
     importing any model code; repeated calls are harmless.
     """
     global _PATCHED

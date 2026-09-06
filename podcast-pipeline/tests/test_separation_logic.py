@@ -9,6 +9,7 @@ import os
 import sys
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -54,28 +55,36 @@ def _dialogue():
     ]
 
 
-def test_window_reaches_target_and_contains_both_speakers():
-    svc = TargetExtractionService(FakeTSE(), logger=None)
-    by_spk = svc._intervals_by_speaker(_dialogue())
-    built, reason = svc._build_window(by_spk, "SPEAKER_00", "SPEAKER_01", 14.0, 14.4, 60.0)
-    assert built is not None, f"window should be buildable, got {reason}"
-    lo, hi, solo_a, solo_b, anchor = built
-    assert hi - lo >= 20.0, f"window {hi - lo:.1f}s is shorter than Sidon's chunk"
-    # Only one speaker needs solo audio; the anchor is whichever has more.
-    assert max(sum(b - a for a, b in solo_a), sum(b - a for a, b in solo_b)) >= 2.0
-    assert anchor in ("SPEAKER_00", "SPEAKER_01")
 
 
-def test_backchannel_gets_a_real_probe_not_the_whole_window():
+def test_a_backchannel_window_is_the_overlap_widened_to_the_model_window():
+    """USEF is told who to extract by its enrollment, so the mixture carries
+    the overlap and nothing else -- widened to the 2s the ONNX graph takes.
+
+    This replaces a window of 5s solo A + 5s solo B + the overlap. That
+    existed for DialogueSidon, which separates blind and collapsed to "one
+    source carries everything" when the two speakers were unbalanced. A
+    target-conditioned masker never needed the solo audio."""
     fake = FakeTSE()
     svc = TargetExtractionService(fake, logger=None)
     svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
     assert len(fake.calls) == 1, "one job expected"
     call = fake.calls[0]
-    # No length floor: a stitched window is deliberately short. What matters is
-    # that B is scored on real solo speech, not on the whole window.
-    assert call["probe_B_sec"] >= 2.0, "B must be scored on its solo turn"
-    assert call["probe_B_sec"] < call["len_sec"], "probe must be a subset, not the window"
+    assert call["len_sec"] == pytest.approx(2.0, abs=0.05), (
+        f"window is {call['len_sec']:.2f}s; it should be the model's 2s")
+
+
+def test_an_ordered_backend_scores_the_whole_track_not_a_probe():
+    """With no solo speech in the window there is nothing to probe with, and
+    nothing to probe for: track 1 IS speaker A by construction. An empty probe
+    reads downstream as "score the whole track", which is the right question
+    to ask of a track that should be one speaker end to end."""
+    fake = FakeTSE()
+    svc = TargetExtractionService(fake, logger=None)
+    svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
+    call = fake.calls[0]
+    assert not call.get("probe_A"), "no solo audio is fed any more"
+    assert not call.get("probe_B")
 
 
 def test_low_scoring_track_does_not_discard_the_good_one():
@@ -171,39 +180,8 @@ def test_every_overlap_is_accounted_for():
         )
 
 
-def test_window_rejects_three_speakers():
-    """Three voices *in the overlap* is unseparable: Sidon emits two sources.
-
-    The test is on the overlap, not the window. A window is padded out to 20s
-    and merged jobs span more, so a third speaker who talks somewhere in that
-    stretch -- but not during the overlap being extracted -- is audio the
-    separator has to cope with, not a reason to refuse. On the measured corpus
-    that distinction was eight of thirteen failures.
-    """
-    segs = [
-        Segment(index="00001", start=0.0, end=30.0, speaker="SPEAKER_00"),
-        Segment(index="00002", start=14.0, end=14.4, speaker="SPEAKER_01"),
-        Segment(index="00003", start=14.1, end=14.3, speaker="SPEAKER_02"),
-        Segment(index="00004", start=32.0, end=40.0, speaker="SPEAKER_01"),
-    ]
-    svc = TargetExtractionService(FakeTSE(), logger=None)
-    by_spk = svc._intervals_by_speaker(segs)
-    built, reason = svc._build_window(by_spk, "SPEAKER_00", "SPEAKER_01", 14.0, 14.4, 60.0)
-    assert built is None and reason == "multi_speaker"
 
 
-def test_a_third_speaker_outside_the_overlap_does_not_reject_the_window():
-    """The other half of the rule above, and the case that was failing."""
-    segs = [
-        Segment(index="00001", start=0.0, end=30.0, speaker="SPEAKER_00"),
-        Segment(index="00002", start=14.0, end=14.4, speaker="SPEAKER_01"),
-        Segment(index="00003", start=16.0, end=18.0, speaker="SPEAKER_02"),
-        Segment(index="00004", start=32.0, end=40.0, speaker="SPEAKER_01"),
-    ]
-    svc = TargetExtractionService(FakeTSE(), logger=None)
-    by_spk = svc._intervals_by_speaker(segs)
-    built, reason = svc._build_window(by_spk, "SPEAKER_00", "SPEAKER_01", 14.0, 14.4, 60.0)
-    assert reason != "multi_speaker"
 
 
 def test_no_window_does_not_block_later_overlaps():
@@ -304,41 +282,10 @@ def _buried_case():
     return svc, svc._intervals_by_speaker(segs)
 
 
-def test_stitching_balances_a_window_a_continuous_one_cannot():
-    svc, by = _buried_case()
-    wav = np.zeros(int(820 * SR), dtype=np.float32)
-    built = svc._build_stitched(by, "1", "2", 777.33, 777.67, wav, SR, 820.0)
-    assert built is not None
-
-    _audio, _core, _pa, _pb, layout = built
-    # The continuous window for this overlap spans 36s at 28.75s vs 6.91s.
-    assert layout["ratio"] < 1.5
-    assert layout["dur"] < 12.0
-    # Fitting one Sidon chunk removes cross-chunk channel drift entirely.
-    assert layout["dur"] <= 20.0
 
 
-def test_stitched_core_is_exactly_the_overlap_and_probes_stay_clear_of_it():
-    svc, by = _buried_case()
-    wav = np.zeros(int(820 * SR), dtype=np.float32)
-    audio, core, probe_a, probe_b, _ = svc._build_stitched(
-        by, "1", "2", 777.33, 777.67, wav, SR, 820.0)
-
-    assert abs((core[1] - core[0]) / SR - 0.34) < 0.01
-    assert 0 <= core[0] < core[1] <= len(audio)
-    for i, j in probe_a + probe_b:
-        assert 0 <= i < j <= len(audio)
-        assert j <= core[0] or i >= core[1]
 
 
-def test_stitching_declines_when_a_speaker_has_no_clean_audio():
-    """Falling back to the continuous window is right; inventing one is not."""
-    segs = _diar([(0.0, 40.0, "1"), (20.0, 20.3, "2")])
-    svc = _svc()
-    svc.logger = None
-    wav = np.zeros(int(45 * SR), dtype=np.float32)
-    assert svc._build_stitched(svc._intervals_by_speaker(segs),
-                               "1", "2", 20.0, 20.3, wav, SR, 45.0) is None
 
 
 def test_qc_rejects_a_track_that_is_silent_where_the_mixture_speaks():

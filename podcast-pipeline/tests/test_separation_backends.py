@@ -19,7 +19,6 @@ from models.separation_backends import (
     USEF_ENROLL_SAMPLES,
     USEF_MIX_SAMPLES,
     USEF_SR,
-    SidonBackend,
     UsefOnnxBackend,
     make_backend,
 )
@@ -27,8 +26,8 @@ from models.separation_backends import (
 
 # --- choosing a backend -----------------------------------------------------
 
-def test_sidon_is_the_default():
-    assert make_backend(None, process=None, temp_dir="/tmp").name == "sidon"
+def test_usef_is_the_default():
+    assert make_backend(None, process=None, temp_dir="/tmp").name == "usef"
 
 
 def test_names_are_case_and_space_insensitive():
@@ -43,7 +42,6 @@ def test_an_unknown_name_fails_rather_than_falling_back():
 
 
 def test_blind_and_targeted_backends_declare_themselves():
-    assert make_backend("sidon", process=None, temp_dir="/tmp").ordered is False
     assert make_backend("usef").ordered is True
 
 
@@ -128,7 +126,8 @@ def test_a_partial_final_window_is_padded_in_but_trimmed_out():
 
 
 def test_the_declared_rate_is_returned_so_the_caller_can_resample():
-    """Sidon decodes at 24 kHz and USEF at 8 kHz; the caller resamples back."""
+    """USEF runs at 8 kHz while the pipeline carries 16 kHz, so the backend
+    returns its rate and the caller resamples back rather than assuming."""
     backend = _backend_with_fake()
     enroll = [np.full(USEF_SR, 0.1, dtype=np.float32)]
     _a, _b, out_sr = backend.separate(np.zeros(USEF_SR, dtype=np.float32), USEF_SR,
@@ -162,4 +161,31 @@ def test_both_profiles_declare_a_separator():
     with open(os.path.join(root, "config.json"), encoding="utf-8") as fh:
         config = json.load(fh)
     for name, profile in config["environments"].items():
-        assert profile["models"]["tse"]["separator"] in ("sidon", "usef"), name
+        assert profile["models"]["tse"]["separator"] == "usef", name
+
+
+def test_only_the_target_conditioned_backend_ships():
+    """DialogueSidon was removed. It separated blind, which meant ECAPA had to
+    decide which track was whom -- a decision that sat at p50 0.58 similarity
+    where natural speech scores 0.70-0.90, and which three separate repair
+    paths existed to cope with. USEF is told who to extract, so the question
+    does not arise."""
+    from models.separation_backends import BACKENDS
+    assert set(BACKENDS) == {"usef"}
+
+
+def test_every_shipped_backend_knows_its_track_order():
+    """`ordered` is what the caller branches on. A backend that left it False
+    would silently re-enable the assignment and repair paths."""
+    from models.separation_backends import BACKENDS
+    for name, cls in BACKENDS.items():
+        assert cls.ordered is True, name
+
+
+def test_an_unknown_separator_is_refused_not_quietly_replaced():
+    """A typo that fell back to a default would make two runs look comparable
+    when they are not."""
+    import pytest as _pytest
+    from models.separation_backends import make_backend
+    with _pytest.raises(ValueError):
+        make_backend("sidon")

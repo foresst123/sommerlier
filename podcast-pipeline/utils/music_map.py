@@ -31,8 +31,32 @@ import numpy as np
 # a classifier would use: the cost is asymmetric. A frame wrongly called
 # musical removes one enrolment candidate from a pool of hundreds, while a
 # missed one contaminates an enrolment or sends song lyrics to ASR.
-MUSIC_THRESHOLD = float(os.environ.get("MUSIC_MAP_THRESHOLD", "0.35"))
-SINGING_THRESHOLD = float(os.environ.get("MUSIC_MAP_SINGING", "0.35"))
+MUSIC_THRESHOLD = float(os.environ.get("MUSIC_MAP_THRESHOLD", "0.10"))
+
+# 0.35 was above anything this tagger produces, so the SINGING branch never
+# fired once: a full 527-label dump (tools/dump_panns.py) of three recordings
+# put the ceiling of the singing group at 0.205, on the one file that actually
+# contains a song. Every sung stretch fell through to SONG instead.
+#
+# 0.12 is the lowest level that still separates the two cases cleanly:
+#
+#     level   two files with no singing    the file with a real song
+#     0.05            1.3s                        103.4s
+#     0.10            0.6s                         39.4s
+#     0.12            0.0s                         23.0s   <- clean
+#     0.20            0.0s                          0.3s
+#     0.35            0.0s                          0.0s   <- what it was
+#
+# Below 0.12 the "Male singing" label starts firing on ordinary speech in
+# vimeanhphanchiatay; above it, real singing is thrown away for nothing.
+#
+# Expect no change in what gets cut on the current corpus: every frame over
+# 0.10 already sat inside a SONG span, which is excised anyway. What this
+# restores is the branch's ability to fire at all -- which matters for the one
+# case SONG cannot catch, someone singing *over* speech.
+#
+# Thin evidence, and worth saying so: one recording with real singing.
+SINGING_THRESHOLD = float(os.environ.get("MUSIC_MAP_SINGING", "0.12"))
 
 # Singing and speech both light up the vocal range, so a frame can score on
 # both. It is called singing only when singing leads by this margin -- without
@@ -40,16 +64,27 @@ SINGING_THRESHOLD = float(os.environ.get("MUSIC_MAP_SINGING", "0.35"))
 # dropped from the transcript.
 SINGING_MARGIN = float(os.environ.get("MUSIC_MAP_SINGING_MARGIN", "0.15"))
 
-# Shortest run worth recording. Below this the label is a flicker between two
-# genuinely different stretches rather than a stretch of its own.
+# Shortest run worth recording -- and it is two numbers, because the two
+# decisions this map drives are not equally reversible.
 #
-# Measured against what the tagger can actually resolve, 0.30 filters nothing:
-# Cnn14_DecisionLevelMax decides once per 320ms and repeats that decision
+# The old single 0.30 filtered nothing, and the code said so without acting on
+# it: Cnn14_DecisionLevelMax decides once per 320ms and repeats that decision
 # across the 32 frames it covers, so the shortest run it can produce is already
-# longer than this. Raising it above 0.32 is what would make it a filter --
-# left at the old value until a run on real audio says which flickers are worth
-# dropping, because raising it silently drops real short stretches too.
-MIN_SPAN_SECONDS = float(os.environ.get("MUSIC_MAP_MIN_SPAN", "0.30"))
+# longer than 0.30. Every single 320ms block became a span, then grew by
+# PAD_SECONDS on each side into a 0.92s one. Nine such spans across three
+# recordings.
+#
+# MUSIC only strips a bed and writes vocals back. A false one costs a separator
+# pass on speech that did not need it -- wasteful, not destructive -- so it
+# stays at one block, and raising it would throw away real music: on
+# vimeanhphanchiatay, 0.96 would drop 10 spans and 6.1s of genuine bed.
+#
+# SINGING and SONG delete audio from the recording permanently. That asks for
+# more than one block of evidence, and the cost of asking is small: across the
+# two files with sung or standalone music, 0.96 drops 6 fragment spans and
+# 2.9 seconds total.
+MIN_SPAN_SECONDS = float(os.environ.get("MUSIC_MAP_MIN_SPAN", "0.32"))
+MIN_SPAN_EXCISED = float(os.environ.get("MUSIC_MAP_MIN_SPAN_CUT", "0.96"))
 
 # Gap below which two runs of the same kind are one. Music dips under the
 # threshold on a beat rest without stopping.
@@ -227,31 +262,50 @@ def _runs(flags, fps, min_span, merge_gap, pad=0.0):
 def build(waveform, sample_rate, detector, logger=None,
           music_threshold=MUSIC_THRESHOLD, singing_threshold=SINGING_THRESHOLD,
           singing_margin=SINGING_MARGIN):
-    """Label the recording frame by frame and collapse the result into spans.
+    """The music map alone. See `build_maps` for the noise track beside it."""
+    return build_maps(waveform, sample_rate, detector, logger=logger,
+                      music_threshold=music_threshold,
+                      singing_threshold=singing_threshold,
+                      singing_margin=singing_margin)[0]
 
-    An empty map is returned when there is no detector, which every caller
+
+def build_maps(waveform, sample_rate, detector, logger=None,
+               music_threshold=MUSIC_THRESHOLD, singing_threshold=SINGING_THRESHOLD,
+               singing_margin=SINGING_MARGIN):
+    """Label the recording frame by frame; return (MusicMap, NoiseTrack).
+
+    One PANNs sweep produces both. Cnn14 predicts all 527 AudioSet labels on
+    every forward pass, so the noise groups cost nothing beyond reading columns
+    that were already computed -- a second sweep would double the price of this
+    stage for no new information.
+
+    Empty maps are returned when there is no detector, which every caller
     already reads as "no reason to avoid anything" -- the right default when
     the check did not run rather than a claim that the audio is clean.
     """
+    from utils.noise_map import NoiseTrack, build as build_noise
+
     if detector is None or waveform is None or not len(waveform):
-        return MusicMap()
+        return MusicMap(), NoiseTrack()
 
     tag = getattr(detector, "tag_framewise", None)
     if tag is None:
         if logger:
             logger.warning("Detector has no frame-level tagging; music map is empty")
-        return MusicMap()
+        return MusicMap(), NoiseTrack()
 
     try:
         scores, fps = tag(waveform, sample_rate)
     except Exception as exc:                       # pragma: no cover - model path
         if logger:
             logger.warning(f"Music sweep failed: {exc}")
-        return MusicMap()
+        return MusicMap(), NoiseTrack()
+
+    noise = build_noise(scores, fps)
 
     speech, singing, music = scores["speech"], scores["singing"], scores["music"]
     if not len(music):
-        return MusicMap(fps=fps)
+        return MusicMap(fps=fps), noise
 
     # Singing first, and exclusively: a sung frame is not also a bed to clean up,
     # because the thing to remove would be the voice itself.
@@ -264,10 +318,12 @@ def build(waveform, sample_rate, detector, logger=None,
     is_song = loud_music & (speech < SPEECH_PRESENT)
     is_music = loud_music & ~is_song
 
+    # SINGING and SONG leave the recording; MUSIC is only cleaned. The first two
+    # therefore have to clear a longer run than the third -- see MIN_SPAN_*.
     spans = ([(a, b, SINGING) for a, b in
-              _runs(is_singing, fps, MIN_SPAN_SECONDS, MERGE_GAP_SECONDS, PAD_SECONDS)]
+              _runs(is_singing, fps, MIN_SPAN_EXCISED, MERGE_GAP_SECONDS, PAD_SECONDS)]
              + [(a, b, SONG) for a, b in
-                _runs(is_song, fps, MIN_SPAN_SECONDS, MERGE_GAP_SECONDS, PAD_SECONDS)]
+                _runs(is_song, fps, MIN_SPAN_EXCISED, MERGE_GAP_SECONDS, PAD_SECONDS)]
              + [(a, b, MUSIC) for a, b in
                 _runs(is_music, fps, MIN_SPAN_SECONDS, MERGE_GAP_SECONDS, PAD_SECONDS)])
 
@@ -279,4 +335,14 @@ def build(waveform, sample_rate, detector, logger=None,
             f"{found.total_of(MUSIC):.1f}s music under speech, of "
             f"{duration:.1f}s ({found.total / max(duration, 1e-9) * 100:.1f}%), "
             f"{len(found)} span(s) at {fps:.0f} fps")
-    return found
+        if noise:
+            combined = noise.combined
+            from utils.noise_map import NOTICEABLE
+            share = float((combined >= NOTICEABLE).mean()) * 100 if len(combined) else 0.0
+            logger.info(
+                f"Noise: p50={float(np.percentile(combined, 50)):.3f} "
+                f"p90={float(np.percentile(combined, 90)):.3f} "
+                f"max={float(combined.max()):.3f}, "
+                f"{share:.1f}% of frames over {NOTICEABLE}. Nothing is removed "
+                "for this -- it marks segments so they can be left out.")
+    return found, noise

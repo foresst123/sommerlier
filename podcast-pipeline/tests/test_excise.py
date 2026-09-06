@@ -12,6 +12,7 @@ import os
 import sys
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -273,3 +274,241 @@ def test_the_per_segment_pass_is_skipped_when_the_waveform_was_cleaned():
                   encoding="utf-8").read()
     assert '_has_map = self.step_enabled(args, "music_analysis")' in source
     assert "the waveform was already cleaned" in source
+
+
+def test_a_source_file_routes_stripping_through_the_hi_res_path():
+    """MusicService must prefer separate_span when it knows the original file:
+    that is the whole 44.1kHz gain, and it was invisible from the waveform."""
+    from schemas.audio import AudioData
+    from services.music_service import MusicService
+    from utils.music_map import MUSIC, MusicMap
+
+    calls = []
+
+    class Separator:
+        def separate_span(self, path, start, end, sr, reference):
+            calls.append((path, start, end, sr, len(reference)))
+            return np.full(len(reference), 0.25, dtype=np.float32)
+
+        def separate_segment(self, audio, sr):
+            raise AssertionError("the 16kHz fallback must not run here")
+
+    audio = AudioData(name="t", waveform=np.ones(20 * SR, dtype=np.float32),
+                      sample_rate=SR, duration=20.0, audio_segment=None)
+    service = MusicService(panns_model=None, bs_roformer_model=Separator(), logger=None)
+    service.strip_music_spans(audio, MusicMap([(5.0, 8.0, MUSIC)]),
+                              source_path="/tmp/original.mp3")
+
+    assert calls == [("/tmp/original.mp3", 5.0, 8.0, SR, 3 * SR)]
+    assert audio.waveform[6 * SR] == 0.25
+
+
+def test_a_separator_without_the_hi_res_path_still_works():
+    """The 16kHz path is the contract; hi-res is an optimisation on top, and a
+    stub or an older separator that lacks it must not break the stage."""
+    from schemas.audio import AudioData
+    from services.music_service import MusicService
+    from utils.music_map import MUSIC, MusicMap
+
+    class OldSeparator:
+        def separate_segment(self, audio, sr):
+            return (np.asarray(audio) * 0.5).astype(np.float32)
+
+    audio = AudioData(name="t", waveform=np.ones(20 * SR, dtype=np.float32),
+                      sample_rate=SR, duration=20.0, audio_segment=None)
+    MusicService(panns_model=None, bs_roformer_model=OldSeparator(), logger=None
+                 ).strip_music_spans(audio, MusicMap([(5.0, 8.0, MUSIC)]),
+                                     source_path="/tmp/original.mp3")
+    assert audio.waveform[6 * SR] == 0.5
+
+
+def test_a_failed_hi_res_decode_falls_back_to_the_16khz_slice():
+    """A source that cannot be decoded at the span offset must not lose the
+    strip: the pipeline already holds a usable slice."""
+    from schemas.audio import AudioData
+    from services.music_service import MusicService
+    from utils.music_map import MUSIC, MusicMap
+
+    class Separator:
+        def separate_span(self, path, start, end, sr, reference):
+            return None                      # decode failed, caller falls back
+        def separate_segment(self, audio, sr):
+            return (np.asarray(audio) * 0.5).astype(np.float32)
+
+    audio = AudioData(name="t", waveform=np.ones(20 * SR, dtype=np.float32),
+                      sample_rate=SR, duration=20.0, audio_segment=None)
+    MusicService(panns_model=None, bs_roformer_model=Separator(), logger=None
+                 ).strip_music_spans(audio, MusicMap([(5.0, 8.0, MUSIC)]),
+                                     source_path="/tmp/original.mp3")
+    assert audio.waveform[6 * SR] == 0.5
+
+
+# --- provenance: where a cut-timeline interval came from ----------------------
+
+def _timeline():
+    """20s of audio with 5.0-8.0 and 12.0-13.0 removed.
+
+    kept (original)      -> cut
+      0.0 -  5.0         ->  0.0 -  5.0
+      8.0 - 12.0         ->  5.0 -  9.0
+     13.0 - 20.0         ->  9.0 - 16.0
+    """
+    from utils.excise import TimelineMap
+    return TimelineMap([(0.0, 5.0, 0.0), (8.0, 12.0, 5.0), (13.0, 20.0, 9.0)])
+
+
+def test_an_interval_inside_one_piece_is_one_span():
+    spans = _timeline().spans_to_original(6.0, 7.0)
+    assert len(spans) == 1
+    assert spans[0] == pytest.approx((9.0, 10.0))
+
+
+def test_an_interval_across_a_join_is_both_pieces_not_one_range():
+    """[to_original(start), to_original(end)] would claim 4.0-9.0, which
+    includes the 5.0-8.0 that was removed -- audio this segment never held."""
+    spans = _timeline().spans_to_original(4.0, 6.0)
+    assert len(spans) == 2
+    assert spans[0] == pytest.approx((4.0, 5.0))
+    assert spans[1] == pytest.approx((8.0, 9.0))
+    covered = sum(b - a for a, b in spans)
+    assert covered == pytest.approx(2.0), "the pieces must add up to the segment"
+
+
+def test_an_interval_across_two_joins_is_three_pieces():
+    spans = _timeline().spans_to_original(4.5, 9.5)
+    assert len(spans) == 3
+    assert [round(a, 2) for a, _ in spans] == [4.5, 8.0, 13.0]
+
+
+def test_crosses_cut_says_whether_the_audio_is_glued():
+    tl = _timeline()
+    assert tl.crosses_cut(4.0, 6.0) is True
+    assert tl.crosses_cut(6.0, 7.0) is False
+
+
+def test_an_empty_or_reversed_interval_has_no_provenance():
+    tl = _timeline()
+    assert tl.spans_to_original(3.0, 3.0) == []
+    assert tl.spans_to_original(5.0, 4.0) == []
+
+
+def test_an_uncut_recording_maps_every_interval_to_itself():
+    """No excision means the two timelines are the same one, and provenance
+    must not become a special case for the caller."""
+    from utils.excise import TimelineMap
+    empty = TimelineMap()
+    assert empty.spans_to_original(3.0, 7.0) == [(3.0, 7.0)]
+    assert empty.crosses_cut(3.0, 7.0) is False
+    assert empty.cut_between(3.0, 7.0) is False
+
+
+def test_a_pause_spanning_a_join_is_not_a_pause():
+    """The gap between two turns is the thing a full-duplex corpus learns. A
+    gap measured across a join is however much was removed there, not silence."""
+    tl = _timeline()
+    assert tl.cut_between(4.9, 5.1) is True     # the 5.0 join sits inside
+    assert tl.cut_between(6.0, 7.0) is False    # wholly inside one piece
+    assert tl.cut_between(8.9, 9.1) is True     # the 9.0 join
+
+
+def test_a_turn_ending_exactly_on_a_join_still_counts():
+    """Touching endpoints count: what follows is removed audio whatever the
+    arithmetic says."""
+    tl = _timeline()
+    assert tl.cut_between(5.0, 5.0) is True
+    assert tl.cut_between(3.0, 5.0) is True
+
+
+def test_the_end_of_the_recording_is_not_a_join():
+    """kept[-1] ends the audio; there is nothing removed after it to mistake
+    for a gap."""
+    tl = _timeline()
+    assert tl.cut_between(15.0, 16.0) is False
+
+
+def test_provenance_survives_a_json_round_trip():
+    from utils.excise import TimelineMap
+    revived = TimelineMap.from_json(_timeline().to_json())
+    assert revived.crosses_cut(4.0, 6.0) is True
+    assert revived.cut_between(4.9, 5.1) is True
+
+
+# --- replaying a checkpointed cut --------------------------------------------
+#
+# run() is re-entered once per stage and reloads the whole recording each time,
+# so the cut has to be reproduced on every entry. Reproducing it from the music
+# map is not the same thing: the map is rebuilt from thresholds that may have
+# moved and a cut_singing flag that may have been switched off since. When that
+# rebuild comes back empty, the audio stays whole while the timeline still says
+# it was shortened -- and diarization then runs on a different timeline from
+# every timestamp that follows it, with nothing to notice.
+
+def test_the_removed_spans_are_the_complement_of_the_kept_ones():
+    tl = _timeline()      # 0-5, 8-12, 13-20 kept out of 20s
+    assert tl.removed_spans(20.0) == [(5.0, 8.0), (12.0, 13.0)]
+
+
+def test_a_recording_that_opens_on_a_cut_reports_the_lead_in():
+    from utils.excise import TimelineMap
+    tl = TimelineMap([(4.0, 10.0, 0.0)])
+    assert tl.removed_spans(10.0) == [(0.0, 4.0)]
+
+
+def test_a_recording_that_ends_inside_a_cut_needs_its_length():
+    """Without the original duration the tail cannot be told from the end."""
+    from utils.excise import TimelineMap
+    tl = TimelineMap([(0.0, 6.0, 0.0)])
+    assert tl.removed_spans() == []
+    assert tl.removed_spans(10.0) == [(6.0, 10.0)]
+
+
+def test_an_uncut_timeline_removed_nothing():
+    from utils.excise import TimelineMap
+    assert TimelineMap().removed_spans(20.0) == []
+    assert TimelineMap([(0.0, 20.0, 0.0)]).removed_spans(20.0) == []
+
+
+def test_replaying_a_cut_reproduces_it_sample_for_sample():
+    """This is the property the re-entry path depends on: cutting, then
+    cutting again from the timeline alone, must give the same audio."""
+    sr = 1000
+    waveform = np.arange(20 * sr, dtype=np.float32) / sr
+    once, timeline = excise(waveform, sr, [(5.0, 8.0), (12.0, 13.0)])
+
+    again, _ = excise(waveform, sr, timeline.removed_spans(20.0))
+    assert len(again) == len(once)
+    assert np.allclose(again, once)
+
+
+def test_replaying_survives_a_json_round_trip():
+    """The timeline reaches the next entry through a checkpoint, not memory."""
+    from utils.excise import TimelineMap
+    sr = 1000
+    waveform = np.arange(20 * sr, dtype=np.float32) / sr
+    once, timeline = excise(waveform, sr, [(2.0, 4.0), (15.0, 19.0)])
+    revived = TimelineMap.from_json(timeline.to_json())
+    again, _ = excise(waveform, sr, revived.removed_spans(20.0))
+    assert np.allclose(again, once)
+
+
+def test_replaying_a_dropped_island_keeps_it_dropped():
+    """excise drops a kept stretch under min_keep together with the span beside
+    it. The timeline records that, so the replay must not resurrect it."""
+    sr = 1000
+    waveform = np.arange(20 * sr, dtype=np.float32) / sr
+    once, timeline = excise(waveform, sr, [(5.0, 8.0), (8.02, 11.0)])
+    again, _ = excise(waveform, sr, timeline.removed_spans(20.0))
+    assert np.allclose(again, once)
+
+
+def test_the_pipeline_replays_from_the_timeline_not_from_the_map():
+    """The bug this guards: `cuts` is recomputed per entry, the timeline is
+    not. Reaching for `cuts` here is what puts the two out of step."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    source = open(os.path.join(root, "services", "pipeline_service.py"),
+                  encoding="utf-8").read()
+    start = source.index("elif timeline:")
+    block = source[start:start + 1600]
+    assert "timeline.removed_spans(" in block
+    assert "for a, b, _ in cuts]" not in block, (
+        "the replay must not be rebuilt from the music map")

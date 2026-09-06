@@ -197,7 +197,6 @@ def test_a_checkpointed_stage_does_not_revive_its_worker():
         "services/pipeline_service.py"), encoding="utf-8").read()
 
     for worker, stage in (("diarizen", "diarization"),
-                          ("sidon", "separation"),
                           ("qwen3", "asr")):
         call = re.search(rf'.*_rebind_worker\(args, "{worker}".*', src).group(0)
         line_no = src[:src.index(call)].count("\n")

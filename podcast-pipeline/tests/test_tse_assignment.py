@@ -46,74 +46,21 @@ def test_the_anchor_branch_is_symmetric():
         assert anchor_embed[-1] != other_np[-1]
 
 
-# --- channel similarity -----------------------------------------------------
-
-def test_channel_similarity_uses_an_energy_envelope():
-    """The decoder resynthesises each chunk independently, so the same voice
-    returns with a different phase across a seam. Raw-sample correlation goes
-    from 1.0 to -0.64 on a 2ms shift, which is enough to swap two channels that
-    were already correct."""
-    src = _source("sidon_infer.py")
-    fn = src[src.index("def _channel_similarity"):]
-    fn = fn[:fn.index("\ndef ", 1)]
-
-    assert "_energy_envelope" in fn
-    assert "_ENVELOPE_FRAME" in src
 
 
-def test_the_envelope_survives_a_phase_shift_that_breaks_raw_correlation():
-    import numpy as np
-
-    rng = np.random.default_rng(0)
-    sr, n = 24000, 12000
-    t = np.arange(n) / sr
-    voice = np.sin(2 * np.pi * 180 * t) * np.exp(-((t - 0.25) ** 2) / 0.01)
-    voice = voice + rng.standard_normal(n) * 0.02
-
-    def corr(a, b):
-        a, b = a - a.mean(), b - b.mean()
-        d = np.linalg.norm(a) * np.linalg.norm(b)
-        return float(np.dot(a, b) / d) if d > 1e-8 else 0.0
-
-    def envelope(x, frame=240):
-        m = len(x) // frame
-        return np.sqrt((x[:m * frame].reshape(m, frame) ** 2).mean(axis=1) + 1e-12)
-
-    shifted = np.roll(voice, int(0.002 * sr))          # 2ms
-
-    assert corr(voice, shifted) < 0.5, "raw correlation should collapse"
-    assert corr(envelope(voice), envelope(shifted)) > 0.9
 
 
-# --- stitched window sizing -------------------------------------------------
 
-def test_the_stitched_window_takes_five_seconds_per_speaker():
-    """ECAPA pools over time; 3s left the scores noisy enough to mislabel
-    tracks. Both speakers contribute equally, so the ratio stays 1:1 whatever
-    this is."""
-    src = _source("services/separation_service.py")
-    assert 'TSE_STITCH_SOLO", "5.0"' in src
-
-
-def test_the_overlap_carries_context_either_side():
-    """Diarizer boundaries land on a frame grid, not on the speech, so a span
-    cut exactly at them can start mid-syllable."""
-    src = _source("services/separation_service.py")
-    assert 'TSE_STITCH_EDGE_PAD", "0.2"' in src
-    assert "pad = TSE_STITCH_EDGE_PAD" in src, "the pad must not be hardcoded"
-
-
-def test_both_stitch_settings_are_configurable_per_profile():
+def test_the_retired_stitch_settings_are_gone_from_every_profile():
+    """`stitch_solo` and `stitch_edge_pad` sized the solo slices in the window
+    that DialogueSidon needed. Nothing reads them now, and a setting that looks
+    live but is not is worse than no setting at all."""
     import json
 
     with open(os.path.join(ROOT, "config.json"), encoding="utf-8") as f:
         config = json.load(f)
-
     for env, profile in config["environments"].items():
         tse = profile.get("models", {}).get("tse", {})
-        assert "stitch_solo" in tse, f"{env} cannot set stitch_solo"
-        assert "stitch_edge_pad" in tse, f"{env} cannot set stitch_edge_pad"
-
-    main = _source("main.py")
-    assert '("stitch_solo", "TSE_STITCH_SOLO")' in main
-    assert '("stitch_edge_pad", "TSE_STITCH_EDGE_PAD")' in main
+        assert "stitch_solo" not in tse, env
+        assert "stitch_edge_pad" not in tse, env
+    assert "TSE_STITCH" not in _source("main.py")

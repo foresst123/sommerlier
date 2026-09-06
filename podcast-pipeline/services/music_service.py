@@ -59,7 +59,8 @@ class MusicService:
             if self.logger: self.logger.info("Running BS-RoFormer on full audio to extract vocals.")
             self.full_vocals = self.bs_roformer.separate_full(audio.waveform, audio.sample_rate)
             
-    def strip_music_spans(self, audio: AudioData, music_map, logger=None):
+    def strip_music_spans(self, audio: AudioData, music_map, logger=None,
+                          source_path: str = None):
         """Replace the music-bed stretches of the waveform with their vocals.
 
         Runs before diarization, so the diarizer segments audio that no longer
@@ -75,6 +76,13 @@ class MusicService:
         so they can be cached and re-applied without running the separator
         again -- run() is re-entered once per stage and reloads the audio each
         time.
+
+        `source_path` is the original file. When it is given the separator
+        decodes each span from it at the checkpoint's own 44.1kHz instead of
+        reusing the 16kHz slice held here, which is where most of the SDR the
+        model is chosen for actually lives. It is an optimisation, not a
+        requirement: without it, or when the decode fails, the 16kHz slice is
+        separated exactly as before.
         """
         from utils.music_map import MUSIC
 
@@ -85,6 +93,7 @@ class MusicService:
         waveform = self._writable_waveform(audio)
         total = len(waveform)
         patches = []
+        hi_res = 0
         for start, end, kind in music_map.spans:
             if kind != MUSIC:
                 continue
@@ -93,7 +102,16 @@ class MusicService:
                 # Under half a second there is not enough for the separator to
                 # work with, and the seams would cost more than the bed does.
                 continue
-            vocals = self.bs_roformer.separate_segment(waveform[i:j], sr)
+            reference = waveform[i:j]
+            vocals = None
+            if source_path is not None:
+                separate_span = getattr(self.bs_roformer, "separate_span", None)
+                if separate_span is not None:
+                    vocals = separate_span(source_path, start, end, sr, reference)
+                    if vocals is not None:
+                        hi_res += 1
+            if vocals is None:
+                vocals = self.bs_roformer.separate_segment(reference, sr)
             if vocals is None or len(vocals) != j - i:
                 continue
             waveform[i:j] = vocals
@@ -102,7 +120,8 @@ class MusicService:
         if logger and patches:
             seconds = sum(len(p) for _, p in patches) / sr
             logger.info(f"Stripped music from {seconds:.1f}s of the recording "
-                        f"before diarization ({len(patches)} stretch(es))")
+                        f"before diarization ({len(patches)} stretch(es), "
+                        f"{hi_res} at 44.1kHz)")
         return patches
 
     @staticmethod

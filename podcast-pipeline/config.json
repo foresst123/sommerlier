@@ -91,18 +91,16 @@
                 "tse": {
                     "qc_sim_threshold": 0.2,
                     "min_voiced_sec": 1.0,
-                    "stitch_solo": 5.0,
-                    "stitch_edge_pad": 0.2,
                     "enrollment_memory": false,
                     "separator": "usef"
                 },
-                "sidon": {
-                    "num_steps": 100,
-                    "spectral_restore": false
-                },
                 "bs_roformer": {
-                    "segment": 10,
-                    "overlap": 0.1
+                    "model": "model_bs_roformer_ep_368_sdr_12.9628.ckpt",
+                    "chunk_duration": 300,
+                    "normalization_threshold": 1.0,
+                    "native_fp16": true,
+                    "torch_compile": false,
+                    "hi_res": true
                 },
                 "refinement": {
                     "model_name": "Qwen/Qwen2.5-3B-Instruct",
@@ -185,18 +183,16 @@
                 "tse": {
                     "qc_sim_threshold": 0.2,
                     "min_voiced_sec": 1.0,
-                    "stitch_solo": 5.0,
-                    "stitch_edge_pad": 0.2,
                     "enrollment_memory": false,
                     "separator": "usef"
                 },
-                "sidon": {
-                    "num_steps": 100,
-                    "spectral_restore": false
-                },
                 "bs_roformer": {
-                    "segment": 30,
-                    "overlap": 0.2
+                    "model": "model_bs_roformer_ep_368_sdr_12.9628.ckpt",
+                    "chunk_duration": 600,
+                    "normalization_threshold": 1.0,
+                    "native_fp16": true,
+                    "torch_compile": false,
+                    "hi_res": true
                 },
                 "refinement": {
                     "model_name": "Qwen/Qwen3-8B",

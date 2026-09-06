@@ -72,11 +72,14 @@ def highpass(x: np.ndarray, sr: int, cutoff: float = HIGHPASS_HZ) -> np.ndarray:
 
 def restore_gain(track: np.ndarray, track_sum: np.ndarray, mixture: np.ndarray,
                  max_gain_db: float = 12.0) -> np.ndarray:
-    """Undo Sidon's per-chunk peak normalisation with a single common gain.
+    """Put the separated tracks back at the level of the audio around them.
 
-    Sidon normalises every 20s chunk by its own peak, so the returned tracks sit
-    at an arbitrary level and a spliced span lands several dB away from the
-    audio around it. ASR front-ends read that seam as an event.
+    A spliced span landing several dB away from its neighbours is a seam ASR
+    front-ends read as an event. Written for DialogueSidon, which normalised
+    every 20s chunk by its own peak and so returned tracks at an arbitrary
+    level; USEF masks rather than resynthesises and mostly does not drift, so
+    the correction is now a check that usually finds nothing. Kept because a
+    near-unity gain costs nothing and the failure it guards is silent.
 
     The gain is derived from the SUM of both separated tracks against the
     mixture, not from this track against its neighbours. Matching a track to the

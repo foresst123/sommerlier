@@ -95,40 +95,10 @@ def _service():
     return svc
 
 
-def test_a_third_voice_between_overlaps_no_longer_blocks_the_job():
-    """Measured case: eight two-speaker overlaps across 43s, rejected because a
-    third speaker said something once, in a gap between them."""
-    svc = _service()
-    by_spk = {
-        "1": [(820.0, 880.0)],
-        "2": [(831.4, 831.9), (874.2, 874.3)],
-        "0": [(840.1, 841.3)],          # between the overlaps, not in one
-    }
-    overlaps = [(831.4, 831.9), (874.2, 874.3)]
-    built, reason = svc._build_window(by_spk, "1", "2", 831.4, 874.3, 2978.0,
-                                      overlaps=overlaps)
-    assert reason != "multi_speaker"
 
 
-def test_a_third_voice_inside_an_overlap_still_blocks_it():
-    """Sidon emits two sources; three in the span really is unseparable."""
-    svc = _service()
-    by_spk = {
-        "1": [(820.0, 880.0)],
-        "2": [(850.0, 851.0)],
-        "0": [(850.2, 850.8)],          # inside the overlap
-    }
-    built, reason = svc._build_window(by_spk, "1", "2", 850.0, 851.0, 2978.0,
-                                      overlaps=[(850.0, 851.0)])
-    assert reason == "multi_speaker"
 
 
-def test_the_hull_is_used_when_no_overlaps_are_given():
-    """Callers that pass no span list keep the old, conservative behaviour."""
-    svc = _service()
-    by_spk = {"1": [(0.0, 100.0)], "2": [(10.0, 11.0)], "0": [(50.0, 51.0)]}
-    built, reason = svc._build_window(by_spk, "1", "2", 10.0, 60.0, 200.0)
-    assert reason == "multi_speaker"
 
 
 # --- overlaps that need no separation still have to be recorded -------------
