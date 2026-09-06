@@ -440,6 +440,18 @@ class PipelineService:
             audio_data.duration = len(trimmed) / float(audio_data.sample_rate)
         self.timeline = timeline
 
+        # PANNs is done: the map is built and the beds are stripped. The only
+        # thing that needs it again is the per-segment fallback at step 5, and
+        # that is skipped whenever a map exists.
+        #
+        # It has to be released here rather than there. Under stage-major
+        # execution the run finishes this stage for every file and leaves for
+        # diarization, so the release at the end of step 5 is never reached --
+        # and the tagger sat on ~600MB of VRAM for the rest of the run, on a
+        # card that then has to hold DiariZen, the embedder, TSE and ASR.
+        if not self.step_enabled(args, "music_removal_fallback"):
+            self._free(args, "panns")
+
         # Everything after the cut works in the shortened timeline, so the map
         # separation consults has to move with it.
         self.separation_svc.music_map = (music_map.remap(timeline) if timeline

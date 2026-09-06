@@ -391,3 +391,26 @@ def test_prefetch_is_reachable_for_a_box_with_room():
     main = open(os.path.join(root, "main.py"), encoding="utf-8").read()
     assert '"--prefetch_workers"' in main
     assert 'getattr(args, "prefetch_workers", False)' in main
+
+
+def test_the_tagger_is_released_when_the_music_stage_ends():
+    """PANNs was only released at the end of step 5, the per-segment music
+    fallback. That stage is skipped whenever a music map exists, and under
+    stage-major execution the run leaves for diarization long before reaching
+    it -- so the tagger held ~600MB of VRAM for the whole run, on the card that
+    then has to fit DiariZen, the embedder, TSE and ASR.
+
+    Observed in a real run: "Unloaded bs_roformer from VRAM" appeared and no
+    matching line for panns ever did."""
+    source = open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "services", "pipeline_service.py"),
+        encoding="utf-8").read()
+
+    release = source.index('self._free(args, "panns")')
+    diarization = source.index("# 3. Diarization")
+    assert release < diarization, (
+        "panns must be released inside the music stage, not after it")
+
+    fallback = source.index("# 5. Background Music Removal")
+    assert source.index('self._free(args, "panns", "bs_roformer")') > fallback, (
+        "the fallback keeps its own release for runs that do reach it")
