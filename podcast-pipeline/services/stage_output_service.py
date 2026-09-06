@@ -325,7 +325,7 @@ class StageOutputService:
         if audio is not None and sample_rate:
             try:
                 import soundfile as sf
-                sf.write(os.path.join(stage, "after_music.wav"), audio, sample_rate)
+                sf.write(os.path.join(stage, "after_music.wav"), audio, sample_rate, subtype='PCM_16')
             except Exception as exc:
                 if self.logger:
                     self.logger.warning(f"Could not write after_music.wav: {exc}")

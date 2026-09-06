@@ -29,14 +29,45 @@ class ExportService:
         os.makedirs(separated_dir, exist_ok=True)
         
         if self.logger: self.logger.info(f"Exporting separation audio to {separated_dir}")
+        
+        # Determine total length for the stitched full audio
+        max_end = max((seg.end for seg in enhanced_segments), default=0.0)
+        full_length = int(max_end * sample_rate)
+        full_audio = np.zeros(full_length, dtype=np.float32)
+        
         for seg in enhanced_segments:
             if seg.enhanced_audio is not None:
-                # Save as WAV for higher quality instead of MP3 (which requires pydub encoding)
+                # Save individual chunk
                 file_path = os.path.join(separated_dir, f"{seg.index}_{seg.speaker}_separated.wav")
                 try:
-                    sf.write(file_path, seg.enhanced_audio, sample_rate)
+                    sf.write(file_path, seg.enhanced_audio, sample_rate, subtype='PCM_16')
                 except Exception as e:
                     if self.logger: self.logger.warning(f"Failed to export separated audio for {seg.index}: {e}")
+                    
+                # Mix into full audio
+                start_sample = int(seg.start * sample_rate)
+                end_sample = start_sample + len(seg.enhanced_audio)
+                
+                if end_sample > full_length:
+                    # Pad if necessary
+                    pad_len = end_sample - full_length
+                    full_audio = np.pad(full_audio, (0, pad_len))
+                    full_length = end_sample
+                    
+                full_audio[start_sample:end_sample] += seg.enhanced_audio
+                
+        # Save the stitched full audio
+        full_audio_path = os.path.join(save_dir, "after_separation.wav")
+        try:
+            # Normalize to prevent clipping from overlap mixing
+            max_val = np.max(np.abs(full_audio))
+            if max_val > 1.0:
+                full_audio = full_audio / max_val
+            
+            sf.write(full_audio_path, full_audio, sample_rate, subtype='PCM_16')
+            if self.logger: self.logger.info(f"Exported full stitched audio to {full_audio_path}")
+        except Exception as e:
+            if self.logger: self.logger.warning(f"Failed to export full stitched audio: {e}")
 
     def export_mp3_segments(self, segments: List[TranscriptSegment], audio: AudioData, save_dir: str, audio_name: str):
         segments_dir = os.path.join(save_dir, audio_name)
