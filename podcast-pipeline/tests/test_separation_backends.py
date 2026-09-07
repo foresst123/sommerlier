@@ -189,3 +189,50 @@ def test_an_unknown_separator_is_refused_not_quietly_replaced():
     from models.separation_backends import make_backend
     with _pytest.raises(ValueError):
         make_backend("sidon")
+
+
+# --- the export returns inverted phase ---------------------------------------
+
+def test_the_backend_undoes_the_export_s_phase_inversion():
+    """usef_tse_tfgridnet returns the extracted speech negated.
+
+    Measured against the graph itself: a mixture plus an enrollment of the
+    speaker who dominates it gives an output correlating with the input at
+    -1.0000 on synthetic speech and -0.90 across six slices of this corpus.
+    Negating brings the same slices to +0.95.
+
+    Inaudible on its own -- a flipped waveform sounds like the original -- and
+    that is what let it through. The splice is where it does damage: an
+    inverted span goes into the middle of a track that is not inverted, and the
+    equal-power crossfade at each edge blends a signal with its own negative,
+    which cancels rather than blends. A 28-minute recording had 248 spliced
+    spans, so about 500 dropouts.
+    """
+    import numpy as np
+    from models.separation_backends import POLARITY, UsefOnnxBackend
+
+    assert POLARITY == -1.0
+
+    backend = UsefOnnxBackend.__new__(UsefOnnxBackend)
+    backend._input_names = ["mixture", "enrollment"]
+    signal = np.sin(np.linspace(0, 40 * np.pi, 16000)).astype(np.float32)
+
+    class Graph:
+        """Stands in for the export: returns the target, negated."""
+        def run(self, _out, feeds):
+            return [(-signal).reshape(1, -1)]
+
+    backend._session = Graph()
+    out = backend._extract_one(signal, np.zeros(64000, dtype=np.float32))
+    corr = float(np.dot(out, signal) / (np.linalg.norm(out) * np.linalg.norm(signal)))
+    assert corr > 0.99, f"output still inverted (corr {corr:+.3f})"
+
+
+def test_the_correction_is_named_not_a_stray_minus_sign():
+    """A bare `-fed` in the loop would read as a typo to the next person and be
+    removed. The constant carries the measurement that justifies it."""
+    import inspect
+    from models import separation_backends
+    source = inspect.getsource(separation_backends)
+    assert "POLARITY * fed" in source
+    assert "-1.0000" in source, "the measurement belongs beside the constant"

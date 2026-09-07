@@ -56,6 +56,21 @@ USEF_SR = 8000
 USEF_MIX_SAMPLES = 16000        # 2.0s
 USEF_ENROLL_SAMPLES = 64000     # 8.0s
 
+# The export returns the extracted speech with its phase inverted.
+#
+# Measured against the model directly: feed it a mixture and an enrollment of
+# the speaker who dominates it, and the output correlates with the input at
+# -1.0000 on synthetic speech and -0.90 on six slices of this corpus. Negating
+# it brings the same slices to +0.95.
+#
+# Alone that is inaudible -- a flipped waveform sounds like the original. It is
+# the splice that makes it destructive: an inverted span is written into the
+# middle of a track that is not inverted, and the equal-power crossfade at each
+# edge then blends a signal with its own negative, which cancels instead of
+# blending. One dropout at each end of every spliced span, and there were 248
+# of them in a 28-minute recording.
+POLARITY = -1.0
+
 USEF_REPO = "bitsydarel/usef-tse-onnx"
 USEF_DEFAULT_FILE = "usef_tse_tfgridnet_wsj0-2mix.onnx"
 
@@ -158,6 +173,7 @@ class UsefOnnxBackend(SeparationBackend):
                 {self._input_names[0]: chunk.reshape(1, -1).astype(np.float32),
                  self._input_names[1]: enroll_in.astype(np.float32)},
             )[0].reshape(-1)
+            fed = POLARITY * fed
             out[start:start + take] = fed[:take]
         return out
 
