@@ -65,3 +65,6 @@ podcast-pipeline/inpaint_samples/
 # PANNs raw dumps: binary, regenerable with tools/dump_panns.py
 data/panns/*.npz
 data/panns/*.csv
+
+# Kết quả chạy tải về: nặng (review HTML ~107MB/file) và có repo lồng bên trong
+results/

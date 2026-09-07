@@ -99,12 +99,20 @@ class TimelineMap:
         never adjacent now are. Anything that widens a span has to stop at
         them: reaching across a seam picks up audio from somewhere else in the
         recording entirely.
+
+        A join is where the next piece's fade-in begins, which is exactly the
+        `cut_start` excise recorded for it -- not the running total of the
+        lengths before it. The two differ because every join overlap-adds, so
+        the timeline is `fade` shorter at each one, and summing lengths drifts
+        by one fade per join:
+
+            summed:      11.88  32.08  45.88  60.64  104.20  110.96  114.20
+            recorded:    11.85  32.02  45.79  60.52  104.05  110.78  113.99
+
+        Measured on a real run, where the drift left every cut 30ms late and
+        four segments carrying a sliver of the following piece.
         """
-        out, position = [], 0.0
-        for start, end, _cut_start in self.kept[:-1]:
-            position += end - start
-            out.append(position)
-        return out
+        return [cut_start for _start, _end, cut_start in self.kept[1:]]
 
     def removed_spans(self, duration: float = None):
         """What this timeline took out, in original time.
@@ -152,9 +160,15 @@ class TimelineMap:
         if not self.kept:
             return [(start, end)]
 
+        # Each piece owns cut time up to where the next one's fade-in starts.
+        # Taking `cut_start + length` instead makes consecutive pieces overlap
+        # by `fade`, and any span ending inside that overlap is reported as
+        # spanning two pieces when it spans one.
+        bounds = [c for _s, _e, c in self.kept[1:]] + [float("inf")]
+
         out = []
-        for orig_start, orig_end, cut_start in self.kept:
-            cut_end = cut_start + (orig_end - orig_start)
+        for (orig_start, orig_end, cut_start), cut_end in zip(self.kept, bounds):
+            cut_end = min(cut_end, cut_start + (orig_end - orig_start))
             lo, hi = max(start, cut_start), min(end, cut_end)
             if hi <= lo:
                 continue

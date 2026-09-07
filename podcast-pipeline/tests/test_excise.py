@@ -595,3 +595,53 @@ def test_dropping_an_island_still_replays_exactly():
     once, timeline = excise(waveform, sr, [(5.0, 10.0), (10.5, 15.0)])
     again, _ = excise(waveform, sr, timeline.removed_spans(30.0))
     assert np.allclose(again, once)
+
+
+def test_a_join_is_where_the_next_fade_in_begins_not_the_running_total():
+    """Every join overlap-adds, so the timeline is `fade` shorter at each one.
+    Summing the kept lengths drifts by one fade per join, which put every cut
+    30ms late and left four segments carrying a sliver of the following piece
+    on a real run.
+
+    The timeline below is that run's, verbatim."""
+    from utils.excise import TimelineMap
+    tl = TimelineMap([(2.86, 14.74, 0.0), (17.58, 37.78, 11.85),
+                      (42.54, 56.34, 32.02), (58.54, 73.3, 45.79),
+                      (75.18, 118.74, 60.52), (122.22, 128.98, 104.05),
+                      (133.42, 136.66, 110.78), (142.38, 1689.86, 113.99)],
+                     fade=0.03)
+
+    assert tl.seams() == [11.85, 32.02, 45.79, 60.52, 104.05, 110.78, 113.99]
+
+    drifted, position = [], 0.0
+    for start, end, _c in tl.kept[:-1]:
+        position += end - start
+        drifted.append(round(position, 2))
+    assert drifted == [11.88, 32.08, 45.88, 60.64, 104.2, 110.96, 114.2]
+    for real, wrong in zip(tl.seams(), drifted):
+        assert wrong > real, "the old sum ran late at every join"
+
+
+def test_a_span_ending_on_a_join_belongs_to_one_piece_only():
+    """`cut_start + length` overlaps the next piece by `fade`, so a span ending
+    inside that overlap was reported as spanning two pieces when it spans one.
+    This is the segment the real run flagged as glued."""
+    from utils.excise import TimelineMap
+    tl = TimelineMap([(2.86, 14.74, 0.0), (17.58, 37.78, 11.85)], fade=0.03)
+
+    assert tl.spans_to_original(9.507, 11.85) == [(pytest.approx(12.367),
+                                                   pytest.approx(14.71))]
+    assert not tl.crosses_cut(9.507, 11.85)
+    # Past the join it really does span both, and must still say so.
+    assert tl.crosses_cut(9.507, 11.90)
+
+
+def test_the_pieces_cover_cut_time_without_overlapping():
+    from utils.excise import TimelineMap
+    tl = TimelineMap([(2.86, 14.74, 0.0), (17.58, 37.78, 11.85),
+                      (42.54, 56.34, 32.02)], fade=0.03)
+    for seam in tl.seams():
+        just_before = tl.spans_to_original(seam - 0.01, seam)
+        just_after = tl.spans_to_original(seam, seam + 0.01)
+        assert len(just_before) == 1 and len(just_after) == 1
+        assert just_before[0][1] <= just_after[0][0] or just_before[0][0] != just_after[0][0]
