@@ -68,3 +68,6 @@ data/panns/*.csv
 
 # Kết quả chạy tải về: nặng (review HTML ~107MB/file) và có repo lồng bên trong
 results/
+
+# Playwright MCP scratch output
+.playwright-mcp/
