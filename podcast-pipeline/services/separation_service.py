@@ -45,6 +45,24 @@ TSE_RETRY_SPLIT = os.environ.get("TSE_RETRY_SPLIT", "1") not in ("0", "false", "
 TSE_ENROLL_BUDGET = float(os.environ.get("TSE_ENROLL_BUDGET", "8.0"))
 TSE_ENROLL_MIN_CLIP = float(os.environ.get("TSE_ENROLL_MIN_CLIP", "0.35"))
 TSE_ENROLL_MIN_TOTAL = float(os.environ.get("TSE_ENROLL_MIN_TOTAL", "1.5"))
+# One continuous clip beats several stitched together, and by enough to matter.
+# Measured on eight synthetic two-speaker mixtures built from this corpus, all
+# levelled to 0 dB, scored as SI-SDR improvement over the mixture:
+#
+#     several clips concatenated          +6.86 dB
+#     the same clips, crossfaded joins    +6.94 dB
+#     one continuous clip                 +8.39 dB
+#     one continuous clip, zero-padded    +8.56 dB
+#
+# Two things fall out of that. Crossfading the joins buys nothing, so the
+# damage is not the discontinuity at each one -- it is that the clip stops
+# being one continuous stretch of a voice. And zero-padding to fill the
+# window costs nothing, so a short real clip is worth more than a long
+# assembled one.
+#
+# Above this length a single clip is used alone; below it, clips are still
+# gathered to the budget, because too little speech is its own failure.
+TSE_ENROLL_PREFER_SINGLE = float(os.environ.get("TSE_ENROLL_PREFER_SINGLE", "4.0"))
 
 # --- QC -------------------------------------------------------------------
 # NOT CALIBRATED. Read the sim percentiles in the [TSE] log
@@ -310,12 +328,17 @@ class TargetExtractionService:
             candidates = [c for c in candidates if (c[1] - c[0]) >= TSE_ENROLL_MIN_CLIP]
             candidates.sort(key=lambda c: c[1] - c[0], reverse=True)
 
+            # Longest first, and if the longest is on its own long enough,
+            # stop there rather than assembling a patchwork -- see
+            # TSE_ENROLL_PREFER_SINGLE for what that assembly costs.
             picked, total = [], 0.0
             for start, end in candidates:
                 if total >= TSE_ENROLL_BUDGET:
                     break
                 picked.append(waveform[int(start * sr):int(end * sr)].copy())
                 total += end - start
+                if len(picked) == 1 and total >= TSE_ENROLL_PREFER_SINGLE:
+                    break
 
             if total < TSE_ENROLL_MIN_TOTAL:
                 if self.logger:
