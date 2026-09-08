@@ -155,14 +155,30 @@ PAGE = """<!doctype html>
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   button:hover { filter: brightness(1.08); }
   #status { color: var(--ok); font-size: 13px; min-width: 12ch; }
-  .wrap { overflow-x: auto; }
-  table { border-collapse: collapse; width: 100%; min-width: 1400px; }
+  /* The table scrolls inside this, not the page, and that is what makes the
+     column names stay put. `overflow-x: auto` alone does not work: the spec
+     computes overflow-y to auto alongside it, so the wrapper silently becomes
+     a vertical scroll container that never scrolls -- and a sticky <th> pins
+     itself to that instead of to the window, scrolling away with the rows.
+     Giving it a real height makes it the scroller it was already pretending
+     to be. 74px is the transport bar at the foot. */
+  .wrap {
+    overflow: auto;
+    height: calc(100vh - var(--hh, 62px) - 74px);
+    overscroll-behavior: contain;
+  }
+  table { border-collapse: collapse; width: 100%; min-width: 1180px; }
   /* State reads at a glance from shape and colour together, so the two flag
      columns can be scanned without stopping to read every cell. */
+  /* Read as a symbol, not a sentence. These two columns are scanned down the
+     page rather than read row by row, and the words were costing 100px each
+     for information a glyph carries; the wording moved into the tooltip. */
   .flag {
-    display: inline-block; white-space: nowrap; font-size: 12px;
-    padding: 2px 7px; border-radius: 10px; border: 1px solid transparent;
+    display: inline-block; white-space: nowrap; font-size: 13px;
+    font-weight: 600; line-height: 1.4; text-align: center; min-width: 22px;
   }
+  th.c-flag { width: 42px; text-align: center; }
+  td.c-flag { text-align: center; padding-left: 4px; padding-right: 4px; }
   .flag.none { color: var(--muted); }
   .flag.ok   { color: var(--ok); border-color: var(--ok); }
   .flag.warn { color: #b45309; border-color: #b45309; }
@@ -177,10 +193,14 @@ PAGE = """<!doctype html>
     border-bottom: 1px solid var(--line); padding: 8px 10px;
     vertical-align: top; text-align: left;
   }
+  /* Pinned to the top of .wrap rather than of the window: the page header
+     already owns the top of the window, and a thead pinned there would slide
+     underneath it and disappear exactly when a long table needs it. */
   th {
-    position: sticky; top: 0px; background: var(--bg); z-index: 5;
-    font-size: 12px; text-transform: uppercase; letter-spacing: .04em;
-    color: var(--muted); font-weight: 600;
+    position: sticky; top: 0; background: var(--bg); z-index: 5;
+    font-size: 11px; text-transform: uppercase; letter-spacing: .03em;
+    color: var(--muted); font-weight: 600; padding: 7px 8px;
+    box-shadow: inset 0 -1px 0 var(--line);
   }
   tbody tr:nth-child(odd) { background: var(--row); }
   /* First column carries everything needed to find the row again: which
@@ -234,28 +254,28 @@ PAGE = """<!doctype html>
   #bar .who b { display: block; }
   #bar .who span { color: var(--muted); font-size: 12px; }
   #bar .src { font-size: 12px; color: var(--muted); min-width: 9ch; }
-  body { padding-bottom: 74px; }
+  body { overflow: hidden; }
 
   /* The two reviewer columns, built the way a paper form builds them: the
      question is asked once in the column head, and every row is just a box.
      Repeating the label in each cell is what made them wide and slow to scan.
      The label wraps the box so the whole cell is the target -- a reviewer
      ticking a thousand rows should not have to hit a 17px square. */
-  th.mark-h { text-align: center; width: 62px; line-height: 1.25; }
+  th.mark-h { text-align: center; width: 44px; line-height: 1.15; font-size: 10px; }
   td.mark { padding: 0; vertical-align: middle; }
   td.mark label {
     display: flex; align-items: center; justify-content: center;
-    min-height: 44px; height: 100%; cursor: pointer; user-select: none;
+    min-height: 40px; height: 100%; cursor: pointer; user-select: none;
   }
   td.mark label:hover { background: color-mix(in srgb, var(--accent) 9%, transparent); }
   td.mark input {
     appearance: none; -webkit-appearance: none; margin: 0; cursor: pointer;
-    width: 20px; height: 20px; border: 1.5px solid var(--muted); border-radius: 3px;
+    width: 18px; height: 18px; border: 1.5px solid var(--muted); border-radius: 3px;
     background: var(--bg); position: relative; display: block;
   }
   td.mark input:checked { background: var(--accent); border-color: var(--accent); }
   td.mark input:checked::after {
-    content: ""; position: absolute; left: 6px; top: 2px;
+    content: ""; position: absolute; left: 5px; top: 1px;
     width: 5px; height: 10px; border: solid #fff;
     border-width: 0 2px 2px 0; transform: rotate(42deg);
   }
@@ -286,8 +306,8 @@ PAGE = """<!doctype html>
       <th class="c-spk">Giọng</th>
       <th>Audio gốc</th>
       <th>Sau xử lý</th>
-      <th>Nhạc</th>
-      <th>Tách</th>
+      <th class="c-flag" title="Bộ dò nhạc thấy gì, và đã lọc chưa">Nhạc</th>
+      <th class="c-flag" title="Chồng tiếng đã tách được chưa">Tách</th>
       <th>3 bản ASR</th>
       <th>Text đã chọn</th>
       <th>Sửa</th>
@@ -329,11 +349,11 @@ function playCell(i, which, has) {
 // A separated segment never reaches the music detector, so "no music" would be
 // a claim the pipeline never made. Say "chưa xét" instead of implying clean.
 function musicCell(r) {
-  if (r.bss) return `<span class="flag none" title="Đoạn đã tách không qua bộ dò nhạc">–</span>`;
-  if (!r.music) return `<span class="flag none">–</span>`;
+  if (r.bss) return `<span class="flag none" title="Đoạn đã tách không qua bộ dò nhạc">·</span>`;
+  if (!r.music) return `<span class="flag none" title="Không phát hiện nhạc">·</span>`;
   return r.bs_roformer
-    ? `<span class="flag ok" title="Phát hiện nhạc, đã tách nhạc bằng BS-RoFormer">♪ đã lọc</span>`
-    : `<span class="flag warn" title="Phát hiện nhạc nhưng chưa lọc">♪ còn nhạc</span>`;
+    ? `<span class="flag ok" title="Phát hiện nhạc, đã lọc">♪</span>`
+    : `<span class="flag warn" title="Phát hiện nhạc nhưng CHƯA lọc">♪!</span>`;
 }
 
 // Reasons come from the separation report; a reviewer needs to know the audio
@@ -351,12 +371,12 @@ function sepCell(r) {
   const u = r.unseparated || [];
   if (!u.length) {
     return r.bss
-      ? `<span class="flag ok" title="Đã tách chồng tiếng thành công">✓ đã tách</span>`
-      : `<span class="flag none">–</span>`;
+      ? `<span class="flag ok" title="Đã tách chồng tiếng thành công">✓</span>`
+      : `<span class="flag none" title="Không có chồng tiếng">·</span>`;
   }
   const total = u.reduce((a, x) => a + (x.end - x.start), 0);
   const reasons = [...new Set(u.map(x => SEP_LABEL[x.reason] || x.reason))].join(", ");
-  return `<span class="flag bad" title="${esc(reasons)}">✗ ${total.toFixed(1)}s</span>`;
+  return `<span class="flag bad" title="Còn ${total.toFixed(1)}s chưa tách — ${esc(reasons)}">✗</span>`;
 }
 
 DATA.forEach((r, i) => {
@@ -367,8 +387,8 @@ DATA.forEach((r, i) => {
     <td class="spk"><span>${esc(r.speaker)}</span></td>
     <td>${playCell(i, "src", !!r.audio_src)}</td>
     <td>${playCell(i, "out", !!r.audio_out)}</td>
-      <td>${musicCell(r)}</td>
-      <td>${sepCell(r)}</td>
+      <td class="c-flag">${musicCell(r)}</td>
+      <td class="c-flag">${sepCell(r)}</td>
     <td class="asr">
       <div><span>Whisper</span>${esc(r.whisper)}</div>
       <div><span>PhoWhisper</span>${esc(r.phowhisper)}</div>
@@ -422,6 +442,14 @@ DATA.forEach((r, i) => {
   if (r.edited !== r.final || r.note) tr.classList.add("changed");
   if (r.mark_music || r.mark_multi) tr.classList.add("marked");
 });
+
+// The table head pins directly under the page header, so it has to know how
+// tall that is -- and it changes when the buttons wrap on a narrow window.
+const _hdr = document.querySelector("header");
+const _pin = () => document.documentElement.style.setProperty(
+  "--hh", _hdr.getBoundingClientRect().height + "px");
+_pin();
+addEventListener("resize", _pin);
 
 let dirty = false;
 addEventListener("beforeunload", e => { if (dirty) e.preventDefault(); });
