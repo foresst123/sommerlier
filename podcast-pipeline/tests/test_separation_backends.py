@@ -1,12 +1,13 @@
-"""Swapping the separator without touching the assignment and QC around it.
+"""The seam between "produce two tracks" and "decide which is whose".
 
-`BssSeparator` produces two tracks and then decides which belongs to
-whom. Only the first is model-specific, and these pin the seam between them --
-including the part that matters most: a target-conditioned separator was told
-whose voice to extract, so the assignment must not run at all.
+Only the first is model-specific. `BssSeparator` runs a backend and then works
+out, with ECAPA, which returned track belongs to which speaker -- and these pin
+that seam, including the part that caused a real regression: what the backend
+needs in the window handed to it.
 
 Run:  python -m pytest tests/test_separation_backends.py -q   (from podcast-pipeline/)
 """
+import json
 import os
 import sys
 
@@ -15,181 +16,68 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.separation_backends import (
-    USEF_ENROLL_SAMPLES,
-    USEF_MIX_SAMPLES,
-    USEF_SR,
-    UsefOnnxBackend,
-    make_backend,
-)
+from models.separation_backends import BACKENDS, SidonBackend, make_backend
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _profiles():
+    with open(os.path.join(ROOT, "config.json"), encoding="utf-8") as fh:
+        return json.load(fh)["environments"]
 
 
 # --- choosing a backend -----------------------------------------------------
 
-def test_usef_is_the_default():
-    assert make_backend(None, process=None, temp_dir="/tmp").name == "usef"
+def test_sidon_is_the_default():
+    assert make_backend(None, process=None, temp_dir="/tmp").name == "sidon"
 
 
 def test_names_are_case_and_space_insensitive():
-    assert make_backend("  USEF ").name == "usef"
+    assert make_backend("  SIDON ", process=None, temp_dir="/tmp").name == "sidon"
 
 
 def test_an_unknown_name_fails_rather_than_falling_back():
-    """A typo that quietly kept the old model would make two runs look
+    """A typo that quietly kept a different model would make two runs look
     comparable when they are not."""
     with pytest.raises(ValueError, match="unknown separator"):
-        make_backend("tfgridnet-large")
+        make_backend("usef", process=None, temp_dir="/tmp")
 
 
-def test_blind_and_targeted_backends_declare_themselves():
-    assert make_backend("usef").ordered is True
+def test_only_sidon_ships():
+    """USEF-TFGridNet was removed rather than left switched off.
 
-
-# --- enrollment reaches USEF in the one shape its graph accepts -------------
-
-def _clips(seconds, count=1, sr=24000):
-    return [np.full(int(sr * seconds), 0.1, dtype=np.float32)] * count
-
-
-def test_a_short_enrollment_is_padded_to_eight_seconds():
-    out = UsefOnnxBackend._prepare_enrollment(_clips(3.0), 24000)
-    assert len(out) == USEF_ENROLL_SAMPLES
-
-
-def test_a_long_enrollment_is_trimmed():
-    out = UsefOnnxBackend._prepare_enrollment(_clips(20.0), 24000)
-    assert len(out) == USEF_ENROLL_SAMPLES
-
-
-def test_several_mined_clips_are_joined_before_trimming():
-    """A speaker whose clean audio is spread over short spans still fills the
-    window; taking only the first clip would leave it mostly padding."""
-    out = UsefOnnxBackend._prepare_enrollment(_clips(2.0, count=4), 24000)
-    assert len(out) == USEF_ENROLL_SAMPLES
-    assert np.abs(out[:USEF_ENROLL_SAMPLES]).mean() > 0.05
-
-
-def test_a_missing_enrollment_is_an_error_not_a_silent_pass():
-    with pytest.raises(ValueError, match="enrollment"):
-        UsefOnnxBackend._prepare_enrollment(None, 24000)
-    with pytest.raises(ValueError, match="empty"):
-        UsefOnnxBackend._prepare_enrollment([], 24000)
-
-
-# --- the fixed 2s window ----------------------------------------------------
-
-class _FakeSession:
-    """Stands in for the ONNX graph, asserting the shapes it would require."""
-
-    def __init__(self):
-        self.windows = []
-
-    def get_inputs(self):
-        return [type("I", (), {"name": "mixture"}), type("I", (), {"name": "enrollment"})]
-
-    def run(self, _outputs, feeds):
-        mixture = feeds["mixture"]
-        assert mixture.shape == (1, USEF_MIX_SAMPLES), mixture.shape
-        assert feeds["enrollment"].shape == (1, USEF_ENROLL_SAMPLES)
-        self.windows.append(mixture.shape)
-        return [mixture * 2.0]
-
-
-def _backend_with_fake():
-    backend = UsefOnnxBackend()
-    backend._session = _FakeSession()
-    backend._input_names = ["mixture", "enrollment"]
-    return backend
-
-
-@pytest.mark.parametrize("seconds,expected_windows", [(0.4, 1), (2.0, 1), (5.0, 3), (20.0, 10)])
-def test_audio_is_chunked_into_two_second_windows(seconds, expected_windows):
-    """TF-GridNet's export bakes its unfold constants in, so the window cannot
-    be negotiated: longer audio is chunked and concatenated."""
-    backend = _backend_with_fake()
-    samples = int(USEF_SR * seconds)
-    mixture = np.random.default_rng(0).standard_normal(samples).astype(np.float32)
-
-    out = backend._extract_one(mixture, np.zeros(USEF_ENROLL_SAMPLES, dtype=np.float32))
-
-    assert len(backend._session.windows) == expected_windows
-    assert len(out) == samples, "the tail must not be padded into the result"
-
-
-def test_a_partial_final_window_is_padded_in_but_trimmed_out():
-    backend = _backend_with_fake()
-    samples = USEF_MIX_SAMPLES + 100
-    out = backend._extract_one(np.ones(samples, dtype=np.float32),
-                               np.zeros(USEF_ENROLL_SAMPLES, dtype=np.float32))
-    assert len(out) == samples
-    assert out[-1] != 0.0, "real audio, not the zero padding, should survive"
-
-
-def test_the_declared_rate_is_returned_so_the_caller_can_resample():
-    """USEF runs at 8 kHz while the pipeline carries 16 kHz, so the backend
-    returns its rate and the caller resamples back rather than assuming."""
-    backend = _backend_with_fake()
-    enroll = [np.full(USEF_SR, 0.1, dtype=np.float32)]
-    _a, _b, out_sr = backend.separate(np.zeros(USEF_SR, dtype=np.float32), USEF_SR,
-                                      enroll_A=enroll, enroll_B=enroll)
-    assert out_sr == USEF_SR
-
-
-def test_a_targeted_backend_runs_once_per_speaker():
-    backend = _backend_with_fake()
-    enroll = [np.full(USEF_SR, 0.1, dtype=np.float32)]
-    backend.separate(np.zeros(USEF_MIX_SAMPLES, dtype=np.float32), USEF_SR,
-                     enroll_A=enroll, enroll_B=enroll)
-    assert len(backend._session.windows) == 2, "one pass per enrollment"
-
-
-# --- the seam in BssSeparator -------------------------------------
-
-def test_the_extractor_skips_assignment_for_a_targeted_backend():
-    """The measured reason this matters: similarity here sits at p50 0.58 where
-    natural speech scores 0.70-0.90, so every assignment decision is made on
-    thin evidence. A targeted separator removes the decision entirely."""
-    source = open(os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))), "models", "bss_model.py"), encoding="utf-8").read()
-    assert 'if getattr(self.backend, "ordered", False):' in source
-    assert "self.backend.separate(" in source
+    While both were present the constants they share drifted toward whichever
+    ran last, and the mixture window ended up pinned at USEF's 2s -- a hard
+    constraint of its ONNX graph and the wrong length for a blind separator.
+    Keeping an unused second backend is what let that happen quietly.
+    """
+    assert set(BACKENDS) == {"sidon"}
 
 
 def test_both_profiles_declare_a_separator():
     """Named, not defaulted: which separator ran is the difference between two
-    runs being comparable and not, so it has to be written down."""
-    import json
-    from models.separation_backends import BACKENDS
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    with open(os.path.join(root, "config.json"), encoding="utf-8") as fh:
-        config = json.load(fh)
-    for name, profile in config["environments"].items():
+    runs being comparable and not, so it is written down."""
+    for name, profile in _profiles().items():
         assert profile["models"]["bss"]["separator"] in BACKENDS, name
 
 
-def test_both_backends_ship_and_differ_in_kind():
-    """The two are not interchangeable and the difference is not a tuning knob.
+# --- blind means the assignment has to run ----------------------------------
 
-    USEF is told whose voice to extract, so track 1 is speaker A and the
-    assignment never runs. DialogueSidon separates blind, so ECAPA has to
-    decide which track is whom -- a decision that sat at p50 0.58 similarity on
-    this corpus where natural speech scores 0.70-0.90, which is what the
-    `_maybe_swap` / `not_a_fail` / `qc_sim` paths exist to cope with.
-    """
-    from models.separation_backends import BACKENDS
-    assert set(BACKENDS) == {"usef", "sidon"}
-    assert BACKENDS["usef"].ordered is True
-    assert BACKENDS["sidon"].ordered is False
-
-
-def test_every_shipped_backend_declares_its_track_order():
+def test_sidon_declares_itself_blind():
     """`ordered` is what the caller branches on, and getting it wrong is silent
     in both directions: True on a blind backend hands speaker B's audio to
-    speaker A, False on a conditioned one re-enables repair paths that have
-    nothing to repair."""
-    from models.separation_backends import BACKENDS
-    for name, cls in BACKENDS.items():
-        assert isinstance(cls.ordered, bool), name
+    speaker A, False on a conditioned one runs repair paths with nothing to
+    repair."""
+    assert SidonBackend.ordered is False
+
+
+def test_the_assignment_path_is_reachable_for_a_blind_backend():
+    """The swap repair, the not-A test and the qc_sim gate exist for exactly
+    this case. With a conditioned backend they were dead code; with this one
+    they are the only thing deciding who is who."""
+    src = open(os.path.join(ROOT, "models", "bss_model.py"), encoding="utf-8").read()
+    assert 'if not getattr(self.backend, "ordered", False):' in src
+    assert "_repair_chunk_swaps" in src
 
 
 def test_the_generative_backend_says_so_where_it_is_defined():
@@ -197,65 +85,110 @@ def test_the_generative_backend_says_so_where_it_is_defined():
     output is audio the model produced, not audio the microphone recorded.
     Whatever it fills in becomes training data. That has to be legible at the
     definition, not only in a commit message."""
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    src = open(os.path.join(root, "models", "separation_backends.py"),
+    src = open(os.path.join(ROOT, "models", "separation_backends.py"),
                encoding="utf-8").read()
     block = src[:src.index("class SidonBackend")]
     assert "generative" in block
     assert "not audio the" in block
 
 
-def test_an_unknown_separator_is_refused_not_quietly_replaced():
-    """A typo that fell back to a default would make two runs look comparable
-    when they are not."""
-    import pytest as _pytest
-    from models.separation_backends import make_backend
-    with _pytest.raises(ValueError):
-        make_backend("sidonn")
+# --- the worker exchange ----------------------------------------------------
+
+class _FakeProcess:
+    """Stands in for the worker: answers one request, records what it was sent."""
+
+    def __init__(self, tmp_path, target_sr=24000, error=None):
+        self.tmp_path = tmp_path
+        self.target_sr = target_sr
+        self.error = error
+        self.sent = []
+        self.stdin = self
+        self.stdout = self
+        self._replies = []
+
+    # stdin
+    def write(self, line):
+        req = json.loads(line)
+        self.sent.append(req)
+        if self.error:
+            self._replies.append(json.dumps({"id": req["id"], "error": self.error}))
+            return
+        t1 = os.path.join(self.tmp_path, f"t1_{req['id']}.npy")
+        t2 = os.path.join(self.tmp_path, f"t2_{req['id']}.npy")
+        np.save(t1, np.ones(100, dtype=np.float32))
+        np.save(t2, np.full(100, 2.0, dtype=np.float32))
+        # A line of chatter first: the worker prints progress on stdout too,
+        # and anything that is not the answer has to be skipped rather than
+        # treated as a protocol error.
+        self._replies.append("loading something")
+        self._replies.append(json.dumps(
+            {"id": req["id"], "track_1_path": t1, "track_2_path": t2,
+             "target_sr": self.target_sr}))
+
+    def flush(self):
+        pass
+
+    # stdout
+    def readline(self):
+        return (self._replies.pop(0) + "\n") if self._replies else ""
 
 
-# --- the export returns inverted phase ---------------------------------------
+def test_a_request_carries_the_mixture_as_a_file(tmp_path):
+    """Arrays cross as .npy rather than inline: a full podcast issues thousands
+    of these and base64 in JSON would dominate the exchange."""
+    proc = _FakeProcess(str(tmp_path))
+    backend = SidonBackend(process=proc, temp_dir=str(tmp_path))
+    backend.separate(np.zeros(1600, dtype=np.float32), 16000)
 
-def test_the_backend_undoes_the_export_s_phase_inversion():
-    """usef_tse_tfgridnet returns the extracted speech negated.
-
-    Measured against the graph itself: a mixture plus an enrollment of the
-    speaker who dominates it gives an output correlating with the input at
-    -1.0000 on synthetic speech and -0.90 across six slices of this corpus.
-    Negating brings the same slices to +0.95.
-
-    Inaudible on its own -- a flipped waveform sounds like the original -- and
-    that is what let it through. The splice is where it does damage: an
-    inverted span goes into the middle of a track that is not inverted, and the
-    equal-power crossfade at each edge blends a signal with its own negative,
-    which cancels rather than blends. A 28-minute recording had 248 spliced
-    spans, so about 500 dropouts.
-    """
-    import numpy as np
-    from models.separation_backends import POLARITY, UsefOnnxBackend
-
-    assert POLARITY == -1.0
-
-    backend = UsefOnnxBackend.__new__(UsefOnnxBackend)
-    backend._input_names = ["mixture", "enrollment"]
-    signal = np.sin(np.linspace(0, 40 * np.pi, 16000)).astype(np.float32)
-
-    class Graph:
-        """Stands in for the export: returns the target, negated."""
-        def run(self, _out, feeds):
-            return [(-signal).reshape(1, -1)]
-
-    backend._session = Graph()
-    out = backend._extract_one(signal, np.zeros(64000, dtype=np.float32))
-    corr = float(np.dot(out, signal) / (np.linalg.norm(out) * np.linalg.norm(signal)))
-    assert corr > 0.99, f"output still inverted (corr {corr:+.3f})"
+    req = proc.sent[0]
+    assert req["sample_rate"] == 16000
+    assert req["audio_path"].endswith(".npy")
 
 
-def test_the_correction_is_named_not_a_stray_minus_sign():
-    """A bare `-fed` in the loop would read as a typo to the next person and be
-    removed. The constant carries the measurement that justifies it."""
-    import inspect
-    from models import separation_backends
-    source = inspect.getsource(separation_backends)
-    assert "POLARITY * fed" in source
-    assert "-1.0000" in source, "the measurement belongs beside the constant"
+def test_the_rate_the_worker_reports_is_the_one_returned(tmp_path):
+    """Sidon's VAE decoder emits 24kHz whatever it was fed. Echoing the input
+    rate instead would resample against the wrong number, silently."""
+    proc = _FakeProcess(str(tmp_path), target_sr=24000)
+    backend = SidonBackend(process=proc, temp_dir=str(tmp_path))
+    _t1, _t2, sr = backend.separate(np.zeros(1600, dtype=np.float32), 16000)
+    assert sr == 24000
+
+
+def test_chatter_on_stdout_is_skipped_not_parsed_as_the_answer(tmp_path):
+    proc = _FakeProcess(str(tmp_path))
+    backend = SidonBackend(process=proc, temp_dir=str(tmp_path))
+    t1, t2, _sr = backend.separate(np.zeros(1600, dtype=np.float32), 16000)
+    assert t1[0] == pytest.approx(1.0)
+    assert t2[0] == pytest.approx(2.0)
+
+
+def test_a_worker_error_is_raised_not_returned_as_audio(tmp_path):
+    proc = _FakeProcess(str(tmp_path), error="out of memory")
+    backend = SidonBackend(process=proc, temp_dir=str(tmp_path))
+    with pytest.raises(RuntimeError, match="out of memory"):
+        backend.separate(np.zeros(1600, dtype=np.float32), 16000)
+
+
+def test_the_exchange_files_are_cleaned_up(tmp_path):
+    """Thousands of jobs per recording; leaving them behind fills the disk."""
+    proc = _FakeProcess(str(tmp_path))
+    backend = SidonBackend(process=proc, temp_dir=str(tmp_path))
+    backend.separate(np.zeros(1600, dtype=np.float32), 16000)
+    assert [f for f in os.listdir(tmp_path) if f.endswith(".npy")] == []
+
+
+def test_no_worker_is_a_clear_error_rather_than_a_crash():
+    backend = SidonBackend(process=None, temp_dir="/tmp")
+    with pytest.raises(RuntimeError, match="not connected"):
+        backend.separate(np.zeros(1600, dtype=np.float32), 16000)
+
+
+def test_a_restarted_worker_can_be_handed_over(tmp_path):
+    """The worker is released at the end of the stage and a fresh one starts
+    for the next file. A backend still holding the dead process fails on every
+    job from the second file onwards."""
+    backend = SidonBackend(process=None, temp_dir=str(tmp_path))
+    proc = _FakeProcess(str(tmp_path))
+    backend.set_process(proc)
+    backend.separate(np.zeros(1600, dtype=np.float32), 16000)
+    assert proc.sent, "the new process was never used"

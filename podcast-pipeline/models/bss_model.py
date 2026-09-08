@@ -11,12 +11,12 @@ each speaker, and assigns them; `_repair_chunk_swaps` catches the separator
 changing its mind about channel order mid-file; `qc_sim` and the not-A test
 gate the result when the assignment is not confident.
 
-The naming says BSS because that is what actually runs, but the seam is wider
-than the name: `models/separation_backends.py` also carries USEF-TFGridNet,
-which is target-conditioned and therefore returns its tracks already ordered.
-That backend sets `ordered = True` and the assignment above becomes a no-op --
-it is skipped, not fooled. So "BSS" describes the configured pipeline rather
-than the only thing this module can drive.
+USEF-TFGridNet used to sit behind the same interface and is gone. It was
+target-conditioned, returned its tracks already ordered, and skipped the
+assignment entirely -- and while it was there the shared constants drifted to
+suit it, which left Sidon running on a 2s window with no solo audio to score
+against. The `ordered` flag it set survives on the base backend for a future
+conditioned model, but nothing sets it now.
 
 Sidon is also generative, which is a property of the corpus and not of this
 code: what it returns is audio the model produced, not audio the microphone
@@ -95,7 +95,7 @@ class BssSeparator:
         # Which separator produces the two tracks. Everything else in this
         # class -- enrollment embeddings, QC scoring, the not-A test -- is the
         # same whichever one runs, which is what makes them comparable.
-        name = separator or os.environ.get("BSS_SEPARATOR", "usef")
+        name = separator or os.environ.get("BSS_SEPARATOR", "sidon")
         self.backend = make_backend(name, process=process, temp_dir=self._temp_dir,
                                     device=device, logger=logger)
 

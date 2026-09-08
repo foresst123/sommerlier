@@ -77,7 +77,7 @@ def restore_gain(track: np.ndarray, track_sum: np.ndarray, mixture: np.ndarray,
     A spliced span landing several dB away from its neighbours is a seam ASR
     front-ends read as an event. Written for DialogueSidon, which normalised
     every 20s chunk by its own peak and so returned tracks at an arbitrary
-    level; USEF masks rather than resynthesises and mostly does not drift, so
+    level; Sidon resynthesises through a VAE and can drift, so
     the correction is now a check that usually finds nothing. Kept because a
     near-unity gain costs nothing and the failure it guards is silent.
 

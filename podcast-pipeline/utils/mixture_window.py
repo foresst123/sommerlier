@@ -1,33 +1,38 @@
-"""How much audio to hand the separator around one overlap.
+"""Where a separator's window is allowed to reach.
 
-USEF-TSE's ONNX graph takes a fixed 2-second mixture window; anything longer is
-cut into 2s pieces and the outputs concatenated, which is what its own README
-prescribes. So the only question here is what to do with an overlap *shorter*
-than 2 seconds -- a 0.34s backchannel, which on this corpus is the common case.
+Only the walls live here now. How far to actually grow inside them belongs to
+SeparationService._build_window, because the answer depends on where each
+speaker's solo audio is -- which is diarization's business, not this module's.
 
-The answer is not "pad it with silence". The model has to hear the voices it is
-separating, and two seconds of real audio around a backchannel is what lets it.
-Padding is the fallback for when the recording cannot supply that, not the plan.
+The walls are excise seams. Cutting sung and standalone-music stretches out
+leaves points where two parts of the recording that were never adjacent now
+touch. Growing a window across one drags in audio from somewhere else entirely,
+and worse, audio whose speakers have nothing to do with the overlap being
+separated. That constraint is independent of which separator runs.
 
-What this replaces: a window assembled out of five seconds of each speaker's
-solo speech plus the overlap, 6-12s in all. That existed because DialogueSidon
-separates blind -- it has to find both voices in the mixture itself, and at a
-lopsided balance it collapses to "one source carries everything". USEF-TSE is
-told who to extract by an 8-second enrollment, so the mixture does not have to
-carry that evidence any more.
-
-The one thing the widening must respect is a seam: excising sung and
-standalone-music stretches leaves points where two parts of the recording that
-were never adjacent now touch. Widening across one drags in audio from
-somewhere else entirely -- and worse, audio whose speaker is unrelated to the
-overlap being separated.
+This module briefly held the whole sizing policy, pinned at USEF-TSE's fixed
+2-second window -- a real constraint of its ONNX graph, and the wrong one for
+anything else. `widen` and `window_for` are kept for callers that only need a
+span of a given length centred on an overlap.
 """
 
 import os
 
-# The model's fixed window. Not a preference: the ONNX graph bakes TF-GridNet's
-# unfold constants in at [1, 16000] @ 8 kHz.
-MODEL_WINDOW = float(os.environ.get("BSS_MODEL_WINDOW", "2.0"))
+# The window the separator wants around an overlap. This was 2.0s while
+# USEF-TFGridNet was the backend, and that was not a preference: its ONNX graph
+# bakes TF-GridNet's unfold constants in at [1, 16000] @ 8 kHz, so 2s was the
+# only length it accepted.
+#
+# Sidon has no such constraint and the opposite need. It is blind -- nobody
+# tells it who is in the mixture -- so ECAPA has to work out which returned
+# track is whose, and it can only do that from stretches where one speaker is
+# audible alone. A 2s window centred on an overlap contains no such stretch by
+# construction. Sidon also chunks internally at 20s (CHUNK_SECONDS in
+# sidon_infer.py), so anything shorter runs it far outside its design point.
+#
+# Measured on one recording: 2s windows with empty probes gave ECAPA
+# similarity p50 0.15, which is what two unrelated speakers score.
+WINDOW_TARGET = float(os.environ.get("BSS_WINDOW_TARGET", "20.0"))
 
 
 def bounds(lo, hi, seams, duration, minimum=None):
@@ -36,7 +41,7 @@ def bounds(lo, hi, seams, duration, minimum=None):
     Walls are the seams plus the two ends of the recording. An overlap sitting
     between two seams can only ever be widened inside that stretch.
     """
-    minimum = MODEL_WINDOW if minimum is None else minimum
+    minimum = WINDOW_TARGET if minimum is None else minimum
     floor_, ceil_ = 0.0, float(duration)
     for seam in seams or ():
         if seam <= lo and seam > floor_:
@@ -59,7 +64,7 @@ def widen(lo, hi, floor_, ceil_, minimum=None):
     two seams can be shorter than that, and the caller pads what is missing,
     which is what the ONNX contract says to do.
     """
-    minimum = MODEL_WINDOW if minimum is None else minimum
+    minimum = WINDOW_TARGET if minimum is None else minimum
     need = minimum - (hi - lo)
     if need <= 0:
         return lo, hi

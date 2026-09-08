@@ -181,15 +181,39 @@ def test_a_transcript_without_the_new_fields_still_renders():
     assert rows[0]["unseparated"] == []
 
 
-def test_every_header_has_exactly_one_cell():
-    """A missing cell shifts every column after it, silently."""
+def test_every_field_a_reviewer_needs_is_on_the_card():
+    """The table this replaced could lose a column silently -- a missing <td>
+    shifted every column after it. The card layout cannot do that, but it can
+    drop a field outright, which is quieter still.
+
+    Pinned by name rather than by count: what matters is that a reviewer can
+    still hear the audio, compare the three transcripts, correct the text, and
+    record the two judgements only a person can make.
+    """
     import re
     mod = _review_module()
-    # Counted inside <thead> only, and with `<th\b` so a header carrying a
-    # class or a title still counts. The bare `<th>` this used to match let two
-    # headerless columns through; counting across the whole page instead picked
-    # up the tag named in a CSS comment.
-    thead = re.search(r"<thead>(.*?)</thead>", mod.PAGE, re.S).group(1)
-    headers = len(re.findall(r"<th\b", thead))
-    template = re.search(r"tr\.innerHTML = `(.*?)`;", mod.PAGE, re.S).group(1)
-    assert headers == len(re.findall(r"<td", template))
+    card = re.search(r"card\.innerHTML = `(.*?)`;", mod.PAGE, re.S)
+    assert card, "the card template moved or was renamed"
+    block = card.group(1)
+
+    for field in ("r.index", "r.speaker", "r.whisper", "r.phowhisper",
+                  "r.qwen3", "r.final", "r.edited", "r.note"):
+        assert field in block, f"the card no longer shows {field}"
+    for control in ('class="edit"', 'class="note"',
+                    'class="mk-music"', 'class="mk-multi"'):
+        assert control in block, f"the card lost {control}"
+    assert 'playCell(i, "src"' in block and 'playCell(i, "out"' in block
+
+
+def test_the_two_marks_start_empty_and_come_only_from_a_person():
+    """Nothing upstream writes them. A pipeline that pre-filled either one
+    would turn a reviewer's judgement into a machine's guess wearing the same
+    checkbox. A mark already made still survives a regenerated page."""
+    mod = _review_module()
+    seg = {"index": "00001", "speaker": "1", "start": 0.0, "end": 1.0}
+    rows = mod._rows([seg], {}, {}, [10 ** 9])
+    assert rows[0]["mark_music"] is False
+    assert rows[0]["mark_multi"] is False
+
+    rows = mod._rows([dict(seg, mark_music=True)], {}, {}, [10 ** 9])
+    assert rows[0]["mark_music"] is True

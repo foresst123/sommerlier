@@ -19,23 +19,23 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.mixture_window import MODEL_WINDOW, bounds, widen, window_for
+from utils.mixture_window import WINDOW_TARGET, bounds, widen, window_for
 
 
 # --- the ordinary case ------------------------------------------------------
 
 def test_an_overlap_already_long_enough_is_left_alone():
-    """Over two seconds the model chunks internally; nothing to arrange."""
-    assert window_for(10.0, 13.0, [], 60.0) == (10.0, 13.0)
-    assert window_for(10.0, 12.0, [], 60.0) == (10.0, 12.0)
+    """Past the target the separator chunks internally; nothing to arrange."""
+    assert window_for(10.0, 35.0, [], 90.0) == (10.0, 35.0)
+    assert window_for(10.0, 30.0, [], 90.0) == (10.0, 30.0)
 
 
 def test_a_short_overlap_is_grown_evenly_on_both_sides():
-    """A 0.34s backchannel needs 1.66s, so 0.83s goes each way."""
+    """A 0.34s backchannel needs 19.66s, so 9.83s goes each way."""
     lo, hi = window_for(10.0, 10.34, [], 60.0)
-    assert lo == pytest.approx(9.17)
-    assert hi == pytest.approx(11.17)
-    assert hi - lo == pytest.approx(MODEL_WINDOW)
+    assert lo == pytest.approx(0.17)
+    assert hi == pytest.approx(20.17)
+    assert hi - lo == pytest.approx(WINDOW_TARGET)
 
 
 def test_the_overlap_stays_centred_when_there_is_room():
@@ -48,13 +48,13 @@ def test_the_overlap_stays_centred_when_there_is_room():
 def test_an_overlap_at_the_start_grows_only_forwards():
     lo, hi = window_for(0.1, 0.5, [], 60.0)
     assert lo == 0.0
-    assert hi - lo == pytest.approx(MODEL_WINDOW), "the shortfall moves right"
+    assert hi - lo == pytest.approx(WINDOW_TARGET), "the shortfall moves right"
 
 
 def test_an_overlap_at_the_end_grows_only_backwards():
     lo, hi = window_for(59.6, 59.9, [], 60.0)
     assert hi == pytest.approx(60.0)
-    assert hi - lo == pytest.approx(MODEL_WINDOW)
+    assert hi - lo == pytest.approx(WINDOW_TARGET)
 
 
 # --- walls: seams left by excising ------------------------------------------
@@ -64,22 +64,26 @@ def test_widening_stops_at_a_seam_and_takes_the_rest_from_the_far_side():
     whose speakers have nothing to do with this overlap."""
     lo, hi = window_for(10.0, 10.4, seams=[9.8], duration=60.0)
     assert lo == pytest.approx(9.8), "stopped at the seam"
-    assert hi - lo == pytest.approx(MODEL_WINDOW)
-    assert hi == pytest.approx(11.8), "the missing 0.6s came from the right"
+    assert hi - lo == pytest.approx(WINDOW_TARGET)
+    assert hi == pytest.approx(29.8), "the shortfall came from the right"
 
 
 def test_a_seam_on_the_right_pushes_the_window_left():
-    lo, hi = window_for(10.0, 10.4, seams=[10.6], duration=60.0)
-    assert hi == pytest.approx(10.6)
-    assert lo == pytest.approx(8.6)
+    """The window still gets its full length; it just takes it all from the
+    side that has room."""
+    lo, hi = window_for(60.0, 60.4, seams=[65.0], duration=120.0)
+    assert hi == pytest.approx(65.0), "stopped at the seam"
+    assert lo == pytest.approx(45.0)
+    assert hi - lo == pytest.approx(WINDOW_TARGET)
 
 
-def test_seams_on_both_sides_cap_the_window_short_of_two_seconds():
-    """A stretch between two joins can simply be shorter than the model wants.
-    The caller zero-pads the rest, which is what the ONNX contract says."""
+def test_seams_on_both_sides_cap_the_window_short():
+    """A stretch between two joins can simply be shorter than the separator
+    wants. Reaching past one would pull in a different part of the recording,
+    so a short window is the correct answer rather than a failure."""
     lo, hi = window_for(10.0, 10.4, seams=[9.7, 10.9], duration=60.0)
     assert (lo, hi) == (pytest.approx(9.7), pytest.approx(10.9))
-    assert hi - lo < MODEL_WINDOW
+    assert hi - lo < WINDOW_TARGET
 
 
 def test_only_the_nearest_seam_on_each_side_matters():
@@ -89,7 +93,7 @@ def test_only_the_nearest_seam_on_each_side_matters():
 
 def test_a_seam_far_away_does_not_constrain_anything():
     lo, hi = window_for(30.0, 30.4, seams=[1.0, 59.0], duration=60.0)
-    assert hi - lo == pytest.approx(MODEL_WINDOW)
+    assert hi - lo == pytest.approx(WINDOW_TARGET)
 
 
 # --- the bounds helper on its own -------------------------------------------
@@ -116,9 +120,13 @@ def test_widen_is_symmetric_about_the_overlap():
     assert 10.0 - lo == pytest.approx(hi - 10.4)
 
 
-def test_the_window_is_the_model_graph_size_not_a_preference():
-    """[1, 16000] @ 8 kHz is baked into the ONNX export; this must track it."""
-    assert MODEL_WINDOW == 2.0
+def test_the_target_matches_the_separator_s_own_chunk_length():
+    """Sidon processes 20s chunks (CHUNK_SECONDS in sidon_infer.py). A window
+    shorter than one chunk runs it outside its design point, and a blind
+    separator given 2s -- which is what USEF's ONNX graph fixed this at -- had
+    no solo stretch to identify either speaker from: ECAPA similarity fell to
+    p50 0.15, the score two unrelated speakers get."""
+    assert WINDOW_TARGET == 20.0
 
 
 # --- seams come from the excise timeline ------------------------------------

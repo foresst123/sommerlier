@@ -8,7 +8,7 @@ from schemas.audio import AudioData
 from schemas.segment import Segment, SpeechSegment
 from algorithms.diarization.overlap import detect_overlapping_segments
 from utils.audio_normalize import match_splice_level, safe_limit
-from utils.mixture_window import MODEL_WINDOW, window_for
+from utils.mixture_window import WINDOW_TARGET, bounds
 from utils.music_map import MusicMap
 from utils.enrollment_memory import EnrollmentMemory, ENABLED as BSS_MEMORY
 
@@ -19,6 +19,39 @@ _NO_MEMORY = EnrollmentMemory(enabled=False)
 
 # Crossfade over each seam so the joins are not step discontinuities the
 # decoder would read as acoustic events.
+# --- Stitched window ------------------------------------------------------
+# A continuous window has to span whatever lies between the overlap and each
+# speaker's nearest solo speech, so a 0.34s backchannel buried in a long turn
+# produced 36s of window holding 28.75s of one speaker against 6.91s of the
+# other. Sidon resynthesises through a VAE decoder rather than masking, and at
+# that imbalance the cheapest solution it can find is "one source carries
+# everything, the other is silent" -- measured: the backchannel came back empty
+# on its own track with the interfering speaker's tail in its place.
+#
+# Stitching a short window instead -- a trimmed slice of each speaker's nearest
+# clean speech, then the overlap -- puts both voices in front of the model in
+# equal measure. On the case above this took the imbalance from 85:1 to 9:1 and
+# the window from 36s to 6.3s, which also fits inside one 20s Sidon chunk and so
+# removes cross-chunk channel drift entirely.
+BSS_STITCH = os.environ.get("BSS_STITCH", "1") not in ("0", "false", "False")
+# Solo audio to take per speaker. ECAPA pools statistics over time, so more of
+# it makes the embedding steadier and the A/B assignment harder to get wrong;
+# 3s left the scores noisy enough that tracks were being mislabelled. Raised to
+# 5s, which is still far short of the imbalance the stitched window exists to
+# avoid -- both speakers contribute the same amount, so the ratio stays 1:1
+# however large this is.
+BSS_STITCH_SOLO = float(os.environ.get("BSS_STITCH_SOLO", "5.0"))
+# Context kept either side of the overlap inside the stitched window. The
+# diarizer's boundaries land on a frame grid, not on the speech, so a span cut
+# exactly at them can start mid-syllable; a fifth of a second lets the decoder
+# hear the onset it is separating. Only the overlap itself is spliced back --
+# this padding is context for the model, never output.
+BSS_STITCH_EDGE_PAD = float(os.environ.get("BSS_STITCH_EDGE_PAD", "0.2"))
+# Shortest usable piece: below this a slice is mostly onset and carries little
+# speaker identity.
+BSS_STITCH_MIN_PIECE = float(os.environ.get("BSS_STITCH_MIN_PIECE", "0.5"))
+# How far to look for clean speech before giving up and using a plain window.
+BSS_STITCH_SEARCH = float(os.environ.get("BSS_STITCH_SEARCH", "400.0"))
 BSS_STITCH_FADE = float(os.environ.get("BSS_STITCH_FADE", "0.02"))
 # Silence padded around the overlap so seam artifacts cannot bleed into the one
 # span actually spliced back.
@@ -26,6 +59,19 @@ BSS_STITCH_GUARD = float(os.environ.get("BSS_STITCH_GUARD", "0.25"))
 
 # --- Job grouping ---------------------------------------------------------
 BSS_JOB_MERGE_GAP = float(os.environ.get("BSS_JOB_MERGE_GAP", "8.0"))
+
+# --- Window ---------------------------------------------------------------
+# Sidon processes 20s chunks (CHUNK_SECONDS in sidon_infer.py). Start there and
+# only grow when the window does not yet contain enough solo speech to score.
+#
+# These were dropped while USEF was the backend, because a target-conditioned
+# masker is told whose voice to extract and needs no solo audio to identify it.
+# Sidon is blind: ECAPA decides which returned track belongs to whom, and a
+# window with no solo stretch in it gives that decision nothing to work from.
+BSS_WINDOW_MAX = float(os.environ.get("BSS_WINDOW_MAX", "48.0"))
+BSS_WINDOW_GROW = float(os.environ.get("BSS_WINDOW_GROW", "4.0"))
+# Voiced solo audio one speaker needs for ECAPA to produce a usable embedding.
+BSS_MIN_SOLO = float(os.environ.get("BSS_MIN_SOLO", "2.0"))
 # Overlaps this close together are treated as one span rather than as a job of
 # several. The stitched window -- the thing that puts both voices in front of
 # the separator in equal measure -- only builds for a single overlap, because
@@ -228,7 +274,9 @@ class SeparationService:
             # it are widened, longer ones are chunked by the graph.
             "thresholds": {
                 "qc_sim": BSS_QC_SIM_THRESHOLD, "not_a_margin": BSS_NOT_A_MARGIN,
-                "model_window": MODEL_WINDOW,
+                "window_target": WINDOW_TARGET,
+                "window_max": BSS_WINDOW_MAX,
+                "min_solo": BSS_MIN_SOLO,
                 "enroll_budget": BSS_ENROLL_BUDGET,
                 "enroll_min_clip": BSS_ENROLL_MIN_CLIP,
                 "enroll_min_total": BSS_ENROLL_MIN_TOTAL,
@@ -302,7 +350,7 @@ class SeparationService:
         # per-segment music pass, so a "solo" span is only solo in the sense
         # that one person is talking -- the bed underneath is still there, and
         # an enrollment taken from it describes the speaker plus the backing
-        # track. USEF is conditioned on this audio and nothing else, so a
+        # track. The enrolment is what ECAPA compares against, so a
         # contaminated enrollment is a contaminated extraction.
         #
         # getattr, not self.music_map: the attribute is set in __init__ and
@@ -462,6 +510,297 @@ class SeparationService:
         timeline = getattr(self, "timeline", None)
         return timeline.seams() if timeline else []
 
+
+    @staticmethod
+    def _solo_spans(by_spk, spk, lo, hi):
+        """Parts of [lo, hi] where `spk` speaks and nobody else does."""
+        own = [(max(a, lo), min(b, hi)) for a, b in by_spk.get(spk, [])
+               if b > lo and a < hi]
+        own = [(a, b) for a, b in own if b > a]
+        if not own:
+            return []
+        others = []
+        for other, ivals in by_spk.items():
+            if other == spk:
+                continue
+            for a, b in ivals:
+                if b > lo and a < hi:
+                    others.append((max(a, lo), min(b, hi)))
+        others.sort()
+
+        solo = []
+        for a, b in own:
+            cur = a
+            for oa, ob in others:
+                if ob <= cur:
+                    continue
+                if oa >= b:
+                    break
+                if cur < oa:
+                    solo.append((cur, min(oa, b)))
+                cur = max(cur, ob)
+                if cur >= b:
+                    break
+            if cur < b:
+                solo.append((cur, b))
+        return [(a, b) for a, b in solo if b - a > 1e-6]
+
+    @staticmethod
+    def _speakers_in(by_spk, lo, hi):
+        return {spk for spk, ivals in by_spk.items()
+                if any(b > lo and a < hi for a, b in ivals)}
+
+    @staticmethod
+    def _growth_bias(by_spk, spk, lo, hi) -> float:
+        """How strongly to grow right rather than left to reach `spk`.
+
+        Returns 1.0 to spend the whole step on the right, 0.0 on the left, and
+        0.5 when neither side is closer (or the speaker is unreachable).
+        """
+        ivals = by_spk.get(spk) or []
+        left = [b for a, b in ivals if b <= lo]
+        right = [a for a, b in ivals if a >= hi]
+        dist_left = lo - max(left) if left else float("inf")
+        dist_right = min(right) - hi if right else float("inf")
+        if dist_left == float("inf") and dist_right == float("inf"):
+            return 0.5
+        if dist_right < dist_left:
+            return 1.0
+        if dist_left < dist_right:
+            return 0.0
+        return 0.5
+
+    @staticmethod
+    def _to_samples(spans, window_lo, sr, n_samples):
+        out = []
+        for a, b in spans:
+            i, j = int((a - window_lo) * sr), int((b - window_lo) * sr)
+            i, j = max(0, i), min(n_samples, j)
+            if j > i:
+                out.append((i, j))
+        return out
+
+    def _pick_solo(self, by_spk, spk, centre, want, search=None):
+        """Nearest `want` seconds of solo speech to `centre`, trimmed to fit.
+
+        Pieces are taken closest-first and cut down rather than used whole, so
+        the result stays at the requested length instead of dragging in a 28s
+        turn. Each piece is trimmed from the end facing `centre`, keeping the
+        audio as close in time -- and so as close in vocal delivery -- to the
+        overlap as the diarization allows.
+        """
+        search = BSS_STITCH_SEARCH if search is None else search
+        lo, hi = max(0.0, centre - search), centre + search
+        pieces = self._solo_spans(by_spk, spk, lo, hi)
+
+        # Drop anything playing over music. A "solo" span is only solo in the
+        # sense that one person is talking; a music bed underneath is still
+        # there, and audio taken from it describes the speaker plus the backing
+        # track. getattr, not self.music_map: a service built for a narrower
+        # purpose -- tests, a one-off script -- has none, and a missing map must
+        # read as "nothing to avoid" rather than raise.
+        music_map = getattr(self, "music_map", None)
+        if music_map:
+            clean = []
+            for a, b in pieces:
+                clean.extend(music_map.clean_parts(a, b))
+            pieces = clean
+
+        pieces = [p for p in pieces if p[1] - p[0] >= BSS_STITCH_MIN_PIECE]
+        pieces.sort(key=lambda ab: abs((ab[0] + ab[1]) / 2.0 - centre))
+
+        out, total = [], 0.0
+        for a, b in pieces:
+            take = min(b - a, want - total)
+            if take <= 0:
+                break
+            # Trim towards the overlap: a piece before it keeps its tail, one
+            # after it keeps its head.
+            out.append((b - take, b) if (a + b) / 2.0 < centre else (a, a + take))
+            total += take
+            if total >= want - 1e-6:
+                break
+        out.sort()
+        return out, total
+
+    def _build_stitched(self, by_spk, spk_a, spk_b, ov_lo, ov_hi, waveform, sr,
+                        total_dur):
+        """Assemble [solo A][solo B][overlap] into one short balanced window.
+
+        Returns (audio, core_range, probe_a, probe_b, layout) or None when
+        either speaker lacks clean speech to contribute, in which case the
+        caller falls back to the continuous window.
+
+        The overlap goes last, after the model has heard both voices alone in
+        equal measure. Guard silence around it keeps seam transients out of the
+        only span that gets spliced back, and every returned range is in samples
+        of the assembled window, which is what the separator and probes see.
+        """
+        solo_a, got_a = self._pick_solo(by_spk, spk_a, ov_lo, BSS_STITCH_SOLO)
+        solo_b, got_b = self._pick_solo(by_spk, spk_b, ov_lo, BSS_STITCH_SOLO)
+        if got_a < BSS_MIN_SOLO or got_b < BSS_MIN_SOLO:
+            return None
+
+        fade = max(1, int(BSS_STITCH_FADE * sr))
+        guard = np.zeros(int(BSS_STITCH_GUARD * sr), dtype=np.float32)
+
+        def grab(a, b):
+            i, j = max(0, int(a * sr)), min(len(waveform), int(b * sr))
+            return waveform[i:j].astype(np.float32, copy=True) if j > i else None
+
+        parts, probe_a, probe_b, cursor = [], [], [], 0
+
+        def append(chunk, probe_for=None):
+            nonlocal cursor
+            if chunk is None or len(chunk) == 0:
+                return
+            # Ramp the seam rather than butting two unrelated waveforms
+            # together: a step discontinuity is an acoustic event, and the
+            # decoder will happily resynthesise it as one.
+            if parts and len(chunk) > fade * 2:
+                ramp = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+                chunk = chunk.copy()
+                chunk[:fade] *= ramp
+                chunk[-fade:] *= ramp[::-1]
+            start = cursor
+            parts.append(chunk)
+            cursor += len(chunk)
+            if probe_for is not None:
+                # Keep the probe clear of the ramps, which are no longer clean
+                # solo speech.
+                probe_for.append((start + fade, cursor - fade))
+
+        for a, b in solo_a:
+            append(grab(a, b), probe_a)
+        append(guard)
+        for a, b in solo_b:
+            append(grab(a, b), probe_b)
+        append(guard)
+
+        pad = BSS_STITCH_EDGE_PAD
+        core_start = cursor
+        overlap = grab(max(0.0, ov_lo - pad), min(total_dur, ov_hi + pad))
+        if overlap is None or len(overlap) == 0:
+            return None
+        parts.append(overlap)        # never ramped: this is the span spliced back
+        cursor += len(overlap)
+        lead = int(min(pad, ov_lo) * sr)
+        core = (core_start + lead, core_start + lead + int((ov_hi - ov_lo) * sr))
+        parts.append(guard)
+
+        audio = np.concatenate(parts).astype(np.float32)
+        probe_a = [(i, j) for i, j in probe_a if j > i]
+        probe_b = [(i, j) for i, j in probe_b if j > i]
+        if not probe_a or not probe_b:
+            return None
+
+        layout = {
+            "solo_a": got_a, "solo_b": got_b,
+            "dur": len(audio) / sr,
+            "ratio": max(got_a, got_b) / max(min(got_a, got_b), 1e-9),
+        }
+        return audio, core, probe_a, probe_b, layout
+
+    def _build_window(self, by_spk, spk_a, spk_b, ov_lo, ov_hi, total_dur,
+                      overlaps=None, floor_=0.0, ceil_=None):
+        """Grow a window around the overlap until one speaker can be scored.
+
+        Returns ((lo, hi, solo_a, solo_b, anchor), None) on success, or
+        (None, reason).
+
+        Only ONE speaker needs solo audio. Channel assignment is a 2x2
+        decision: if track 1 matches A strongly where A speaks alone and track 2
+        does not, the assignment is settled without knowing anything about B.
+        Requiring both would reject the common case here -- A talking for 28s
+        with B only interjecting.
+
+        `floor_`/`ceil_` are the excise seams either side, which did not exist
+        when this was first written. Growing across one drags in audio from a
+        part of the recording that was never adjacent to this one, and whose
+        speakers have nothing to do with the overlap being separated.
+        """
+        ceil_ = float(total_dur) if ceil_ is None else ceil_
+        target = min(WINDOW_TARGET, ceil_ - floor_)
+        pad = max(0.0, (target - (ov_hi - ov_lo)) / 2.0)
+        lo, hi = max(floor_, ov_lo - pad), min(ceil_, ov_hi + pad)
+
+        # Borrow from the other side when clamped at a wall, so a window near a
+        # seam still reaches its target length.
+        if hi - lo < target:
+            if lo <= floor_:
+                hi = min(ceil_, lo + target)
+            elif hi >= ceil_:
+                lo = max(floor_, hi - target)
+
+        # Sidon emits exactly two sources, so a third voice inside the span
+        # being separated would be folded into one of them. That test belongs
+        # on the overlaps, not on the window: the window is padded out to 20s
+        # and jobs merge overlaps up to 8s apart, so a third speaker saying
+        # something once in a gap between them is not a reason to refuse.
+        for span_lo, span_hi in (overlaps or [(ov_lo, ov_hi)]):
+            if len(self._speakers_in(by_spk, span_lo, span_hi)) > 2:
+                return None, "multi_speaker"
+
+        best_single = None
+        for _ in range(24):
+            solo_a = self._solo_spans(by_spk, spk_a, lo, hi)
+            solo_b = self._solo_spans(by_spk, spk_b, lo, hi)
+            dur_a = sum(b - a for a, b in solo_a)
+            dur_b = sum(b - a for a, b in solo_b)
+
+            # Both scorable is strictly better: each speaker then gets a real
+            # cosine instead of the weaker relative "not-A" test. Keep growing
+            # for it, but remember the one-speaker window as a fallback so a
+            # reachable anchor is never thrown away.
+            if dur_a >= BSS_MIN_SOLO and dur_b >= BSS_MIN_SOLO:
+                anchor = spk_a if dur_a >= dur_b else spk_b
+                return (lo, hi, solo_a, solo_b, anchor), None
+            if dur_a >= BSS_MIN_SOLO or dur_b >= BSS_MIN_SOLO:
+                weaker = min(dur_a, dur_b)
+                if best_single is None or weaker > best_single[0]:
+                    best_single = (
+                        weaker,
+                        (lo, hi, solo_a, solo_b,
+                         spk_a if dur_a >= dur_b else spk_b),
+                    )
+
+            if (hi - lo) >= BSS_WINDOW_MAX or (lo <= floor_ and hi >= ceil_):
+                break
+
+            # Grow toward whichever speaker still lacks solo audio, instead of
+            # padding both sides equally. A backchannel sits inside a long turn
+            # by the other speaker, so a symmetric window spends its whole
+            # budget on audio that speaker already has plenty of.
+            need = None
+            if dur_a < BSS_MIN_SOLO and dur_b >= BSS_MIN_SOLO:
+                need = spk_a
+            elif dur_b < BSS_MIN_SOLO and dur_a >= BSS_MIN_SOLO:
+                need = spk_b
+            elif dur_a < BSS_MIN_SOLO and dur_b < BSS_MIN_SOLO:
+                need = spk_a if dur_a <= dur_b else spk_b
+
+            budget = min(2.0 * BSS_WINDOW_GROW, BSS_WINDOW_MAX - (hi - lo))
+            left_room, right_room = lo - floor_, ceil_ - hi
+            bias = self._growth_bias(by_spk, need, lo, hi) if need else 0.5
+            take_right = min(right_room, budget * bias)
+            take_left = min(left_room, budget * (1.0 - bias))
+            # Only spill onto the other side once the preferred one is
+            # exhausted; splitting the remainder unconditionally would spend
+            # budget away from the speaker we are trying to reach.
+            spare = budget - take_left - take_right
+            if spare > 0:
+                if bias >= 0.5:
+                    take_left = min(left_room, take_left + spare)
+                else:
+                    take_right = min(right_room, take_right + spare)
+
+            if take_left <= 0.0 and take_right <= 0.0:
+                break
+            lo, hi = max(floor_, lo - take_left), min(ceil_, hi + take_right)
+
+        if best_single is not None:
+            return best_single[1], None
+        return None, "no_window"
 
     @staticmethod
     def _fuse_adjacent(plist, gap=None):
@@ -653,34 +992,66 @@ class SeparationService:
             job_lo = min(p["overlap_start"] for p in plist)
             job_hi = max(p["overlap_end"] for p in plist)
 
+            # The window Sidon is handed. It has to do two jobs at once: give a
+            # blind separator enough context to tell the two voices apart, and
+            # contain a stretch where one speaker is audible alone so ECAPA can
+            # work out which returned track is whose.
+            #
+            # Neither was needed while USEF was the backend -- it was told whose
+            # voice to extract, so the mixture only had to carry the overlap and
+            # the window was pinned at its ONNX graph's fixed 2s. Handing that
+            # window to Sidon took ECAPA similarity to p50 0.15, the score two
+            # unrelated speakers get.
             # A stitched window only makes sense for a single overlap: the
             # assembled timeline no longer matches the recording, so several
             # overlaps at different offsets could not all be located in it.
-            # USEF is told who to extract by its 8s enrollment, so the mixture
-            # only has to carry the overlap itself. A target-conditioned masker has no
-            # such failure as blind extractors, and the solo audio it was fed was
-            # audio it did not need.
-            #
-            # What is left is the model's own 2s window: overlaps longer than
-            # that are chunked internally, shorter ones are widened to reach it.
-            win_lo, win_hi = window_for(job_lo, job_hi, self.seams(), total_dur)
-            lo_f, hi_f = int(win_lo * sr), int(win_hi * sr)
-            window_audio = waveform[lo_f:hi_f].copy()
-            core = (int((job_lo - win_lo) * sr), int((job_hi - win_lo) * sr))
+            stitched = None
+            if BSS_STITCH and len(plist) == 1:
+                stitched = self._build_stitched(
+                    by_spk, spk_a, spk_b, job_lo, job_hi, waveform, sr, total_dur)
 
-            # No solo speech in the window any more, so nothing to probe with.
-            # `separate_two_speakers` reads an empty probe as "score the whole
-            # track", which is the right question to ask of a track that is
-            # supposed to be one speaker from end to end.
-            solo_a = solo_b = ()
-            probe_a_s = probe_b_s = []
-            anchor = spk_a
-            if self.logger:
-                self.logger.info(
-                    f"[TSE] {job_lo:.2f}-{job_hi:.2f}s ({job_hi - job_lo:.2f}s) "
-                    f"-> {win_hi - win_lo:.2f}s window"
-                    + ("" if win_hi - win_lo >= 2.0 - 1e-6
-                       else "  (walled in by a cut; the model pads the rest)"))
+            if stitched is not None:
+                window_audio, core, probe_a_s, probe_b_s, layout = stitched
+                # win_lo maps window samples back to recording time. The
+                # stitched timeline is discontinuous, so only the core span is
+                # meaningful there -- and that is the one span spliced back.
+                win_lo = job_lo - core[0] / sr
+                win_hi = win_lo + len(window_audio) / sr
+                solo_a = solo_b = ()
+                anchor = spk_a if layout["solo_a"] >= layout["solo_b"] else spk_b
+                self.stats["stitched"] += 1
+                if self.logger:
+                    self.logger.info(
+                        f"[BSS:stitch] {job_lo:.2f}-{job_hi:.2f}s -> "
+                        f"{layout['dur']:.1f}s window (solo {spk_a}="
+                        f"{layout['solo_a']:.1f}s {spk_b}={layout['solo_b']:.1f}s, "
+                        f"balance {layout['ratio']:.1f}:1)")
+            else:
+                # No clean speech to stitch from, so fall back to a continuous
+                # window grown until one speaker can be scored.
+                floor_, ceil_ = bounds(job_lo, job_hi, self.seams(), total_dur)
+                built, reason = self._build_window(
+                    by_spk, spk_a, spk_b, job_lo, job_hi, total_dur,
+                    overlaps=[(p["overlap_start"], p["overlap_end"]) for p in plist],
+                    floor_=floor_, ceil_=ceil_)
+                if built is None:
+                    fail_all(reason, f"span={job_hi - job_lo:.2f}s")
+                    continue
+
+                win_lo, win_hi, solo_a, solo_b, anchor = built
+                lo_f, hi_f = int(win_lo * sr), int(win_hi * sr)
+                window_audio = waveform[lo_f:hi_f].copy()
+                core = (int((job_lo - win_lo) * sr), int((job_hi - win_lo) * sr))
+                n_win = len(window_audio)
+                probe_a_s = self._to_samples(solo_a, win_lo, sr, n_win)
+                probe_b_s = self._to_samples(solo_b, win_lo, sr, n_win)
+                if self.logger:
+                    self.logger.info(
+                        f"[BSS] {job_lo:.2f}-{job_hi:.2f}s ({job_hi - job_lo:.2f}s) "
+                        f"-> {win_hi - win_lo:.1f}s window, solo "
+                        f"{spk_a}={sum(b - a for a, b in solo_a):.1f}s "
+                        f"{spk_b}={sum(b - a for a, b in solo_b):.1f}s, "
+                        f"anchor={anchor}")
 
             # Enrolments grown from earlier well-separated spans of this same
             # conversation, when the memory is on. The mined clips stay at the

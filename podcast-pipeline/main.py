@@ -52,11 +52,8 @@ def _build_parser():
     parser.add_argument("--dia3", action="store_true", help="Use Pyannote community model (default is DiariZen if false)")
     parser.add_argument("--bss", "--tse", dest="bss", action="store_true",
                         help="Enable blind source separation of overlapped speech")
-    parser.add_argument("--separator", choices=["usef"], default=None,
-                        help="Which model produces the two tracks. usef (default) "
-                             "is target-conditioned TF-GridNet at 8kHz: it needs no "
-                             "channel assignment, but discards everything above "
-                             "4kHz.")
+    parser.add_argument("--separator", choices=["sidon"], default=None,
+                        help="Which model produces the two tracks")
     parser.add_argument("--music", "--panns", dest="music", action="store_true",
                         help="Enable background music analysis and removal")
     parser.add_argument("--music_separator", default=None, metavar="CKPT",
@@ -417,7 +414,7 @@ def main():
     sidon_service = None
     _separator = (getattr(args, "separator", None)
                   or env_profile.get("models", {}).get("bss", {}).get("separator")
-                  or "usef")
+                  or "sidon")
     if (str(_separator).strip().lower() == "sidon" and getattr(args, "bss", False)
             and will_run(args, "separation")):
         sidon_worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sidon_worker.py")

@@ -57,34 +57,39 @@ def _dialogue():
 
 
 
-def test_a_backchannel_window_is_the_overlap_widened_to_the_model_window():
-    """USEF is told who to extract by its enrollment, so the mixture carries
-    the overlap and nothing else -- widened to the 2s the ONNX graph takes.
+def test_a_backchannel_window_is_grown_well_past_the_overlap():
+    """Sidon separates blind, so the window has two jobs: give it enough
+    context to tell the voices apart, and contain a stretch where one speaker
+    is audible alone for ECAPA to identify the tracks from.
 
-    This replaces a window of 5s solo A + 5s solo B + the overlap. That
-    existed for DialogueSidon, which separates blind and collapsed to "one
-    source carries everything" when the two speakers were unbalanced. A
-    target-conditioned masker never needed the solo audio."""
+    This was briefly 2.0s, which is what USEF's ONNX graph fixed it at. Handing
+    that to a blind separator took ECAPA similarity to p50 0.15 -- the score two
+    unrelated speakers get -- because a 2s window centred on an overlap holds no
+    solo stretch by construction."""
     fake = FakeTSE()
     svc = SeparationService(fake, logger=None)
     svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
     assert len(fake.calls) == 1, "one job expected"
     call = fake.calls[0]
-    assert call["len_sec"] == pytest.approx(2.0, abs=0.05), (
-        f"window is {call['len_sec']:.2f}s; it should be the model's 2s")
+    assert call["len_sec"] >= 10.0, (
+        f"window is {call['len_sec']:.2f}s; a blind separator needs context")
 
 
-def test_an_ordered_backend_scores_the_whole_track_not_a_probe():
-    """With no solo speech in the window there is nothing to probe with, and
-    nothing to probe for: track 1 IS speaker A by construction. An empty probe
-    reads downstream as "score the whole track", which is the right question
-    to ask of a track that should be one speaker end to end."""
+def test_the_window_carries_solo_audio_for_the_assignment_to_use():
+    """An empty probe reads downstream as "score the whole track", which for a
+    blind backend means scoring a track that may be either speaker against an
+    enrolment for one of them. The probe is what makes the answer mean
+    something."""
     fake = FakeTSE()
     svc = SeparationService(fake, logger=None)
     svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
     call = fake.calls[0]
-    assert not call.get("probe_A"), "no solo audio is fed any more"
-    assert not call.get("probe_B")
+    assert call["probe_A_sec"] >= 2.0 and call["probe_B_sec"] >= 2.0, (
+        "no solo audio in the window; ECAPA has nothing to assign from")
+    # Both speakers contribute the same amount, which is the whole point of the
+    # stitched window: an 85:1 imbalance is what made Sidon collapse to "one
+    # source carries everything".
+    assert call["probe_A_sec"] == pytest.approx(call["probe_B_sec"], abs=0.1)
 
 
 def test_low_scoring_track_does_not_discard_the_good_one():
@@ -334,7 +339,7 @@ def test_the_run_report_can_actually_be_built():
 
     payload = svc.report_payload()
     assert set(payload) >= {"thresholds", "music_map", "stats", "failures"}
-    assert payload["thresholds"]["model_window"] == 2.0
+    assert payload["thresholds"]["window_target"] == 20.0
 
 
 def test_no_module_reads_a_constant_nobody_defines():

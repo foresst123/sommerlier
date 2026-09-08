@@ -1,147 +1,27 @@
-"""Build a single-file HTML review page for one processed recording.
-
-The page puts each segment's original audio, its processed audio, all three ASR
-outputs and the fused text side by side, with an editable copy of the fused text
-and a note field. Saving writes a corrected transcript back to disk.
-
-The audio is embedded as data: URIs so the page is one file that can be moved,
-copied or opened straight from a download -- a page referring to clips by path
-stops working the moment it leaves the directory it was built in.
-
-Usage:
-    python tools/make_review_page.py OUTPUT_DIR [-o review.html]
-
-OUTPUT_DIR is a per-file directory under _final/, the one holding
-{name}.json alongside 02_diarization/ and the rest.
-"""
-
-import argparse
-import base64
-import html
-import json
-import mimetypes
-import os
-import sys
-
-# Above this the page becomes slow to open and awkward to scroll; the audio
-# dominates the size, so the cap is on total bytes rather than segment count.
-MAX_EMBED_BYTES = 400 * 1024 * 1024
-
-
-def _load_transcript(out_dir: str):
-    """The final transcript, plus the name it was keyed under."""
-    name = os.path.basename(os.path.normpath(out_dir))
-    path = os.path.join(out_dir, f"{name}.json")
-    if not os.path.exists(path):
-        candidates = [f for f in os.listdir(out_dir)
-                      if f.endswith(".json") and not f.startswith("manifest")]
-        if not candidates:
-            raise SystemExit(f"no transcript JSON in {out_dir}")
-        path = os.path.join(out_dir, candidates[0])
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-    segments = data["segments"] if isinstance(data, dict) else data
-    return name, segments, path
-
-
-def _audio_index(out_dir: str, name: str):
-    """Map segment index -> (original clip, processed clip), by filename prefix.
-
-    Both directories name their files "{index}_{speaker}...", so the index is
-    the prefix up to the first underscore. Matching on that rather than
-    rebuilding the whole filename keeps this working when the speaker label
-    changes between runs.
-    """
-    original, processed = {}, {}
-    for src, target in ((os.path.join(out_dir, name), original),
-                        (os.path.join(out_dir, "separation"), processed)):
-        if not os.path.isdir(src):
-            continue
-        for fn in os.listdir(src):
-            key = fn.split("_", 1)[0]
-            target.setdefault(key, os.path.join(src, fn))
-    return original, processed
-
-
-def _data_uri(path: str, budget: list):
-    """Embed a clip, or return None once the size budget is spent."""
-    if not path or not os.path.exists(path):
-        return None
-    size = os.path.getsize(path)
-    if size > budget[0]:
-        return None
-    budget[0] -= size
-    mime = mimetypes.guess_type(path)[0] or "audio/mpeg"
-    with open(path, "rb") as f:
-        return f"data:{mime};base64," + base64.b64encode(f.read()).decode("ascii")
-
-
-def _rows(segments, original, processed, budget):
-    out = []
-    for seg in segments:
-        idx = str(seg.get("index", ""))
-        out.append({
-            "index": idx,
-            "speaker": str(seg.get("speaker", "")),
-            "start": float(seg.get("start", 0.0)),
-            "end": float(seg.get("end", 0.0)),
-            "whisper": seg.get("text_whisper") or "",
-            "phowhisper": seg.get("text_phowhisper") or "",
-            "qwen3": seg.get("text_qwen3") or "",
-            "final": seg.get("text") or "",
-            "edited": seg.get("text_edited") or seg.get("text") or "",
-            "note": seg.get("note") or "",
-            "audio_src": _data_uri(original.get(idx), budget),
-            "audio_out": _data_uri(processed.get(idx), budget),
-            # Two things a reviewer cannot hear their way to reliably: whether
-            # the detector found music under the speech, and whether an overlap
-            # was left unseparated so the audio still holds two voices.
-            "music": bool(seg.get("has_music")),
-            "bs_roformer": bool(seg.get("bs_roformer")),
-            "unseparated": [
-                {"start": float(u.get("start", 0.0)), "end": float(u.get("end", 0.0)),
-                 "reason": str(u.get("reason", ""))}
-                for u in (seg.get("unseparated") or [])
-            ],
-            "bss": bool(seg.get("bss")),
-            # Two judgements only a person can make, so they start empty and
-            # stay empty until someone ticks them. Read back from the segment
-            # as well, which is what lets an edited JSON round-trip through a
-            # regenerated page without losing the marks already made.
-            "mark_music": bool(seg.get("mark_music")),
-            "mark_multi": bool(seg.get("mark_multi")),
-        })
-    return out
-
-
-PAGE = """<!doctype html>
+<!doctype html>
 <html lang="vi">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Review · __TITLE__</title>
+<title>Review · podcast_ep42_mock</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
 /* === Warm cream / reading theme === */
 :root {
-  --bg: #f1ebdd; /* Warm cream. Deepened from #fbf8f1, which sat at 1.06
-                    against the white cards -- they had no edge to see. */
+  --bg: #fbf8f1; /* Light warm yellow/cream */
   --bg-elevated: #ffffff; --bg-card: #ffffff;
   --bg-card-hover: #fdfaf6; --fg: #292524; /* Warm dark grey */
   --fg-secondary: #57534e;
-  --fg-dim: #78716c; --accent: #c2410c; /* Warm orange-red accent */
+  --fg-dim: #a8a29e; --accent: #c2410c; /* Warm orange-red accent */
   --accent-hover: #9a3412;
   --accent-bg: rgba(194,65,12,.06); --accent-border: rgba(194,65,12,.2);
   --green: #059669; --green-bg: rgba(5,150,105,.07); --green-fg: #065f46;
   --amber: #d97706; --amber-bg: rgba(217,119,6,.08); --amber-fg: #92400e;
   --red: #dc2626; --red-bg: rgba(220,38,38,.07); --red-fg: #991b1b;
-  --border: rgba(120,113,108,.22); --border-strong: rgba(120,113,108,.38);
-  /* The box you type in has to look like a box. #fffdf5 was 1.02
-     against the card: the one control on the card that gets used the
-     most was the one you could not find. */
-  --edit-bg: #fbf3dc; --note-bg: #f2efe9;
+  --border: rgba(120,113,108,.15); --border-strong: rgba(120,113,108,.25);
+  --edit-bg: #fffdf5; --note-bg: #f5f5f4;
   --shadow-card: 0 1px 3px rgba(120,113,108,.08), 0 1px 2px rgba(120,113,108,.05);
   --shadow-hover: 0 4px 14px rgba(120,113,108,.12);
   --radius: 10px; --radius-sm: 6px; --ok: #059669; --hh: 62px;
@@ -308,7 +188,7 @@ button.play.on{background:var(--accent);border-color:var(--accent);color:#fff;}
 /* Edit textarea — directly under final text */
 .card-edit-wrap{margin-top:2px;}
 textarea.edit{
-  width:100%;font:inherit;font-size:13.5px;padding:7px 10px;
+  width:100%;font:inherit;font-size:12.5px;padding:6px 9px;
   border:1px solid var(--border-strong);border-radius:var(--radius-sm);
   resize:vertical;color:var(--fg);line-height:1.45;
   background:var(--edit-bg);
@@ -317,10 +197,7 @@ textarea.edit{
 }
 textarea.edit:focus{
   outline:none;border-color:var(--accent);
-  /* A wide, opaque ring rather than a 6%-alpha tint: while you are typing,
-     which box has focus should be readable from across the desk. */
-  box-shadow:0 0 0 3px rgba(194,65,12,.22);
-  background:#fffdf7;
+  box-shadow:0 0 0 3px var(--accent-bg);
 }
 textarea.edit::placeholder{color:var(--fg-dim);font-size:11px;}
 
@@ -331,8 +208,8 @@ textarea.edit::placeholder{color:var(--fg-dim);font-size:11px;}
 }
 .card-right-label{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--fg-dim);}
 textarea.note{
-  width:100%;font:inherit;font-size:13px;padding:7px 9px;
-  border:1px solid var(--border-strong);border-radius:var(--radius-sm);
+  width:100%;font:inherit;font-size:12.5px;padding:7px 9px;
+  border:1px solid var(--border);border-radius:var(--radius-sm);
   resize:vertical;color:var(--fg);line-height:1.45;
   background:var(--note-bg);flex:1;min-height:48px;overflow:hidden;
   transition:border-color .15s,box-shadow .15s;
@@ -393,8 +270,8 @@ textarea.note::placeholder{color:var(--fg-dim);font-size:11px;}
 </head>
 <body>
 <header>
-  <h1>__TITLE__</h1>
-  <span class="meta">__COUNT__ đoạn</span>
+  <h1>podcast_ep42_mock</h1>
+  <span class="meta">12 đoạn</span>
   <span class="meta" id="changed"></span>
   <span class="meta" id="shown"></span>
   <div class="progress-wrap" id="progress-wrap">
@@ -430,10 +307,10 @@ textarea.note::placeholder{color:var(--fg-dim);font-size:11px;}
   <button id="bar-stop">Dừng</button>
 </div>
 
-<script id="payload" type="application/json">__DATA__</script>
+<script id="payload" type="application/json">[{"index": "0", "speaker": "Ngọc Anh", "start": 0.3, "end": 6.3, "whisper": "Xin chào các bạn, hôm nay chúng ta sẽ nói về chủ đề rất thú vị liên quan đến âm nhạc và podcast.", "phowhisper": "Xin chào các bạn, hôm nay chúng ta sẽ nói về chủ đề thú vị liên quan đến âm nhạc và podcast.", "qwen3": "Xin chào các bạn hôm nay chúng ta sẽ nói về chủ đề rất thú vị liên quan đến âm nhạc và podcast.", "final": "Xin chào các bạn, hôm nay chúng ta sẽ nói về chủ đề rất thú vị liên quan đến âm nhạc và podcast.", "edited": "Xin chào các bạn, hôm nay chúng ta sẽ nói về chủ đề rất thú vị liên quan đến âm nhạc và podcast.", "note": "", "audio_src": null, "audio_out": null, "music": false, "bs_roformer": false, "unseparated": [], "bss": false, "mark_music": false, "mark_multi": false}, {"index": "1", "speaker": "Minh Tuấn", "start": 12.8, "end": 20.9, "whisper": "Vâng, đây là một chủ đề mà tôi rất tâm đắc. Tôi đã nghiên cứu về nó suốt mấy năm qua.", "phowhisper": "Vâng, đây là chủ đề mà tôi tâm đắc. Tôi đã nghiên cứu về nó suốt mấy năm qua.", "qwen3": "Vâng đây là một chủ đề mà tôi rất tâm đắc Tôi đã nghiên cứu về nó suốt mấy năm qua.", "final": "Vâng, đây là một chủ đề mà tôi rất tâm đắc. Tôi đã nghiên cứu về nó suốt mấy năm qua.", "edited": "Vâng, đây là một chủ đề mà tôi rất tâm đắc. Tôi đã nghiên cứu về nó suốt mấy năm qua.", "note": "", "audio_src": null, "audio_out": null, "music": true, "bs_roformer": true, "unseparated": [], "bss": false, "mark_music": false, "mark_multi": false}, {"index": "2", "speaker": "Thu Hà", "start": 25.3, "end": 35.5, "whisper": "Thật ra thì podcast ở Việt Nam đang phát triển rất mạnh mẽ trong những năm gần đây.", "phowhisper": "Thật ra thì podcast ở Việt Nam đang phát triển mạnh mẽ trong những năm gần đây.", "qwen3": "Thật ra thì podcast ở Việt Nam đang phát triển rất mạnh mẽ trong những năm gần đây.", "final": "Thật ra thì podcast ở Việt Nam đang phát triển rất mạnh mẽ trong những năm gần đây.", "edited": "Thật ra thì podcast ở Việt Nam đang phát triển rất mạnh mẽ trong những năm gần đây.", "note": "", "audio_src": null, "audio_out": null, "music": false, "bs_roformer": false, "unseparated": [], "bss": false, "mark_music": false, "mark_multi": false}, {"index": "3", "speaker": "Ngọc Anh", "start": 37.8, "end": 50.1, "whisper": "Đúng vậy, đặc biệt là sau đại dịch, mọi người bắt đầu nghe podcast nhiều hơn. \nChúng ta có thể thấy số lượng podcast tăng đột biến và chất lượng cũng được cải thiện rất nhiều.", "phowhisper": "Đúng vậy, đặc biệt là sau đại dịch, mọi người bắt đầu nghe podcast nhiều hơn. \nChúng ta có thể thấy số lượng podcast tăng đột biến và chất lượng cũng được cải thiện nhiều.", "qwen3": "Đúng vậy đặc biệt là sau đại dịch mọi người bắt đầu nghe podcast nhiều hơn \nChúng ta có thể thấy số lượng podcast tăng đột biến và chất lượng cũng được cải thiện rất nhiều.", "final": "Đúng vậy, đặc biệt là sau đại dịch, mọi người bắt đầu nghe podcast nhiều hơn. \nChúng ta có thể thấy số lượng podcast tăng đột biến và chất lượng cũng được cải thiện rất nhiều.", "edited": "Đúng vậy, đặc biệt là sau đại dịch COVID-19, mọi người bắt đầu nghe podcast nhiều hơn. \nChúng ta có thể thấy số lượng podcast tăng đột biến và chất lượng cũng được cải thiện rất nhiều. \nThêm một dòng nữa để test độ dài của ô sửa text.", "note": "Đã sửa COVID-19", "audio_src": null, "audio_out": null, "music": false, "bs_roformer": false, "unseparated": [], "bss": false, "mark_music": false, "mark_multi": false}, {"index": "4", "speaker": "Minh Tuấn", "start": 50.3, "end": 56.3, "whisper": "Tôi muốn chia sẻ một câu chuyện thú vị về cách mà AI đang thay đổi ngành công nghiệp âm nhạc.", "phowhisper": "Tôi muốn chia sẻ câu chuyện thú vị về cách mà AI đang thay đổi ngành công nghiệp âm nhạc.", "qwen3": "Tôi muốn chia sẻ một câu chuyện thú vị về cách mà AI đang thay đổi ngành công nghiệp âm nhạc.", "final": "Tôi muốn chia sẻ một câu chuyện thú vị về cách mà AI đang thay đổi ngành công nghiệp âm nhạc.", "edited": "Tôi muốn chia sẻ một câu chuyện thú vị về cách mà AI đang thay đổi ngành công nghiệp âm nhạc.", "note": "", "audio_src": null, "audio_out": null, "music": true, "bs_roformer": false, "unseparated": [], "bss": false, "mark_music": false, "mark_multi": false}, {"index": "5", "speaker": "Thu Hà", "start": 62.8, "end": 70.9, "whisper": "Cảm ơn bạn đã chia sẻ. Vậy theo bạn, tương lai của podcast sẽ như thế nào?", "phowhisper": "Cảm ơn bạn đã chia sẻ. Vậy theo bạn, tương lai của podcast sẽ như thế nào?", "qwen3": "Cảm ơn bạn đã chia sẻ Vậy theo bạn tương lai của podcast sẽ như thế nào?", "final": "Cảm ơn bạn đã chia sẻ. Vậy theo bạn, tương lai của podcast sẽ như thế nào?", "edited": "Cảm ơn bạn đã chia sẻ. Vậy theo bạn, tương lai của podcast sẽ như thế nào?", "note": "", "audio_src": null, "audio_out": null, "music": false, "bs_roformer": false, "unseparated": [], "bss": true, "mark_music": false, "mark_multi": false}, {"index": "6", "speaker": "Ngọc Anh", "start": 75.3, "end": 85.5, "whisper": "Tôi nghĩ rằng podcast sẽ ngày càng cá nhân hóa hơn nhờ vào trí tuệ nhân tạo.", "phowhisper": "Tôi nghĩ rằng podcast sẽ ngày càng cá nhân hóa hơn nhờ vào trí tuệ nhân tạo.", "qwen3": "Tôi nghĩ rằng podcast sẽ ngày càng cá nhân hóa hơn nhờ vào trí tuệ nhân tạo.", "final": "Tôi nghĩ rằng podcast sẽ ngày càng cá nhân hóa hơn nhờ vào trí tuệ nhân tạo.", "edited": "Tôi nghĩ rằng podcast sẽ ngày càng cá nhân hóa hơn nhờ vào trí tuệ nhân tạo.", "note": "", "audio_src": null, "audio_out": null, "music": false, "bs_roformer": false, "unseparated": [{"start": 77.3, "end": 80.3, "reason": "multi_speaker"}], "bss": false, "mark_music": false, "mark_multi": true}, {"index": "7", "speaker": "Minh Tuấn", "start": 87.8, "end": 100.1, "whisper": "Một điểm quan trọng nữa là chất lượng âm thanh. Người nghe ngày càng đòi hỏi cao hơn.", "phowhisper": "Một điểm quan trọng nữa là chất lượng âm thanh. Người nghe ngày càng đòi hỏi cao hơn.", "qwen3": "Một điểm quan trọng nữa là chất lượng âm thanh Người nghe ngày càng đòi hỏi cao hơn.", "final": "Một điểm quan trọng nữa là chất lượng âm thanh. Người nghe ngày càng đòi hỏi cao hơn.", "edited": "Một điểm quan trọng nữa là chất lượng âm thanh. Người nghe ngày càng đòi hỏi cao hơn.", "note": "Âm thanh hơi nhỏ", "audio_src": null, "audio_out": null, "music": false, "bs_roformer": false, "unseparated": [], "bss": false, "mark_music": false, "mark_multi": false}, {"index": "8", "speaker": "Thu Hà", "start": 100.3, "end": 106.3, "whisper": "Bạn nói đúng. Và đó cũng là lý do tại sao chúng ta cần các công cụ xử lý âm thanh tốt hơn.", "phowhisper": "Bạn nói đúng. Và đó cũng là lý do tại sao chúng ta cần các công cụ xử lý âm thanh tốt hơn.", "qwen3": "Bạn nói đúng Và đó cũng là lý do tại sao chúng ta cần các công cụ xử lý âm thanh tốt hơn.", "final": "Bạn nói đúng. Và đó cũng là lý do tại sao chúng ta cần các công cụ xử lý âm thanh tốt hơn.", "edited": "Bạn nói đúng. Và đó cũng là lý do tại sao chúng ta cần các công cụ xử lý âm thanh tốt hơn.", "note": "", "audio_src": null, "audio_out": null, "music": true, "bs_roformer": false, "unseparated": [], "bss": false, "mark_music": true, "mark_multi": false}, {"index": "9", "speaker": "Ngọc Anh", "start": 112.8, "end": 120.9, "whisper": "Vâng, cuối cùng tôi muốn cảm ơn tất cả thính giả đã theo dõi chương trình hôm nay.", "phowhisper": "Vâng, cuối cùng tôi muốn cảm ơn tất cả thính giả đã theo dõi chương trình hôm nay.", "qwen3": "Vâng cuối cùng tôi muốn cảm ơn tất cả thính giả đã theo dõi chương trình hôm nay.", "final": "Vâng, cuối cùng tôi muốn cảm ơn tất cả thính giả đã theo dõi chương trình hôm nay.", "edited": "Vâng, cuối cùng tôi muốn cảm ơn tất cả thính giả đã theo dõi chương trình hôm nay.", "note": "", "audio_src": null, "audio_out": null, "music": false, "bs_roformer": false, "unseparated": [], "bss": true, "mark_music": false, "mark_multi": false}, {"index": "10", "speaker": "Minh Tuấn", "start": 125.3, "end": 135.5, "whisper": "Cảm ơn các bạn. Hẹn gặp lại trong tập tiếp theo nhé!", "phowhisper": "Cảm ơn các bạn. Hẹn gặp lại trong tập tiếp theo nhé!", "qwen3": "Cảm ơn các bạn Hẹn gặp lại trong tập tiếp theo nhé!", "final": "Cảm ơn các bạn. Hẹn gặp lại trong tập tiếp theo nhé!", "edited": "Cảm ơn các bạn. Hẹn gặp lại trong tập tiếp theo nhé!", "note": "", "audio_src": null, "audio_out": null, "music": false, "bs_roformer": false, "unseparated": [], "bss": false, "mark_music": false, "mark_multi": false}, {"index": "11", "speaker": "Thu Hà", "start": 137.8, "end": 150.1, "whisper": "Trước khi kết thúc, tôi muốn nhắn nhủ rằng hãy luôn giữ đam mê với âm nhạc.", "phowhisper": "Trước khi kết thúc, tôi muốn nhắn nhủ rằng hãy luôn giữ đam mê với âm nhạc.", "qwen3": "Trước khi kết thúc tôi muốn nhắn nhủ rằng hãy luôn giữ đam mê với âm nhạc.", "final": "Trước khi kết thúc, tôi muốn nhắn nhủ rằng hãy luôn giữ đam mê với âm nhạc.", "edited": "Trước khi kết thúc, tôi muốn nhắn nhủ rằng hãy luôn giữ đam mê với âm nhạc.", "note": "", "audio_src": null, "audio_out": null, "music": false, "bs_roformer": false, "unseparated": [], "bss": false, "mark_music": false, "mark_multi": false}]</script>
 <script>
 const DATA = JSON.parse(document.getElementById("payload").textContent);
-const NAME = __NAME__;
+const NAME = "podcast_ep42_mock";
 const tbody = document.getElementById("tbody");
 
 const esc = s => (s ?? "").replace(/[&<>"']/g, c =>
@@ -486,8 +363,8 @@ DATA.forEach((r, i) => {
     <div class="card-left">
       <div class="seg-idx">${+r.index}</div>
       <div class="seg-spk"><span>${esc(r.speaker)}</span></div>
-      <div class="seg-time">${clock(r.start)} – ${clock(r.end)}</div>
-      <div class="seg-dur">(${(r.end - r.start).toFixed(1)}s)</div>
+      <div class="seg-time">${clock(r.start)}</div>
+      <div class="seg-dur">${(r.end - r.start).toFixed(1)}s</div>
     </div>
     <div class="card-center">
       <div class="card-top-row">
@@ -803,7 +680,7 @@ document.getElementById("save").onclick = () => {
     b.innerHTML = `<span class="play-ico">▶</span> ${label}`;
   });
   download(NAME + "_review.html",
-           "<!doctype html>\\n" + doc.outerHTML, "text/html");
+           "<!doctype html>\n" + doc.outerHTML, "text/html");
   dirty = false;
   flash("Đã lưu — ghi đè file cũ");
 };
@@ -821,96 +698,3 @@ document.getElementById("export").onclick = () => {
 </script>
 </body>
 </html>
-"""
-
-
-def build_review_page(output_dir: str, target: str = None, max_mb: int = None,
-                      limit: int = None, logger=None):
-    """Write the review page for one processed recording. Returns its path.
-
-    Kept separate from main() so the pipeline can call it at the end of a run
-    without going through argparse.
-    """
-    out_dir = os.path.abspath(output_dir)
-    name, segments, _src = _load_transcript(out_dir)
-    if limit:
-        segments = segments[:limit]
-
-    original, processed = _audio_index(out_dir, name)
-    cap = (max_mb * 1024 * 1024) if max_mb else MAX_EMBED_BYTES
-    budget = [cap]
-    rows = _rows(segments, original, processed, budget)
-
-    page = (PAGE
-            .replace("__TITLE__", html.escape(name))
-            .replace("__COUNT__", str(len(rows)))
-            .replace("__NAME__", json.dumps(name))
-            .replace("__DATA__", json.dumps(rows, ensure_ascii=False)))
-
-    target = target or os.path.join(out_dir, f"{name}_review.html")
-    with open(target, "w", encoding="utf-8") as f:
-        f.write(page)
-
-    if logger:
-        size_mb = os.path.getsize(target) / (1024 * 1024)
-        clips = sum(bool(r["audio_src"]) + bool(r["audio_out"]) for r in rows)
-        flagged = sum(1 for r in rows if r["unseparated"])
-        music = sum(1 for r in rows if r["music"] and not r["bs_roformer"])
-        msg = (f"Review page: {len(rows)} segment(s), {clips} clip(s), "
-               f"{size_mb:.1f} MB -> {target}")
-        if flagged or music:
-            msg += (f"  ({flagged} segment(s) with unseparated overlap, "
-                    f"{music} with music left in)")
-        if budget[0] <= 0:
-            msg += "  (size cap reached; later clips were left out)"
-        logger.info(msg)
-    return target
-
-
-def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("output_dir", help="per-file directory under _final/")
-    ap.add_argument("-o", "--out", default=None, help="where to write the page")
-    ap.add_argument("--max-mb", type=int, default=MAX_EMBED_BYTES // (1024 * 1024),
-                    help="cap on embedded audio (default: %(default)s MB)")
-    ap.add_argument("--limit", type=int, default=None,
-                    help="only the first N segments")
-    args = ap.parse_args()
-
-    out_dir = os.path.abspath(args.output_dir)
-    name, segments, src = _load_transcript(out_dir)
-    if args.limit:
-        segments = segments[:args.limit]
-
-    original, processed = _audio_index(out_dir, name)
-    budget = [args.max_mb * 1024 * 1024]
-    rows = _rows(segments, original, processed, budget)
-
-    embedded = sum(1 for r in rows if r["audio_src"]) + \
-        sum(1 for r in rows if r["audio_out"])
-    missing = sum(1 for r in rows if not r["audio_src"] or not r["audio_out"])
-
-    page = (PAGE
-            .replace("__TITLE__", html.escape(name))
-            .replace("__COUNT__", str(len(rows)))
-            .replace("__NAME__", json.dumps(name))
-            .replace("__DATA__", json.dumps(rows, ensure_ascii=False)))
-
-    target = args.out or os.path.join(out_dir, f"{name}_review.html")
-    with open(target, "w", encoding="utf-8") as f:
-        f.write(page)
-
-    size_mb = os.path.getsize(target) / (1024 * 1024)
-    print(f"transcript : {src}")
-    print(f"segments   : {len(rows)}")
-    print(f"audio      : {embedded} clip(s) embedded"
-          + (f", {missing} row(s) missing one" if missing else ""))
-    print(f"page       : {target}  ({size_mb:.1f} MB)")
-    if budget[0] <= 0:
-        print("warning    : the size cap was reached; later clips were skipped. "
-              "Raise --max-mb or use --limit.", file=sys.stderr)
-
-
-if __name__ == "__main__":
-    main()

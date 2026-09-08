@@ -84,7 +84,7 @@ class ModelLoader:
             # then the profile (published as BSS_SEPARATOR in main.py), then the
             # default. Resolved here too so the log line names what actually ran.
             separator = (getattr(self.args, "separator", None)
-                         or os.environ.get("BSS_SEPARATOR") or "usef")
+                         or os.environ.get("BSS_SEPARATOR") or "sidon")
             if self.logger: self.logger.info(f"  separator backend: {separator}")
             self.models["separator"] = BssSeparator(
                 device=self.device_1,
