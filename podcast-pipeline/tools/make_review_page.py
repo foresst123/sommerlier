@@ -370,6 +370,13 @@ textarea.note::placeholder{color:var(--fg-dim);font-size:11px;}
   width:15px;height:15px;border:1.5px solid var(--fg-dim);border-radius:3px;
   background:var(--bg-elevated);position:relative;display:block;flex-shrink:0;transition:all .12s;
 }
+.spk-correct{
+  display:none; width:70px; font-size:11px; padding:3px 6px;
+  border:1px solid var(--border); border-radius:4px; background:var(--bg-elevated);
+  color:var(--fg);
+}
+.spk-correct.show{display:inline-block;}
+.spk-correct:focus{outline:1px solid var(--accent);border-color:transparent;}
 .mark-label input:checked{background:var(--accent);border-color:var(--accent);}
 .mark-label input:checked::after{
   content:"";position:absolute;left:4px;top:1px;
@@ -540,6 +547,7 @@ DATA.forEach((r, i) => {
         <label class="mark-label" title="Còn nhạc nền"><input type="checkbox" class="mk-music"${r.mark_music ? " checked" : ""}><span>🎵 Nhạc</span></label>
         <label class="mark-label" title="Nhiều hơn một giọng"><input type="checkbox" class="mk-multi"${r.mark_multi ? " checked" : ""}><span>👥 Giọng</span></label>
         <label class="mark-label" title="Sai người nói"><input type="checkbox" class="mk-spk"${r.mark_spk ? " checked" : ""}><span>👤 Sai Spk</span></label>
+        <input type="text" class="spk-correct${r.mark_spk ? ' show' : ''}" value="${esc(r.spk_correct || '')}" placeholder="Tên đúng">
       </div>
     </div>`;
   tbody.appendChild(card);
@@ -554,7 +562,19 @@ function syncRow(target) {
   else if (target.classList.contains("note")) r.note = target.value;
   else if (target.classList.contains("mk-music")) r.mark_music = target.checked;
   else if (target.classList.contains("mk-multi")) r.mark_multi = target.checked;
-  else if (target.classList.contains("mk-spk")) r.mark_spk = target.checked;
+  else if (target.classList.contains("mk-spk")) {
+    r.mark_spk = target.checked;
+    const input = card.querySelector(".spk-correct");
+    if (target.checked) {
+      input.classList.add("show");
+      input.focus();
+    } else {
+      input.classList.remove("show");
+      input.value = "";
+      r.spk_correct = "";
+    }
+  }
+  else if (target.classList.contains("spk-correct")) r.spk_correct = target.value;
   else return;
   card.classList.toggle("changed", r.edited !== r.final || !!r.note);
   card.classList.toggle("marked", !!(r.mark_music || r.mark_multi || r.mark_spk));
