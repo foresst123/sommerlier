@@ -185,6 +185,9 @@ def test_every_header_has_exactly_one_cell():
     """A missing cell shifts every column after it, silently."""
     import re
     mod = _review_module()
-    headers = len(re.findall(r"<th>", mod.PAGE))
+    # `<th\b`, not `<th>`: a header that grows a class or a title is
+    # still a header, and matching only the bare tag made this pass
+    # while two columns had no counterpart.
+    headers = len(re.findall(r"<th\b", mod.PAGE))
     template = re.search(r"tr\.innerHTML = `(.*?)`;", mod.PAGE, re.S).group(1)
     assert headers == len(re.findall(r"<td", template))

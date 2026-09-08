@@ -103,7 +103,13 @@ def _rows(segments, original, processed, budget):
                  "reason": str(u.get("reason", ""))}
                 for u in (seg.get("unseparated") or [])
             ],
-            "tse": bool(seg.get("tse")),
+            "bss": bool(seg.get("bss")),
+            # Two judgements only a person can make, so they start empty and
+            # stay empty until someone ticks them. Read back from the segment
+            # as well, which is what lets an edited JSON round-trip through a
+            # regenerated page without losing the marks already made.
+            "mark_music": bool(seg.get("mark_music")),
+            "mark_multi": bool(seg.get("mark_multi")),
         })
     return out
 
@@ -150,7 +156,7 @@ PAGE = """<!doctype html>
   button:hover { filter: brightness(1.08); }
   #status { color: var(--ok); font-size: 13px; min-width: 12ch; }
   .wrap { overflow-x: auto; }
-  table { border-collapse: collapse; width: 100%; min-width: 1280px; }
+  table { border-collapse: collapse; width: 100%; min-width: 1400px; }
   /* State reads at a glance from shape and colour together, so the two flag
      columns can be scanned without stopping to read every cell. */
   .flag {
@@ -177,8 +183,20 @@ PAGE = """<!doctype html>
     color: var(--muted); font-weight: 600;
   }
   tbody tr:nth-child(odd) { background: var(--row); }
-  td.id { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--muted); }
-  td.id b { color: var(--fg); display: block; font-variant-numeric: normal; }
+  /* First column carries everything needed to find the row again: which
+     segment it is, and where in the recording. Stacked rather than spread
+     across two columns -- on a form you look in one place for the reference. */
+  td.id { white-space: nowrap; text-align: center; padding: 8px 6px;
+          font-variant-numeric: tabular-nums; line-height: 1.25; }
+  td.id b { display: block; font-size: 15px; font-weight: 700; }
+  td.id i { display: block; font-style: normal; font-size: 11px; color: var(--muted); }
+  td.id u { display: block; text-decoration: none; font-size: 10px; color: var(--muted); }
+  td.spk { text-align: center; }
+  td.spk span {
+    display: inline-block; min-width: 24px; padding: 2px 7px; border-radius: 4px;
+    border: 1px solid var(--line); font-size: 12px; font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
   audio { width: 190px; height: 32px; display: block; }
   .no-audio { color: var(--muted); font-size: 12px; font-style: italic; }
   .asr { font-size: 13px; }
@@ -217,6 +235,35 @@ PAGE = """<!doctype html>
   #bar .who span { color: var(--muted); font-size: 12px; }
   #bar .src { font-size: 12px; color: var(--muted); min-width: 9ch; }
   body { padding-bottom: 74px; }
+
+  /* The two reviewer columns, built the way a paper form builds them: the
+     question is asked once in the column head, and every row is just a box.
+     Repeating the label in each cell is what made them wide and slow to scan.
+     The label wraps the box so the whole cell is the target -- a reviewer
+     ticking a thousand rows should not have to hit a 17px square. */
+  th.mark-h { text-align: center; width: 62px; line-height: 1.25; }
+  td.mark { padding: 0; vertical-align: middle; }
+  td.mark label {
+    display: flex; align-items: center; justify-content: center;
+    min-height: 44px; height: 100%; cursor: pointer; user-select: none;
+  }
+  td.mark label:hover { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+  td.mark input {
+    appearance: none; -webkit-appearance: none; margin: 0; cursor: pointer;
+    width: 20px; height: 20px; border: 1.5px solid var(--muted); border-radius: 3px;
+    background: var(--bg); position: relative; display: block;
+  }
+  td.mark input:checked { background: var(--accent); border-color: var(--accent); }
+  td.mark input:checked::after {
+    content: ""; position: absolute; left: 6px; top: 2px;
+    width: 5px; height: 10px; border: solid #fff;
+    border-width: 0 2px 2px 0; transform: rotate(42deg);
+  }
+  td.mark input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* A marked row has to be findable while scrolling a thousand of them, but
+     the mark is a reviewer's note and not an error -- a rule on the edge, not
+     a wash of colour across the row. */
+  tr.marked td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 </style>
 </head>
 <body>
@@ -235,8 +282,8 @@ PAGE = """<!doctype html>
 <table>
   <thead>
     <tr>
-      <th>Đoạn</th>
-      <th>Thời gian</th>
+      <th class="c-id">STT</th>
+      <th class="c-spk">Giọng</th>
       <th>Audio gốc</th>
       <th>Sau xử lý</th>
       <th>Nhạc</th>
@@ -245,6 +292,8 @@ PAGE = """<!doctype html>
       <th>Text đã chọn</th>
       <th>Sửa</th>
       <th>Ghi chú</th>
+      <th class="mark-h" title="Người nghe tự đánh dấu: sau xử lý vẫn còn nhạc nền">Còn<br>nhạc</th>
+      <th class="mark-h" title="Người nghe tự đánh dấu: đoạn này còn nhiều hơn một giọng">Nhiều<br>giọng</th>
     </tr>
   </thead>
   <tbody id="tbody"></tbody>
@@ -280,7 +329,7 @@ function playCell(i, which, has) {
 // A separated segment never reaches the music detector, so "no music" would be
 // a claim the pipeline never made. Say "chưa xét" instead of implying clean.
 function musicCell(r) {
-  if (r.tse) return `<span class="flag none" title="Đoạn đã tách không qua bộ dò nhạc">–</span>`;
+  if (r.bss) return `<span class="flag none" title="Đoạn đã tách không qua bộ dò nhạc">–</span>`;
   if (!r.music) return `<span class="flag none">–</span>`;
   return r.bs_roformer
     ? `<span class="flag ok" title="Phát hiện nhạc, đã tách nhạc bằng BS-RoFormer">♪ đã lọc</span>`
@@ -301,7 +350,7 @@ const SEP_LABEL = {
 function sepCell(r) {
   const u = r.unseparated || [];
   if (!u.length) {
-    return r.tse
+    return r.bss
       ? `<span class="flag ok" title="Đã tách chồng tiếng thành công">✓ đã tách</span>`
       : `<span class="flag none">–</span>`;
   }
@@ -314,8 +363,8 @@ DATA.forEach((r, i) => {
   const tr = document.createElement("tr");
   tr.dataset.i = i;
   tr.innerHTML = `
-    <td class="id"><b>${esc(r.index)}</b>SP ${esc(r.speaker)}</td>
-    <td class="time"><b>${clock(r.start)}</b>${clock(r.end)}<br>${(r.end - r.start).toFixed(2)}s</td>
+    <td class="id"><b>${+r.index}</b><i>${clock(r.start)}</i><u>${(r.end - r.start).toFixed(1)}s</u></td>
+    <td class="spk"><span>${esc(r.speaker)}</span></td>
     <td>${playCell(i, "src", !!r.audio_src)}</td>
     <td>${playCell(i, "out", !!r.audio_out)}</td>
       <td>${musicCell(r)}</td>
@@ -327,29 +376,51 @@ DATA.forEach((r, i) => {
     </td>
     <td class="final">${esc(r.final)}</td>
     <td><textarea rows="3" class="edit">${esc(r.edited)}</textarea></td>
-    <td><textarea rows="3" class="note">${esc(r.note)}</textarea></td>`;
+    <td><textarea rows="3" class="note">${esc(r.note)}</textarea></td>
+    <td class="mark"><label title="Còn nhạc nền"><input type="checkbox" class="mk-music"${r.mark_music ? " checked" : ""}></label></td>
+    <td class="mark"><label title="Còn nhiều hơn một giọng"><input type="checkbox" class="mk-multi"${r.mark_multi ? " checked" : ""}></label></td>`;
   tbody.appendChild(tr);
 });
 
 // Keep the in-memory rows in step with the boxes, so a save always writes
 // what is on screen rather than what was loaded.
-tbody.addEventListener("input", e => {
-  const tr = e.target.closest("tr");
+// Checkboxes fire "change" as well as "input" depending on the browser, and a
+// mark that silently failed to save is worse than one that never existed.
+// Listening to both, with an idempotent handler, costs nothing.
+function syncRow(target) {
+  const tr = target.closest("tr");
+  if (!tr) return;
   const r = DATA[+tr.dataset.i];
-  if (e.target.classList.contains("edit")) r.edited = e.target.value;
-  else r.note = e.target.value;
+  if (target.classList.contains("edit")) r.edited = target.value;
+  else if (target.classList.contains("note")) r.note = target.value;
+  else if (target.classList.contains("mk-music")) r.mark_music = target.checked;
+  else if (target.classList.contains("mk-multi")) r.mark_multi = target.checked;
+  else return;
   tr.classList.toggle("changed", r.edited !== r.final || !!r.note);
+  tr.classList.toggle("marked", !!(r.mark_music || r.mark_multi));
   countChanged();
   dirty = true;
-});
+}
+tbody.addEventListener("input", e => syncRow(e.target));
+tbody.addEventListener("change", e => syncRow(e.target));
 
+// Three counts, because they answer different questions: how much text was
+// touched, and how much audio a listener judged unusable for each reason.
 function countChanged() {
-  const n = DATA.filter(r => r.edited !== r.final || r.note).length;
-  document.getElementById("changed").textContent = n ? `${n} đã sửa` : "";
+  const edited = DATA.filter(r => r.edited !== r.final || r.note).length;
+  const music = DATA.filter(r => r.mark_music).length;
+  const multi = DATA.filter(r => r.mark_multi).length;
+  const bits = [];
+  if (edited) bits.push(`${edited} đã sửa`);
+  if (music) bits.push(`${music} còn nhạc`);
+  if (multi) bits.push(`${multi} nhiều giọng`);
+  document.getElementById("changed").textContent = bits.join(" · ");
 }
 countChanged();
 DATA.forEach((r, i) => {
-  if (r.edited !== r.final || r.note) tbody.children[i].classList.add("changed");
+  const tr = tbody.children[i];
+  if (r.edited !== r.final || r.note) tr.classList.add("changed");
+  if (r.mark_music || r.mark_multi) tr.classList.add("marked");
 });
 
 let dirty = false;
@@ -521,6 +592,9 @@ document.getElementById("export").onclick = () => {
   const rows = DATA.map(r => ({
     index: r.index, speaker: r.speaker, start: r.start, end: r.end,
     text: r.final, text_edited: r.edited, note: r.note,
+    // The reason this page exists: a downstream filter needs to know which
+    // segments a person rejected, not only which ones they retyped.
+    mark_music: r.mark_music, mark_multi: r.mark_multi,
   }));
   download(NAME + "_edited.json", JSON.stringify(rows, null, 2),
            "application/json");
