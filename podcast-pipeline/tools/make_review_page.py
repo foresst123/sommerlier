@@ -155,6 +155,12 @@ PAGE = """<!doctype html>
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   button:hover { filter: brightness(1.08); }
   #status { color: var(--ok); font-size: 13px; min-width: 12ch; }
+  .pick { font-size: 13px; color: var(--muted); display: inline-flex;
+          align-items: center; gap: 6px; }
+  .pick select { font: inherit; padding: 5px 8px; border-radius: 6px;
+                 border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+  kbd.hint { font: inherit; font-size: 12px; color: var(--muted); cursor: help;
+             border: 1px dashed var(--line); border-radius: 5px; padding: 4px 8px; }
   /* The table scrolls inside this, not the page, and that is what makes the
      column names stay put. `overflow-x: auto` alone does not work: the spec
      computes overflow-y to auto alongside it, so the wrapper silently becomes
@@ -190,7 +196,7 @@ PAGE = """<!doctype html>
   :root[data-theme="dark"] .flag.warn { color: #d99331; border-color: #d99331; }
   :root[data-theme="dark"] .flag.bad  { color: #f87171; border-color: #f87171; }
   th, td {
-    border-bottom: 1px solid var(--line); padding: 8px 10px;
+    border-bottom: 1px solid var(--line); padding: 6px 8px;
     vertical-align: top; text-align: left;
   }
   /* Pinned to the top of .wrap rather than of the window: the page header
@@ -206,10 +212,10 @@ PAGE = """<!doctype html>
   /* First column carries everything needed to find the row again: which
      segment it is, and where in the recording. Stacked rather than spread
      across two columns -- on a form you look in one place for the reference. */
-  td.id { white-space: nowrap; text-align: center; padding: 8px 6px;
-          font-variant-numeric: tabular-nums; line-height: 1.25; }
-  td.id b { display: block; font-size: 15px; font-weight: 700; }
-  td.id i { display: block; font-style: normal; font-size: 11px; color: var(--muted); }
+  td.id { white-space: nowrap; padding: 7px 8px;
+          font-variant-numeric: tabular-nums; line-height: 1.3; }
+  td.id b { font-size: 14px; font-weight: 700; }
+  td.id i { font-style: normal; font-size: 11px; color: var(--muted); margin-left: 6px; }
   td.id u { display: block; text-decoration: none; font-size: 10px; color: var(--muted); }
   td.spk { text-align: center; }
   td.spk span {
@@ -219,21 +225,50 @@ PAGE = """<!doctype html>
   }
   audio { width: 190px; height: 32px; display: block; }
   .no-audio { color: var(--muted); font-size: 12px; font-style: italic; }
-  .asr { font-size: 13px; }
-  .asr div { margin-bottom: 5px; }
-  .asr span { color: var(--muted); font-size: 11px; display: block; }
-  textarea {
-    width: 100%; min-width: 210px; font: inherit; padding: 6px 8px;
-    border: 1px solid var(--line); border-radius: 5px; resize: vertical;
-    background: var(--edit-bg); color: var(--fg); min-height: 200px;
+  /* Three transcripts stacked with a label on its own line above each was
+     three lines of chrome for three lines of text. The label sits inline now
+     and each variant is capped at two lines -- long enough to compare wording,
+     short enough that the row does not decide the height of the table. */
+  .asr { font-size: 12.5px; line-height: 1.4; }
+  .asr div {
+    margin-bottom: 3px; display: -webkit-box; -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical; overflow: hidden;
   }
-  textarea.note { background: var(--bg); min-height: 42px; }
-  td.final { font-size: 13px; }
+  .asr div:last-child { margin-bottom: 0; }
+  .asr span {
+    color: var(--muted); font-size: 10px; text-transform: uppercase;
+    letter-spacing: .04em; margin-right: 5px; font-weight: 600;
+  }
+  /* Row height is the whole reading experience here. A 200px edit box meant
+     two or three rows on a screen, so reviewing 300 segments was 100 screens
+     of scrolling; at this height it is nearer 12, which is what a dense table
+     is supposed to give. The box grows to its content and grows again while
+     it has focus, so editing a long line is still comfortable -- the space is
+     spent when it is needed instead of reserved on every row. */
+  textarea {
+    width: 100%; min-width: 160px; font: inherit; padding: 5px 7px;
+    border: 1px solid var(--line); border-radius: 5px; resize: vertical;
+    background: var(--edit-bg); color: var(--fg);
+    min-height: 46px; max-height: 120px; overflow-y: auto; line-height: 1.45;
+  }
+  textarea:focus { max-height: 300px; min-height: 90px; outline: 2px solid var(--accent);
+                   outline-offset: -1px; border-color: var(--accent); }
+  textarea.note { background: var(--bg); min-height: 46px; }
+  td.final {
+    font-size: 12.5px; line-height: 1.4; display: -webkit-box;
+    -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+  }
   tr.changed td.id b { color: var(--accent); }
   td.time { white-space: nowrap; font-variant-numeric: tabular-nums;
             font-size: 12px; color: var(--muted); }
   td.time b { color: var(--fg); font-weight: 600; display: block; }
   tr.playing { background: color-mix(in srgb, var(--accent) 14%, transparent) !important; }
+  /* Keyboard focus needs somewhere to be. Without a visible current row the
+     shortcuts below are unusable: you cannot tell what j/k is about to act on. */
+  tr.cur td { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  tr.cur td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+  tr.cur.marked td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+  tr.hidden { display: none; }
   button.play {
     padding: 4px 10px; font-size: 12px; border-radius: 4px; min-width: 62px;
   }
@@ -291,6 +326,18 @@ PAGE = """<!doctype html>
   <h1>__TITLE__</h1>
   <span class="meta">__COUNT__ đoạn</span>
   <span class="meta" id="changed"></span>
+  <span class="meta" id="shown"></span>
+  <label class="pick">Xem
+    <select id="filter">
+      <option value="all">tất cả</option>
+      <option value="todo">chưa đánh dấu</option>
+      <option value="marked">đã đánh dấu</option>
+      <option value="music">còn nhạc</option>
+      <option value="multi">nhiều giọng</option>
+      <option value="issue">máy báo lỗi</option>
+    </select>
+  </label>
+  <kbd class="hint" title="j/k hoặc ↑/↓ chuyển dòng · Space nghe · M đánh dấu còn nhạc · V đánh dấu nhiều giọng · E sửa text">? phím tắt</kbd>
   <span class="spacer"></span>
   <span id="status"></span>
   <button id="playall">▶ Phát toàn bộ</button>
@@ -395,8 +442,8 @@ DATA.forEach((r, i) => {
       <div><span>Qwen3</span>${esc(r.qwen3)}</div>
     </td>
     <td class="final">${esc(r.final)}</td>
-    <td><textarea rows="3" class="edit">${esc(r.edited)}</textarea></td>
-    <td><textarea rows="3" class="note">${esc(r.note)}</textarea></td>
+    <td><textarea rows="2" class="edit">${esc(r.edited)}</textarea></td>
+    <td><textarea rows="2" class="note">${esc(r.note)}</textarea></td>
     <td class="mark"><label title="Còn nhạc nền"><input type="checkbox" class="mk-music"${r.mark_music ? " checked" : ""}></label></td>
     <td class="mark"><label title="Còn nhiều hơn một giọng"><input type="checkbox" class="mk-multi"${r.mark_multi ? " checked" : ""}></label></td>`;
   tbody.appendChild(tr);
@@ -420,6 +467,10 @@ function syncRow(target) {
   tr.classList.toggle("marked", !!(r.mark_music || r.mark_multi));
   countChanged();
   dirty = true;
+  // A row that no longer matches the filter should leave, but not while the
+  // pointer is still on it -- so this runs on the next tick, after the click
+  // has finished.
+  if (filterSel.value !== "all") setTimeout(applyFilter, 0);
 }
 tbody.addEventListener("input", e => syncRow(e.target));
 tbody.addEventListener("change", e => syncRow(e.target));
@@ -450,6 +501,99 @@ const _pin = () => document.documentElement.style.setProperty(
   "--hh", _hdr.getBoundingClientRect().height + "px");
 _pin();
 addEventListener("resize", _pin);
+
+// --- filtering and keyboard -------------------------------------------------
+//
+// A reviewer does not work through a thousand rows once, top to bottom. They
+// work a subset: the ones the pipeline flagged, then the ones they marked, then
+// what is left. Without a filter that means scrolling past everything already
+// dealt with, every pass.
+const FILTERS = {
+  all:    () => true,
+  todo:   r => !r.mark_music && !r.mark_multi,
+  marked: r => r.mark_music || r.mark_multi,
+  music:  r => r.mark_music,
+  multi:  r => r.mark_multi,
+  issue:  r => (r.unseparated && r.unseparated.length) || (r.music && !r.bs_roformer),
+};
+const filterSel = document.getElementById("filter");
+
+function applyFilter() {
+  const keep = FILTERS[filterSel.value] || FILTERS.all;
+  let shown = 0;
+  DATA.forEach((r, i) => {
+    const on = keep(r);
+    tbody.children[i].classList.toggle("hidden", !on);
+    if (on) shown++;
+  });
+  document.getElementById("shown").textContent =
+    shown === DATA.length ? "" : `hiện ${shown}/${DATA.length}`;
+  if (cur >= 0 && tbody.children[cur].classList.contains("hidden")) setCur(nextVisible(0, 1));
+}
+filterSel.addEventListener("change", applyFilter);
+
+// The current row. Shortcuts act on it, so it has to exist and be visible
+// before any of them mean anything.
+let cur = -1;
+
+function nextVisible(from, step) {
+  for (let i = from; i >= 0 && i < DATA.length; i += step) {
+    if (!tbody.children[i].classList.contains("hidden")) return i;
+  }
+  return -1;
+}
+
+function setCur(i) {
+  tbody.querySelectorAll("tr.cur").forEach(tr => tr.classList.remove("cur"));
+  cur = i;
+  if (i < 0) return;
+  const tr = tbody.children[i];
+  tr.classList.add("cur");
+  tr.scrollIntoView({block: "nearest"});
+}
+
+function toggleMark(field) {
+  if (cur < 0) return;
+  const tr = tbody.children[cur];
+  tr.querySelector(field === "mark_music" ? ".mk-music" : ".mk-multi").click();
+}
+
+// One hand on the keyboard is what makes this quick: move, listen, judge,
+// without reaching for the mouse between rows. Typing must never trigger any
+// of it, so anything with a text field focused falls straight through.
+addEventListener("keydown", e => {
+  const typing = /^(TEXTAREA|INPUT|SELECT)$/.test(e.target.tagName)
+                 && e.target.type !== "checkbox";
+  if (typing) {
+    if (e.key === "Escape") e.target.blur();
+    return;
+  }
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if (k === "j" || e.key === "ArrowDown") { e.preventDefault(); setCur(nextVisible(cur < 0 ? 0 : cur + 1, 1)); }
+  else if (k === "k" || e.key === "ArrowUp") { e.preventDefault(); setCur(nextVisible(cur <= 0 ? 0 : cur - 1, -1)); }
+  else if (k === "m") { e.preventDefault(); toggleMark("mark_music"); }
+  else if (k === "v") { e.preventDefault(); toggleMark("mark_multi"); }
+  else if (k === "e") {
+    e.preventDefault();
+    if (cur >= 0) tbody.children[cur].querySelector("textarea.edit").focus();
+  } else if (e.key === " ") {
+    e.preventDefault();
+    if (cur < 0) return;
+    const r = DATA[cur];
+    if (cur === current && !player.paused) { player.pause(); clearRow(); current = -1; }
+    else { chain = false; play(cur, r.audio_out ? "out" : "src"); }
+  }
+});
+
+// Clicking anywhere in a row makes it the current one, so mouse and keyboard
+// agree about where you are rather than each keeping their own idea.
+tbody.addEventListener("mousedown", e => {
+  const tr = e.target.closest("tr");
+  if (tr) setCur(+tr.dataset.i);
+});
+
+applyFilter();
 
 let dirty = false;
 addEventListener("beforeunload", e => { if (dirty) e.preventDefault(); });
