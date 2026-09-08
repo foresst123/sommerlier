@@ -51,6 +51,9 @@ class SeparationBackend:
         """
         raise NotImplementedError
 
+    def set_process(self, proc):
+        """Re-point at a restarted worker. In-process backends ignore it."""
+
     def close(self):
         pass
 
@@ -227,6 +230,9 @@ class SidonBackend(SeparationBackend):
         self._temp_dir = temp_dir or tempfile.mkdtemp(prefix="sidon_exchange_")
         self._logger = logger
         self._counter = 0
+
+    def set_process(self, proc):
+        self._process = proc
 
     def separate(self, mixture, sample_rate, enroll_A=None, enroll_B=None):
         """Blind separation: the enrollments are not used, and cannot be.

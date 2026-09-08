@@ -86,7 +86,7 @@ class BssSeparator:
         from models.separation_backends import make_backend
 
         self.device = device
-        self.process = process
+        self._process = process
         self.classifier = None
         self.target_embed_cache: Dict[str, torch.Tensor] = {}
         self._temp_dir = tempfile.mkdtemp(prefix="bss_exchange_")
@@ -100,6 +100,25 @@ class BssSeparator:
                                     device=device, logger=logger)
 
         self._load_model()
+
+    @property
+    def process(self):
+        return self._process
+
+    @process.setter
+    def process(self, proc):
+        """Re-point at a worker that was restarted between files.
+
+        The pipeline releases the worker at the end of the stage and starts a
+        fresh one for the next file, so the process this was built with is dead
+        by then. Setting it here without telling the backend left the backend
+        holding the corpse: every job after the first file failed on a pipe
+        nobody was reading.
+        """
+        self._process = proc
+        setter = getattr(self.backend, "set_process", None)
+        if setter:
+            setter(proc)
 
     def reset_speakers(self):
         """Forget the cached enrollment embeddings.

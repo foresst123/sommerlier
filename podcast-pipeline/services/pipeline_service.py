@@ -95,6 +95,7 @@ class PipelineService:
     # hands it None and the stage connects to nothing.
     WORKER_FOR_STAGE = {
         "diarization": "diarizen",
+        "separation": "sidon",
         "asr": "qwen3",
     }
 
@@ -298,6 +299,12 @@ class PipelineService:
 
         if not checkpoint.exists("asr"):
             self._rebind_worker(args, "qwen3", self.asr_svc, "qwen3")
+
+        # The separator only needs a worker when the backend is out of process.
+        # An in-process one has no `process` to rebind and the call falls
+        # through on the None check, so this costs nothing there.
+        if not checkpoint.exists("separation"):
+            self._rebind_worker(args, "sidon", self.separation_svc, "bss_model")
         
         # 1. Audio Preprocessing
         audio_data = self.audio_svc.load_audio(audio_path, target_sr=24000)

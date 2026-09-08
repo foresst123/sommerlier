@@ -185,9 +185,11 @@ def test_every_header_has_exactly_one_cell():
     """A missing cell shifts every column after it, silently."""
     import re
     mod = _review_module()
-    # `<th\b`, not `<th>`: a header that grows a class or a title is
-    # still a header, and matching only the bare tag made this pass
-    # while two columns had no counterpart.
-    headers = len(re.findall(r"<th\b", mod.PAGE))
+    # Counted inside <thead> only, and with `<th\b` so a header carrying a
+    # class or a title still counts. The bare `<th>` this used to match let two
+    # headerless columns through; counting across the whole page instead picked
+    # up the tag named in a CSS comment.
+    thead = re.search(r"<thead>(.*?)</thead>", mod.PAGE, re.S).group(1)
+    headers = len(re.findall(r"<th\b", thead))
     template = re.search(r"tr\.innerHTML = `(.*?)`;", mod.PAGE, re.S).group(1)
     assert headers == len(re.findall(r"<td", template))
