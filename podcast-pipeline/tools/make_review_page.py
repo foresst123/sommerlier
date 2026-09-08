@@ -119,206 +119,276 @@ PAGE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>__TITLE__</title>
+<title>Review · __TITLE__</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
-  :root {
-    --bg: #ffffff; --fg: #1a1a1a; --muted: #6b6b6b; --line: #e2e2e2;
-    --row: #fafafa; --accent: #2563eb; --edit-bg: #fffbea; --ok: #16a34a;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      --bg: #14161a; --fg: #e8e8e8; --muted: #9aa0a6; --line: #2c3038;
-      --row: #1a1d22; --accent: #60a5fa; --edit-bg: #2a2620; --ok: #4ade80;
-    }
-  }
-  :root[data-theme="dark"] {
-    --bg: #14161a; --fg: #e8e8e8; --muted: #9aa0a6; --line: #2c3038;
-    --row: #1a1d22; --accent: #60a5fa; --edit-bg: #2a2620; --ok: #4ade80;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; background: var(--bg); color: var(--fg);
-    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  }
-  header {
-    position: sticky; top: 0; z-index: 10; background: var(--bg);
-    border-bottom: 1px solid var(--line); padding: 12px 16px;
-    display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
-  }
-  h1 { font-size: 16px; margin: 0; font-weight: 600; }
-  .meta { color: var(--muted); font-size: 13px; }
-  .spacer { flex: 1; }
-  button {
-    font: inherit; padding: 7px 14px; border-radius: 6px; cursor: pointer;
-    border: 1px solid var(--line); background: var(--bg); color: var(--fg);
-  }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  button:hover { filter: brightness(1.08); }
-  #status { color: var(--ok); font-size: 13px; min-width: 12ch; }
-  .pick { font-size: 13px; color: var(--muted); display: inline-flex;
-          align-items: center; gap: 6px; }
-  .pick select { font: inherit; padding: 5px 8px; border-radius: 6px;
-                 border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
-  kbd.hint { font: inherit; font-size: 12px; color: var(--muted); cursor: help;
-             border: 1px dashed var(--line); border-radius: 5px; padding: 4px 8px; }
-  /* The table scrolls inside this, not the page, and that is what makes the
-     column names stay put. `overflow-x: auto` alone does not work: the spec
-     computes overflow-y to auto alongside it, so the wrapper silently becomes
-     a vertical scroll container that never scrolls -- and a sticky <th> pins
-     itself to that instead of to the window, scrolling away with the rows.
-     Giving it a real height makes it the scroller it was already pretending
-     to be. 74px is the transport bar at the foot. */
-  .wrap {
-    overflow: auto;
-    height: calc(100vh - var(--hh, 62px) - 74px);
-    overscroll-behavior: contain;
-  }
-  table { border-collapse: collapse; width: 100%; min-width: 1180px; }
-  /* State reads at a glance from shape and colour together, so the two flag
-     columns can be scanned without stopping to read every cell. */
-  /* Read as a symbol, not a sentence. These two columns are scanned down the
-     page rather than read row by row, and the words were costing 100px each
-     for information a glyph carries; the wording moved into the tooltip. */
-  .flag {
-    display: inline-block; white-space: nowrap; font-size: 13px;
-    font-weight: 600; line-height: 1.4; text-align: center; min-width: 22px;
-  }
-  th.c-flag { width: 42px; text-align: center; }
-  td.c-flag { text-align: center; padding-left: 4px; padding-right: 4px; }
-  .flag.none { color: var(--muted); }
-  .flag.ok   { color: var(--ok); border-color: var(--ok); }
-  .flag.warn { color: #b45309; border-color: #b45309; }
-  .flag.bad  { color: #dc2626; border-color: #dc2626; font-weight: 600; }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) .flag.warn { color: #d99331; border-color: #d99331; }
-    :root:not([data-theme="light"]) .flag.bad  { color: #f87171; border-color: #f87171; }
-  }
-  :root[data-theme="dark"] .flag.warn { color: #d99331; border-color: #d99331; }
-  :root[data-theme="dark"] .flag.bad  { color: #f87171; border-color: #f87171; }
-  th, td {
-    border-bottom: 1px solid var(--line); padding: 6px 8px;
-    vertical-align: top; text-align: left;
-  }
-  /* Pinned to the top of .wrap rather than of the window: the page header
-     already owns the top of the window, and a thead pinned there would slide
-     underneath it and disappear exactly when a long table needs it. */
-  th {
-    position: sticky; top: 0; background: var(--bg); z-index: 5;
-    font-size: 11px; text-transform: uppercase; letter-spacing: .03em;
-    color: var(--muted); font-weight: 600; padding: 7px 8px;
-    box-shadow: inset 0 -1px 0 var(--line);
-  }
-  tbody tr:nth-child(odd) { background: var(--row); }
-  /* First column carries everything needed to find the row again: which
-     segment it is, and where in the recording. Stacked rather than spread
-     across two columns -- on a form you look in one place for the reference. */
-  td.id { white-space: nowrap; padding: 7px 8px;
-          font-variant-numeric: tabular-nums; line-height: 1.3; }
-  td.id b { font-size: 14px; font-weight: 700; }
-  td.id i { font-style: normal; font-size: 11px; color: var(--muted); margin-left: 6px; }
-  td.id u { display: block; text-decoration: none; font-size: 10px; color: var(--muted); }
-  td.spk { text-align: center; }
-  td.spk span {
-    display: inline-block; min-width: 24px; padding: 2px 7px; border-radius: 4px;
-    border: 1px solid var(--line); font-size: 12px; font-weight: 600;
-    font-variant-numeric: tabular-nums;
-  }
-  audio { width: 190px; height: 32px; display: block; }
-  .no-audio { color: var(--muted); font-size: 12px; font-style: italic; }
-  /* Three transcripts stacked with a label on its own line above each was
-     three lines of chrome for three lines of text. The label sits inline now
-     and each variant is capped at two lines -- long enough to compare wording,
-     short enough that the row does not decide the height of the table. */
-  .asr { font-size: 12.5px; line-height: 1.4; }
-  .asr div {
-    margin-bottom: 3px; display: -webkit-box; -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical; overflow: hidden;
-  }
-  .asr div:last-child { margin-bottom: 0; }
-  .asr span {
-    color: var(--muted); font-size: 10px; text-transform: uppercase;
-    letter-spacing: .04em; margin-right: 5px; font-weight: 600;
-  }
-  /* Row height is the whole reading experience here. A 200px edit box meant
-     two or three rows on a screen, so reviewing 300 segments was 100 screens
-     of scrolling; at this height it is nearer 12, which is what a dense table
-     is supposed to give. The box grows to its content and grows again while
-     it has focus, so editing a long line is still comfortable -- the space is
-     spent when it is needed instead of reserved on every row. */
-  textarea {
-    width: 100%; min-width: 160px; font: inherit; padding: 5px 7px;
-    border: 1px solid var(--line); border-radius: 5px; resize: vertical;
-    background: var(--edit-bg); color: var(--fg);
-    min-height: 46px; max-height: 120px; overflow-y: auto; line-height: 1.45;
-  }
-  textarea:focus { max-height: 300px; min-height: 90px; outline: 2px solid var(--accent);
-                   outline-offset: -1px; border-color: var(--accent); }
-  textarea.note { background: var(--bg); min-height: 46px; }
-  td.final {
-    font-size: 12.5px; line-height: 1.4; display: -webkit-box;
-    -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
-  }
-  tr.changed td.id b { color: var(--accent); }
-  td.time { white-space: nowrap; font-variant-numeric: tabular-nums;
-            font-size: 12px; color: var(--muted); }
-  td.time b { color: var(--fg); font-weight: 600; display: block; }
-  tr.playing { background: color-mix(in srgb, var(--accent) 14%, transparent) !important; }
-  /* Keyboard focus needs somewhere to be. Without a visible current row the
-     shortcuts below are unusable: you cannot tell what j/k is about to act on. */
-  tr.cur td { background: color-mix(in srgb, var(--accent) 8%, transparent); }
-  tr.cur td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
-  tr.cur.marked td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
-  tr.hidden { display: none; }
-  button.play {
-    padding: 4px 10px; font-size: 12px; border-radius: 4px; min-width: 62px;
-  }
-  button.play.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+/* === Warm cream / reading theme === */
+:root {
+  --bg: #f1ebdd; /* Warm cream. Deepened from #fbf8f1, which sat at 1.06
+                    against the white cards -- they had no edge to see. */
+  --bg-elevated: #ffffff; --bg-card: #ffffff;
+  --bg-card-hover: #fdfaf6; --fg: #292524; /* Warm dark grey */
+  --fg-secondary: #57534e;
+  --fg-dim: #78716c; --accent: #c2410c; /* Warm orange-red accent */
+  --accent-hover: #9a3412;
+  --accent-bg: rgba(194,65,12,.06); --accent-border: rgba(194,65,12,.2);
+  --green: #059669; --green-bg: rgba(5,150,105,.07); --green-fg: #065f46;
+  --amber: #d97706; --amber-bg: rgba(217,119,6,.08); --amber-fg: #92400e;
+  --red: #dc2626; --red-bg: rgba(220,38,38,.07); --red-fg: #991b1b;
+  --border: rgba(120,113,108,.22); --border-strong: rgba(120,113,108,.38);
+  /* The box you type in has to look like a box. #fffdf5 was 1.02
+     against the card: the one control on the card that gets used the
+     most was the one you could not find. */
+  --edit-bg: #fbf3dc; --note-bg: #f2efe9;
+  --shadow-card: 0 1px 3px rgba(120,113,108,.08), 0 1px 2px rgba(120,113,108,.05);
+  --shadow-hover: 0 4px 14px rgba(120,113,108,.12);
+  --radius: 10px; --radius-sm: 6px; --ok: #059669; --hh: 62px;
+}
 
-  /* A single transport at the foot of the window, the way a music player
-     works: one element to control, and the row it belongs to stays visible
-     while the table scrolls. Per-row <audio> tags meant hunting for whichever
-     one was playing. */
-  #bar {
-    position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
-    background: var(--bg); border-top: 1px solid var(--line);
-    padding: 10px 16px; display: flex; gap: 14px; align-items: center;
-    box-shadow: 0 -2px 12px rgba(0,0,0,.09);
-  }
-  #bar audio { flex: 1; width: auto; height: 36px; }
-  #bar .who { font-size: 13px; min-width: 15ch; }
-  #bar .who b { display: block; }
-  #bar .who span { color: var(--muted); font-size: 12px; }
-  #bar .src { font-size: 12px; color: var(--muted); min-width: 9ch; }
-  body { overflow: hidden; }
+*{box-sizing:border-box;margin:0;}
+body{
+  background:var(--bg);color:var(--fg);
+  font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  font-size:14px;line-height:1.5;overflow:hidden;
+}
 
-  /* The two reviewer columns, built the way a paper form builds them: the
-     question is asked once in the column head, and every row is just a box.
-     Repeating the label in each cell is what made them wide and slow to scan.
-     The label wraps the box so the whole cell is the target -- a reviewer
-     ticking a thousand rows should not have to hit a 17px square. */
-  th.mark-h { text-align: center; width: 44px; line-height: 1.15; font-size: 10px; }
-  td.mark { padding: 0; vertical-align: middle; }
-  td.mark label {
-    display: flex; align-items: center; justify-content: center;
-    min-height: 40px; height: 100%; cursor: pointer; user-select: none;
-  }
-  td.mark label:hover { background: color-mix(in srgb, var(--accent) 9%, transparent); }
-  td.mark input {
-    appearance: none; -webkit-appearance: none; margin: 0; cursor: pointer;
-    width: 18px; height: 18px; border: 1.5px solid var(--muted); border-radius: 3px;
-    background: var(--bg); position: relative; display: block;
-  }
-  td.mark input:checked { background: var(--accent); border-color: var(--accent); }
-  td.mark input:checked::after {
-    content: ""; position: absolute; left: 5px; top: 1px;
-    width: 5px; height: 10px; border: solid #fff;
-    border-width: 0 2px 2px 0; transform: rotate(42deg);
-  }
-  td.mark input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  /* A marked row has to be findable while scrolling a thousand of them, but
-     the mark is a reviewer's note and not an error -- a rule on the edge, not
-     a wash of colour across the row. */
-  tr.marked td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+/* === Header === */
+header{
+  position:sticky;top:0;z-index:10;
+  background:var(--bg-elevated);
+  border-bottom:1px solid var(--border-strong);
+  padding:10px 20px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;
+  box-shadow:0 1px 4px rgba(0,0,0,.04);
+}
+h1{font-size:15px;font-weight:700;letter-spacing:-.01em;color:var(--fg);}
+.meta{color:var(--fg-secondary);font-size:12px;}
+.spacer{flex:1;}
+
+.progress-wrap{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--fg-secondary);}
+.progress-bar{width:80px;height:4px;background:var(--border-strong);border-radius:2px;overflow:hidden;}
+.progress-fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--accent-hover));border-radius:2px;transition:width .4s ease;}
+
+button{
+  font:inherit;font-size:13px;font-weight:500;
+  padding:6px 14px;border-radius:var(--radius-sm);cursor:pointer;
+  border:1px solid var(--border-strong);background:var(--bg-elevated);color:var(--fg);
+  transition:all .15s ease;
+}
+button:hover{border-color:var(--accent);color:var(--accent);}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff;}
+button.primary:hover{background:var(--accent-hover);border-color:var(--accent-hover);}
+#status{color:var(--ok);font-size:12px;min-width:12ch;}
+
+.pick{font-size:12px;color:var(--fg-secondary);display:inline-flex;align-items:center;gap:6px;}
+.pick select{
+  font:inherit;font-size:12px;padding:5px 10px;border-radius:var(--radius-sm);
+  border:1px solid var(--border-strong);background:var(--bg-elevated);color:var(--fg);cursor:pointer;
+}
+kbd.hint{
+  font:inherit;font-size:11px;color:var(--fg-dim);cursor:help;
+  border:1px dashed var(--border-strong);border-radius:var(--radius-sm);padding:4px 8px;
+}
+kbd.hint:hover{color:var(--fg-secondary);}
+
+/* === Card List === */
+.wrap{
+  overflow-y:auto;overflow-x:hidden;
+  height:calc(100vh - var(--hh) - 74px);
+  padding:10px 16px;overscroll-behavior:contain;
+}
+.card-list{display:flex;flex-direction:column;gap:5px;max-width:1600px;margin:0 auto;}
+
+/* === Card: 3-column grid — Left meta | Center content+edit | Right note+marks === */
+.card{
+  display:grid;grid-template-columns:80px 1fr 240px;
+  background:var(--bg-card);border:1px solid var(--border);
+  border-radius:var(--radius);box-shadow:var(--shadow-card);
+  transition:box-shadow .2s,border-color .2s,background .15s;
+  overflow:hidden;border-left:3px solid transparent;
+}
+.card:hover{
+  background:var(--bg-card-hover);box-shadow:var(--shadow-hover);
+  border-color:var(--border-strong);
+}
+.card.cur{
+  border-left-color:var(--accent);
+  background:color-mix(in srgb,var(--accent) 4%,var(--bg-card));
+}
+.card.playing{border-left-color:var(--accent);animation:pulse-border 2s ease-in-out infinite;}
+@keyframes pulse-border{
+  0%,100%{border-left-color:var(--accent);}
+  50%{border-left-color:var(--accent-hover);}
+}
+.card.changed .seg-idx{color:var(--accent);}
+.card.marked{border-left-color:var(--accent);}
+.card.hidden{display:none;}
+
+/* --- Card Left: ID & Meta --- */
+.card-left{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  padding:10px 6px;gap:3px;border-right:1px solid var(--border);
+  background:color-mix(in srgb,var(--bg) 60%,var(--bg-card));
+}
+.seg-idx{font-size:12px;font-weight:600;color:var(--fg-dim);font-variant-numeric:tabular-nums;line-height:1;transition:color .2s;margin-bottom:2px;}
+.seg-spk span{
+  display:inline-block;padding:3px 10px;border-radius:6px;
+  font-size:13px;font-weight:700;letter-spacing:.01em;
+  background:var(--accent-bg);color:var(--accent);border:1px solid var(--accent-border);
+}
+.seg-time{font-size:10px;color:var(--fg-secondary);font-variant-numeric:tabular-nums;}
+.seg-dur{font-size:10px;color:var(--fg-dim);font-weight:500;}
+
+/* --- Card Center: Audio + ASR + Final + Edit --- */
+.card-center{display:flex;flex-direction:column;padding:8px 14px;gap:6px;min-width:0;}
+
+.card-top-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.card-audio{display:flex;gap:5px;}
+.card-flags{display:flex;gap:5px;margin-left:auto;}
+
+/* Play buttons */
+button.play{
+  padding:4px 11px;font-size:11px;font-weight:600;
+  border-radius:var(--radius-sm);border:1px solid var(--border-strong);
+  background:var(--bg-elevated);color:var(--fg);
+  display:inline-flex;align-items:center;gap:4px;min-width:70px;justify-content:center;
+}
+button.play:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-bg);}
+button.play.on{background:var(--accent);border-color:var(--accent);color:#fff;}
+.play-ico{font-size:9px;}
+.no-audio{color:var(--fg-dim);font-size:11px;}
+
+/* Badges for music/separation */
+.badge{
+  display:inline-flex;align-items:center;justify-content:center;
+  padding:4px 8px;border-radius:12px;
+  border:1px solid transparent;cursor:help;
+  position:relative;
+}
+/* Custom instant tooltip */
+.badge[title]:hover::after {
+  content: attr(title);
+  position: absolute;
+  top: 100%; right: 0;
+  margin-top: 5px;
+  background: var(--fg); color: var(--bg);
+  padding: 5px 10px; border-radius: 5px;
+  font-size: 11px; font-weight: 500;
+  white-space: nowrap; z-index: 50;
+  pointer-events: none;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+}
+.badge-muted{color:var(--fg-dim);border-color:transparent;}
+.badge-ok{color:var(--green-fg);background:var(--green-bg);border-color:var(--green);}
+.badge-warn{color:var(--amber-fg);background:var(--amber-bg);border-color:var(--amber);}
+.badge-bad{color:var(--red-fg);background:var(--red-bg);border-color:var(--red);}
+.badge-icon{font-size:14px;line-height:1;}
+
+/* ASR lines */
+.card-asr{display:flex;flex-direction:column;gap:2px;}
+.asr-line{
+  font-size:12px;line-height:1.4;color:var(--fg-secondary);
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+}
+.asr-tag{
+  display:inline-block;min-width:16px;font-size:9px;font-weight:700;
+  color:var(--fg-dim);text-transform:uppercase;letter-spacing:.04em;margin-right:5px;
+  background:var(--border);padding:1px 4px;border-radius:3px;
+}
+
+/* Final text */
+.card-final{
+  font-size:13px;line-height:1.45;color:var(--fg);padding:6px 10px;
+  border-radius:var(--radius-sm);background:var(--accent-bg);border-left:3px solid var(--accent);
+  font-weight:500;
+}
+.final-icon{color:var(--accent);margin-right:5px;font-weight:700;}
+
+/* Edit textarea — directly under final text */
+.card-edit-wrap{margin-top:2px;}
+textarea.edit{
+  width:100%;font:inherit;font-size:13.5px;padding:7px 10px;
+  border:1px solid var(--border-strong);border-radius:var(--radius-sm);
+  resize:vertical;color:var(--fg);line-height:1.45;
+  background:var(--edit-bg);
+  min-height:40px;overflow:hidden;
+  transition:border-color .15s,box-shadow .15s;
+}
+textarea.edit:focus{
+  outline:none;border-color:var(--accent);
+  /* A wide, opaque ring rather than a 6%-alpha tint: while you are typing,
+     which box has focus should be readable from across the desk. */
+  box-shadow:0 0 0 3px rgba(194,65,12,.22);
+  background:#fffdf7;
+}
+textarea.edit::placeholder{color:var(--fg-dim);font-size:11px;}
+
+/* --- Card Right: Note + Marks --- */
+.card-right{
+  display:flex;flex-direction:column;padding:8px 10px;gap:6px;
+  border-left:1px solid var(--border);
+}
+.card-right-label{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--fg-dim);}
+textarea.note{
+  width:100%;font:inherit;font-size:13px;padding:7px 9px;
+  border:1px solid var(--border-strong);border-radius:var(--radius-sm);
+  resize:vertical;color:var(--fg);line-height:1.45;
+  background:var(--note-bg);flex:1;min-height:48px;overflow:hidden;
+  transition:border-color .15s,box-shadow .15s;
+}
+textarea.note:focus{
+  outline:none;border-color:var(--accent);
+  box-shadow:0 0 0 3px var(--accent-bg);
+}
+textarea.note::placeholder{color:var(--fg-dim);font-size:11px;}
+
+/* Mark checkboxes */
+.card-marks{display:flex;gap:4px;margin-top:auto;flex-wrap:wrap;}
+.mark-label{
+  display:flex;align-items:center;gap:5px;cursor:pointer;user-select:none;
+  font-size:11px;color:var(--fg-secondary);padding:4px 8px;
+  border-radius:var(--radius-sm);border:1px solid var(--border);
+  transition:background .12s,border-color .12s;
+}
+.mark-label:hover{background:var(--accent-bg);border-color:var(--accent-border);}
+.mark-label input[type="checkbox"]{
+  appearance:none;-webkit-appearance:none;margin:0;cursor:pointer;
+  width:15px;height:15px;border:1.5px solid var(--fg-dim);border-radius:3px;
+  background:var(--bg-elevated);position:relative;display:block;flex-shrink:0;transition:all .12s;
+}
+.mark-label input:checked{background:var(--accent);border-color:var(--accent);}
+.mark-label input:checked::after{
+  content:"";position:absolute;left:4px;top:1px;
+  width:4.5px;height:8.5px;border:solid #fff;
+  border-width:0 2px 2px 0;transform:rotate(42deg);
+}
+.mark-label input:checked+span{color:var(--accent);font-weight:600;}
+.mark-label input:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+
+/* === Transport Bar === */
+#bar{
+  position:fixed;left:0;right:0;bottom:0;z-index:20;
+  background:var(--bg-elevated);
+  border-top:1px solid var(--border-strong);padding:10px 20px;
+  display:flex;gap:14px;align-items:center;
+  box-shadow:0 -2px 8px rgba(0,0,0,.06);
+}
+#bar audio{flex:1;width:auto;height:36px;}
+#bar .who{font-size:13px;min-width:15ch;}
+#bar .who b{display:block;font-weight:600;}
+#bar .who span{color:var(--fg-secondary);font-size:12px;}
+#bar .src{font-size:11px;color:var(--fg-secondary);min-width:9ch;}
+
+/* === Responsive === */
+@media(max-width:1000px){
+  .card{grid-template-columns:70px 1fr 200px;}
+}
+@media(max-width:800px){
+  .card{grid-template-columns:1fr;grid-template-rows:auto auto auto;}
+  .card-left{flex-direction:row;justify-content:flex-start;gap:10px;padding:8px 14px;border-right:none;border-bottom:1px solid var(--border);}
+  .card-right{border-left:none;border-top:1px solid var(--border);}
+}
 </style>
 </head>
 <body>
@@ -327,6 +397,10 @@ PAGE = """<!doctype html>
   <span class="meta">__COUNT__ đoạn</span>
   <span class="meta" id="changed"></span>
   <span class="meta" id="shown"></span>
+  <div class="progress-wrap" id="progress-wrap">
+    <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+    <span id="progress-text"></span>
+  </div>
   <label class="pick">Xem
     <select id="filter">
       <option value="all">tất cả</option>
@@ -346,25 +420,7 @@ PAGE = """<!doctype html>
 </header>
 
 <div class="wrap">
-<table>
-  <thead>
-    <tr>
-      <th class="c-id">STT</th>
-      <th class="c-spk">Giọng</th>
-      <th>Audio gốc</th>
-      <th>Sau xử lý</th>
-      <th class="c-flag" title="Bộ dò nhạc thấy gì, và đã lọc chưa">Nhạc</th>
-      <th class="c-flag" title="Chồng tiếng đã tách được chưa">Tách</th>
-      <th>3 bản ASR</th>
-      <th>Text đã chọn</th>
-      <th>Sửa</th>
-      <th>Ghi chú</th>
-      <th class="mark-h" title="Người nghe tự đánh dấu: sau xử lý vẫn còn nhạc nền">Còn<br>nhạc</th>
-      <th class="mark-h" title="Người nghe tự đánh dấu: đoạn này còn nhiều hơn một giọng">Nhiều<br>giọng</th>
-    </tr>
-  </thead>
-  <tbody id="tbody"></tbody>
-</table>
+  <div id="tbody" class="card-list"></div>
 </div>
 
 <div id="bar">
@@ -388,23 +444,19 @@ const clock = t => {
 };
 
 function playCell(i, which, has) {
-  return has
-    ? `<button class="play" data-i="${i}" data-which="${which}">▶ Phát</button>`
-    : `<span class="no-audio">không có</span>`;
+  if (!has) return '<span class="no-audio">—</span>';
+  const label = which === "src" ? "Gốc" : "Xử lý";
+  return `<button class="play" data-i="${i}" data-which="${which}"><span class="play-ico">▶</span> ${label}</button>`;
 }
 
-// A separated segment never reaches the music detector, so "no music" would be
-// a claim the pipeline never made. Say "chưa xét" instead of implying clean.
 function musicCell(r) {
-  if (r.bss) return `<span class="flag none" title="Đoạn đã tách không qua bộ dò nhạc">·</span>`;
-  if (!r.music) return `<span class="flag none" title="Không phát hiện nhạc">·</span>`;
+  if (r.bss) return '<span class="badge badge-muted" title="Đoạn đã tách — không qua bộ dò nhạc">·</span>';
+  if (!r.music) return '<span class="badge badge-muted" title="Không phát hiện nhạc">·</span>';
   return r.bs_roformer
-    ? `<span class="flag ok" title="Phát hiện nhạc, đã lọc">♪</span>`
-    : `<span class="flag warn" title="Phát hiện nhạc nhưng CHƯA lọc">♪!</span>`;
+    ? '<span class="badge badge-ok" title="Thành công: Phát hiện nhạc, đã lọc bằng BS-RoFormer"><span class="badge-icon">🎵</span></span>'
+    : '<span class="badge badge-bad" title="Lỗi: Phát hiện nhạc nhưng CHƯA lọc!"><span class="badge-icon">🎵</span></span>';
 }
 
-// Reasons come from the separation report; a reviewer needs to know the audio
-// still holds two voices before trusting what they hear in it.
 const SEP_LABEL = {
   multi_speaker: "còn 2 giọng",
   no_enroll: "thiếu mẫu giọng",
@@ -418,65 +470,82 @@ function sepCell(r) {
   const u = r.unseparated || [];
   if (!u.length) {
     return r.bss
-      ? `<span class="flag ok" title="Đã tách chồng tiếng thành công">✓</span>`
-      : `<span class="flag none" title="Không có chồng tiếng">·</span>`;
+      ? '<span class="badge badge-ok" title="Thành công: Đã tách chồng tiếng"><span class="badge-icon">👥</span></span>'
+      : '<span class="badge badge-muted" title="Không có chồng tiếng">·</span>';
   }
   const total = u.reduce((a, x) => a + (x.end - x.start), 0);
   const reasons = [...new Set(u.map(x => SEP_LABEL[x.reason] || x.reason))].join(", ");
-  return `<span class="flag bad" title="Còn ${total.toFixed(1)}s chưa tách — ${esc(reasons)}">✗</span>`;
+  return `<span class="badge badge-bad" title="Lỗi: Còn ${total.toFixed(1)}s chưa tách — ${esc(reasons)}"><span class="badge-icon">👥</span></span>`;
 }
 
 DATA.forEach((r, i) => {
-  const tr = document.createElement("tr");
-  tr.dataset.i = i;
-  tr.innerHTML = `
-    <td class="id"><b>${+r.index}</b><i>${clock(r.start)}</i><u>${(r.end - r.start).toFixed(1)}s</u></td>
-    <td class="spk"><span>${esc(r.speaker)}</span></td>
-    <td>${playCell(i, "src", !!r.audio_src)}</td>
-    <td>${playCell(i, "out", !!r.audio_out)}</td>
-      <td class="c-flag">${musicCell(r)}</td>
-      <td class="c-flag">${sepCell(r)}</td>
-    <td class="asr">
-      <div><span>Whisper</span>${esc(r.whisper)}</div>
-      <div><span>PhoWhisper</span>${esc(r.phowhisper)}</div>
-      <div><span>Qwen3</span>${esc(r.qwen3)}</div>
-    </td>
-    <td class="final">${esc(r.final)}</td>
-    <td><textarea rows="2" class="edit">${esc(r.edited)}</textarea></td>
-    <td><textarea rows="2" class="note">${esc(r.note)}</textarea></td>
-    <td class="mark"><label title="Còn nhạc nền"><input type="checkbox" class="mk-music"${r.mark_music ? " checked" : ""}></label></td>
-    <td class="mark"><label title="Còn nhiều hơn một giọng"><input type="checkbox" class="mk-multi"${r.mark_multi ? " checked" : ""}></label></td>`;
-  tbody.appendChild(tr);
+  const card = document.createElement("div");
+  card.className = "card";
+  card.dataset.i = i;
+  card.innerHTML = `
+    <div class="card-left">
+      <div class="seg-idx">${+r.index}</div>
+      <div class="seg-spk"><span>${esc(r.speaker)}</span></div>
+      <div class="seg-time">${clock(r.start)}</div>
+      <div class="seg-dur">${(r.end - r.start).toFixed(1)}s</div>
+    </div>
+    <div class="card-center">
+      <div class="card-top-row">
+        <div class="card-audio">
+          ${playCell(i, "src", !!r.audio_src)}
+          ${playCell(i, "out", !!r.audio_out)}
+        </div>
+        <div class="card-flags">
+          ${musicCell(r)}
+          ${sepCell(r)}
+        </div>
+      </div>
+      <div class="card-asr">
+        <div class="asr-line"><span class="asr-tag">W</span>${esc(r.whisper)}</div>
+        <div class="asr-line"><span class="asr-tag">P</span>${esc(r.phowhisper)}</div>
+        <div class="asr-line"><span class="asr-tag">Q</span>${esc(r.qwen3)}</div>
+      </div>
+      <div class="card-final"><span class="final-icon">✦</span>${esc(r.final)}</div>
+      <div class="card-edit-wrap">
+        <textarea rows="1" class="edit" placeholder="Sửa text nếu cần...">${esc(r.edited)}</textarea>
+      </div>
+    </div>
+    <div class="card-right">
+      <span class="card-right-label">Ghi chú</span>
+      <textarea rows="2" class="note" placeholder="Ghi chú...">${esc(r.note)}</textarea>
+      <div class="card-marks">
+        <label class="mark-label" title="Còn nhạc nền"><input type="checkbox" class="mk-music"${r.mark_music ? " checked" : ""}><span>🎵 Nhạc</span></label>
+        <label class="mark-label" title="Nhiều hơn một giọng"><input type="checkbox" class="mk-multi"${r.mark_multi ? " checked" : ""}><span>👥 Giọng</span></label>
+      </div>
+    </div>`;
+  tbody.appendChild(card);
 });
 
-// Keep the in-memory rows in step with the boxes, so a save always writes
-// what is on screen rather than what was loaded.
-// Checkboxes fire "change" as well as "input" depending on the browser, and a
-// mark that silently failed to save is worse than one that never existed.
-// Listening to both, with an idempotent handler, costs nothing.
+// Keep in-memory rows in step with the boxes
 function syncRow(target) {
-  const tr = target.closest("tr");
-  if (!tr) return;
-  const r = DATA[+tr.dataset.i];
+  const card = target.closest(".card");
+  if (!card) return;
+  const r = DATA[+card.dataset.i];
   if (target.classList.contains("edit")) r.edited = target.value;
   else if (target.classList.contains("note")) r.note = target.value;
   else if (target.classList.contains("mk-music")) r.mark_music = target.checked;
   else if (target.classList.contains("mk-multi")) r.mark_multi = target.checked;
   else return;
-  tr.classList.toggle("changed", r.edited !== r.final || !!r.note);
-  tr.classList.toggle("marked", !!(r.mark_music || r.mark_multi));
+  card.classList.toggle("changed", r.edited !== r.final || !!r.note);
+  card.classList.toggle("marked", !!(r.mark_music || r.mark_multi));
   countChanged();
   dirty = true;
-  // A row that no longer matches the filter should leave, but not while the
-  // pointer is still on it -- so this runs on the next tick, after the click
-  // has finished.
   if (filterSel.value !== "all") setTimeout(applyFilter, 0);
 }
-tbody.addEventListener("input", e => syncRow(e.target));
+tbody.addEventListener("input", e => {
+  if (e.target.tagName === 'TEXTAREA') {
+    e.target.style.height = 'auto';
+    e.target.style.height = e.target.scrollHeight + 'px';
+  }
+  syncRow(e.target);
+});
 tbody.addEventListener("change", e => syncRow(e.target));
 
-// Three counts, because they answer different questions: how much text was
-// touched, and how much audio a listener judged unusable for each reason.
 function countChanged() {
   const edited = DATA.filter(r => r.edited !== r.final || r.note).length;
   const music = DATA.filter(r => r.mark_music).length;
@@ -486,16 +555,19 @@ function countChanged() {
   if (music) bits.push(`${music} còn nhạc`);
   if (multi) bits.push(`${multi} nhiều giọng`);
   document.getElementById("changed").textContent = bits.join(" · ");
+  const total = DATA.length;
+  const reviewed = DATA.filter(r => r.mark_music || r.mark_multi || r.edited !== r.final || r.note).length;
+  const pct = total ? Math.round(reviewed / total * 100) : 0;
+  document.getElementById("progress-fill").style.width = pct + "%";
+  document.getElementById("progress-text").textContent = `${reviewed}/${total}`;
 }
 countChanged();
 DATA.forEach((r, i) => {
-  const tr = tbody.children[i];
-  if (r.edited !== r.final || r.note) tr.classList.add("changed");
-  if (r.mark_music || r.mark_multi) tr.classList.add("marked");
+  const card = tbody.children[i];
+  if (r.edited !== r.final || r.note) card.classList.add("changed");
+  if (r.mark_music || r.mark_multi) card.classList.add("marked");
 });
 
-// The table head pins directly under the page header, so it has to know how
-// tall that is -- and it changes when the buttons wrap on a narrow window.
 const _hdr = document.querySelector("header");
 const _pin = () => document.documentElement.style.setProperty(
   "--hh", _hdr.getBoundingClientRect().height + "px");
@@ -503,11 +575,6 @@ _pin();
 addEventListener("resize", _pin);
 
 // --- filtering and keyboard -------------------------------------------------
-//
-// A reviewer does not work through a thousand rows once, top to bottom. They
-// work a subset: the ones the pipeline flagged, then the ones they marked, then
-// what is left. Without a filter that means scrolling past everything already
-// dealt with, every pass.
 const FILTERS = {
   all:    () => true,
   todo:   r => !r.mark_music && !r.mark_multi,
@@ -532,8 +599,6 @@ function applyFilter() {
 }
 filterSel.addEventListener("change", applyFilter);
 
-// The current row. Shortcuts act on it, so it has to exist and be visible
-// before any of them mean anything.
 let cur = -1;
 
 function nextVisible(from, step) {
@@ -544,23 +609,20 @@ function nextVisible(from, step) {
 }
 
 function setCur(i) {
-  tbody.querySelectorAll("tr.cur").forEach(tr => tr.classList.remove("cur"));
+  tbody.querySelectorAll(".card.cur").forEach(c => c.classList.remove("cur"));
   cur = i;
   if (i < 0) return;
-  const tr = tbody.children[i];
-  tr.classList.add("cur");
-  tr.scrollIntoView({block: "nearest"});
+  const card = tbody.children[i];
+  card.classList.add("cur");
+  card.scrollIntoView({block: "nearest"});
 }
 
 function toggleMark(field) {
   if (cur < 0) return;
-  const tr = tbody.children[cur];
-  tr.querySelector(field === "mark_music" ? ".mk-music" : ".mk-multi").click();
+  const card = tbody.children[cur];
+  card.querySelector(field === "mark_music" ? ".mk-music" : ".mk-multi").click();
 }
 
-// One hand on the keyboard is what makes this quick: move, listen, judge,
-// without reaching for the mouse between rows. Typing must never trigger any
-// of it, so anything with a text field focused falls straight through.
 addEventListener("keydown", e => {
   const typing = /^(TEXTAREA|INPUT|SELECT)$/.test(e.target.tagName)
                  && e.target.type !== "checkbox";
@@ -586,11 +648,9 @@ addEventListener("keydown", e => {
   }
 });
 
-// Clicking anywhere in a row makes it the current one, so mouse and keyboard
-// agree about where you are rather than each keeping their own idea.
 tbody.addEventListener("mousedown", e => {
-  const tr = e.target.closest("tr");
-  if (tr) setCur(+tr.dataset.i);
+  const card = e.target.closest(".card");
+  if (card) setCur(+card.dataset.i);
 });
 
 applyFilter();
@@ -600,15 +660,16 @@ addEventListener("beforeunload", e => { if (dirty) e.preventDefault(); });
 
 // ---------------------------------------------------------------- transport
 const player = document.getElementById("player");
-let current = -1;        // row being played, -1 for none
-let source = "src";      // which column: original or processed
-let chain = false;       // continue into the next row when this one ends
+let current = -1;
+let source = "src";
+let chain = false;
 
 function clearRow() {
-  tbody.querySelectorAll("tr.playing").forEach(tr => tr.classList.remove("playing"));
+  tbody.querySelectorAll(".card.playing").forEach(c => c.classList.remove("playing"));
   tbody.querySelectorAll("button.play.on").forEach(b => {
     b.classList.remove("on");
-    b.textContent = "▶ Phát";
+    const label = b.dataset.which === "src" ? "Gốc" : "Xử lý";
+    b.innerHTML = `<span class="play-ico">▶</span> ${label}`;
   });
 }
 
@@ -621,10 +682,10 @@ function play(i, which) {
   current = i;
   source = which;
 
-  const tr = tbody.children[i];
-  tr.classList.add("playing");
-  const btn = tr.querySelector(`button.play[data-which="${which}"]`);
-  if (btn) { btn.classList.add("on"); btn.textContent = "❚❚ Đang"; }
+  const card = tbody.children[i];
+  card.classList.add("playing");
+  const btn = card.querySelector(`button.play[data-which="${which}"]`);
+  if (btn) { btn.classList.add("on"); btn.innerHTML = '<span class="play-ico">⏸</span> Đang'; }
 
   document.getElementById("bar-id").textContent = `${r.index} · SP ${r.speaker}`;
   document.getElementById("bar-time").textContent =
@@ -634,16 +695,13 @@ function play(i, which) {
 
   player.src = url;
   player.play();
-  // Only scroll when the row has left the viewport, so a manual click does not
-  // yank the page around.
-  const box = tr.getBoundingClientRect();
+  const box = card.getBoundingClientRect();
   if (box.top < 80 || box.bottom > innerHeight - 90) {
-    tr.scrollIntoView({ block: "center", behavior: "smooth" });
+    card.scrollIntoView({ block: "center", behavior: "smooth" });
   }
   return true;
 }
 
-/** The next row that has audio in the current column. */
 function nextWith(from, which) {
   for (let i = from; i < DATA.length; i++) {
     if (which === "out" ? DATA[i].audio_out : DATA[i].audio_src) return i;
@@ -662,13 +720,10 @@ tbody.addEventListener("click", e => {
     chain = false;
     return;
   }
-  chain = false;                      // a manual click plays just that row
+  chain = false;
   play(i, which);
 });
 
-// Walking to the next segment when one finishes is the point of the play-all
-// button, but it also makes listening through a stretch by hand work without
-// clicking every row.
 player.addEventListener("ended", () => {
   if (!chain) { clearRow(); current = -1; return; }
   const next = nextWith(current + 1, source);
@@ -698,8 +753,6 @@ document.getElementById("playall").onclick = () => {
     setPlayAll(false);
     return;
   }
-  // Start from the row after the one showing, so pressing it again resumes
-  // rather than jumping back to the top.
   const from = current >= 0 ? current : 0;
   const i = nextWith(from, source);
   if (i === -1) { flash("Không có audio để phát"); return; }
@@ -716,7 +769,6 @@ document.getElementById("bar-stop").onclick = () => {
   setPlayAll(false);
 };
 
-// Space toggles playback unless a text box has focus, where it types a space.
 addEventListener("keydown", e => {
   if (e.code !== "Space" || /^(TEXTAREA|INPUT)$/.test(e.target.tagName)) return;
   e.preventDefault();
@@ -738,21 +790,17 @@ function download(filename, text, type) {
   URL.revokeObjectURL(a.href);
 }
 
-// Saving rewrites this page's own payload and hands back the whole file, so
-// reopening it shows the edits. A browser cannot overwrite the file it is
-// displaying -- the download replaces it in place once you confirm.
 document.getElementById("save").onclick = () => {
   const doc = document.documentElement.cloneNode(true);
   doc.querySelector("#payload").textContent = JSON.stringify(DATA);
   doc.querySelectorAll("textarea").forEach(t => t.textContent = t.value);
-  // The player holds whichever clip was last loaded as a data: URI. Cloning it
-  // would write that clip into the file a second time, so clear it.
   const p = doc.querySelector("#player");
   if (p) p.removeAttribute("src");
-  doc.querySelectorAll("tr.playing").forEach(tr => tr.classList.remove("playing"));
+  doc.querySelectorAll(".card.playing").forEach(c => c.classList.remove("playing"));
   doc.querySelectorAll("button.play.on").forEach(b => {
     b.classList.remove("on");
-    b.textContent = "▶ Phát";
+    const label = b.dataset.which === "src" ? "Gốc" : "Xử lý";
+    b.innerHTML = `<span class="play-ico">▶</span> ${label}`;
   });
   download(NAME + "_review.html",
            "<!doctype html>\\n" + doc.outerHTML, "text/html");
@@ -764,8 +812,6 @@ document.getElementById("export").onclick = () => {
   const rows = DATA.map(r => ({
     index: r.index, speaker: r.speaker, start: r.start, end: r.end,
     text: r.final, text_edited: r.edited, note: r.note,
-    // The reason this page exists: a downstream filter needs to know which
-    // segments a person rejected, not only which ones they retyped.
     mark_music: r.mark_music, mark_multi: r.mark_multi,
   }));
   download(NAME + "_edited.json", JSON.stringify(rows, null, 2),
