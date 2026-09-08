@@ -124,27 +124,23 @@ PAGE = """<!doctype html>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
-/* === Warm cream / reading theme === */
+/* === Warm beige / sand theme === */
 :root {
-  --bg: #f1ebdd; /* Warm cream. Deepened from #fbf8f1, which sat at 1.06
-                    against the white cards -- they had no edge to see. */
-  --bg-elevated: #ffffff; --bg-card: #ffffff;
-  --bg-card-hover: #fdfaf6; --fg: #292524; /* Warm dark grey */
-  --fg-secondary: #57534e;
-  --fg-dim: #78716c; --accent: #c2410c; /* Warm orange-red accent */
-  --accent-hover: #9a3412;
-  --accent-bg: rgba(194,65,12,.06); --accent-border: rgba(194,65,12,.2);
-  --green: #059669; --green-bg: rgba(5,150,105,.07); --green-fg: #065f46;
-  --amber: #d97706; --amber-bg: rgba(217,119,6,.08); --amber-fg: #92400e;
-  --red: #dc2626; --red-bg: rgba(220,38,38,.07); --red-fg: #991b1b;
-  --border: rgba(120,113,108,.22); --border-strong: rgba(120,113,108,.38);
-  /* The box you type in has to look like a box. #fffdf5 was 1.02
-     against the card: the one control on the card that gets used the
-     most was the one you could not find. */
-  --edit-bg: #fbf3dc; --note-bg: #f2efe9;
-  --shadow-card: 0 1px 3px rgba(120,113,108,.08), 0 1px 2px rgba(120,113,108,.05);
-  --shadow-hover: 0 4px 14px rgba(120,113,108,.12);
-  --radius: 10px; --radius-sm: 6px; --ok: #059669; --hh: 62px;
+  --bg: #f5eedc; /* Light yellow-brown/sand */
+  --bg-elevated: #fdfbf7; --bg-card: #fdfbf7;
+  --bg-card-hover: #fcf6e8; --fg: #332d27; /* Dark brown grey */
+  --fg-secondary: #5c544d;
+  --fg-dim: #a69c91; --accent: #92400e; /* Deep amber/brown accent */
+  --accent-hover: #713f12;
+  --accent-bg: rgba(146,64,14,.08); --accent-border: rgba(146,64,14,.25);
+  --green: #065f46; --green-bg: rgba(6,95,70,.07); --green-fg: #064e3b;
+  --amber: #b45309; --amber-bg: rgba(180,83,9,.08); --amber-fg: #78350f;
+  --red: #b91c1c; --red-bg: rgba(185,28,28,.07); --red-fg: #7f1d1d;
+  --border: rgba(120,110,100,.18); --border-strong: rgba(120,110,100,.28);
+  --edit-bg: #fffcf5; --note-bg: #f3efe6;
+  --shadow-card: 0 1px 3px rgba(100,90,80,.1), 0 1px 2px rgba(100,90,80,.06);
+  --shadow-hover: 0 4px 14px rgba(100,90,80,.15);
+  --radius: 10px; --radius-sm: 6px; --ok: #065f46; --hh: 62px;
 }
 
 *{box-sizing:border-box;margin:0;}
@@ -227,18 +223,32 @@ kbd.hint:hover{color:var(--fg-secondary);}
 
 /* --- Card Left: ID & Meta --- */
 .card-left{
-  display:flex;flex-direction:column;align-items:center;justify-content:center;
-  padding:10px 6px;gap:3px;border-right:1px solid var(--border);
+  display:flex;flex-direction:column;align-items:center;
+  padding:0;border-right:1px solid var(--border);
   background:color-mix(in srgb,var(--bg) 60%,var(--bg-card));
+  position:relative;
 }
-.seg-idx{font-size:12px;font-weight:600;color:var(--fg-dim);font-variant-numeric:tabular-nums;line-height:1;transition:color .2s;margin-bottom:2px;}
-.seg-spk span{
-  display:inline-block;padding:3px 10px;border-radius:6px;
-  font-size:13px;font-weight:700;letter-spacing:.01em;
-  background:var(--accent-bg);color:var(--accent);border:1px solid var(--accent-border);
+.seg-idx{
+  position:absolute;top:0;left:0;
+  padding:3px 6px 2px 4px;
+  border-bottom:1px solid var(--border-strong);
+  border-right:1px solid var(--border-strong);
+  border-bottom-right-radius:5px;
+  font-size:10px;font-weight:600;color:var(--fg-secondary);
+  font-variant-numeric:tabular-nums;line-height:1;transition:color .2s;
+  background:var(--bg-elevated);
 }
-.seg-time{font-size:10px;color:var(--fg-secondary);font-variant-numeric:tabular-nums;}
-.seg-dur{font-size:10px;color:var(--fg-dim);font-weight:500;}
+.seg-spk{
+  flex:1;display:flex;align-items:center;justify-content:center;
+  font-size:14px;font-weight:700;color:var(--fg);
+  text-align:center;padding:15px 5px 5px;
+}
+.seg-time{
+  font-size:10px;color:var(--fg-secondary);font-variant-numeric:tabular-nums;
+  text-align:center;line-height:1.2;padding-bottom:10px;
+}
+.seg-dash{color:var(--fg-dim);font-size:9px;}
+.seg-dur{color:var(--fg-dim);font-weight:500;font-size:9.5px;}
 
 /* --- Card Center: Audio + ASR + Final + Edit --- */
 .card-center{display:flex;flex-direction:column;padding:8px 14px;gap:6px;min-width:0;}
@@ -288,9 +298,12 @@ button.play.on{background:var(--accent);border-color:var(--accent);color:#fff;}
 /* ASR lines */
 .card-asr{display:flex;flex-direction:column;gap:2px;}
 .asr-line{
-  font-size:12px;line-height:1.4;color:var(--fg-secondary);
-  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+  font-size:12.5px;color:var(--fg-secondary);
+  display:flex;align-items:flex-start;gap:6px;line-height:1.45;
+  cursor:pointer;padding:2px 4px;border-radius:4px;
+  transition:background-color .15s;
 }
+.asr-line:hover{background:var(--bg-card-hover);}
 .asr-tag{
   display:inline-block;min-width:16px;font-size:9px;font-weight:700;
   color:var(--fg-dim);text-transform:uppercase;letter-spacing:.04em;margin-right:5px;
@@ -411,6 +424,14 @@ textarea.note::placeholder{color:var(--fg-dim);font-size:11px;}
       <option value="issue">máy báo lỗi</option>
     </select>
   </label>
+  <label class="pick" style="margin-left:8px;">Tốc độ
+    <select id="rate">
+      <option value="1">1.0x</option>
+      <option value="1.25">1.25x</option>
+      <option value="1.5">1.5x</option>
+      <option value="2">2.0x</option>
+    </select>
+  </label>
   <kbd class="hint" title="j/k hoặc ↑/↓ chuyển dòng · Space nghe · M đánh dấu còn nhạc · V đánh dấu nhiều giọng · E sửa text">? phím tắt</kbd>
   <span class="spacer"></span>
   <span id="status"></span>
@@ -485,9 +506,11 @@ DATA.forEach((r, i) => {
   card.innerHTML = `
     <div class="card-left">
       <div class="seg-idx">${+r.index}</div>
-      <div class="seg-spk"><span>${esc(r.speaker)}</span></div>
-      <div class="seg-time">${clock(r.start)} – ${clock(r.end)}</div>
-      <div class="seg-dur">(${(r.end - r.start).toFixed(1)}s)</div>
+      <div class="seg-spk">${esc(r.speaker)}</div>
+      <div class="seg-time">
+        ${clock(r.start)} <span class="seg-dash">–</span><br>
+        ${clock(r.end)} <span class="seg-dur">(${(r.end - r.start).toFixed(1)}s)</span>
+      </div>
     </div>
     <div class="card-center">
       <div class="card-top-row">
@@ -516,6 +539,7 @@ DATA.forEach((r, i) => {
       <div class="card-marks">
         <label class="mark-label" title="Còn nhạc nền"><input type="checkbox" class="mk-music"${r.mark_music ? " checked" : ""}><span>🎵 Nhạc</span></label>
         <label class="mark-label" title="Nhiều hơn một giọng"><input type="checkbox" class="mk-multi"${r.mark_multi ? " checked" : ""}><span>👥 Giọng</span></label>
+        <label class="mark-label" title="Sai người nói"><input type="checkbox" class="mk-spk"${r.mark_spk ? " checked" : ""}><span>👤 Sai Spk</span></label>
       </div>
     </div>`;
   tbody.appendChild(card);
@@ -530,9 +554,10 @@ function syncRow(target) {
   else if (target.classList.contains("note")) r.note = target.value;
   else if (target.classList.contains("mk-music")) r.mark_music = target.checked;
   else if (target.classList.contains("mk-multi")) r.mark_multi = target.checked;
+  else if (target.classList.contains("mk-spk")) r.mark_spk = target.checked;
   else return;
   card.classList.toggle("changed", r.edited !== r.final || !!r.note);
-  card.classList.toggle("marked", !!(r.mark_music || r.mark_multi));
+  card.classList.toggle("marked", !!(r.mark_music || r.mark_multi || r.mark_spk));
   countChanged();
   dirty = true;
   if (filterSel.value !== "all") setTimeout(applyFilter, 0);
@@ -545,18 +570,41 @@ tbody.addEventListener("input", e => {
   syncRow(e.target);
 });
 tbody.addEventListener("change", e => syncRow(e.target));
+tbody.addEventListener("dblclick", e => {
+  const asrLine = e.target.closest(".asr-line");
+  if (!asrLine) return;
+  const tag = asrLine.querySelector(".asr-tag");
+  let text = asrLine.textContent;
+  if (tag) text = text.substring(tag.textContent.length);
+  const card = asrLine.closest(".card");
+  const editBox = card.querySelector("textarea.edit");
+  if (editBox) {
+    editBox.value = text;
+    syncRow(editBox);
+    editBox.style.height = "auto";
+    editBox.style.height = editBox.scrollHeight + "px";
+    editBox.style.transition = "none";
+    editBox.style.backgroundColor = "var(--green-bg)";
+    setTimeout(() => {
+      editBox.style.transition = "background-color 0.5s";
+      editBox.style.backgroundColor = "";
+    }, 50);
+  }
+});
 
 function countChanged() {
   const edited = DATA.filter(r => r.edited !== r.final || r.note).length;
   const music = DATA.filter(r => r.mark_music).length;
   const multi = DATA.filter(r => r.mark_multi).length;
+  const spk = DATA.filter(r => r.mark_spk).length;
   const bits = [];
   if (edited) bits.push(`${edited} đã sửa`);
   if (music) bits.push(`${music} còn nhạc`);
   if (multi) bits.push(`${multi} nhiều giọng`);
+  if (spk) bits.push(`${spk} sai spk`);
   document.getElementById("changed").textContent = bits.join(" · ");
   const total = DATA.length;
-  const reviewed = DATA.filter(r => r.mark_music || r.mark_multi || r.edited !== r.final || r.note).length;
+  const reviewed = DATA.filter(r => r.mark_music || r.mark_multi || r.mark_spk || r.edited !== r.final || r.note).length;
   const pct = total ? Math.round(reviewed / total * 100) : 0;
   document.getElementById("progress-fill").style.width = pct + "%";
   document.getElementById("progress-text").textContent = `${reviewed}/${total}`;
@@ -565,7 +613,7 @@ countChanged();
 DATA.forEach((r, i) => {
   const card = tbody.children[i];
   if (r.edited !== r.final || r.note) card.classList.add("changed");
-  if (r.mark_music || r.mark_multi) card.classList.add("marked");
+  if (r.mark_music || r.mark_multi || r.mark_spk) card.classList.add("marked");
 });
 
 const _hdr = document.querySelector("header");
@@ -660,6 +708,9 @@ addEventListener("beforeunload", e => { if (dirty) e.preventDefault(); });
 
 // ---------------------------------------------------------------- transport
 const player = document.getElementById("player");
+document.getElementById("rate").addEventListener("change", e => {
+  if (!player.paused) player.playbackRate = parseFloat(e.target.value) || 1.0;
+});
 let current = -1;
 let source = "src";
 let chain = false;
@@ -693,6 +744,8 @@ function play(i, which) {
   document.getElementById("bar-src").textContent =
     which === "out" ? "sau xử lý" : "gốc";
 
+  const rate = parseFloat(document.getElementById("rate").value) || 1.0;
+  player.playbackRate = rate;
   player.src = url;
   player.play();
   const box = card.getBoundingClientRect();
