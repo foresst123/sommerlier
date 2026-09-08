@@ -95,7 +95,7 @@
                     "separator": "sidon"
                 },
                 "bs_roformer": {
-                    "model": "model_bs_roformer_ep_368_sdr_12.9628.ckpt",
+                    "model": "model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt",
                     "chunk_duration": 300,
                     "normalization_threshold": 1.0,
                     "native_fp16": true,
@@ -189,8 +189,9 @@
                     "enrollment_memory": false,
                     "separator": "sidon"
                 },
+                
                 "bs_roformer": {
-                    "model": "model_bs_roformer_ep_368_sdr_12.9628.ckpt",
+                    "model": "model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt",
                     "chunk_duration": 600,
                     "normalization_threshold": 1.0,
                     "native_fp16": true,
