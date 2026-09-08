@@ -69,8 +69,13 @@ class ModelLoader:
             device=self.device_1
         )
             
-    def load_separation_models(self):
-        """Load Target Speaker Extractor (TSE) if enabled."""
+    def load_separation_models(self, sidon_service=None):
+        """Load Target Speaker Extractor (TSE) if enabled.
+
+        `sidon_service` is only consulted by the out-of-process backend; the
+        in-process one never looks at it, so passing it unconditionally keeps
+        the caller from having to know which separator the profile named.
+        """
         if "separator" in self.models:
             return
         if getattr(self.args, "tse", False):
@@ -83,6 +88,7 @@ class ModelLoader:
             if self.logger: self.logger.info(f"  separator backend: {separator}")
             self.models["separator"] = TargetSpeakerExtractor(
                 device=self.device_1,
+                process=sidon_service.process if sidon_service else None,
                 separator=separator,
                 logger=self.logger,
             )

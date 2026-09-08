@@ -156,30 +156,53 @@ def test_the_extractor_skips_assignment_for_a_targeted_backend():
 
 
 def test_both_profiles_declare_a_separator():
+    """Named, not defaulted: which separator ran is the difference between two
+    runs being comparable and not, so it has to be written down."""
     import json
+    from models.separation_backends import BACKENDS
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     with open(os.path.join(root, "config.json"), encoding="utf-8") as fh:
         config = json.load(fh)
     for name, profile in config["environments"].items():
-        assert profile["models"]["tse"]["separator"] == "usef", name
+        assert profile["models"]["tse"]["separator"] in BACKENDS, name
 
 
-def test_only_the_target_conditioned_backend_ships():
-    """DialogueSidon was removed. It separated blind, which meant ECAPA had to
-    decide which track was whom -- a decision that sat at p50 0.58 similarity
-    where natural speech scores 0.70-0.90, and which three separate repair
-    paths existed to cope with. USEF is told who to extract, so the question
-    does not arise."""
+def test_both_backends_ship_and_differ_in_kind():
+    """The two are not interchangeable and the difference is not a tuning knob.
+
+    USEF is told whose voice to extract, so track 1 is speaker A and the
+    assignment never runs. DialogueSidon separates blind, so ECAPA has to
+    decide which track is whom -- a decision that sat at p50 0.58 similarity on
+    this corpus where natural speech scores 0.70-0.90, which is what the
+    `_maybe_swap` / `not_a_fail` / `qc_sim` paths exist to cope with.
+    """
     from models.separation_backends import BACKENDS
-    assert set(BACKENDS) == {"usef"}
+    assert set(BACKENDS) == {"usef", "sidon"}
+    assert BACKENDS["usef"].ordered is True
+    assert BACKENDS["sidon"].ordered is False
 
 
-def test_every_shipped_backend_knows_its_track_order():
-    """`ordered` is what the caller branches on. A backend that left it False
-    would silently re-enable the assignment and repair paths."""
+def test_every_shipped_backend_declares_its_track_order():
+    """`ordered` is what the caller branches on, and getting it wrong is silent
+    in both directions: True on a blind backend hands speaker B's audio to
+    speaker A, False on a conditioned one re-enables repair paths that have
+    nothing to repair."""
     from models.separation_backends import BACKENDS
     for name, cls in BACKENDS.items():
-        assert cls.ordered is True, name
+        assert isinstance(cls.ordered, bool), name
+
+
+def test_the_generative_backend_says_so_where_it_is_defined():
+    """Sidon resynthesises through a diffusion head and a VAE decoder: its
+    output is audio the model produced, not audio the microphone recorded.
+    Whatever it fills in becomes training data. That has to be legible at the
+    definition, not only in a commit message."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(root, "models", "separation_backends.py"),
+               encoding="utf-8").read()
+    block = src[:src.index("class SidonBackend")]
+    assert "generative" in block
+    assert "not audio the" in block
 
 
 def test_an_unknown_separator_is_refused_not_quietly_replaced():
@@ -188,7 +211,7 @@ def test_an_unknown_separator_is_refused_not_quietly_replaced():
     import pytest as _pytest
     from models.separation_backends import make_backend
     with _pytest.raises(ValueError):
-        make_backend("sidon")
+        make_backend("sidonn")
 
 
 # --- the export returns inverted phase ---------------------------------------

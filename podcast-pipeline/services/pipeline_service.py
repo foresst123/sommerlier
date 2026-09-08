@@ -83,7 +83,7 @@ class PipelineService:
         {
             "base":        lambda: self.model_loader.load_base_models(),
             "diarization": lambda: self.model_loader.load_diarization_models(w.get("diarizen")),
-            "separation":  lambda: self.model_loader.load_separation_models(),
+            "separation":  lambda: self.model_loader.load_separation_models(w.get("sidon")),
             "music":       lambda: self.model_loader.load_music_models(),
             "tagger":      lambda: self.model_loader.load_tagger(),
             "asr":         lambda: self.model_loader.load_asr_models(w.get("qwen3")),
@@ -567,7 +567,10 @@ class PipelineService:
             stage_out.write_separated_audio(speech_segments, audio_data.sample_rate)
 
         self._free(args, "separator", "embedder")
-
+        # The worker holds the separator's weights on the same card DiariZen
+        # and ASR need next, and nothing after this stage speaks to it. A run
+        # on the in-process backend never spawned one, so this is a no-op there.
+        self._release_worker(args, "sidon")
 
         if getattr(args, "stop_after", None) == "separation":
             if self.logger: self.logger.info("Stopping pipeline after separation as requested by --stop_after.")

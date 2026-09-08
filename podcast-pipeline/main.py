@@ -283,6 +283,7 @@ from services.export_service import ExportService
 from services.pipeline_service import PipelineService
 from services.qwen3_worker_service import Qwen3WorkerService
 from services.diarizen_worker_service import DiarizenWorkerService
+from services.sidon_worker_service import SidonWorkerService
 
 
 def _discard_partial(ledger, args, audio_path, logger, pipeline=None):
@@ -407,6 +408,24 @@ def main():
         
 
 
+    # 1c. Start the Sidon worker, when the profile asks for that separator.
+    #
+    # Gated on the separator name as well as on --tse: the in-process backend
+    # needs no worker at all, and spawning one for it would download the
+    # DialogueSidon weights and hold a GPU for a process nothing talks to.
+    sidon_service = None
+    _separator = (getattr(args, "separator", None)
+                  or env_profile.get("models", {}).get("tse", {}).get("separator")
+                  or "usef")
+    if (str(_separator).strip().lower() == "sidon" and getattr(args, "tse", False)
+            and will_run(args, "separation")):
+        sidon_worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sidon_worker.py")
+        sidon_service = _prefetch(SidonWorkerService(
+            resolve_worker_python("sidon", config=config,
+                                  env_profile=env_profile, logger=logger),
+            sidon_worker_script, device_id=args.gpu_1, logger=logger,
+            env_name=args.env, config_path=args.config))
+
     # 1d. Join whichever actually started. They were launched without blocking,
     # so startup is bounded by the slowest rather than the sum -- that is the
     # whole point of doing it here. One that did not start is simply skipped;
@@ -476,6 +495,7 @@ def main():
             worker_services={
                 "diarizen": diarizen_service,
                 "qwen3": qwen3_service,
+                "sidon": sidon_service,
             }
         )
         
