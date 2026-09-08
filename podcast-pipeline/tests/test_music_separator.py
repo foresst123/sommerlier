@@ -308,13 +308,38 @@ def test_both_profiles_name_a_checkpoint():
         assert model and model.endswith(".ckpt"), name
 
 
-def test_the_checkpoint_is_the_best_scoring_one_audio_separator_ships():
-    """audio-separator bundles models-scores.json, which ranks checkpoints on
-    a shared 40-track set. ep_368 beats the ep_317 this pipeline started with
-    (11.63 vs 11.43 mean vocal SDR) at identical cost -- same architecture,
-    same windowing. Pinned so a future edit has to argue with the number."""
+# audio-separator bundles models-scores.json, which ranks every checkpoint it
+# ships on one shared 40-track set. On vocals -- the stem this pipeline keeps:
+#
+#     model_bs_roformer_ep_368_sdr_12.9628      SDR 12.10   (was configured)
+#     model_bs_roformer_ep_317_sdr_12.9755      SDR 11.77
+#     model_mel_band_roformer_ep_3005_sdr_11.43 SDR 10.54   (is configured)
+#
+# The current choice is 1.56 dB behind the best one available, and 1.18 dB
+# behind on instrumental too. Mel-Band is the lighter architecture, so this
+# reads as a deliberate trade of separation quality for speed or memory rather
+# than an accident -- but the number belongs in the repo either way, which is
+# what this test is for.
+BEST_VOCAL_SDR = {"model_bs_roformer_ep_368_sdr_12.9628.ckpt": 12.10,
+                  "model_bs_roformer_ep_317_sdr_12.9755.ckpt": 11.77,
+                  "model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt": 10.54}
+
+
+def test_the_configured_checkpoint_is_one_whose_score_is_known():
+    """A checkpoint nobody has scored cannot be compared with the one it
+    replaced, and swapping to one is how a regression stops being visible."""
     for name, profile in _profiles().items():
-        assert "ep_368" in profile["models"]["bs_roformer"]["model"], name
+        model = profile["models"]["bs_roformer"]["model"]
+        assert model in BEST_VOCAL_SDR, (
+            f"{name} names {model}, which has no recorded vocal SDR here; "
+            "add it from audio-separator's models-scores.json")
+
+
+def test_both_profiles_agree_on_the_checkpoint():
+    """Two profiles running different separators would make their outputs
+    incomparable while both looked like the same pipeline."""
+    chosen = {p["models"]["bs_roformer"]["model"] for p in _profiles().values()}
+    assert len(chosen) == 1, f"profiles disagree: {sorted(chosen)}"
 
 
 def test_no_profile_still_carries_the_retired_demucs_knobs():

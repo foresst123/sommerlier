@@ -87,14 +87,19 @@ def test_steps_are_kept_apart_from_the_tuning_values():
 
 # --- skipping a load-bearing stage ends the run ------------------------------
 
-def test_the_service_stops_rather_than_running_without_diarization():
-    """Nothing downstream has an input without it, so a missing stage must end
-    the run rather than produce a file with a hole where a stage was."""
+def test_a_stage_checks_its_own_input_rather_than_a_global_gate():
+    """There used to be one up-front check that refused the whole run unless
+    diarization, ASR and export were all on. It is gone: a stage now decides
+    for itself, from whether the data it needs exists.
+
+    That is what makes `--stop_after music` and a music-only profile work at
+    all -- under the old gate, switching export off silently disabled
+    diarization, which is a hard thing to see from a config file."""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     source = open(os.path.join(root, "services", "pipeline_service.py"),
                   encoding="utf-8").read()
-    assert 'for _required in ("diarization", "asr", "export"):' in source
-    assert '"stopped_before": _required' in source
+    assert 'for _required in ("diarization", "asr", "export"):' not in source
+    assert "no segments available" in source
 
 
 def test_separation_off_still_produces_segments_of_the_same_shape():
@@ -231,18 +236,15 @@ def _music_only(**kw):
     return _args(**base)
 
 
-def test_a_stage_behind_a_disabled_one_is_not_reached():
-    """The bug this exists for.
-
-    ASR is switched on, so `step_enabled` says yes -- but the run stops after
-    the music stage, and the Qwen3 worker was being spawned for it. On Kaggle
-    that meant a FileNotFoundError for an interpreter the music stage does not
-    need, before any audio was opened.
-    """
+def test_a_switched_off_stage_does_not_run():
+    """`will_run` is now exactly `step_enabled`, so what a profile says is what
+    happens. The reachability logic it used to carry -- ASR is on but the run
+    stops before it, so do not spawn its worker -- moved into the stages
+    themselves, which is where the run actually knows."""
     args = _music_only()
-    assert steps.step_enabled(args, "asr"), "ASR is still switched on"
-    assert not steps.will_run(args, "asr"), "but the run never gets there"
-    assert not steps.will_run(args, "separation")
+    assert not steps.step_enabled(args, "diarization")
+    assert not steps.will_run(args, "diarization")
+    assert steps.will_run(args, "music_analysis")
 
 
 def test_the_music_stages_run_regardless():
@@ -264,10 +266,13 @@ def test_a_stage_switched_off_is_not_reached_either():
     assert steps.will_run(args, "asr"), "separation is not load-bearing"
 
 
-def test_export_off_stops_the_run_before_diarization():
-    """The pipeline checks all three up front, so export gates diarization."""
+def test_export_off_no_longer_disables_diarization():
+    """The old up-front gate made this true, and it was the reason a profile
+    with export off produced no diarization and said so nowhere. Stages are
+    independent now: switching one off is a statement about that stage."""
     args = _music_only(step_diarization=True, step_export=False)
-    assert not steps.will_run(args, "diarization")
+    assert steps.will_run(args, "diarization")
+    assert not steps.will_run(args, "export")
     assert steps.will_run(args, "music_removal")
 
 
@@ -323,7 +328,11 @@ def _parse(argv):
         "sys.argv = ['main.py'] + " + repr(argv) + "\n"
         "mod = types.ModuleType('probe')\n"
         "src = open('main.py').read().split('# 2. DELAYED IMPORTS')[0]\n"
-        "ns = {'__name__': 'probe'}\n"
+        # A real module always has __file__, and main.py uses it above the
+        # split marker to put the repo on sys.path. Without it the probe dies
+        # in the first ten lines with a NameError, and every step assertion
+        # below reports as a failure of the thing it was checking.
+        "ns = {'__name__': 'probe', '__file__': 'main.py'}\n"
         "exec(compile(src, 'main.py', 'exec'), ns)\n"
         "print(json.dumps({k: v for k, v in vars(ns['args']).items() "
         "if k.startswith('step_')}))\n"
