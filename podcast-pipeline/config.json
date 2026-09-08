@@ -30,12 +30,12 @@
                 "music_analysis": true,
                 "music_removal": true,
                 "cut_music": true,
-                "diarization": false,
-                "separation": false,
-                "asr": false,
-                "captioning": false,
-                "refinement": false,
-                "export": false
+                "diarization": true,
+                "separation": true,
+                "asr": true,
+                "captioning": true,
+                "refinement": true,
+                "export": true
             },
             "pipeline": {
                 "vad": true,
@@ -189,7 +189,7 @@
                     "enrollment_memory": false,
                     "separator": "sidon"
                 },
-                
+
                 "bs_roformer": {
                     "model": "model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt",
                     "chunk_duration": 600,
