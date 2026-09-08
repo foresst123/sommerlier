@@ -197,7 +197,6 @@ def test_stage_artifacts_are_written_once_not_once_per_stage():
 
     for stage, writer in (("diarization", "write_diarization"),
                           ("separation", "write_separation"),
-                          ("music_removal", "write_music_removal"),
                           ("asr", "write_asr")):
         call = re.search(rf".*stage_out\.{writer}\(.*", src).group(0)
         before = src[:src.index(call)]
@@ -215,7 +214,7 @@ def test_the_manifest_accumulates_across_separate_service_instances(tmp_path):
         return [_Seg(index=str(i).zfill(5), start=i * 2.0, end=i * 2.0 + 1.8,
                      speaker="1" if i % 2 else "2") for i in range(n)]
 
-    for writer in ("write_diarization", "write_separation", "write_music_removal"):
+    for writer in ("write_diarization", "write_separation"):
         service = StageOutputService(str(tmp_path))          # fresh, as run() does
         getattr(service, writer)(_segments(40), 90.0)
         service.write_manifest({"audio_file": "a.mp3"})
@@ -226,7 +225,7 @@ def test_the_manifest_accumulates_across_separate_service_instances(tmp_path):
 
     flow = json.loads((tmp_path / "manifest.json").read_text())["flow"]
     assert [r["stage"] for r in flow] == [
-        "diarization", "separation", "music_removal", "asr"]
+        "diarization", "separation", "asr"]
 
 
 def test_a_recomputed_stage_replaces_its_earlier_entry(tmp_path):

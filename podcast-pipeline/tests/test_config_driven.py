@@ -16,7 +16,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Flags that decide whether a stage runs at all.
-STAGE_FLAGS = ("vad", "tse", "panns", "ASRMoE", "llm_refinement",
+STAGE_FLAGS = ("vad", "tse", "music", "ASRMoE", "llm_refinement",
                "qwen3omni", "dia3", "keep_models")
 
 
@@ -62,7 +62,7 @@ def test_stage_flags_live_in_every_profile():
 
 def test_profile_alone_turns_the_stages_on():
     args = _resolve(["--audio", "x.mp3", "--env", "kaggle"])
-    for flag in ("vad", "tse", "panns", "ASRMoE", "llm_refinement"):
+    for flag in ("vad", "tse", "music", "ASRMoE", "llm_refinement"):
         assert args[flag] is True, f"{flag} should come from the profile"
 
 

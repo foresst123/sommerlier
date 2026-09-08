@@ -141,14 +141,14 @@ def test_the_map_round_trips_through_a_checkpoint():
 def test_the_music_map_follows_the_cut():
     """Spans stay in original time while everything downstream moves; comparing
     the two would silently mis-locate every bed."""
-    from utils.music_map import MUSIC, SINGING, MusicMap
+    from utils.music_map import MUSIC, SONG, MusicMap
 
     _, timeline = excise(np.zeros(20 * SR, dtype=np.float32), SR,
                          [(2.0, 4.0)], fade=0.0)
-    moved = MusicMap([(2.0, 4.0, SINGING), (10.0, 12.0, MUSIC)]).remap(timeline)
+    moved = MusicMap([(2.0, 4.0, SONG), (10.0, 12.0, MUSIC)]).remap(timeline)
 
     kinds = [k for _, _, k in moved.spans]
-    assert SINGING not in kinds, "a cut stretch has no place in the new timeline"
+    assert SONG not in kinds, "a cut stretch has no place in the new timeline"
     assert abs(moved.spans[0][0] - 8.0) < 0.01
 
 
@@ -159,20 +159,20 @@ def test_stripping_then_cutting_leaves_each_where_it_belongs():
     time: cutting first would move every bed before the separator saw it."""
     from schemas.audio import AudioData
     from services.music_service import MusicService
-    from utils.music_map import MUSIC, SINGING, MusicMap
+    from utils.music_map import MUSIC, SONG, MusicMap
 
     class HalvingSeparator:
         def separate_segment(self, audio, sr):
             return (np.asarray(audio) * 0.5).astype(np.float32)
 
-    music_map = MusicMap([(2.0, 4.0, MUSIC), (10.0, 12.0, SINGING)])
+    music_map = MusicMap([(2.0, 4.0, MUSIC), (10.0, 12.0, SONG)])
     audio = AudioData(name="t", waveform=np.ones(20 * SR, dtype=np.float32),
                       sample_rate=SR, duration=20.0, audio_segment=None)
-    service = MusicService(panns_model=None, bs_roformer_model=HalvingSeparator(), logger=None)
+    service = MusicService(bs_roformer_model=HalvingSeparator(), logger=None)
 
     service.strip_music_spans(audio, music_map)
     assert audio.waveform[3 * SR] == 0.5, "the bed should have been stripped"
-    assert audio.waveform[11 * SR] == 1.0, "singing is cut, not stripped"
+    assert audio.waveform[11 * SR] == 1.0, "standalone music is cut, not stripped"
 
     trimmed, timeline = excise(audio.waveform, SR,
                                [(a, b) for a, b, _ in music_map.excised_spans()],
@@ -181,7 +181,7 @@ def test_stripping_then_cutting_leaves_each_where_it_belongs():
     assert trimmed[3 * SR] == 0.5, "the stripped stretch must survive the cut"
 
     moved = music_map.remap(timeline)
-    assert SINGING not in [k for _, _, k in moved.spans]
+    assert SONG not in [k for _, _, k in moved.spans]
 
 
 def test_applying_cached_patches_twice_changes_nothing():
@@ -199,7 +199,7 @@ def test_applying_cached_patches_twice_changes_nothing():
         return AudioData(name="t", waveform=np.ones(20 * SR, dtype=np.float32),
                          sample_rate=SR, duration=20.0, audio_segment=None)
 
-    service = MusicService(panns_model=None, bs_roformer_model=HalvingSeparator(), logger=None)
+    service = MusicService(bs_roformer_model=HalvingSeparator(), logger=None)
     once = fresh()
     patches = service.strip_music_spans(once, MusicMap([(5.0, 8.0, MUSIC)]))
 
@@ -225,7 +225,7 @@ def test_stripping_music_accepts_read_only_cached_waveform():
                       duration=20.0, audio_segment=None)
 
     patches = MusicService(
-        panns_model=None, bs_roformer_model=HalvingSeparator(), logger=None
+        bs_roformer_model=HalvingSeparator(), logger=None
     ).strip_music_spans(audio, MusicMap([(5.0, 8.0, MUSIC)]))
 
     assert patches
@@ -266,14 +266,23 @@ def test_the_service_refuses_to_cut_away_the_recording():
     assert "keeping the audio " in source
 
 
-def test_the_per_segment_pass_is_skipped_when_the_waveform_was_cleaned():
-    """Otherwise a vocal separator is handed its own output and asked to find a
-    voice in it a second time -- and reloaded to do it."""
+def test_there_is_no_per_segment_music_pass_left():
+    """It ran after diarization and re-checked each segment in turn. Once the
+    sweep moved to the front of the run, the waveform reaching it had already
+    been cleaned whole-file, so it gated itself off on every ordinary run --
+    a stage that could only fire when the stage it duplicated was switched off.
+
+    Handing a vocal separator its own output and asking it to find a voice in
+    it a second time is the failure this prevents."""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     source = open(os.path.join(root, "services", "pipeline_service.py"),
                   encoding="utf-8").read()
-    assert '_has_map = self.step_enabled(args, "music_analysis")' in source
-    assert "the waveform was already cleaned" in source
+    assert "process_segments" not in source
+    assert "music_removal_fallback" not in source
+
+    music = open(os.path.join(root, "services", "music_service.py"),
+                 encoding="utf-8").read()
+    assert "def process_segments" not in music
 
 
 def test_a_source_file_routes_stripping_through_the_hi_res_path():
@@ -295,7 +304,7 @@ def test_a_source_file_routes_stripping_through_the_hi_res_path():
 
     audio = AudioData(name="t", waveform=np.ones(20 * SR, dtype=np.float32),
                       sample_rate=SR, duration=20.0, audio_segment=None)
-    service = MusicService(panns_model=None, bs_roformer_model=Separator(), logger=None)
+    service = MusicService(bs_roformer_model=Separator(), logger=None)
     service.strip_music_spans(audio, MusicMap([(5.0, 8.0, MUSIC)]),
                               source_path="/tmp/original.mp3")
 
@@ -316,7 +325,7 @@ def test_a_separator_without_the_hi_res_path_still_works():
 
     audio = AudioData(name="t", waveform=np.ones(20 * SR, dtype=np.float32),
                       sample_rate=SR, duration=20.0, audio_segment=None)
-    MusicService(panns_model=None, bs_roformer_model=OldSeparator(), logger=None
+    MusicService(bs_roformer_model=OldSeparator(), logger=None
                  ).strip_music_spans(audio, MusicMap([(5.0, 8.0, MUSIC)]),
                                      source_path="/tmp/original.mp3")
     assert audio.waveform[6 * SR] == 0.5
@@ -337,7 +346,7 @@ def test_a_failed_hi_res_decode_falls_back_to_the_16khz_slice():
 
     audio = AudioData(name="t", waveform=np.ones(20 * SR, dtype=np.float32),
                       sample_rate=SR, duration=20.0, audio_segment=None)
-    MusicService(panns_model=None, bs_roformer_model=Separator(), logger=None
+    MusicService(bs_roformer_model=Separator(), logger=None
                  ).strip_music_spans(audio, MusicMap([(5.0, 8.0, MUSIC)]),
                                      source_path="/tmp/original.mp3")
     assert audio.waveform[6 * SR] == 0.5

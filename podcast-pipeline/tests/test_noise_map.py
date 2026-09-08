@@ -127,9 +127,20 @@ def test_build_ignores_groups_the_detector_did_not_return():
 # --- the labels have to be real ----------------------------------------------
 
 def test_every_noise_label_exists_in_audioset():
-    """`_label_columns` drops a name it cannot find, so a typo becomes a group
-    that always answers zero and looks like clean audio."""
-    source = open(os.path.join(ROOT, "models", "panns.py"), encoding="utf-8").read()
+    """`label_columns` drops a name it cannot find, so a typo becomes a group
+    that always answers zero and looks like clean audio.
+
+    Checkable for real now that the 527 names ship with the repo rather than
+    arriving with whichever tagger happens to be installed."""
+    from models.audioset import (MUSIC_LABELS, NOISE_GROUPS, SPEECH_LABELS,
+                                 audioset_labels)
+    known = set(audioset_labels())
+    for group, names in list(NOISE_GROUPS.items()) + [
+            ("speech", SPEECH_LABELS), ("music", MUSIC_LABELS)]:
+        unknown = [n for n in names if n not in known]
+        assert not unknown, f"{group} names labels AudioSet does not have: {unknown}"
+
+    source = open(os.path.join(ROOT, "models", "audioset.py"), encoding="utf-8").read()
     groups = {}
     for node in ast.parse(source).body:
         if (isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
@@ -145,14 +156,14 @@ def test_every_noise_label_exists_in_audioset():
 def test_the_detector_reports_labels_it_cannot_find():
     """Silence here is how a stale group becomes a detector that always says
     the audio is clean."""
-    source = open(os.path.join(ROOT, "models", "panns.py"), encoding="utf-8").read()
+    source = open(os.path.join(ROOT, "models", "audioset.py"), encoding="utf-8").read()
     assert "will never fire" in source
 
 
 def test_speaker_sounds_are_not_treated_as_noise():
     """Breathing before a turn and a laugh over someone's sentence are the
     phenomena a full-duplex corpus is collecting, not contamination."""
-    source = open(os.path.join(ROOT, "models", "panns.py"), encoding="utf-8").read()
+    source = open(os.path.join(ROOT, "models", "audioset.py"), encoding="utf-8").read()
     start = source.index("NOISE_SPEECH_LABELS")
     end = source.index("NOISE_GROUPS")
     block = source[start:end]

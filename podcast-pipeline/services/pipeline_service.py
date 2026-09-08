@@ -9,7 +9,7 @@ from services.stage_output_service import StageOutputService
 from schemas.audio import AudioData
 
 # Above this share of a recording marked for removal, the map is not trusted:
-# a podcast that is mostly singing is either mis-tagged or the wrong file, and
+# a podcast that is mostly music is either mis-tagged or the wrong file, and
 # either way an empty waveform downstream is the worst possible answer.
 CUT_SHARE_LIMIT = float(os.environ.get("MUSIC_CUT_SHARE_LIMIT", "0.60"))
 
@@ -85,7 +85,7 @@ class PipelineService:
             "diarization": lambda: self.model_loader.load_diarization_models(w.get("diarizen")),
             "separation":  lambda: self.model_loader.load_separation_models(),
             "music":       lambda: self.model_loader.load_music_models(),
-            "panns":       lambda: self.model_loader.load_panns(),
+            "tagger":      lambda: self.model_loader.load_tagger(),
             "asr":         lambda: self.model_loader.load_asr_models(w.get("qwen3")),
             "caption":     lambda: self.model_loader.load_caption_model(),
         }[group]()
@@ -245,7 +245,7 @@ class PipelineService:
             root = os.path.join(
                 os.path.dirname(audio_path), "_final",
                 f"-tse-{getattr(args, 'tse', False)}"
-                f"-bs_roformer-{getattr(args, 'panns', False)}"
+                f"-bs_roformer-{getattr(args, 'music', False)}"
                 f"-vad-{getattr(args, 'vad', False)}"
                 f"-diaModel-{suffix}-initPrompt-True"
                 f"-merge_gap-{getattr(args, 'merge_gap', 2.0)}"
@@ -308,11 +308,11 @@ class PipelineService:
 
         # 2. What is playing, before anything else looks at the audio.
         #
-        # PANNs' frame-level tagger labels every 10ms as speech, singing or
-        # music, and the three need different handling: singing is skipped
-        # entirely (song lyrics scored as dialogue are dirty data for a
-        # full-duplex corpus), a music bed under speech is stripped, and clean
-        # speech is left alone -- which on this corpus is almost all of it.
+        # SSLAM labels each frame across all 527 AudioSet classes, and what
+        # the map does with that splits two ways: music with nobody talking is
+        # cut out of the recording, a music bed under speech is stripped and
+        # the speech kept, and clean speech is left alone -- which on this
+        # corpus is almost all of it.
         #
         # Swept first so that everything downstream sees the verdict:
         # diarization segments cleaned audio, and separation's search for solo
@@ -329,8 +329,8 @@ class PipelineService:
             if self.step_enabled(args, "music_analysis"):
                 # The tagger only. The vocal separator is loaded below, and
                 # only when the map actually found a bed to strip.
-                self._load("panns")
-                detector = self.model_loader.get("panns") if self.model_loader else None
+                self._load("tagger")
+                detector = self.model_loader.get("tagger") if self.model_loader else None
                 music_map, self.noise_track = build_maps(
                     audio_data.waveform, audio_data.sample_rate, detector,
                     logger=self.logger)
@@ -377,10 +377,10 @@ class PipelineService:
         # checkpointed for exactly that.
         timeline = TimelineMap.from_json(checkpoint.load("timeline", fmt="json"))
         cuts = (music_map.excised_spans()
-                if self.step_enabled(args, "cut_singing") else [])
+                if self.step_enabled(args, "cut_music") else [])
 
         # Refuse to cut away the recording. A tagger that calls most of a
-        # podcast singing has gone wrong -- thresholds set too low, or a file
+        # podcast music has gone wrong -- thresholds set too low, or a file
         # that is genuinely music and does not belong in this corpus -- and
         # deleting the audio would turn that into a run that produces nothing
         # and says why only in a log line.
@@ -404,7 +404,7 @@ class PipelineService:
             checkpoint.save("timeline", timeline.to_json(), fmt="json")
             if self.logger:
                 self.logger.info(
-                    f"Cut {timeline.removed:.1f}s of singing/music from "
+                    f"Cut {timeline.removed:.1f}s of standalone music from "
                     f"{len(cuts)} stretch(es); {audio_data.duration / 60:.1f} min remain")
         elif timeline:
             # A later run() entry: the audio was reloaded whole, so re-cut it to
@@ -412,7 +412,7 @@ class PipelineService:
             #
             # The spans come from the timeline, not from the map. `cuts` is
             # rebuilt on every entry out of thresholds that may have moved and
-            # a `cut_singing` flag that may have been switched off since --
+            # a `cut_music` flag that may have been switched off since --
             # and when it comes back empty, re-cutting with it leaves the audio
             # whole while `self.timeline` still says it was shortened. Nothing
             # downstream would notice: diarization would run on one timeline
@@ -440,17 +440,16 @@ class PipelineService:
             audio_data.duration = len(trimmed) / float(audio_data.sample_rate)
         self.timeline = timeline
 
-        # PANNs is done: the map is built and the beds are stripped. The only
-        # thing that needs it again is the per-segment fallback at step 5, and
-        # that is skipped whenever a map exists.
+        # The tagger is done: the map is built and the beds are stripped, and
+        # nothing later in the run asks it anything.
         #
-        # It has to be released here rather than there. Under stage-major
-        # execution the run finishes this stage for every file and leaves for
-        # diarization, so the release at the end of step 5 is never reached --
-        # and the tagger sat on ~600MB of VRAM for the rest of the run, on a
-        # card that then has to hold DiariZen, the embedder, TSE and ASR.
-        if not self.step_enabled(args, "music_removal_fallback"):
-            self._free(args, "panns")
+        # Released here, at the end of the stage that used it. The release
+        # used to sit at the end of the per-segment music pass much further
+        # down, which under stage-major execution was never reached: the run
+        # finishes this stage for every file and leaves for diarization. The
+        # tagger then sat on VRAM for the rest of the run, on a card that has
+        # to hold DiariZen, the embedder, TSE and ASR after it.
+        self._free(args, "tagger")
 
         # Everything after the cut works in the shortened timeline, so the map
         # separation consults has to move with it.
@@ -576,40 +575,15 @@ class PipelineService:
                                       "stopped_after": "separation"})
             return None
             
-        # 5. Background Music Removal -- the per-segment fallback.
-        if not self.step_enabled(args, "music_removal_fallback"):
-            if self.logger:
-                self.logger.info("Step 'music_removal_fallback' is off in the profile; skipping")
-        elif speech_segments is None:
-            if self.logger:
-                self.logger.info("Skipping music_removal_fallback (no segments available)")
-        else:
-            _has_map = self.step_enabled(args, "music_analysis") and bool(music_map)
-            if _has_map:
-                if self.logger:
-                    self.logger.info("Skipping the per-segment music pass (the waveform was already cleaned)")
-            elif checkpoint.exists("music_removal"):
-                if self.logger: self.logger.info("Loading Music Removal from checkpoint")
-                speech_segments = checkpoint.load("music_removal")
-            else:
-                self._load("music")
-                speech_segments = self.music_svc.process_segments(speech_segments, audio_data)
-                if self.logger: self.logger.info(f"[DEBUG] After Music Removal: {len(speech_segments)} segments")
-                checkpoint.save("music_removal", speech_segments)
-                computed.add("music_removal")
+        # There is no per-segment music pass any more. It ran here, after
+        # diarization, on each segment in turn -- and once the sweep moved to
+        # the front of the run the waveform reaching this point had already had
+        # its beds stripped whole-file, so the pass spent its time confirming
+        # that. It gated itself off whenever a music map existed, which on any
+        # ordinary run was always, leaving a stage that could only fire when
+        # the stage it duplicated had been switched off.
 
-        if "music_removal" in computed:
-            stage_out.write_music_removal(speech_segments, audio_data.duration)
-
-        self._free(args, "panns", "bs_roformer")
-            
-        if getattr(args, "stop_after", None) == "music_removal":
-            if self.logger: self.logger.info("Stopping pipeline after music_removal as requested by --stop_after.")
-            stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
-                                      "stopped_after": "music_removal"})
-            return None
-            
-        # 6. ASR Ensemble (MoE)
+        # 5. ASR Ensemble (MoE)
         transcripts = None
         if not self.step_enabled(args, "asr"):
             if self.logger:
@@ -639,7 +613,7 @@ class PipelineService:
                                       "stopped_after": "asr"})
             return transcripts
             
-        # 7. Qwen3-Omni Captioning
+        # 6. Qwen3-Omni Captioning
         if not self.step_enabled(args, "captioning"):
             if self.logger:
                 self.logger.info("Step 'captioning' is off in the profile; skipping")
@@ -661,7 +635,7 @@ class PipelineService:
                                       "stopped_after": "captioning"})
             return transcripts
                 
-        # 8. LLM Refinement
+        # 7. LLM Refinement
         if not self.step_enabled(args, "refinement"):
             if self.logger:
                 self.logger.info("Step 'refinement' is off in the profile; skipping")
@@ -686,7 +660,7 @@ class PipelineService:
                 self.refinement_svc.unload()
 
         
-        # 9. Export Results
+        # 8. Export Results
         save_path = output_dir
         os.makedirs(save_path, exist_ok=True)
         base_name = os.path.splitext(os.path.basename(audio_path))[0]
@@ -696,7 +670,7 @@ class PipelineService:
                 self.logger.info("Step 'export' is off in the profile; skipping")
             stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
                                       "audio_name": base_name,
-                                      "panns_enabled": getattr(args, "panns", False)})
+                                      "music_enabled": getattr(args, "music", False)})
             if self.logger: self.logger.info(f"Pipeline completed successfully. Results saved to {save_path}")
             return transcripts
 
@@ -705,7 +679,7 @@ class PipelineService:
                 self.logger.info("Skipping full export (no transcripts available)")
             stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
                                       "audio_name": base_name,
-                                      "panns_enabled": getattr(args, "panns", False)})
+                                      "music_enabled": getattr(args, "music", False)})
             if self.logger: self.logger.info(f"Pipeline completed successfully. Results saved to {save_path}")
             return transcripts
 
@@ -734,7 +708,7 @@ class PipelineService:
             "audio_name": base_name,
             "diarization_model": "pyannote" if getattr(args, "dia3", False) else "diarizen",
             "asr_models": self.asr_svc.active_models(),
-            "panns_enabled": getattr(args, "panns", False),
+            "music_enabled": getattr(args, "music", False),
             "vad_enabled": getattr(args, "vad", False),
             "tse_enabled": getattr(args, "tse", False),
             "llm_refinement": getattr(args, "llm_refinement", False),

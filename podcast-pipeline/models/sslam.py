@@ -1,10 +1,10 @@
 """SSLAM as a drop-in frame-level tagger beside PANNs.
 
-SSLAM (ICLR 2025) scores the same 527 AudioSet labels as PANNs, so the group
-definitions in models/panns.py -- which labels count as speech, as singing, as
-music, as each noise kind -- carry over unchanged. Only the way frames are
-produced differs, and that is the whole reason to try it: SSLAM reports
-mAP 50.2 on AudioSet-2M against PANNs' 38.5 for the frame-level checkpoint.
+SSLAM (ICLR 2025) scores the 527 AudioSet labels, and reads them through the
+same group definitions as every other tagger here -- see models/audioset.py.
+Only the way frames are produced differs, and that is the whole reason to use
+it: SSLAM reports mAP 50.2 on AudioSet-2M against the 38.5 of the frame-level
+PANNs checkpoint it replaced.
 
 Resolution. The released checkpoint has a clip-level head only, and there is
 no frame-level SSLAM to download. Two ways to get a curve out of it were tried
@@ -64,14 +64,13 @@ def _patch_transformers():
 
 
 class SSLAMDetector:
-    """Same interface as PANNSDetector for the parts the music map uses."""
+    """A frame-level tagger for utils/music_map.build_maps."""
 
     SED_FPS = FPS
     SED_MIN_SAMPLES = SAMPLE_RATE               # one second, as for PANNs
 
     def __init__(self, device: str = None):
         import torch
-        from models.panns import PANNSDetector
 
         if device is None:
             device = ("cuda" if torch.cuda.is_available()
@@ -80,14 +79,14 @@ class SSLAMDetector:
         self._model = None
         self._reported_missing = set()
 
-        # Borrowed rather than re-declared: if the two detectors disagreed on
-        # which labels are "music", the comparison between them would be
-        # measuring the label lists, not the models.
-        self._label_columns = PANNSDetector._label_columns.__get__(self)
-        self.group_scores = PANNSDetector.group_scores.__get__(self)
+        from models.audioset import audioset_labels
+        self.labels = audioset_labels()
 
-        from panns_inference.config import labels as audioset_labels
-        self.labels = list(audioset_labels)
+    def group_scores(self, framewise):
+        """The routing curves. Shared with every other tagger by design --
+        see models/audioset.py."""
+        from models.audioset import group_scores
+        return group_scores(framewise, self.labels, self._reported_missing)
 
     def _load(self):
         if self._model is not None:
@@ -122,9 +121,11 @@ class SSLAMDetector:
     def framewise_raw(self, audio_array, sample_rate: int = SAMPLE_RATE):
         """All 527 scores per hop, plus how the audio was scaled.
 
-        Mirrors PANNSDetector.framewise_raw down to the peak normalisation, so
-        a threshold that means one thing on one detector means the same on the
-        other. Returns (framewise, fps, scale).
+        Peak-normalised over the whole recording, so a threshold means the
+        same thing wherever it is applied and a quiet stretch is not judged
+        against a different loudness from its neighbours.
+
+        Returns (framewise, fps, scale).
         """
         import librosa
         import torch

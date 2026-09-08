@@ -30,7 +30,7 @@ KINDS = ("noise_speech", "noise_env", "noise_room")
 
 # What counts as worth noticing, for logging and as the starting point for any
 # filter. Measured, not guessed -- a full 527-label dump of three recordings
-# (tools/dump_panns.py) says the model is far sparser on this material than a
+# (tools/dump_sslam.py) says the tagger is far sparser on this material than a
 # 0..1 score suggests:
 #
 #     only 2 of 527 labels ever exceed 0.5 in any file: Speech and Music
@@ -130,10 +130,10 @@ class NoiseTrack:
 
 
 def build(scores, fps) -> NoiseTrack:
-    """A track from the framewise scores `PANNSDetector.tag_framewise` returns.
+    """A track from the framewise scores a tagger's `tag_framewise` returns.
 
     Takes the scores rather than the waveform on purpose: tagging a recording
-    costs a full PANNs sweep, and the music map already pays for one. Reading
+    costs a full sweep, and the music map already pays for one. Reading
     the noise groups out of that same result is free; a second sweep would
     double the cost of the stage for nothing.
     """

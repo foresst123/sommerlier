@@ -70,7 +70,7 @@ def test_loaders_are_idempotent():
     for guard in ('if "vad" in self.models',
                   'if "diarizer" in self.models',
                   'if "separator" in self.models',
-                  'if "panns" in self.models',
+                  'if "tagger" in self.models',
                   'if "phowhisper" in self.models',
                   'if "captioner" in self.models'):
         assert guard in src, f"missing early return: {guard}"
@@ -97,10 +97,10 @@ def test_a_service_sees_a_model_loaded_after_it_was_built():
 
     loader = Loader()
     svc = MusicService(model_loader=loader)
-    assert svc.panns is None, "nothing is loaded yet"
+    assert svc.bs_roformer is None, "nothing is loaded yet"
 
-    loader.models["panns"] = object()
-    assert svc.panns is loader.models["panns"], (
+    loader.models["bs_roformer"] = object()
+    assert svc.bs_roformer is loader.models["bs_roformer"], (
         "the service captured None instead of resolving on use")
 
 
@@ -109,5 +109,5 @@ def test_an_explicit_model_still_wins():
     from services.music_service import MusicService
 
     sentinel = object()
-    svc = MusicService(panns_model=sentinel, model_loader=None)
-    assert svc.panns is sentinel
+    svc = MusicService(bs_roformer_model=sentinel, model_loader=None)
+    assert svc.bs_roformer is sentinel

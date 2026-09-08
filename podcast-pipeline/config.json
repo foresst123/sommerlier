@@ -29,8 +29,7 @@
             "steps": {
                 "music_analysis": true,
                 "music_removal": true,
-                "music_removal_fallback": false,
-                "cut_singing": true,
+                "cut_music": true,
                 "diarization": false,
                 "separation": false,
                 "asr": false,
@@ -41,7 +40,7 @@
             "pipeline": {
                 "vad": true,
                 "tse": true,
-                "panns": true,
+                "music": true,
                 "ASRMoE": true,
                 "llm_refinement": true,
                 "qwen3omni": false,
@@ -122,8 +121,7 @@
             "steps": {
                 "music_analysis": true,
                 "music_removal": true,
-                "music_removal_fallback": false,
-                "cut_singing": true,
+                "cut_music": true,
                 "diarization": true,
                 "separation": true,
                 "asr": true,
@@ -134,7 +132,7 @@
             "pipeline": {
                 "vad": true,
                 "tse": true,
-                "panns": true,
+                "music": true,
                 "ASRMoE": true,
                 "llm_refinement": true,
                 "qwen3omni": false,

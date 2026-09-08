@@ -56,7 +56,8 @@ def _build_parser():
                              "is target-conditioned TF-GridNet at 8kHz: it needs no "
                              "channel assignment, but discards everything above "
                              "4kHz.")
-    parser.add_argument("--panns", action="store_true", help="Enable background music removal")
+    parser.add_argument("--music", "--panns", dest="music", action="store_true",
+                        help="Enable background music analysis and removal")
     parser.add_argument("--music_separator", default=None, metavar="CKPT",
                         help="Which BS-RoFormer checkpoint isolates vocals once "
                              "PANNs finds music, as an audio-separator model "
@@ -114,7 +115,7 @@ def _build_parser():
                              "several as name=on,name=off. Exists so a run does not "
                              "have to edit config.json -- which a re-clone reverts "
                              "without saying so.")
-    parser.add_argument("--stop_after", type=str, choices=["music", "diarization", "separation", "music_removal", "asr", "captioning"], help="Stop pipeline gracefully after this stage")
+    parser.add_argument("--stop_after", type=str, choices=["music", "diarization", "separation", "asr", "captioning"], help="Stop pipeline gracefully after this stage")
     return parser
 
 
@@ -225,7 +226,7 @@ if env_profile.get("offline_mode", False):
     os.environ["HF_HOME"] = os.path.join(offline_dir, "huggingface")
     os.environ["TORCH_HOME"] = os.path.join(offline_dir, "torch")
     os.environ["XDG_CACHE_HOME"] = offline_dir
-    os.environ["HOME"] = offline_dir  # For PANNS
+    os.environ["HOME"] = offline_dir  # where cached checkpoints are looked up
     os.environ["TSE_PATH"] = os.path.join(offline_dir, "tse_model")
     print(f"[*] Running in Offline Mode (env: {args.env}). Using weights from: {offline_dir}")
     
@@ -316,7 +317,7 @@ def main():
 
     import torch
 
-    # TF32 on the fp32 paths: DiariZen, BS-RoFormer, PANNS and ECAPA all run in
+    # TF32 on the fp32 paths: DiariZen, BS-RoFormer, SSLAM and ECAPA all run in
     # fp32, and on Ampere and later their matmuls and convolutions can use
     # TF32 tensor cores instead. Same code, same memory, roughly an order of
     # magnitude more throughput on those ops, at a precision that is ample for

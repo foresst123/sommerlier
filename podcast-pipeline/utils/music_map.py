@@ -1,21 +1,27 @@
-"""What kind of audio is playing, at 10ms resolution, across a recording.
+"""What kind of audio is playing across a recording, frame by frame.
 
-Three questions get different answers and need to be told apart:
+Two questions get different answers and need to be told apart:
 
-    someone is singing        -> mark it, and keep it out of the transcript.
-                                 Song lyrics scored as dialogue are dirty data
-                                 for a full-duplex corpus: the model would
-                                 learn a song's timing as conversational turn
-                                 taking.
+    music with nobody talking -> cut it out. An intro, an outro, a sting: there
+                                 is no dialogue in it to keep, and handing it to
+                                 a vocal separator would only ask the model to
+                                 invent a voice out of an instrumental.
     speech over a music bed   -> separate, then transcribe.
     speech, nothing under it  -> leave it alone. On this corpus that is
-                                 almost everything: 30s of music in 50 minutes.
+                                 almost everything.
 
-PANNs answers all three at once -- Cnn14 predicts 527 AudioSet labels on every
-forward pass, `Speech`, `Singing` and `Music` among them. The earlier version
-of this module read one of those labels and slid a 2s window; this one uses
-`SoundEventDetection`, which labels every 10ms frame directly, and reads three
-groups instead of one.
+There used to be a third kind, SINGING, for a voice that is singing rather than
+speaking. It is gone. On three recordings it fired for 10s, 0s and 0s under
+PANNs, and under SSLAM every detection that survived the speech-margin gate was
+a single isolated frame -- no run ever reached the two consecutive frames that
+MIN_SPAN_EXCISED asks for, so the branch could not produce a span at all. A
+branch that cannot fire is worse than no branch: it reads as a safeguard that
+is present and working. What it was meant to catch, someone singing over
+speech, now falls to MUSIC and is cleaned rather than cut.
+
+The detector supplies all of this at once: both taggers score all 527 AudioSet
+labels on every frame, `Speech`, `Singing` and `Music` among them, so reading
+several groups costs no more than reading one.
 
 The map is also what keeps enrolment off music beds: separation runs before
 music removal, so its search for clean solo speech would otherwise happen over
@@ -33,37 +39,6 @@ import numpy as np
 # missed one contaminates an enrolment or sends song lyrics to ASR.
 MUSIC_THRESHOLD = float(os.environ.get("MUSIC_MAP_THRESHOLD", "0.10"))
 
-# 0.35 was above anything this tagger produces, so the SINGING branch never
-# fired once: a full 527-label dump (tools/dump_panns.py) of three recordings
-# put the ceiling of the singing group at 0.205, on the one file that actually
-# contains a song. Every sung stretch fell through to SONG instead.
-#
-# 0.12 is the lowest level that still separates the two cases cleanly:
-#
-#     level   two files with no singing    the file with a real song
-#     0.05            1.3s                        103.4s
-#     0.10            0.6s                         39.4s
-#     0.12            0.0s                         23.0s   <- clean
-#     0.20            0.0s                          0.3s
-#     0.35            0.0s                          0.0s   <- what it was
-#
-# Below 0.12 the "Male singing" label starts firing on ordinary speech in
-# vimeanhphanchiatay; above it, real singing is thrown away for nothing.
-#
-# Expect no change in what gets cut on the current corpus: every frame over
-# 0.10 already sat inside a SONG span, which is excised anyway. What this
-# restores is the branch's ability to fire at all -- which matters for the one
-# case SONG cannot catch, someone singing *over* speech.
-#
-# Thin evidence, and worth saying so: one recording with real singing.
-SINGING_THRESHOLD = float(os.environ.get("MUSIC_MAP_SINGING", "0.12"))
-
-# Singing and speech both light up the vocal range, so a frame can score on
-# both. It is called singing only when singing leads by this margin -- without
-# it, ordinary speech with a music bed under it reads as singing and gets
-# dropped from the transcript.
-SINGING_MARGIN = float(os.environ.get("MUSIC_MAP_SINGING_MARGIN", "0.15"))
-
 # Shortest run worth recording -- and it is two numbers, because the two
 # decisions this map drives are not equally reversible.
 #
@@ -79,10 +54,16 @@ SINGING_MARGIN = float(os.environ.get("MUSIC_MAP_SINGING_MARGIN", "0.15"))
 # stays at one block, and raising it would throw away real music: on
 # vimeanhphanchiatay, 0.96 would drop 10 spans and 6.1s of genuine bed.
 #
-# SINGING and SONG delete audio from the recording permanently. That asks for
-# more than one block of evidence, and the cost of asking is small: across the
-# two files with sung or standalone music, 0.96 drops 6 fragment spans and
-# 2.9 seconds total.
+# SONG deletes audio from the recording permanently. That asks for more than one
+# block of evidence, and the cost of asking is small: across the two files with
+# standalone music, 0.96 drops 6 fragment spans and 2.9 seconds total.
+#
+# Both numbers were calibrated on PANNs' 320ms grid. On SSLAM they quantise
+# rather than transfer: at its 2 fps a frame IS 0.5s, so 0.32 becomes "one
+# frame" and 0.96 becomes "two consecutive frames". Measured on the same three
+# recordings, that costs 6.5s out of 417.5s of music -- 1.6%, spread over 13
+# single-frame runs. The names no longer describe the behaviour, but the
+# behaviour is still the intended one.
 MIN_SPAN_SECONDS = float(os.environ.get("MUSIC_MAP_MIN_SPAN", "0.32"))
 MIN_SPAN_EXCISED = float(os.environ.get("MUSIC_MAP_MIN_SPAN_CUT", "0.96"))
 
@@ -90,23 +71,20 @@ MIN_SPAN_EXCISED = float(os.environ.get("MUSIC_MAP_MIN_SPAN_CUT", "0.96"))
 # threshold on a beat rest without stopping.
 MERGE_GAP_SECONDS = float(os.environ.get("MUSIC_MAP_MERGE_GAP", "0.50"))
 
-# Margin to pad around detected music/singing spans to catch the fade-in/out
+# Margin to pad around detected music spans to catch the fade-in/out
 PAD_SECONDS = float(os.environ.get("MUSIC_MAP_PAD", "0.30"))
 
 # What a span can be, and what each one means for the audio.
 #
 #   MUSIC    a bed with someone talking over it. Strip the bed, keep the speech.
-#   SINGING  the voice itself is singing. Cut it: the thing to remove is the
-#            voice, so stripping a bed would leave the lyrics behind.
 #   SONG     music with nobody speaking -- an intro, an outro, a sting. Cut it
 #            too. Running vocal separation here would extract whatever the
 #            model imagines a voice to be out of an instrumental.
 MUSIC = "music"
-SINGING = "singing"
 SONG = "song"
 
 # Spans that leave the recording entirely rather than being cleaned.
-EXCISED = (SINGING, SONG)
+EXCISED = (SONG,)
 
 # Below this the frame carries no speech worth keeping, so music there is a
 # song rather than a bed.
@@ -118,7 +96,7 @@ class MusicMap:
 
     def __init__(self, spans=None, fps=100.0):
         # Sorted (start, end, kind) in seconds. A bare (start, end) is taken as
-        # music, which is what every span meant before singing was told apart.
+        # music, which is what every span meant before the kinds were split.
         normalised = [tuple(s) if len(s) > 2 else (s[0], s[1], MUSIC)
                       for s in (spans or [])]
         self.spans = sorted(normalised, key=lambda s: s[0])
@@ -150,9 +128,6 @@ class MusicMap:
             if b > start and (kind is None or k == kind):
                 return True
         return False
-
-    def is_singing(self, start: float, end: float) -> bool:
-        return self.overlaps(start, end, SINGING)
 
     def clean_parts(self, start: float, end: float, kind=None):
         """`[start, end)` with every matching stretch cut out of it."""
@@ -222,7 +197,6 @@ class MusicMap:
     def summary(self) -> dict:
         return {"spans": len(self.spans),
                 "music_seconds": round(self.total_of(MUSIC), 2),
-                "singing_seconds": round(self.total_of(SINGING), 2),
                 "song_seconds": round(self.total_of(SONG), 2)}
 
 
@@ -260,18 +234,14 @@ def _runs(flags, fps, min_span, merge_gap, pad=0.0):
 
 
 def build(waveform, sample_rate, detector, logger=None,
-          music_threshold=MUSIC_THRESHOLD, singing_threshold=SINGING_THRESHOLD,
-          singing_margin=SINGING_MARGIN):
+          music_threshold=MUSIC_THRESHOLD):
     """The music map alone. See `build_maps` for the noise track beside it."""
     return build_maps(waveform, sample_rate, detector, logger=logger,
-                      music_threshold=music_threshold,
-                      singing_threshold=singing_threshold,
-                      singing_margin=singing_margin)[0]
+                      music_threshold=music_threshold)[0]
 
 
 def build_maps(waveform, sample_rate, detector, logger=None,
-               music_threshold=MUSIC_THRESHOLD, singing_threshold=SINGING_THRESHOLD,
-               singing_margin=SINGING_MARGIN):
+               music_threshold=MUSIC_THRESHOLD):
     """Label the recording frame by frame; return (MusicMap, NoiseTrack).
 
     One PANNs sweep produces both. Cnn14 predicts all 527 AudioSet labels on
@@ -303,26 +273,21 @@ def build_maps(waveform, sample_rate, detector, logger=None,
 
     noise = build_noise(scores, fps)
 
-    speech, singing, music = scores["speech"], scores["singing"], scores["music"]
+    speech, music = scores["speech"], scores["music"]
     if not len(music):
         return MusicMap(fps=fps), noise
 
-    # Singing first, and exclusively: a sung frame is not also a bed to clean up,
-    # because the thing to remove would be the voice itself.
-    is_singing = (singing >= singing_threshold) & (singing >= speech + singing_margin)
-
-    # Then split the rest of the music by whether anyone is talking over it. A
-    # bed under speech is worth stripping; music with no speech is worth cutting,
-    # and asking a vocal separator to work on it would only invent a voice.
-    loud_music = (music >= music_threshold) & ~is_singing
+    # Split the music by whether anyone is talking over it. A bed under speech
+    # is worth stripping; music with no speech is worth cutting, and asking a
+    # vocal separator to work on it would only invent a voice.
+    loud_music = (music >= music_threshold)
     is_song = loud_music & (speech < SPEECH_PRESENT)
     is_music = loud_music & ~is_song
 
-    # SINGING and SONG leave the recording; MUSIC is only cleaned. The first two
-    # therefore have to clear a longer run than the third -- see MIN_SPAN_*.
-    spans = ([(a, b, SINGING) for a, b in
-              _runs(is_singing, fps, MIN_SPAN_EXCISED, MERGE_GAP_SECONDS, PAD_SECONDS)]
-             + [(a, b, SONG) for a, b in
+    # SONG leaves the recording; MUSIC is only cleaned. Deleting audio asks for
+    # more evidence than cleaning it, so SONG clears a longer run -- see
+    # MIN_SPAN_*.
+    spans = ([(a, b, SONG) for a, b in
                 _runs(is_song, fps, MIN_SPAN_EXCISED, MERGE_GAP_SECONDS, PAD_SECONDS)]
              + [(a, b, MUSIC) for a, b in
                 _runs(is_music, fps, MIN_SPAN_SECONDS, MERGE_GAP_SECONDS, PAD_SECONDS)])
@@ -331,7 +296,7 @@ def build_maps(waveform, sample_rate, detector, logger=None,
     if logger:
         duration = len(waveform) / max(sample_rate, 1)
         logger.info(
-            f"Music map: {found.total_of(SINGING):.1f}s singing, "
+            f"Music map: {found.total_of(SONG):.1f}s standalone music, "
             f"{found.total_of(MUSIC):.1f}s music under speech, of "
             f"{duration:.1f}s ({found.total / max(duration, 1e-9) * 100:.1f}%), "
             f"{len(found)} span(s) at {fps:.0f} fps")

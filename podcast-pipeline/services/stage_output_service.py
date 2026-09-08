@@ -300,8 +300,9 @@ class StageOutputService:
         """What the tagger found, and what was done about it.
 
         Written before diarization runs, so a `--stop_after music` run leaves
-        the whole verdict on disk: which stretches were called singing, which
-        were beds, how much left the recording, and the audio that remains.
+        the whole verdict on disk: which stretches were cut as standalone
+        music, which were beds to strip, how much left the recording, and the
+        audio that remains.
         """
         if not self.enabled:
             return
@@ -339,13 +340,6 @@ class StageOutputService:
         stats["segments"] = self.segment_stats(segments, total_dur)
         return self._finish("separation", "segments.json", segments, stats,
                             extra={"report.json": report} if report else None)
-
-    def write_music_removal(self, segments, total_dur=None):
-        items = [_as_dict(s) for s in segments]
-        stats = {"segments_total": len(items),
-                 "segments_bs_roformer": sum(1 for d in items if d.get("bs_roformer"))}
-        stats["segments"] = self.segment_stats(segments, total_dur)
-        return self._finish("music_removal", "segments.json", segments, stats)
 
     def write_asr(self, transcripts):
         return self._finish("asr", "transcripts.json", transcripts,

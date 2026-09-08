@@ -11,11 +11,12 @@ nothing, which is the worst of the three possible outcomes.
 
 # A stage's older gate, for a profile written before `steps` existed. Several
 # of these flags cover more than one stage, which is the reason `steps` exists:
-# `panns` turned on both the sweep and the vocal separator, and there was no
-# way to ask for one without the other.
+# `music` turns on both the sweep and the vocal separator, and there is no way
+# to ask for one without the other. (It was spelled `panns` until the tagger
+# behind it was replaced; main.py still accepts that spelling.)
 LEGACY_FLAG = {
-    "music_analysis": "panns",
-    "music_removal": "panns",
+    "music_analysis": "music",
+    "music_removal": "music",
     "separation": "tse",
     "captioning": "qwen3omni",
     "refinement": "llm_refinement",

@@ -23,13 +23,15 @@ ctranslate2==4.5.0
 # Checkpoints are pulled from UVR (not the HF hub) on first use, so an offline
 # run needs download_offline_weights.py and BS_ROFORMER_MODEL_DIR.
 audio-separator>=0.47.0
-panns-inference
 librosa==0.10.2.post1
 soundfile==0.13.1
 pydub==0.25.1
 julius==0.2.7
 numba==0.61.2
 transformers==4.53.0
+# SSLAM's remote code builds its ViT through timm; without it the
+# checkpoint loads and then dies on the first forward pass.
+timm==1.0.29
 accelerate>=0.30.0
 # transformers 4.53, pyannote.audio 4.0.7 and whisperx 3.8.6 all require >=0.30
 huggingface-hub==0.33.4

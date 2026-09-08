@@ -12,7 +12,7 @@ from models.diarizen_model import DiariZenDiarizer
 from models.pyannote_embedding import PyannoteEmbedder
 # from models.sortformer import SortformerDiarizer
 from models.tse_model import TargetSpeakerExtractor
-from models.panns import PANNSDetector
+from models.sslam import SSLAMDetector
 from models.qwen3_omni import Qwen3OmniCaptioner
 from models.qwen3_asr import Qwen3ASRClient
 from services.qwen3_worker_service import Qwen3WorkerService
@@ -87,26 +87,26 @@ class ModelLoader:
                 logger=self.logger,
             )
             
-    def load_panns(self):
-        """Load just the music detector.
+    def load_tagger(self):
+        """Load just the frame-level tagger.
 
-        Separate from load_music_models because the music sweep that runs after
-        diarization needs the tagger and nothing else: pulling Demucs in with it
-        would hold a source-separation model in VRAM from diarization all the
-        way to music removal, for a check that never uses it.
+        Separate from load_music_models because the sweep that decides what is
+        playing needs the tagger and nothing else: pulling the vocal separator
+        in with it would hold it in VRAM across a check that never uses it, and
+        on a recording with no music bed it would never be used at all.
         """
-        if "panns" in self.models:
+        if "tagger" in self.models:
             return
         if step_enabled(self.args, "music_analysis"):
-            if self.logger: self.logger.info("Loading PANNS detector")
-            self.models["panns"] = PANNSDetector(device=str(self.device_1))
+            if self.logger: self.logger.info("Loading SSLAM tagger")
+            self.models["tagger"] = SSLAMDetector(device=str(self.device_1))
 
     def load_music_models(self):
-        """Load PANNS and BS-RoFormer if background music removal is enabled."""
+        """Load the tagger and BS-RoFormer if music removal is enabled."""
         if "bs_roformer" in self.models:
             return
         if step_enabled(self.args, "music_removal"):
-            self.load_panns()
+            self.load_tagger()
 
             # Loaded onto device_1, the same card as the DiariZen worker.
             # An earlier note here claimed it ran on GPU 2 alongside Qwen3;

@@ -16,8 +16,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from services.pipeline_service import PipelineService
 from utils import steps
 
-STEPS = ("music_analysis", "music_removal", "music_removal_fallback",
-         "cut_singing", "diarization", "separation", "asr", "captioning",
+STEPS = ("music_analysis", "music_removal",
+         "cut_music", "diarization", "separation", "asr", "captioning",
          "refinement", "export")
 
 
@@ -56,7 +56,7 @@ def test_a_step_with_neither_runs():
 
 def test_one_flag_can_gate_two_steps_independently():
     """`panns` gated both the sweep and the removal; they are separable now."""
-    args = _args(panns=True, step_music_removal=False)
+    args = _args(music=True, step_music_removal=False)
     assert PipelineService.step_enabled(args, "music_analysis")
     assert not PipelineService.step_enabled(args, "music_removal")
 
@@ -118,22 +118,21 @@ def test_separation_off_still_produces_segments_of_the_same_shape():
     assert all(not s.tse for s in out)
 
 
-def test_the_per_segment_pass_is_off_by_default():
-    """It predates the waveform pass and does the same job a stage later, one
-    segment at a time -- redundant with a map, coarser without one."""
+def test_the_per_segment_pass_is_gone_entirely():
+    """It predated the waveform pass and did the same job a stage later, one
+    segment at a time. With the sweep at the front of the run it was redundant
+    on every ordinary run and gated itself off; what remained was a stage that
+    could only fire when the stage it duplicated was switched off."""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     with open(os.path.join(root, "config.json"), encoding="utf-8") as fh:
         config = json.load(fh)
     for name, profile in config["environments"].items():
-        assert profile["steps"]["music_removal_fallback"] is False, name
+        assert "music_removal_fallback" not in profile["steps"], name
 
-
-def test_the_fallback_is_skipped_for_either_reason():
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     source = open(os.path.join(root, "services", "pipeline_service.py"),
                   encoding="utf-8").read()
-    assert 'not self.step_enabled(args, "music_removal_fallback")' in source
-    assert "turned off in the profile" in source
+    assert "music_removal_fallback" not in source
+    assert "process_segments" not in source
 
 
 # --- the loader has to reach the same verdict --------------------------------
@@ -164,12 +163,12 @@ def _stub_model_modules():
         sys.modules[name] = types.ModuleType(name)
     for name in ("models.whisper", "models.whisper_wrapper", "models.phowhisper",
                  "models.silero_vad", "models.pyannote", "models.diarizen_model",
-                 "models.pyannote_embedding", "models.tse_model", "models.panns",
+                 "models.pyannote_embedding", "models.tse_model", "models.sslam",
                  "models.bs_roformer", "models.qwen3_omni", "models.qwen3_asr"):
         module = types.ModuleType(name)
         for attr in ("WhisperASR", "PhoWhisperASR", "SileroVAD", "PyannoteDiarizer",
                      "DiariZenDiarizer", "PyannoteEmbedder", "TargetSpeakerExtractor",
-                     "PANNSDetector", "BSRoformerRemover", "Qwen3OmniCaptioner",
+                     "SSLAMDetector", "BSRoformerRemover", "Qwen3OmniCaptioner",
                      "Qwen3ASRClient", "load_asr_model"):
             setattr(module, attr, type(attr, (), {"__init__": lambda self, *a, **k: None}))
         sys.modules.setdefault(name, module)
@@ -182,10 +181,10 @@ def _loader(monkeypatch, **flags):
     ModelLoader = _stub_model_modules()
 
     # Patched on the loader module rather than left to the stubs: by the time
-    # the whole suite runs, models.panns may already be imported for real, and
-    # the real detector would try to build a 312MB checkpoint.
+    # the whole suite runs, models.sslam may already be imported for real, and
+    # the real detector would try to pull a 362MB checkpoint off the Hub.
     import services.model_loader as ml
-    monkeypatch.setattr(ml, "PANNSDetector", lambda *a, **k: object())
+    monkeypatch.setattr(ml, "SSLAMDetector", lambda *a, **k: object())
 
     loader = ModelLoader.__new__(ModelLoader)
     loader.args = _args(**flags)
@@ -204,20 +203,20 @@ def test_the_profile_alone_is_enough_to_load_the_tagger(monkeypatch):
     a run that says it swept the audio and did not.
     """
     loader = _loader(monkeypatch, env="kaggle", step_music_analysis=True)
-    loader.load_panns()
-    assert "panns" in loader.models
+    loader.load_tagger()
+    assert "tagger" in loader.models
 
 
 def test_turning_the_step_off_leaves_the_tagger_unloaded(monkeypatch):
-    loader = _loader(monkeypatch, env="kaggle", panns=True, step_music_analysis=False)
-    loader.load_panns()
-    assert "panns" not in loader.models
+    loader = _loader(monkeypatch, env="kaggle", music=True, step_music_analysis=False)
+    loader.load_tagger()
+    assert "tagger" not in loader.models
 
 
 def test_the_old_flag_still_loads_it(monkeypatch):
-    loader = _loader(monkeypatch, env="kaggle", panns=True)
-    loader.load_panns()
-    assert "panns" in loader.models
+    loader = _loader(monkeypatch, env="kaggle", music=True)
+    loader.load_tagger()
+    assert "tagger" in loader.models
 
 
 # --- reachability, which is not the same question ----------------------------
@@ -225,7 +224,7 @@ def test_the_old_flag_still_loads_it(monkeypatch):
 def _music_only(**kw):
     """A profile that stops after the music stage: diarization off, rest on."""
     base = dict(step_music_analysis=True, step_music_removal=True,
-                step_cut_singing=True, step_diarization=False,
+                step_cut_music=True, step_diarization=False,
                 step_separation=True, step_asr=True, step_export=True,
                 ASRMoE=True, tse=True, dia3=False)
     base.update(kw)
@@ -249,7 +248,7 @@ def test_a_stage_behind_a_disabled_one_is_not_reached():
 def test_the_music_stages_run_regardless():
     """They come before the load-bearing check, which is the point of them."""
     args = _music_only()
-    for stage in ("music_analysis", "music_removal", "cut_singing"):
+    for stage in ("music_analysis", "music_removal", "cut_music"):
         assert steps.will_run(args, stage), stage
 
 
@@ -274,7 +273,7 @@ def test_export_off_stops_the_run_before_diarization():
 
 def test_an_old_profile_reaches_every_stage_it_used_to():
     """Nothing in `steps` at all: reachability must not become a new gate."""
-    args = _args(tse=True, ASRMoE=True, panns=True)
+    args = _args(tse=True, ASRMoE=True, music=True)
     for stage in ("music_analysis", "diarization", "separation", "asr", "export"):
         assert steps.will_run(args, stage), stage
 

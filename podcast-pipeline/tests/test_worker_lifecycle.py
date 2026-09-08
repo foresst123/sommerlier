@@ -288,8 +288,8 @@ class _RecordingLoader:
     def load_base_models(self):
         self._note("base")
 
-    def load_panns(self):
-        self._note("panns")
+    def load_tagger(self):
+        self._note("tagger")
 
 
 def _staged(worker):
@@ -327,10 +327,10 @@ def test_a_stage_with_no_worker_loads_normally():
     worker = _NeverStarted()
     pipe = _staged(worker)
 
-    pipe._load("panns")
+    pipe._load("tagger")
 
     assert worker.spawns == 0
-    assert pipe.model_loader.order == [("panns", False)]
+    assert pipe.model_loader.order == [("tagger", False)]
 
 
 def test_a_live_worker_is_not_started_twice():
@@ -395,22 +395,22 @@ def test_prefetch_is_reachable_for_a_box_with_room():
 
 def test_the_tagger_is_released_when_the_music_stage_ends():
     """PANNs was only released at the end of step 5, the per-segment music
-    fallback. That stage is skipped whenever a music map exists, and under
-    stage-major execution the run leaves for diarization long before reaching
-    it -- so the tagger held ~600MB of VRAM for the whole run, on the card that
-    then has to fit DiariZen, the embedder, TSE and ASR.
+    fallback -- a stage skipped whenever a music map existed, which under
+    stage-major execution the run left for diarization long before reaching. So
+    the tagger held ~600MB of VRAM for the whole run, on the card that then has
+    to fit DiariZen, the embedder, TSE and ASR.
 
     Observed in a real run: "Unloaded bs_roformer from VRAM" appeared and no
-    matching line for panns ever did."""
+    matching line for the tagger ever did. The fallback is gone now, which is
+    why the release has to sit inside the music stage rather than after it."""
     source = open(os.path.join(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))), "services", "pipeline_service.py"),
         encoding="utf-8").read()
 
-    release = source.index('self._free(args, "panns")')
+    release = source.index('self._free(args, "tagger")')
     diarization = source.index("# 3. Diarization")
     assert release < diarization, (
-        "panns must be released inside the music stage, not after it")
+        "the tagger must be released inside the music stage, not after it")
 
-    fallback = source.index("# 5. Background Music Removal")
-    assert source.index('self._free(args, "panns", "bs_roformer")') > fallback, (
-        "the fallback keeps its own release for runs that do reach it")
+    assert "# 5. Background Music Removal" not in source, (
+        "the per-segment fallback is gone; nothing should re-introduce it")
