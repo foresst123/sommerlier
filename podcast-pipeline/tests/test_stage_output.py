@@ -73,12 +73,12 @@ def test_a_healthy_run_raises_no_warnings():
 
 def test_separation_stats_count_spans_not_segments():
     segs = [
-        _Seg(index="0", start=0, end=5, speaker="1", tse=True,
-             tse_spans=[(1.0, 1.4, 0.7)], tse_failed_spans=[]),
-        _Seg(index="1", start=5, end=9, speaker="2", tse=True,
-             tse_spans=[(6.0, 6.3, 0.6)], tse_failed_spans=[(7.0, 7.2, "qc_sim", "")]),
-        _Seg(index="2", start=9, end=14, speaker="1", tse=False,
-             tse_spans=[], tse_failed_spans=[]),
+        _Seg(index="0", start=0, end=5, speaker="1", bss=True,
+             bss_spans=[(1.0, 1.4, 0.7)], bss_failed_spans=[]),
+        _Seg(index="1", start=5, end=9, speaker="2", bss=True,
+             bss_spans=[(6.0, 6.3, 0.6)], bss_failed_spans=[(7.0, 7.2, "qc_sim", "")]),
+        _Seg(index="2", start=9, end=14, speaker="1", bss=False,
+             bss_spans=[], bss_failed_spans=[]),
     ]
     st = StageOutputService.separation_stats(segs)
     assert st["segments_total"] == 3
@@ -88,8 +88,8 @@ def test_separation_stats_count_spans_not_segments():
 
 
 def test_an_empty_track_failure_is_called_out():
-    segs = [_Seg(index="0", start=0, end=1, speaker="1", tse=False, tse_spans=[],
-                 tse_failed_spans=[(0.1, 0.4, "empty_track", "silent")])]
+    segs = [_Seg(index="0", start=0, end=1, speaker="1", bss=False, bss_spans=[],
+                 bss_failed_spans=[(0.1, 0.4, "empty_track", "silent")])]
     st = StageOutputService.separation_stats(segs)
     assert any("silent" in w for w in st["warnings"])
 

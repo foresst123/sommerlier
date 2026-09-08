@@ -10,7 +10,7 @@ from algorithms.diarization.overlap import detect_overlapping_segments
 from utils.audio_normalize import match_splice_level, safe_limit
 from utils.mixture_window import MODEL_WINDOW, window_for
 from utils.music_map import MusicMap
-from utils.enrollment_memory import EnrollmentMemory, ENABLED as TSE_MEMORY
+from utils.enrollment_memory import EnrollmentMemory, ENABLED as BSS_MEMORY
 
 # Stand-in for a service constructed without one, so the separation path does
 # not have to branch on its presence.
@@ -19,13 +19,13 @@ _NO_MEMORY = EnrollmentMemory(enabled=False)
 
 # Crossfade over each seam so the joins are not step discontinuities the
 # decoder would read as acoustic events.
-TSE_STITCH_FADE = float(os.environ.get("TSE_STITCH_FADE", "0.02"))
+BSS_STITCH_FADE = float(os.environ.get("BSS_STITCH_FADE", "0.02"))
 # Silence padded around the overlap so seam artifacts cannot bleed into the one
 # span actually spliced back.
-TSE_STITCH_GUARD = float(os.environ.get("TSE_STITCH_GUARD", "0.25"))
+BSS_STITCH_GUARD = float(os.environ.get("BSS_STITCH_GUARD", "0.25"))
 
 # --- Job grouping ---------------------------------------------------------
-TSE_JOB_MERGE_GAP = float(os.environ.get("TSE_JOB_MERGE_GAP", "8.0"))
+BSS_JOB_MERGE_GAP = float(os.environ.get("BSS_JOB_MERGE_GAP", "8.0"))
 # Overlaps this close together are treated as one span rather than as a job of
 # several. The stitched window -- the thing that puts both voices in front of
 # the separator in equal measure -- only builds for a single overlap, because
@@ -37,14 +37,14 @@ TSE_JOB_MERGE_GAP = float(os.environ.get("TSE_JOB_MERGE_GAP", "8.0"))
 # Merging them instead splices the sliver between the two overlaps as well. That
 # sliver is single-speaker audio the separator handles trivially, and 0.5s of it
 # is a smaller price than separating the pair unbalanced.
-TSE_OVERLAP_FUSE_GAP = float(os.environ.get("TSE_OVERLAP_FUSE_GAP", "0.6"))
-TSE_JOB_MAX_SPAN = float(os.environ.get("TSE_JOB_MAX_SPAN", "120.0"))
-TSE_RETRY_SPLIT = os.environ.get("TSE_RETRY_SPLIT", "1") not in ("0", "false", "False")
+BSS_OVERLAP_FUSE_GAP = float(os.environ.get("BSS_OVERLAP_FUSE_GAP", "0.6"))
+BSS_JOB_MAX_SPAN = float(os.environ.get("BSS_JOB_MAX_SPAN", "120.0"))
+BSS_RETRY_SPLIT = os.environ.get("BSS_RETRY_SPLIT", "1") not in ("0", "false", "False")
 
 # --- Enrollment -----------------------------------------------------------
-TSE_ENROLL_BUDGET = float(os.environ.get("TSE_ENROLL_BUDGET", "8.0"))
-TSE_ENROLL_MIN_CLIP = float(os.environ.get("TSE_ENROLL_MIN_CLIP", "0.35"))
-TSE_ENROLL_MIN_TOTAL = float(os.environ.get("TSE_ENROLL_MIN_TOTAL", "1.5"))
+BSS_ENROLL_BUDGET = float(os.environ.get("BSS_ENROLL_BUDGET", "8.0"))
+BSS_ENROLL_MIN_CLIP = float(os.environ.get("BSS_ENROLL_MIN_CLIP", "0.35"))
+BSS_ENROLL_MIN_TOTAL = float(os.environ.get("BSS_ENROLL_MIN_TOTAL", "1.5"))
 # One continuous clip beats several stitched together, and by enough to matter.
 # Measured on eight synthetic two-speaker mixtures built from this corpus, all
 # levelled to 0 dB, scored as SI-SDR improvement over the mixture:
@@ -62,26 +62,26 @@ TSE_ENROLL_MIN_TOTAL = float(os.environ.get("TSE_ENROLL_MIN_TOTAL", "1.5"))
 #
 # Above this length a single clip is used alone; below it, clips are still
 # gathered to the budget, because too little speech is its own failure.
-TSE_ENROLL_PREFER_SINGLE = float(os.environ.get("TSE_ENROLL_PREFER_SINGLE", "4.0"))
+BSS_ENROLL_PREFER_SINGLE = float(os.environ.get("BSS_ENROLL_PREFER_SINGLE", "4.0"))
 
 # --- QC -------------------------------------------------------------------
 # NOT CALIBRATED. Read the sim percentiles in the [TSE] log
 # line and the clips under separation/failed/ before trusting either number.
 # ECAPA scores might sit lower than they would on natural speech. The default
 # is set relatively low.
-TSE_QC_SIM_THRESHOLD = float(os.environ.get("TSE_QC_SIM_THRESHOLD", "0.20"))
-TSE_NOT_A_MARGIN = float(os.environ.get("TSE_NOT_A_MARGIN", "0.15"))
-TSE_SILENCE_RMS = float(os.environ.get("TSE_SILENCE_RMS", "0.002"))
+BSS_QC_SIM_THRESHOLD = float(os.environ.get("BSS_QC_SIM_THRESHOLD", "0.20"))
+BSS_NOT_A_MARGIN = float(os.environ.get("BSS_NOT_A_MARGIN", "0.15"))
+BSS_SILENCE_RMS = float(os.environ.get("BSS_SILENCE_RMS", "0.002"))
 
-TSE_DUMP_FAILED = os.environ.get("TSE_DUMP_FAILED", "1") not in ("0", "false", "False")
+BSS_DUMP_FAILED = os.environ.get("BSS_DUMP_FAILED", "1") not in ("0", "false", "False")
 
 # Closed vocabulary of failure reasons, so every discarded overlap can be
 # counted and grepped rather than vanishing into a bare `continue`.
 REASONS = (
     "no_enroll",        # speaker lacks enough clean audio for an enrollment
-    "no_window",        # no window up to TSE_WINDOW_MAX satisfies the criteria
+    "no_window",        # no window up to BSS_WINDOW_MAX satisfies the criteria
     "multi_speaker",    # >2 speakers in the window; the extractor is a 2-source model
-    "qc_sim",           # track scored below TSE_QC_SIM_THRESHOLD
+    "qc_sim",           # track scored below BSS_QC_SIM_THRESHOLD
     "unscorable",       # too little voiced audio to judge (not a failure to separate)
     "not_a_fail",       # the "not-A" relative test did not pass
     "already_spliced",  # another job already wrote this span
@@ -91,17 +91,17 @@ REASONS = (
 )
 
 
-class TargetExtractionService:
+class SeparationService:
     """Isolate overlapping speech with blind separation plus ECAPA assignment.
 
     Every overlap ends up in exactly one of two places on its SpeechSegment:
-    tse_spans (separated) or tse_failed_spans (not, with a reason). Nothing is
+    bss_spans (separated) or bss_failed_spans (not, with a reason). Nothing is
     dropped silently -- test_every_overlap_is_accounted_for enforces that.
     """
 
-    def __init__(self, tse_model=None, logger=None, dump_dir: Optional[str] = None,
+    def __init__(self, bss_model=None, logger=None, dump_dir: Optional[str] = None,
                  model_loader=None):
-        self._tse_model = tse_model
+        self._bss_model = bss_model
         self.model_loader = model_loader
         self.logger = logger
         self.dump_dir = dump_dir
@@ -124,22 +124,22 @@ class TargetExtractionService:
     # runs, so a reference taken here would be None for every stage that had
     # not loaded yet -- and would stay None after it did.
     @property
-    def tse_model(self):
-        if self._tse_model is not None:
-            return self._tse_model
+    def bss_model(self):
+        if self._bss_model is not None:
+            return self._bss_model
         return getattr(self, "model_loader", None) and self.model_loader.get("separator")
 
-    @tse_model.setter
-    def tse_model(self, model):
+    @bss_model.setter
+    def bss_model(self, model):
         """Assigning the model directly still works, which is how callers that
         build the service by hand -- the tests among them -- supply one."""
-        self._tse_model = model
+        self._bss_model = model
 
     def reset_stats(self):
         """Clear per-file counters.
 
         The service instance is reused across a batch, so without this the
-        second file's [TSE] summary and _tse_report.json would report the
+        second file's [TSE] summary and _bss_report.json would report the
         running total rather than that file.
         """
         self.stats = collections.Counter()
@@ -156,7 +156,7 @@ class TargetExtractionService:
             memory.reset()
         # The separator caches enrollment embeddings under the diarizer's
         # speaker labels, and those restart at "1" for every file.
-        reset = getattr(self.tse_model, "reset_speakers", None)
+        reset = getattr(self.bss_model, "reset_speakers", None)
         if reset:
             reset()
 
@@ -166,7 +166,7 @@ class TargetExtractionService:
         assert reason in REASONS, f"unknown reason {reason!r}"
         self.stats[f"fail_{reason}"] += 1
         if enh_seg is not None:
-            enh_seg.tse_failed_spans.append((start, end, reason, detail))
+            enh_seg.bss_failed_spans.append((start, end, reason, detail))
         self.failures.append((start, end, getattr(enh_seg, "speaker", "?"), reason, detail))
         if self.logger:
             self.logger.debug(f"[TSE] {reason} @ {start:.2f}s {detail}")
@@ -192,7 +192,7 @@ class TargetExtractionService:
             self.logger.info(
                 f"[TSE] ECAPA sim: p10={np.percentile(a, 10):.2f} "
                 f"p50={np.percentile(a, 50):.2f} p90={np.percentile(a, 90):.2f} "
-                f"max={a.max():.2f} (threshold {TSE_QC_SIM_THRESHOLD}, NOT calibrated)"
+                f"max={a.max():.2f} (threshold {BSS_QC_SIM_THRESHOLD}, NOT calibrated)"
             )
         else:
             self.logger.info("[TSE] no similarity was computed at all")
@@ -210,7 +210,7 @@ class TargetExtractionService:
         reading them here produced an empty report on every batch run. Passing
         the payload the separation stage checkpointed is what keeps it filled.
         """
-        path = os.path.join(save_dir, f"{audio_name}_tse_report.json")
+        path = os.path.join(save_dir, f"{audio_name}_bss_report.json")
         if payload is None:
             payload = self._report_payload()
         try:
@@ -227,18 +227,18 @@ class TargetExtractionService:
             # own fixed mixture length, not a preference: overlaps shorter than
             # it are widened, longer ones are chunked by the graph.
             "thresholds": {
-                "qc_sim": TSE_QC_SIM_THRESHOLD, "not_a_margin": TSE_NOT_A_MARGIN,
+                "qc_sim": BSS_QC_SIM_THRESHOLD, "not_a_margin": BSS_NOT_A_MARGIN,
                 "model_window": MODEL_WINDOW,
-                "enroll_budget": TSE_ENROLL_BUDGET,
-                "enroll_min_clip": TSE_ENROLL_MIN_CLIP,
-                "enroll_min_total": TSE_ENROLL_MIN_TOTAL,
+                "enroll_budget": BSS_ENROLL_BUDGET,
+                "enroll_min_clip": BSS_ENROLL_MIN_CLIP,
+                "enroll_min_total": BSS_ENROLL_MIN_TOTAL,
             },
             # Recorded per run because it changes what the audio sounds like:
             # a report from a run without it is not comparable to one with it.
             # How much of the recording the enrollment search had to avoid. A
             # run with music but an empty map means the sweep did not happen.
             "enrollment_memory": (self.memory.summary()
-                                  if TSE_MEMORY and getattr(self, "memory", None)
+                                  if BSS_MEMORY and getattr(self, "memory", None)
                                   else None),
             "music_map": self.music_map.summary(),
             "stats": dict(self.stats),
@@ -257,7 +257,7 @@ class TargetExtractionService:
         """
         Component 1: Extract clean, non-overlapping segments for each speaker to serve as TSE enrollments.
         """
-        if self.logger: self.logger.info("Mining enrollments for Target Speaker Extraction...")
+        if self.logger: self.logger.info("Mining enrollments for speaker assignment...")
         
         # Convert to dicts for overlap detection
         # với mỗi thành phần trong segments, tạo một dictionary chứa thông tin start, end, speaker và index
@@ -325,26 +325,26 @@ class TargetExtractionService:
             # the bad embedding surfaced later as a low similarity that looked
             # like a separation failure. Gather clips up to a time budget instead
             # and refuse outright when there is not enough.
-            candidates = [c for c in candidates if (c[1] - c[0]) >= TSE_ENROLL_MIN_CLIP]
+            candidates = [c for c in candidates if (c[1] - c[0]) >= BSS_ENROLL_MIN_CLIP]
             candidates.sort(key=lambda c: c[1] - c[0], reverse=True)
 
             # Longest first, and if the longest is on its own long enough,
             # stop there rather than assembling a patchwork -- see
-            # TSE_ENROLL_PREFER_SINGLE for what that assembly costs.
+            # BSS_ENROLL_PREFER_SINGLE for what that assembly costs.
             picked, total = [], 0.0
             for start, end in candidates:
-                if total >= TSE_ENROLL_BUDGET:
+                if total >= BSS_ENROLL_BUDGET:
                     break
                 picked.append(waveform[int(start * sr):int(end * sr)].copy())
                 total += end - start
-                if len(picked) == 1 and total >= TSE_ENROLL_PREFER_SINGLE:
+                if len(picked) == 1 and total >= BSS_ENROLL_PREFER_SINGLE:
                     break
 
-            if total < TSE_ENROLL_MIN_TOTAL:
+            if total < BSS_ENROLL_MIN_TOTAL:
                 if self.logger:
                     self.logger.warning(
                         f"Speaker {spk}: only {total:.2f}s of clean audio "
-                        f"(need >={TSE_ENROLL_MIN_TOTAL}s); enrollment would be unreliable, "
+                        f"(need >={BSS_ENROLL_MIN_TOTAL}s); enrollment would be unreliable, "
                         "so every overlap involving this speaker is skipped."
                     )
                 enrollments[spk] = []
@@ -370,7 +370,7 @@ class TargetExtractionService:
         frame = max(1, int(frame_sec * sr_hint))
         if n < frame * 2:
             # Too short to profile; fall back to "is there anything at all".
-            return float(np.sqrt(np.mean(track[:n] ** 2) + 1e-12)) >= TSE_SILENCE_RMS
+            return float(np.sqrt(np.mean(track[:n] ** 2) + 1e-12)) >= BSS_SILENCE_RMS
 
         m = n // frame
         h = np.sqrt((host[:m * frame].reshape(m, frame) ** 2).mean(axis=1) + 1e-12)
@@ -378,13 +378,13 @@ class TargetExtractionService:
 
         # Frames where the mixture clearly has speech, relative to its own peak
         # so this holds at any recording level.
-        voiced = h >= max(h.max() * 0.25, TSE_SILENCE_RMS)
+        voiced = h >= max(h.max() * 0.25, BSS_SILENCE_RMS)
         if not voiced.any():
             return True          # nothing to preserve here; not the track's fault
 
         # The track may legitimately be quieter -- the interferer is gone -- so
         # judge it against its own scale, not the mixture's.
-        alive = t >= max(t.max() * 0.15, TSE_SILENCE_RMS * 0.5)
+        alive = t >= max(t.max() * 0.15, BSS_SILENCE_RMS * 0.5)
         return float(np.mean(alive[voiced])) >= 0.35
 
     def _cross_fade(self, orig_audio: np.ndarray, new_audio: np.ndarray, fade_samples: int) -> np.ndarray:
@@ -476,7 +476,7 @@ class TargetExtractionService:
         Only the span is widened; the pair keeps its first entry's speakers and
         segments, which is what the caller reads.
         """
-        gap = TSE_OVERLAP_FUSE_GAP if gap is None else gap
+        gap = BSS_OVERLAP_FUSE_GAP if gap is None else gap
         if gap <= 0 or len(plist) < 2:
             return plist
 
@@ -504,7 +504,7 @@ class TargetExtractionService:
         Two overlaps a few seconds apart would otherwise each get their own
         window covering nearly the same audio: twice the diffusion cost, and two
         independent separations spliced over each other in the shared region.
-        TSE_JOB_MAX_SPAN caps the chain so a backchannel every 5s cannot silently
+        BSS_JOB_MAX_SPAN caps the chain so a backchannel every 5s cannot silently
         merge the whole file into one job.
         """
         buckets: Dict[frozenset, list] = {}
@@ -518,8 +518,8 @@ class TargetExtractionService:
                 # this on its own, and merging a ghost speaker into a
                 # neighbour creates more of it. There is nothing to separate --
                 # one voice is already one source -- but it must not vanish
-                # silently: every overlap ends up in tse_spans or
-                # tse_failed_spans, and the caller records these from here.
+                # silently: every overlap ends up in bss_spans or
+                # bss_failed_spans, and the caller records these from here.
                 if not hasattr(self, "_same_speaker_pairs"):
                     self._same_speaker_pairs = []
                 self._same_speaker_pairs.extend(plist)
@@ -532,7 +532,7 @@ class TargetExtractionService:
                 if current:
                     gap = p["overlap_start"] - current[-1]["overlap_end"]
                     span = p["overlap_end"] - current[0]["overlap_start"]
-                    if gap > TSE_JOB_MERGE_GAP or span > TSE_JOB_MAX_SPAN:
+                    if gap > BSS_JOB_MERGE_GAP or span > BSS_JOB_MAX_SPAN:
                         jobs.append((spk_a, spk_b, current))
                         current = []
                 current.append(p)
@@ -548,7 +548,7 @@ class TargetExtractionService:
         from a mis-calibrated QC threshold, so successful jobs are dumped too,
         not just failures.
         """
-        if not (TSE_DUMP_FAILED and self.dump_dir):
+        if not (BSS_DUMP_FAILED and self.dump_dir):
             return
         try:
             import soundfile as sf
@@ -586,11 +586,11 @@ class TargetExtractionService:
         return speech
 
     def process_overlaps(self, segments: List[Segment], audio: AudioData, overlap_threshold: float = 0.1) -> List[SpeechSegment]:
-        if not self.tse_model:
+        if not self.bss_model:
             return [SpeechSegment(**s.__dict__) for s in segments]
 
         if self.logger:
-            self.logger.info("Processing overlaps with Target Speaker Extraction (TSE)")
+            self.logger.info("Processing overlaps with blind source separation")
 
         seg_dicts = [{"start": s.start, "end": s.end, "speaker": s.speaker, "index": s.index} for s in segments]
         # lọc ra những bộ key value có overlap >= overlap_threshold
@@ -689,7 +689,7 @@ class TargetExtractionService:
             enroll_a = memory.extend(spk_a, enrollments[spk_a], sr)
             enroll_b = memory.extend(spk_b, enrollments[spk_b], sr)
 
-            track_A, track_B, sim_A, sim_B, diag = self.tse_model.separate_two_speakers(
+            track_A, track_B, sim_A, sim_B, diag = self.bss_model.separate_two_speakers(
                 window_audio,
                 enroll_A=enroll_a, enroll_B=enroll_b,
                 sample_rate=sr, id_A=spk_a, id_B=spk_b,
@@ -714,29 +714,29 @@ class TargetExtractionService:
             accepted, rejected = {}, {}
             for spk, track, sim in ((spk_a, track_A, sim_A), (spk_b, track_B, sim_B)):
                 if sim is not None:
-                    if sim >= TSE_QC_SIM_THRESHOLD:
+                    if sim >= BSS_QC_SIM_THRESHOLD:
                         accepted[spk] = (track, sim)
                     else:
-                        rejected[spk] = ("qc_sim", f"sim={sim:.2f} th={TSE_QC_SIM_THRESHOLD}")
+                        rejected[spk] = ("qc_sim", f"sim={sim:.2f} th={BSS_QC_SIM_THRESHOLD}")
                     continue
 
                 # No solo region for this speaker. "Is this track B?" is
                 # unanswerable on a sub-second core, but "is this track just a
                 # copy of the anchor?" only needs a relative comparison.
                 own, other, rms = diag["anchor_self"], diag["anchor_other"], diag["other_rms"]
-                if rms is not None and rms < TSE_SILENCE_RMS:
+                if rms is not None and rms < BSS_SILENCE_RMS:
                     rejected[spk] = ("unscorable", f"rms={rms:.5f}")
                 elif own is None or other is None:
                     rejected[spk] = ("unscorable", "no core embedding")
-                elif (own - other) > TSE_NOT_A_MARGIN:
+                elif (own - other) > BSS_NOT_A_MARGIN:
                     accepted[spk] = (track, None)
                     self.stats["accept_not_a"] += 1
                 else:
                     rejected[spk] = ("not_a_fail",
-                                     f"margin={own - other:.2f} th={TSE_NOT_A_MARGIN}")
+                                     f"margin={own - other:.2f} th={BSS_NOT_A_MARGIN}")
 
             if not accepted:
-                if len(plist) > 1 and TSE_RETRY_SPLIT:
+                if len(plist) > 1 and BSS_RETRY_SPLIT:
                     # A grouped job failing as a whole must not condemn every
                     # overlap in it; retry each one with its own window.
                     self.stats["retried"] += 1
@@ -792,7 +792,7 @@ class TargetExtractionService:
                     if limit <= 0:
                         self._fail(enh, ov_lo, ov_hi, "short_track", f"limit={limit}")
                         continue
-                    if any(not (ov_hi <= a or ov_lo >= b) for a, b, _ in enh.tse_spans):
+                    if any(not (ov_hi <= a or ov_lo >= b) for a, b, _ in enh.bss_spans):
                         self._fail(enh, ov_lo, ov_hi, "already_spliced", "")
                         continue
 
@@ -819,8 +819,8 @@ class TargetExtractionService:
                         enh.audio[dst:dst + limit], track[src:src + limit])
                     enh.audio[dst:dst + limit] = self._cross_fade(
                         enh.audio[dst:dst + limit], patch, fade_samples)
-                    enh.tse = True
-                    enh.tse_spans.append((ov_lo, ov_lo + limit / sr,
+                    enh.bss = True
+                    enh.bss_spans.append((ov_lo, ov_lo + limit / sr,
                                           float(sim) if sim is not None else -1.0))
                     self.stats["spliced"] += 1
                     if self.logger:
@@ -840,7 +840,7 @@ class TargetExtractionService:
                                  strict: bool = True) -> Tuple[np.ndarray, np.ndarray]:
         """Reconstruct two continuous tracks for SDLM / full-duplex training.
 
-        strict=True zeroes every span recorded in tse_failed_spans. Those spans
+        strict=True zeroes every span recorded in bss_failed_spans. Those spans
         still contain the interfering speaker, so writing them would train track
         0 on audio containing speaker 1 -- label contamination that is far more
         expensive to discover later than a shorter corpus is now.
@@ -872,10 +872,10 @@ class TargetExtractionService:
 
             if strict:
                 keep = np.ones(end_idx - start_idx, dtype=bool)
-                # getattr, not seg.tse_failed_spans: a checkpoint pickled before
+                # getattr, not seg.bss_failed_spans: a checkpoint pickled before
                 # this field existed restores an object without it, and pickle
                 # does not backfill dataclass defaults.
-                for a, b, _reason, _detail in getattr(seg, "tse_failed_spans", ()):
+                for a, b, _reason, _detail in getattr(seg, "bss_failed_spans", ()):
                     i = max(start_idx, int(a * sr)) - start_idx
                     j = min(end_idx, int(b * sr)) - start_idx
                     if j > i:

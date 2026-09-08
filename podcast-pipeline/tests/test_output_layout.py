@@ -19,7 +19,7 @@ from utils.batch import find_name_collisions
 
 
 def _args(**kw):
-    base = dict(save_path="./output", tse=True, panns=True, vad=True, dia3=False,
+    base = dict(save_path="./output", bss=True, panns=True, vad=True, dia3=False,
                 merge_gap=2.0, seg_th=0.11, min_cluster_size=11, clust_th=0.5,
                 LLM="case_0")
     base.update(kw)
@@ -55,7 +55,7 @@ def test_default_layout_keeps_the_parameter_suffix():
     p = _pipeline()
     out = p._resolve_output_dir(_args(), "/audio/talk.mp3")
     assert "_final" in out
-    assert "-tse-True" in out and "-merge_gap-2.0" in out
+    assert "-bss-True" in out and "-merge_gap-2.0" in out
     assert out.startswith(os.path.join("/audio", "_final"))
 
 
@@ -155,7 +155,7 @@ def _flag_rows():
          "has_music": True, "bs_roformer": False},
         {"index": "3", "start": 2.0, "end": 3.0, "speaker": "1", "text": "c",
          "has_music": True, "bs_roformer": True},
-        {"index": "4", "start": 3.0, "end": 6.0, "speaker": "2", "text": "d", "tse": True,
+        {"index": "4", "start": 3.0, "end": 6.0, "speaker": "2", "text": "d", "bss": True,
          "unseparated": [{"start": 3.0, "end": 4.2, "reason": "multi_speaker"}]},
     ]
     return mod, mod._rows(segments, {}, {}, [10 ** 9])

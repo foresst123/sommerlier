@@ -1,3 +1,27 @@
+"""Splitting a two-speaker mixture, and working out which voice is whose.
+
+Two steps that are worth keeping distinct, because only one of them is
+model-specific.
+
+The separator produces two tracks. The one the profiles name is DialogueSidon,
+which is *blind*: it is never told who is in the mixture, so the tracks come
+back in whatever order it chose. Everything else in this module exists because
+of that -- ECAPA embeds each track, scores it against the enrollments mined for
+each speaker, and assigns them; `_repair_chunk_swaps` catches the separator
+changing its mind about channel order mid-file; `qc_sim` and the not-A test
+gate the result when the assignment is not confident.
+
+The naming says BSS because that is what actually runs, but the seam is wider
+than the name: `models/separation_backends.py` also carries USEF-TFGridNet,
+which is target-conditioned and therefore returns its tracks already ordered.
+That backend sets `ordered = True` and the assignment above becomes a no-op --
+it is skipped, not fooled. So "BSS" describes the configured pipeline rather
+than the only thing this module can drive.
+
+Sidon is also generative, which is a property of the corpus and not of this
+code: what it returns is audio the model produced, not audio the microphone
+recorded. See models/separation_backends.py and doc/audio-cleanliness.md.
+"""
 import os
 import sys
 import torch
@@ -40,16 +64,19 @@ ABS_SILENCE_RMS = 1e-3
 #
 # This applies to the solo regions the assignment is scored on, not to the
 # overlap being spliced: a 0.24s backchannel is never measured here. The
-# stitched window contributes TSE_STITCH_SOLO (3s) per speaker, so 1s leaves
+# stitched window contributes BSS_STITCH_SOLO (3s) per speaker, so 1s leaves
 # room for the silence filter to drop pauses without failing the whole probe,
 # while still asking for enough audio to trust the score.
-TSE_MIN_VOICED_SEC = float(os.environ.get("TSE_MIN_VOICED_SEC", "1.0"))
+BSS_MIN_VOICED_SEC = float(os.environ.get("BSS_MIN_VOICED_SEC", "1.0"))
 
 
-class TargetSpeakerExtractor:
-    """
-    Dialogue Separation + ECAPA Speaker Matching.
-    Uses the configured separation backend and ECAPA-TDNN for verification.
+class BssSeparator:
+    """Blind source separation, then ECAPA speaker assignment.
+
+    The backend named in the profile splits the mixture; ECAPA-TDNN decides
+    which of the two tracks belongs to which speaker and how much to trust
+    that decision. A target-conditioned backend short-circuits the second half
+    by declaring `ordered = True`.
     """
     
     def __init__(self, device: torch.device, process=None, checkpoint_path: str = None,
@@ -62,13 +89,13 @@ class TargetSpeakerExtractor:
         self.process = process
         self.classifier = None
         self.target_embed_cache: Dict[str, torch.Tensor] = {}
-        self._temp_dir = tempfile.mkdtemp(prefix="tse_exchange_")
+        self._temp_dir = tempfile.mkdtemp(prefix="bss_exchange_")
         self._req_counter = 0
 
         # Which separator produces the two tracks. Everything else in this
         # class -- enrollment embeddings, QC scoring, the not-A test -- is the
         # same whichever one runs, which is what makes them comparable.
-        name = separator or os.environ.get("TSE_SEPARATOR", "usef")
+        name = separator or os.environ.get("BSS_SEPARATOR", "usef")
         self.backend = make_backend(name, process=process, temp_dir=self._temp_dir,
                                     device=device, logger=logger)
 
@@ -98,8 +125,8 @@ class TargetSpeakerExtractor:
         # Load ECAPA-TDNN for Speaker Verification
         try:
             from speechbrain.inference.speaker import EncoderClassifier
-            tse_path = os.environ.get("TSE_PATH", os.path.join(os.path.dirname(__file__), "..", "tse_model"))
-            cls_dir = os.path.join(tse_path, "ecapa")
+            bss_path = os.environ.get("BSS_PATH", os.path.join(os.path.dirname(__file__), "..", "bss_model"))
+            cls_dir = os.path.join(bss_path, "ecapa")
             
             self.classifier = EncoderClassifier.from_hparams(
                 source="speechbrain/spkrec-ecapa-voxceleb", 
@@ -214,7 +241,7 @@ class TargetSpeakerExtractor:
         "extraction failed", and the caller must not conflate the two.
         """
         if min_voiced_sec is None:
-            min_voiced_sec = TSE_MIN_VOICED_SEC
+            min_voiced_sec = BSS_MIN_VOICED_SEC
         if not spans:
             return None
         pieces = [track[max(0, a):min(len(track), b)] for a, b in spans]

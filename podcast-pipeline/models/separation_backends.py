@@ -1,6 +1,6 @@
 """Pluggable separators behind the ECAPA assignment and QC layer.
 
-`TargetSpeakerExtractor` does two jobs: it produces two tracks from a mixture,
+`BssSeparator` does two jobs: it produces two tracks from a mixture,
 and it decides which track belongs to whom. Only the first is model-specific,
 and swapping it is how a different separator gets evaluated without touching
 the enrollment mining, the QC thresholds, or the splice logic that were tuned

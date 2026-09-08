@@ -217,15 +217,15 @@ class StageOutputService:
     @staticmethod
     def separation_stats(segs: List[Any]) -> dict:
         items = [_as_dict(s) for s in segs]
-        sep = [d for d in items if d.get("tse")]
-        spliced = sum(len(d.get("tse_spans") or []) for d in items)
-        failed = sum(len(d.get("tse_failed_spans") or []) for d in items)
-        sims = [sp[2] for d in items for sp in (d.get("tse_spans") or [])
+        sep = [d for d in items if d.get("bss")]
+        spliced = sum(len(d.get("bss_spans") or []) for d in items)
+        failed = sum(len(d.get("bss_failed_spans") or []) for d in items)
+        sims = [sp[2] for d in items for sp in (d.get("bss_spans") or [])
                 if len(sp) > 2 and sp[2] is not None and sp[2] >= 0]
 
         reasons: Dict[str, int] = {}
         for d in items:
-            for fs in (d.get("tse_failed_spans") or []):
+            for fs in (d.get("bss_failed_spans") or []):
                 if len(fs) > 2:
                     reasons[str(fs[2])] = reasons.get(str(fs[2]), 0) + 1
 
@@ -406,8 +406,8 @@ class StageOutputService:
         bad_dir = self.stage_dir("separation", "audio", "failed")
         for seg in segments:
             audio = getattr(seg, "audio", None)
-            spans = getattr(seg, "tse_spans", None) or []
-            fails = getattr(seg, "tse_failed_spans", None) or []
+            spans = getattr(seg, "bss_spans", None) or []
+            fails = getattr(seg, "bss_failed_spans", None) or []
             if audio is None or not len(audio):
                 counts["skipped"] += 1
                 continue

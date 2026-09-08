@@ -3,7 +3,7 @@
 Both were wrong in ways that only bite in one branch, so a run could look
 healthy while a whole class of overlaps was being rejected or swapped.
 
-Run:  python -m pytest tests/test_tse_assignment.py -q     (from podcast-pipeline/)
+Run:  python -m pytest tests/test_bss_assignment.py -q     (from podcast-pipeline/)
 """
 import ast
 import os
@@ -25,7 +25,7 @@ def test_the_anchor_scores_its_own_track_whichever_speaker_it_is():
     """anchor_self read out_A_np regardless of which speaker was the anchor, so
     every job anchored on B compared embed_B against track A: own low, other
     high, (own - other) negative, not_a_fail guaranteed."""
-    src = _source("models/tse_model.py")
+    src = _source("models/bss_model.py")
     block = src[src.index("anchor_is_a = sim_A is not None"):][:600]
 
     assert "self_np = out_A_np if anchor_is_a else out_B_np" in block
@@ -60,7 +60,7 @@ def test_the_retired_stitch_settings_are_gone_from_every_profile():
     with open(os.path.join(ROOT, "config.json"), encoding="utf-8") as f:
         config = json.load(f)
     for env, profile in config["environments"].items():
-        tse = profile.get("models", {}).get("tse", {})
-        assert "stitch_solo" not in tse, env
-        assert "stitch_edge_pad" not in tse, env
-    assert "TSE_STITCH" not in _source("main.py")
+        bss = profile.get("models", {}).get("bss", {})
+        assert "stitch_solo" not in bss, env
+        assert "stitch_edge_pad" not in bss, env
+    assert "BSS_STITCH" not in _source("main.py")

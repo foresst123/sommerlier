@@ -13,7 +13,7 @@ class TranscriptSegment:
     text_qwen3: str
     language: str
     bs_roformer: bool             # Đã qua BS-RoFormer?
-    tse: bool                     # Đã qua TSE?
+    bss: bool                     # Đã qua TSE?
     # PANNs' music verdict, kept whether or not BS-RoFormer then ran. `bs_roformer` only
     # says the audio was replaced, which is a different question: a segment can
     # be flagged for music and still be left alone, and a TSE segment skips

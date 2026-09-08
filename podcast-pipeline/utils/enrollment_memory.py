@@ -35,18 +35,18 @@ import numpy as np
 # audio. Above the QC threshold that decides whether a span is usable at all
 # (0.20): usable is a lower bar than exemplary, and only the second belongs in
 # an enrollment. On this corpus 0.65 admits the top fifth of spans.
-ADMIT_SIMILARITY = float(os.environ.get("TSE_MEMORY_SIM", "0.65"))
+ADMIT_SIMILARITY = float(os.environ.get("BSS_MEMORY_SIM", "0.65"))
 
 # Shortest admissible clip. Below this there is too little voiced audio for the
 # embedder to gain anything, and short clips are where assignment is least sure.
-MIN_CLIP_SECONDS = float(os.environ.get("TSE_MEMORY_MIN_CLIP", "0.4"))
+MIN_CLIP_SECONDS = float(os.environ.get("BSS_MEMORY_MIN_CLIP", "0.4"))
 
 # Total added audio per speaker. Enrollment gains saturate around 4s and the
 # mined budget is already 8s, so this is deliberately modest: the value here is
 # reference audio from *this* conversation, not more seconds.
-BUDGET_SECONDS = float(os.environ.get("TSE_MEMORY_BUDGET", "4.0"))
+BUDGET_SECONDS = float(os.environ.get("BSS_MEMORY_BUDGET", "4.0"))
 
-ENABLED = os.environ.get("TSE_MEMORY", "0").strip().lower() in ("1", "true", "yes", "on")
+ENABLED = os.environ.get("BSS_MEMORY", "0").strip().lower() in ("1", "true", "yes", "on")
 
 
 class EnrollmentMemory:

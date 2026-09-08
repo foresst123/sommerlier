@@ -408,14 +408,14 @@ class ASRService:
                 # language rather than inventing one.
                 language=lang or self.language,
                 bs_roformer=seg.bs_roformer,
-                tse=seg.tse,
+                bss=seg.bss,
                 has_music=getattr(seg, "has_music", False),
                 # Carried through so the review page can warn that these spans
                 # still hold two voices; without it the reviewer has no way to
                 # tell a clean segment from one separation gave up on.
                 unseparated=[
                     {"start": float(a), "end": float(b), "reason": str(r)}
-                    for a, b, r, _detail in getattr(seg, "tse_failed_spans", []) or []
+                    for a, b, r, _detail in getattr(seg, "bss_failed_spans", []) or []
                 ] or None,
                 words=words if enable_word_timestamps else None
             ))

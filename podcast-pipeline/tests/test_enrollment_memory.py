@@ -45,7 +45,7 @@ def test_both_profiles_declare_the_setting():
     with open(os.path.join(root, "config.json"), encoding="utf-8") as fh:
         config = json.load(fh)
     for name, profile in config["environments"].items():
-        assert "enrollment_memory" in profile["models"]["tse"], name
+        assert "enrollment_memory" in profile["models"]["bss"], name
 
 
 # --- what gets in -----------------------------------------------------------
@@ -139,9 +139,9 @@ def test_the_separation_service_clears_it_between_files():
     """Wiring, not just the class: reset_stats() has to reach the memory."""
     import services.separation_service as sep
 
-    service = sep.TargetExtractionService.__new__(sep.TargetExtractionService)
+    service = sep.SeparationService.__new__(sep.SeparationService)
     service.logger = None
-    service._tse_model = None
+    service._bss_model = None
     service.model_loader = None
     service.memory = _memory()
     service.memory.offer("1", _clip(seed=8), 0.9, SR)
@@ -159,7 +159,7 @@ def _pair(start, end, a="1", b="2"):
 
 def _fuse(pairs, gap=0.6):
     import services.separation_service as sep
-    return sep.TargetExtractionService._fuse_adjacent(pairs, gap=gap)
+    return sep.SeparationService._fuse_adjacent(pairs, gap=gap)
 
 
 def test_two_overlaps_half_a_second_apart_become_one():

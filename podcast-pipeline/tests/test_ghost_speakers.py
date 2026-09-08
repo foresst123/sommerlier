@@ -89,7 +89,7 @@ def test_an_empty_list_is_returned_as_is():
 
 def _service():
     import services.separation_service as sep
-    svc = sep.TargetExtractionService.__new__(sep.TargetExtractionService)
+    svc = sep.SeparationService.__new__(sep.SeparationService)
     svc.logger = None
     svc.music_map = None
     return svc
@@ -107,7 +107,7 @@ def test_a_speaker_overlapping_themselves_is_recorded_not_dropped():
     """Merging a ghost into a neighbour turns its overlaps into same-speaker ones.
 
     There is nothing to separate -- one voice is already one source -- but the
-    invariant is that every overlap lands in tse_spans or tse_failed_spans.
+    invariant is that every overlap lands in bss_spans or bss_failed_spans.
     Before this, _group_jobs skipped the pair with a bare `continue`.
     """
     import numpy as np
@@ -127,13 +127,13 @@ def test_a_speaker_overlapping_themselves_is_recorded_not_dropped():
 
     segments = [Segment(index="00001", start=0.0, end=5.0, speaker="A"),
                 Segment(index="00002", start=4.0, end=9.0, speaker="A")]
-    service = sep.TargetExtractionService(Stub(), logger=None)
+    service = sep.SeparationService(Stub(), logger=None)
     audio = AudioData(name="t", waveform=np.zeros(24000 * 10, dtype=np.float32),
                       sample_rate=24000, duration=10.0, audio_segment=None)
 
     out = service.process_overlaps(segments, audio, overlap_threshold=0.1)
-    spliced = sum(len(s.tse_spans) for s in out)
-    failed = [f for s in out for f in s.tse_failed_spans]
+    spliced = sum(len(s.bss_spans) for s in out)
+    failed = [f for s in out for f in s.bss_failed_spans]
     assert spliced + len(failed) == 2, "the overlap vanished from both lists"
     assert all(f[2] == "same_speaker" for f in failed)
 
@@ -152,6 +152,6 @@ def test_fusing_sorts_before_merging():
                 "overlap_duration": end - start,
                 "seg1": {"speaker": "1"}, "seg2": {"speaker": "2"}}
 
-    fused = sep.TargetExtractionService._fuse_adjacent([pair(5.0, 5.2), pair(1.0, 1.2)])
+    fused = sep.SeparationService._fuse_adjacent([pair(5.0, 5.2), pair(1.0, 1.2)])
     assert len(fused) == 2
     assert fused[0]["overlap_start"] == 1.0

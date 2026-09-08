@@ -352,7 +352,7 @@ class DiarizationRefinementService:
         if duration < 1.0:
             note = (f"\nĐoạn này chỉ dài {duration:.2f} giây — nhiều nhất là "
                     f"một vài từ. Bản dịch nào dài hơn thế là ASR bịa, bỏ qua.\n")
-        elif getattr(seg, 'tse', False):
+        elif getattr(seg, 'bss', False):
             note = ("\nĐoạn này có hai người nói chồng lên nhau, ASR dễ nghe sai. "
                     "Ưu tiên phần cả 3 bản đồng ý.\n")
 

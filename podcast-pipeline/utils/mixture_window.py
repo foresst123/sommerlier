@@ -27,7 +27,7 @@ import os
 
 # The model's fixed window. Not a preference: the ONNX graph bakes TF-GridNet's
 # unfold constants in at [1, 16000] @ 8 kHz.
-MODEL_WINDOW = float(os.environ.get("TSE_MODEL_WINDOW", "2.0"))
+MODEL_WINDOW = float(os.environ.get("BSS_MODEL_WINDOW", "2.0"))
 
 
 def bounds(lo, hi, seams, duration, minimum=None):

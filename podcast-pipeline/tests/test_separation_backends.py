@@ -1,6 +1,6 @@
 """Swapping the separator without touching the assignment and QC around it.
 
-`TargetSpeakerExtractor` produces two tracks and then decides which belongs to
+`BssSeparator` produces two tracks and then decides which belongs to
 whom. Only the first is model-specific, and these pin the seam between them --
 including the part that matters most: a target-conditioned separator was told
 whose voice to extract, so the assignment must not run at all.
@@ -143,14 +143,14 @@ def test_a_targeted_backend_runs_once_per_speaker():
     assert len(backend._session.windows) == 2, "one pass per enrollment"
 
 
-# --- the seam in TargetSpeakerExtractor -------------------------------------
+# --- the seam in BssSeparator -------------------------------------
 
 def test_the_extractor_skips_assignment_for_a_targeted_backend():
     """The measured reason this matters: similarity here sits at p50 0.58 where
     natural speech scores 0.70-0.90, so every assignment decision is made on
     thin evidence. A targeted separator removes the decision entirely."""
     source = open(os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))), "models", "tse_model.py"), encoding="utf-8").read()
+        os.path.abspath(__file__))), "models", "bss_model.py"), encoding="utf-8").read()
     assert 'if getattr(self.backend, "ordered", False):' in source
     assert "self.backend.separate(" in source
 
@@ -164,7 +164,7 @@ def test_both_profiles_declare_a_separator():
     with open(os.path.join(root, "config.json"), encoding="utf-8") as fh:
         config = json.load(fh)
     for name, profile in config["environments"].items():
-        assert profile["models"]["tse"]["separator"] in BACKENDS, name
+        assert profile["models"]["bss"]["separator"] in BACKENDS, name
 
 
 def test_both_backends_ship_and_differ_in_kind():

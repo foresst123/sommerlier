@@ -1,4 +1,4 @@
-"""Logic tests for TargetExtractionService that need no GPU and no models.
+"""Logic tests for SeparationService that need no GPU and no models.
 
 The separator is stubbed, so these check windowing, job grouping, per-track
 gating and the dual-channel leakage mask -- not audio quality.
@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from schemas.audio import AudioData
 from schemas.segment import Segment
-from services.separation_service import TargetExtractionService
+from services.separation_service import SeparationService
 
 SR = 24000
 
@@ -66,7 +66,7 @@ def test_a_backchannel_window_is_the_overlap_widened_to_the_model_window():
     source carries everything" when the two speakers were unbalanced. A
     target-conditioned masker never needed the solo audio."""
     fake = FakeTSE()
-    svc = TargetExtractionService(fake, logger=None)
+    svc = SeparationService(fake, logger=None)
     svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
     assert len(fake.calls) == 1, "one job expected"
     call = fake.calls[0]
@@ -80,7 +80,7 @@ def test_an_ordered_backend_scores_the_whole_track_not_a_probe():
     reads downstream as "score the whole track", which is the right question
     to ask of a track that should be one speaker end to end."""
     fake = FakeTSE()
-    svc = TargetExtractionService(fake, logger=None)
+    svc = SeparationService(fake, logger=None)
     svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
     call = fake.calls[0]
     assert not call.get("probe_A"), "no solo audio is fed any more"
@@ -90,14 +90,14 @@ def test_an_ordered_backend_scores_the_whole_track_not_a_probe():
 def test_low_scoring_track_does_not_discard_the_good_one():
     # A scores well, B fails QC -- the old code dropped both.
     fake = FakeTSE(sim_a=0.60, sim_b=0.05)
-    svc = TargetExtractionService(fake, logger=None)
+    svc = SeparationService(fake, logger=None)
     out = svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
     a_seg = next(s for s in out if s.index == "00001")
     b_seg = next(s for s in out if s.index == "00002")
-    assert a_seg.tse is True and a_seg.tse_spans, "A's clean extraction must survive"
-    assert b_seg.tse is False, "B failed QC and must keep the original mixture"
-    assert b_seg.tse_failed_spans, "B's failure must be recorded, not silently dropped"
-    assert b_seg.tse_status == "failed"
+    assert a_seg.bss is True and a_seg.bss_spans, "A's clean extraction must survive"
+    assert b_seg.bss is False, "B failed QC and must keep the original mixture"
+    assert b_seg.bss_failed_spans, "B's failure must be recorded, not silently dropped"
+    assert b_seg.bss_status == "failed"
 
 
 def test_nearby_overlaps_share_one_separation_call():
@@ -108,7 +108,7 @@ def test_nearby_overlaps_share_one_separation_call():
         Segment(index="00004", start=32.0, end=40.0, speaker="SPEAKER_01"),
     ]
     fake = FakeTSE()
-    svc = TargetExtractionService(fake, logger=None)
+    svc = SeparationService(fake, logger=None)
     svc.process_overlaps(segs, _audio(), overlap_threshold=0.1)
     assert len(fake.calls) == 1, f"two nearby overlaps should share one call, got {len(fake.calls)}"
     assert svc.stats["pairs"] == 2
@@ -116,7 +116,7 @@ def test_nearby_overlaps_share_one_separation_call():
 
 def test_sdlm_export_zeroes_unseparated_overlap():
     fake = FakeTSE(sim_a=0.05, sim_b=0.05)   # everything fails QC
-    svc = TargetExtractionService(fake, logger=None)
+    svc = SeparationService(fake, logger=None)
     out = svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
     t0, _t1 = svc.export_sdlm_dual_channel(out, 60.0, SR, strict=True)
     lo, hi = int(14.0 * SR), int(14.4 * SR)
@@ -126,7 +126,7 @@ def test_sdlm_export_zeroes_unseparated_overlap():
 
 def test_sdlm_export_keeps_separated_overlap():
     fake = FakeTSE(sim_a=0.6, sim_b=0.6)     # separation succeeds
-    svc = TargetExtractionService(fake, logger=None)
+    svc = SeparationService(fake, logger=None)
     out = svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
     t0, _t1 = svc.export_sdlm_dual_channel(out, 60.0, SR, strict=True)
     lo, hi = int(14.05 * SR), int(14.35 * SR)
@@ -151,28 +151,28 @@ def test_max_rule_would_paste_speaker_a_into_speaker_b():
     Under max(), 0.46 passes and B's segment gets spliced with A's voice.
     Per-track gating must leave B untouched.
     """
-    svc = TargetExtractionService(DuplicatingTSE(), logger=None)
+    svc = SeparationService(DuplicatingTSE(), logger=None)
     out = svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
 
     a_seg = next(s for s in out if s.index == "00001")
     b_seg = next(s for s in out if s.index == "00002")
 
-    assert a_seg.tse is True, "A's track scored 0.46 and should be spliced"
-    assert b_seg.tse is False, (
+    assert a_seg.bss is True, "A's track scored 0.46 and should be spliced"
+    assert b_seg.bss is False, (
         "B scored -0.05: splicing here would write A's voice into B's segment. "
         "This is exactly what max(sim_A, sim_B) < threshold would allow."
     )
-    assert b_seg.tse_failed_spans[0][2] == "qc_sim"
+    assert b_seg.bss_failed_spans[0][2] == "qc_sim"
 
 
 def test_every_overlap_is_accounted_for():
     """The core invariant: no overlap may vanish without a recorded reason."""
     for fake in (FakeTSE(0.6, 0.6), FakeTSE(0.6, 0.05), FakeTSE(0.05, 0.05),
                  DuplicatingTSE()):
-        svc = TargetExtractionService(fake, logger=None)
+        svc = SeparationService(fake, logger=None)
         out = svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
-        n_ok = sum(len(s.tse_spans) for s in out)
-        n_bad = sum(len(s.tse_failed_spans) for s in out)
+        n_ok = sum(len(s.bss_spans) for s in out)
+        n_bad = sum(len(s.bss_failed_spans) for s in out)
         # one overlap x two segments (A's and B's side)
         assert n_ok + n_bad == 2, (
             f"{type(fake).__name__}: {n_ok} spliced + {n_bad} failed != 2 -- "
@@ -192,10 +192,10 @@ def test_no_window_does_not_block_later_overlaps():
         Segment(index="00003", start=50.0, end=50.4, speaker="SPEAKER_01"),
         Segment(index="00004", start=56.0, end=59.0, speaker="SPEAKER_01"), # B's only solo turn
     ]
-    svc = TargetExtractionService(FakeTSE(), logger=None)
+    svc = SeparationService(FakeTSE(), logger=None)
     out = svc.process_overlaps(segs, _audio(60.0), overlap_threshold=0.1)
-    n_ok = sum(len(s.tse_spans) for s in out)
-    n_bad = sum(len(s.tse_failed_spans) for s in out)
+    n_ok = sum(len(s.bss_spans) for s in out)
+    n_bad = sum(len(s.bss_failed_spans) for s in out)
     assert n_ok + n_bad == 4, "both overlaps (x2 sides) must be accounted for"
     assert n_ok > 0, "the overlap near B's solo turn should still be processed"
 
@@ -223,24 +223,24 @@ def test_failed_group_job_retries_each_overlap():
         Segment(index="00004", start=32.0, end=40.0, speaker="SPEAKER_01"),
     ]
     fake = AllRejectTSE()
-    svc = TargetExtractionService(fake, logger=None)
+    svc = SeparationService(fake, logger=None)
     out = svc.process_overlaps(segs, _audio(), overlap_threshold=0.1)
     assert svc.stats["retried"] == 1, "the rejected group job should have been split"
     assert fake.calls > 1, "retry must actually re-run separation"
-    assert sum(len(s.tse_spans) for s in out) > 0, "retries should recover the overlaps"
+    assert sum(len(s.bss_spans) for s in out) > 0, "retries should recover the overlaps"
 
 
 def test_sdlm_mask_uses_failed_spans():
-    svc = TargetExtractionService(FakeTSE(0.05, 0.05), logger=None)
+    svc = SeparationService(FakeTSE(0.05, 0.05), logger=None)
     out = svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
-    assert all(s.tse_failed_spans or not s.tse_spans for s in out if s.index == "00002")
+    assert all(s.bss_failed_spans or not s.bss_spans for s in out if s.index == "00002")
     t0, _ = svc.export_sdlm_dual_channel(out, 60.0, SR, strict=True)
     lo, hi = int(14.0 * SR), int(14.4 * SR)
     assert np.allclose(t0[lo:hi], 0.0)
 
 
 def test_old_checkpoint_unpickles_without_new_fields():
-    """Resuming a run checkpointed before tse_spans/tse_failed_spans existed.
+    """Resuming a run checkpointed before bss_spans/bss_failed_spans existed.
 
     Pickle restores __dict__ directly and does not apply dataclass defaults, so
     without __setstate__ the first append raises AttributeError mid-pipeline.
@@ -249,14 +249,14 @@ def test_old_checkpoint_unpickles_without_new_fields():
     from schemas.segment import SpeechSegment
 
     seg = SpeechSegment(index="00001", start=0.0, end=1.0, speaker="SPEAKER_00")
-    del seg.__dict__["tse_spans"]
-    del seg.__dict__["tse_failed_spans"]
+    del seg.__dict__["bss_spans"]
+    del seg.__dict__["bss_failed_spans"]
 
     loaded = pickle.loads(pickle.dumps(seg))
-    loaded.tse_failed_spans.append((0.0, 1.0, "qc_sim", "sim=0.10"))
-    assert loaded.tse_status == "failed"
+    loaded.bss_failed_spans.append((0.0, 1.0, "qc_sim", "sim=0.10"))
+    assert loaded.bss_status == "failed"
 
-    svc = TargetExtractionService(FakeTSE(), logger=None)
+    svc = SeparationService(FakeTSE(), logger=None)
     loaded.audio = np.ones(SR, dtype=np.float32)
     t0, _ = svc.export_sdlm_dual_channel([loaded], 2.0, SR, strict=True)
     assert np.allclose(t0[:SR], 0.0), "failed span must still be masked after unpickling"
@@ -265,7 +265,7 @@ def test_old_checkpoint_unpickles_without_new_fields():
 # --- stitched window + splice-site QC ---------------------------------------
 
 def _svc():
-    return TargetExtractionService.__new__(TargetExtractionService)
+    return SeparationService.__new__(SeparationService)
 
 
 def _diar(spans):
@@ -300,36 +300,36 @@ def test_qc_rejects_a_track_that_is_silent_where_the_mixture_speaks():
     bad = np.zeros(n, dtype=np.float32)
     tail = int(n * 0.72)
     bad[tail:] = rng.standard_normal(n - tail) * 0.08
-    assert TargetExtractionService._track_has_speech(host, bad) is False
+    assert SeparationService._track_has_speech(host, bad) is False
     # Whole-clip RMS is far above the silence threshold, which is why the
     # existing gate let this through.
     assert float(np.sqrt(np.mean(bad ** 2))) > 0.002
 
     good = (host * 0.5).astype(np.float32)
-    assert TargetExtractionService._track_has_speech(host, good) is True
+    assert SeparationService._track_has_speech(host, good) is True
 
 
 def test_qc_accepts_a_quieter_track_and_rejects_an_empty_one():
     rng = np.random.default_rng(1)
     n = int(0.5 * SR)
     host = (rng.standard_normal(n) * 0.15).astype(np.float32)
-    assert TargetExtractionService._track_has_speech(host, host * 0.08) is True
-    assert TargetExtractionService._track_has_speech(host, np.zeros(n, np.float32)) is False
+    assert SeparationService._track_has_speech(host, host * 0.08) is True
+    assert SeparationService._track_has_speech(host, np.zeros(n, np.float32)) is False
     # Nothing to preserve where the mixture is silent.
     z = np.zeros(n, dtype=np.float32)
-    assert TargetExtractionService._track_has_speech(z, z) is True
+    assert SeparationService._track_has_speech(z, z) is True
 
 
 def test_the_run_report_can_actually_be_built():
     """It could not, and no test noticed for a whole change set.
 
-    _report_payload named TSE_MIN_SOLO, TSE_WINDOW_TARGET and TSE_WINDOW_MAX,
+    _report_payload named BSS_MIN_SOLO, BSS_WINDOW_TARGET and BSS_WINDOW_MAX,
     three constants deleted with the Sidon window strategy. Every test called
     process_overlaps directly; only the pipeline calls this, and only after
     separation finishes -- so the run reached the end of the separation stage
     and died there with NameError, on both files, after 34 minutes."""
     fake = FakeTSE()
-    svc = TargetExtractionService(fake, logger=None)
+    svc = SeparationService(fake, logger=None)
     svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
 
     payload = svc.report_payload()
@@ -431,7 +431,7 @@ def test_one_long_clip_is_preferred_over_a_patchwork():
     import services.separation_service as sep
 
     sr = 16000
-    svc = sep.TargetExtractionService.__new__(sep.TargetExtractionService)
+    svc = sep.SeparationService.__new__(sep.SeparationService)
     svc.logger = None
     audio = AudioData(name="t", waveform=np.ones(120 * sr, dtype=np.float32),
                       sample_rate=sr, duration=120.0, audio_segment=None)
@@ -453,7 +453,7 @@ def test_short_clips_are_still_gathered_when_none_is_long_enough():
     import services.separation_service as sep
 
     sr = 16000
-    svc = sep.TargetExtractionService.__new__(sep.TargetExtractionService)
+    svc = sep.SeparationService.__new__(sep.SeparationService)
     svc.logger = None
     audio = AudioData(name="t", waveform=np.ones(120 * sr, dtype=np.float32),
                       sample_rate=sr, duration=120.0, audio_segment=None)

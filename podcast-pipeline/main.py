@@ -50,7 +50,8 @@ def _build_parser():
     parser.add_argument("--lang", default="vi", help="Language code")
     parser.add_argument("--ASRMoE", action="store_true", help="Enable MoE ASR")
     parser.add_argument("--dia3", action="store_true", help="Use Pyannote community model (default is DiariZen if false)")
-    parser.add_argument("--tse", action="store_true", help="Enable Target Speaker Extraction (TSE) for overlapping speech")
+    parser.add_argument("--bss", "--tse", dest="bss", action="store_true",
+                        help="Enable blind source separation of overlapped speech")
     parser.add_argument("--separator", choices=["usef"], default=None,
                         help="Which model produces the two tracks. usef (default) "
                              "is target-conditioned TF-GridNet at 8kHz: it needs no "
@@ -155,8 +156,8 @@ env_profile = config.get("environments", {}).get(args.env, {})
 # --- Config -> args, with anything typed on the command line winning -------
 # argparse cannot tell a default from a value the user passed, so re-parse with
 # every default suppressed: what survives is what was actually typed. Without
-# this the profile overwrites deliberate flags, and `--env a100 --tse` would
-# quietly run with the profile's tse rather than the requested one.
+# this the profile overwrites deliberate flags, and `--env a100 --bss` would
+# quietly run with the profile's bss rather than the requested one.
 _probe = _build_parser()
 for _action in _probe._actions:
     if _action.dest != "help":
@@ -227,7 +228,7 @@ if env_profile.get("offline_mode", False):
     os.environ["TORCH_HOME"] = os.path.join(offline_dir, "torch")
     os.environ["XDG_CACHE_HOME"] = offline_dir
     os.environ["HOME"] = offline_dir  # where cached checkpoints are looked up
-    os.environ["TSE_PATH"] = os.path.join(offline_dir, "tse_model")
+    os.environ["BSS_PATH"] = os.path.join(offline_dir, "bss_model")
     print(f"[*] Running in Offline Mode (env: {args.env}). Using weights from: {offline_dir}")
     
 if env_profile.get("use_bf16", False):
@@ -246,35 +247,35 @@ from utils.batch import audio_duration, find_audio_files, find_name_collisions, 
 from utils.progress import ProgressLedger
 from utils.steps import will_run
 from utils.worker_env import resolve_worker_python
-# TSE thresholds live in the profile, but separation_service and tse_model read
+# Separation thresholds live in the profile, but separation_service and bss_model read
 # them at import time. Publish them as environment variables here -- before those
 # imports run -- or the modules capture the defaults instead. An env var set by
 # hand still wins, which keeps a quick sweep possible without editing config.
-for _cfg_key, _env_key in (("qc_sim_threshold", "TSE_QC_SIM_THRESHOLD"),
-                           ("min_voiced_sec", "TSE_MIN_VOICED_SEC")):
-    _value = env_profile.get("models", {}).get("tse", {}).get(_cfg_key)
+for _cfg_key, _env_key in (("qc_sim_threshold", "BSS_QC_SIM_THRESHOLD"),
+                           ("min_voiced_sec", "BSS_MIN_VOICED_SEC")):
+    _value = env_profile.get("models", {}).get("bss", {}).get(_cfg_key)
     if _value is not None and _env_key not in os.environ:
         os.environ[_env_key] = str(_value)
 
 
 
 # Enrollment memory is read at import by separation_service, so it is published
-# here with the TSE thresholds rather than at call time.
-_memory = env_profile.get("models", {}).get("tse", {}).get("enrollment_memory")
-if _memory is not None and "TSE_MEMORY" not in os.environ:
-    os.environ["TSE_MEMORY"] = "1" if _memory else "0"
+# here with the other separation thresholds rather than at call time.
+_memory = env_profile.get("models", {}).get("bss", {}).get("enrollment_memory")
+if _memory is not None and "BSS_MEMORY" not in os.environ:
+    os.environ["BSS_MEMORY"] = "1" if _memory else "0"
 
-# The separator is read at TargetSpeakerExtractor construction, not at import,
-# but it is published here with the other TSE settings so one profile switch
+# The separator is read at BssSeparator construction, not at import,
+# but it is published here with the other separation settings so one profile switch
 # controls it like everything else.
-_sep = env_profile.get("models", {}).get("tse", {}).get("separator")
-if _sep and "TSE_SEPARATOR" not in os.environ:
-    os.environ["TSE_SEPARATOR"] = str(_sep)
+_sep = env_profile.get("models", {}).get("bss", {}).get("separator")
+if _sep and "BSS_SEPARATOR" not in os.environ:
+    os.environ["BSS_SEPARATOR"] = str(_sep)
 
 from services.model_loader import ModelLoader
 from services.audio_service import AudioService
 from services.diarization_service import DiarizationService
-from services.separation_service import TargetExtractionService
+from services.separation_service import SeparationService
 from services.music_service import MusicService
 from services.asr_service import ASRService
 from services.caption_service import CaptionService
@@ -410,14 +411,14 @@ def main():
 
     # 1c. Start the Sidon worker, when the profile asks for that separator.
     #
-    # Gated on the separator name as well as on --tse: the in-process backend
+    # Gated on the separator name as well as on --bss: the in-process backend
     # needs no worker at all, and spawning one for it would download the
     # DialogueSidon weights and hold a GPU for a process nothing talks to.
     sidon_service = None
     _separator = (getattr(args, "separator", None)
-                  or env_profile.get("models", {}).get("tse", {}).get("separator")
+                  or env_profile.get("models", {}).get("bss", {}).get("separator")
                   or "usef")
-    if (str(_separator).strip().lower() == "sidon" and getattr(args, "tse", False)
+    if (str(_separator).strip().lower() == "sidon" and getattr(args, "bss", False)
             and will_run(args, "separation")):
         sidon_worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sidon_worker.py")
         sidon_service = _prefetch(SidonWorkerService(
@@ -463,7 +464,7 @@ def main():
             logger=logger,
             diarizer_config=env_profile.get("models", {}).get("diarizen", {})
         )
-        separation_svc = TargetExtractionService(
+        separation_svc = SeparationService(
             model_loader=model_loader,
             logger=logger
         )

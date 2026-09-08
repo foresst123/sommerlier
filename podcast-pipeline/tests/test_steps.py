@@ -36,15 +36,15 @@ def test_a_step_set_false_is_skipped():
 
 
 def test_the_profile_wins_over_the_flag_it_replaced():
-    """`tse` used to gate separation; `steps` is the newer, clearer answer."""
-    args = _args(tse=True, step_separation=False)
+    """`bss` used to gate separation; `steps` is the newer, clearer answer."""
+    args = _args(bss=True, step_separation=False)
     assert not PipelineService.step_enabled(args, "separation")
 
 
 def test_an_unlisted_step_falls_back_to_its_old_flag():
     """A config written before `steps` existed must behave as it always did."""
-    assert not PipelineService.step_enabled(_args(tse=False), "separation")
-    assert PipelineService.step_enabled(_args(tse=True), "separation")
+    assert not PipelineService.step_enabled(_args(bss=False), "separation")
+    assert PipelineService.step_enabled(_args(bss=True), "separation")
     assert not PipelineService.step_enabled(_args(qwen3omni=False), "captioning")
 
 
@@ -106,7 +106,7 @@ def test_separation_off_still_produces_segments_of_the_same_shape():
     from schemas.segment import Segment
     import services.separation_service as sep
 
-    service = sep.TargetExtractionService.__new__(sep.TargetExtractionService)
+    service = sep.SeparationService.__new__(sep.SeparationService)
     segments = [Segment(index="00001", start=0.0, end=1.0, speaker="1"),
                 Segment(index="00002", start=1.0, end=2.0, speaker="2")]
     audio = AudioData(name="t", waveform=np.ones(24000 * 3, dtype=np.float32),
@@ -115,7 +115,7 @@ def test_separation_off_still_produces_segments_of_the_same_shape():
     out = service.passthrough(segments, audio)
     assert len(out) == 2
     assert all(s.audio is not None and len(s.audio) for s in out)
-    assert all(not s.tse for s in out)
+    assert all(not s.bss for s in out)
 
 
 def test_the_per_segment_pass_is_gone_entirely():
@@ -163,11 +163,11 @@ def _stub_model_modules():
         sys.modules[name] = types.ModuleType(name)
     for name in ("models.whisper", "models.whisper_wrapper", "models.phowhisper",
                  "models.silero_vad", "models.pyannote", "models.diarizen_model",
-                 "models.pyannote_embedding", "models.tse_model", "models.sslam",
+                 "models.pyannote_embedding", "models.bss_model", "models.sslam",
                  "models.bs_roformer", "models.qwen3_omni", "models.qwen3_asr"):
         module = types.ModuleType(name)
         for attr in ("WhisperASR", "PhoWhisperASR", "SileroVAD", "PyannoteDiarizer",
-                     "DiariZenDiarizer", "PyannoteEmbedder", "TargetSpeakerExtractor",
+                     "DiariZenDiarizer", "PyannoteEmbedder", "BssSeparator",
                      "SSLAMDetector", "BSRoformerRemover", "Qwen3OmniCaptioner",
                      "Qwen3ASRClient", "load_asr_model"):
             setattr(module, attr, type(attr, (), {"__init__": lambda self, *a, **k: None}))
@@ -226,7 +226,7 @@ def _music_only(**kw):
     base = dict(step_music_analysis=True, step_music_removal=True,
                 step_cut_music=True, step_diarization=False,
                 step_separation=True, step_asr=True, step_export=True,
-                ASRMoE=True, tse=True, dia3=False)
+                ASRMoE=True, bss=True, dia3=False)
     base.update(kw)
     return _args(**base)
 
@@ -273,7 +273,7 @@ def test_export_off_stops_the_run_before_diarization():
 
 def test_an_old_profile_reaches_every_stage_it_used_to():
     """Nothing in `steps` at all: reachability must not become a new gate."""
-    args = _args(tse=True, ASRMoE=True, music=True)
+    args = _args(bss=True, ASRMoE=True, music=True)
     for stage in ("music_analysis", "diarization", "separation", "asr", "export"):
         assert steps.will_run(args, stage), stage
 

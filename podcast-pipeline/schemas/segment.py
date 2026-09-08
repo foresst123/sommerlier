@@ -12,21 +12,21 @@ class Segment:
 @dataclass
 class SpeechSegment(Segment):
     audio: Optional[np.ndarray] = None  # Audio đã qua TSE
-    tse: bool = False                            # Có được xử lý bởi TSE không
+    bss: bool = False                            # Có được xử lý bởi TSE không
     bs_roformer: bool = False                    # Có được xử lý bởi BS-RoFormer không
     # What PANNs decided, separate from what Demucs then did about it. Kept
     # because the two answers differ: music can be detected and left in place,
     # and a TSE segment never reaches the detector at all.
     has_music: bool = False
     # Absolute (start, end, sim) of every span actually replaced by TSE output.
-    # `tse` alone cannot say which part of a segment is separated and which is
+    # `bss` alone cannot say which part of a segment is separated and which is
     # still raw mixture; the dual-channel export needs that distinction to avoid
     # writing the interfering speaker into the target track.
-    tse_spans: List[Tuple[float, float, float]] = field(default_factory=list)
+    bss_spans: List[Tuple[float, float, float]] = field(default_factory=list)
     # (start, end, reason, detail) for overlapping spans that could NOT be
     # separated. Every overlap must land in exactly one of these two lists --
     # a span in neither means some code path discarded it silently.
-    tse_failed_spans: List[Tuple[float, float, str, str]] = field(default_factory=list)
+    bss_failed_spans: List[Tuple[float, float, str, str]] = field(default_factory=list)
 
 
     def __setstate__(self, state):
@@ -35,16 +35,16 @@ class SpeechSegment(Segment):
         # existed restores an object missing them, so a resumed run would crash
         # on the first append. Backfill instead of forcing a checkpoint wipe.
         self.__dict__.update(state)
-        for name in ("tse_spans", "tse_failed_spans"):
+        for name in ("bss_spans", "bss_failed_spans"):
             if not hasattr(self, name):
                 setattr(self, name, [])
 
     @property
-    def tse_status(self) -> str:
-        if not self.tse_spans and not self.tse_failed_spans:
+    def bss_status(self) -> str:
+        if not self.bss_spans and not self.bss_failed_spans:
             return "clean"        # no overlap touched this segment
-        if not self.tse_failed_spans:
+        if not self.bss_failed_spans:
             return "separated"
-        if not self.tse_spans:
+        if not self.bss_spans:
             return "failed"
         return "partial"

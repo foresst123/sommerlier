@@ -244,7 +244,7 @@ class PipelineService:
             suffix = "pyannote" if getattr(args, "dia3", False) else "diarizen"
             root = os.path.join(
                 os.path.dirname(audio_path), "_final",
-                f"-tse-{getattr(args, 'tse', False)}"
+                f"-bss-{getattr(args, 'bss', False)}"
                 f"-bs_roformer-{getattr(args, 'music', False)}"
                 f"-vad-{getattr(args, 'vad', False)}"
                 f"-diaModel-{suffix}-initPrompt-True"
@@ -713,7 +713,7 @@ class PipelineService:
             "asr_models": self.asr_svc.active_models(),
             "music_enabled": getattr(args, "music", False),
             "vad_enabled": getattr(args, "vad", False),
-            "tse_enabled": getattr(args, "tse", False),
+            "bss_enabled": getattr(args, "bss", False),
             "llm_refinement": getattr(args, "llm_refinement", False),
             "qwen3omni_caption": getattr(args, "qwen3omni", False),
             # Timestamps in `segments` are in the cut timeline; `orig_spans` on

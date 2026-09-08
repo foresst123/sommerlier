@@ -17,7 +17,7 @@ nothing, which is the worst of the three possible outcomes.
 LEGACY_FLAG = {
     "music_analysis": "music",
     "music_removal": "music",
-    "separation": "tse",
+    "separation": "bss",
     "captioning": "qwen3omni",
     "refinement": "llm_refinement",
 }

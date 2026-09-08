@@ -197,7 +197,7 @@ def test_enrollment_is_never_mined_from_speech_over_music():
     from schemas.segment import Segment
 
     sr = 16000
-    service = sep.TargetExtractionService.__new__(sep.TargetExtractionService)
+    service = sep.SeparationService.__new__(sep.SeparationService)
     service.music_map = MusicMap([(100.0, 110.0)])
     service.logger = None
 

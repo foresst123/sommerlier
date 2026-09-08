@@ -11,7 +11,7 @@ from models.pyannote import PyannoteDiarizer
 from models.diarizen_model import DiariZenDiarizer
 from models.pyannote_embedding import PyannoteEmbedder
 # from models.sortformer import SortformerDiarizer
-from models.tse_model import TargetSpeakerExtractor
+from models.bss_model import BssSeparator
 from models.sslam import SSLAMDetector
 from models.qwen3_omni import Qwen3OmniCaptioner
 from models.qwen3_asr import Qwen3ASRClient
@@ -70,7 +70,7 @@ class ModelLoader:
         )
             
     def load_separation_models(self, sidon_service=None):
-        """Load Target Speaker Extractor (TSE) if enabled.
+        """Load the separator and its ECAPA assignment, if enabled.
 
         `sidon_service` is only consulted by the out-of-process backend; the
         in-process one never looks at it, so passing it unconditionally keeps
@@ -78,15 +78,15 @@ class ModelLoader:
         """
         if "separator" in self.models:
             return
-        if getattr(self.args, "tse", False):
-            if self.logger: self.logger.info(f"Loading Target Speaker Extractor on {self.device_1}")
+        if getattr(self.args, "bss", False):
+            if self.logger: self.logger.info(f"Loading separator + ECAPA on {self.device_1}")
             # Same resolution order the extractor uses: an explicit flag wins,
-            # then the profile (published as TSE_SEPARATOR in main.py), then the
+            # then the profile (published as BSS_SEPARATOR in main.py), then the
             # default. Resolved here too so the log line names what actually ran.
             separator = (getattr(self.args, "separator", None)
-                         or os.environ.get("TSE_SEPARATOR") or "usef")
+                         or os.environ.get("BSS_SEPARATOR") or "usef")
             if self.logger: self.logger.info(f"  separator backend: {separator}")
-            self.models["separator"] = TargetSpeakerExtractor(
+            self.models["separator"] = BssSeparator(
                 device=self.device_1,
                 process=sidon_service.process if sidon_service else None,
                 separator=separator,
