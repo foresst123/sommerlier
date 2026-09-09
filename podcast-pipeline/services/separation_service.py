@@ -43,10 +43,10 @@ BSS_STITCH = os.environ.get("BSS_STITCH", "1") not in ("0", "false", "False")
 BSS_STITCH_SOLO = float(os.environ.get("BSS_STITCH_SOLO", "5.0"))
 # Context kept either side of the overlap inside the stitched window. The
 # diarizer's boundaries land on a frame grid, not on the speech, so a span cut
-# exactly at them can start mid-syllable; a fifth of a second lets the decoder
+# exactly at them can start mid-syllable; two seconds lets the decoder
 # hear the onset it is separating. Only the overlap itself is spliced back --
 # this padding is context for the model, never output.
-BSS_STITCH_EDGE_PAD = float(os.environ.get("BSS_STITCH_EDGE_PAD", "0.2"))
+BSS_STITCH_EDGE_PAD = float(os.environ.get("BSS_STITCH_EDGE_PAD", "2.0"))
 # Shortest usable piece: below this a slice is mostly onset and carries little
 # speaker identity.
 BSS_STITCH_MIN_PIECE = float(os.environ.get("BSS_STITCH_MIN_PIECE", "0.5"))
