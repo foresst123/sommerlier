@@ -101,6 +101,21 @@ class BssSeparator:
 
         self._load_model()
 
+        # Silero VAD to keep only real speech in each probe before scoring.
+        # Energy alone cannot tell a separator's residual noise from voice, so
+        # a track that should be silent here can still yield an embedding built
+        # from noise and invert the A/B assignment. Silero judges voice, not
+        # loudness. Falls back to the energy gate if it cannot load.
+        self._vad = None
+        try:
+            from models.silero_vad import SileroVAD
+            self._vad = SileroVAD(device=self.device)
+            if logger:
+                logger.info("[BSS] probe filtering: Silero VAD")
+        except Exception as exc:
+            print(f"[BSS] Silero VAD unavailable ({exc}); using energy gate",
+                  file=sys.stderr)
+
     @property
     def process(self):
         return self._process
@@ -251,13 +266,45 @@ class BssSeparator:
         return F.normalize(self._get_embedding(probe, sr), p=2, dim=0)
 
     @staticmethod
-    def _gather_probe(track: np.ndarray, spans, sr: int, floor_db: float = -40.0,
+    def _xfade_join(pieces, sr, overlap_sec: float = 0.02):
+        """Concatenate voiced pieces with a short cross-fade at each join.
+
+        A butt-join between two separately-cut speech pieces leaves a step
+        discontinuity -- an edge ECAPA reads as a transient. Overlap-adding a
+        few ms with a raised-cosine ramp smooths it. The overlap is only at the
+        seam, so at most a few ms of one piece's tail blends into the next
+        piece's head; it never swallows a whole word. Pieces shorter than the
+        overlap are appended whole.
+        """
+        pieces = [p for p in pieces if p is not None and p.size]
+        if not pieces:
+            return None
+        ov = max(1, int(overlap_sec * sr))
+        out = pieces[0].astype(np.float32, copy=True)
+        for nxt in pieces[1:]:
+            nxt = nxt.astype(np.float32)
+            if out.size >= ov and nxt.size >= ov:
+                ramp = 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, ov, dtype=np.float32)))
+                out[-ov:] = out[-ov:] * (1.0 - ramp) + nxt[:ov] * ramp
+                out = np.concatenate([out, nxt[ov:]])
+            else:
+                out = np.concatenate([out, nxt])
+        return out if out.size else None
+
+    def _gather_probe(self, track: np.ndarray, spans, sr: int, floor_db: float = -40.0,
                       min_voiced_sec: float = None, abs_floor_rms: float = ABS_SILENCE_RMS):
-        """Concatenate `spans` of `track`, keeping only frames above an energy floor.
+        """Keep only real speech from `spans` of `track`, joined with a seam-only
+        cross-fade, and return it for scoring.
+
+        Silero VAD decides what is voice; an energy gate cannot tell a
+        separator's residual noise from speech, so a track that should be silent
+        here would otherwise pass and its noise embedding could invert the A/B
+        assignment. Voiced runs are cross-faded at the join, not butted, so no
+        step discontinuity reaches ECAPA. Falls back to the energy gate when
+        Silero is unavailable or errors.
 
         Returns None when there is too little voiced audio to trust, which means
-        "this speaker is not present here" -- a different outcome from
-        "extraction failed", and the caller must not conflate the two.
+        "this speaker is not present here" -- distinct from "extraction failed".
         """
         if min_voiced_sec is None:
             min_voiced_sec = BSS_MIN_VOICED_SEC
@@ -267,8 +314,26 @@ class BssSeparator:
         pieces = [pc for pc in pieces if pc.size]
         if not pieces:
             return None
-        seg = np.concatenate(pieces)
+        seg = np.concatenate(pieces).astype(np.float32)
 
+        # --- Silero path: keep exactly the voiced runs, cross-fade the joins ---
+        vad = getattr(self, "_vad", None)
+        if vad is not None and seg.size >= int(0.10 * sr):
+            try:
+                ts = vad.get_speech_timestamps(seg, sampling_rate=sr)
+            except Exception:
+                ts = None
+            if ts:
+                voiced = [seg[t["start"]:t["end"]] for t in ts]
+                joined = self._xfade_join(voiced, sr)
+                if joined is not None and joined.size >= int(min_voiced_sec * sr):
+                    return joined
+                return None          # some speech, but not enough to trust
+            elif ts == []:
+                return None          # Silero is confident there is no speech here
+            # ts is None: Silero errored -> fall through to the energy gate
+
+        # --- energy gate (fallback) ---
         frame = max(1, int(0.02 * sr))
         if seg.size < frame * 2:
             return seg if seg.size else None
