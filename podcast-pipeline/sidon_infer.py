@@ -15,6 +15,15 @@ SAMPLE_RATE_IN = 16_000
 CHUNK_SECONDS = 20.0  # Kept similar to original worker
 OVERLAP_SECONDS = 5.0 # Kept similar to original worker
 
+# Silence padded onto each end of a chunk before the fbank front-end, so the
+# first and last analysis windows are complete. The decoder reproduces it, so
+# it has to come back off: the output was only ever trimmed at the tail, which
+# left every separated span sitting PAD_SAMPLES_IN late against the mixture it
+# is spliced back into. That offset lands inside the 20ms cross-fade the
+# caller joins with, where a voice blended against a shifted copy of itself
+# combs. See _lead_samples_out for the input-rate to output-rate conversion.
+PAD_SAMPLES_IN = 160  # 10ms at SAMPLE_RATE_IN
+
 HF_TOKEN = os.environ.get("HUGGINGFACE_TOKEN", os.environ.get("HF_TOKEN"))
 
 # ---------------------------------------------------------------------------
@@ -168,6 +177,36 @@ def _maybe_swap(prev_overlap: torch.Tensor, curr_chunk: torch.Tensor, overlap_sa
         return curr_chunk[[1, 0], :], True
     return curr_chunk, False
 
+def _lead_samples_out(out_sr: int) -> int:
+    """How much of the decoded chunk is the leading pad, in output samples.
+
+    The pad is specified at the input rate; the decoder emits at its own rate,
+    so the two differ by exactly that ratio (160 in at 16kHz -> 240 out at
+    24kHz). Deriving it keeps the trim correct if either rate changes.
+    """
+    return round(PAD_SAMPLES_IN * out_sr / SAMPLE_RATE_IN)
+
+
+def _drop_lead_pad(pred: torch.Tensor, out_sr: int) -> torch.Tensor:
+    """Realign a decoded chunk with the audio that was handed in."""
+    lead = _lead_samples_out(out_sr)
+    return pred[:, lead:] if 0 < lead < pred.shape[-1] else pred
+
+
+def _fit_length(pred: torch.Tensor, target_out: int, device: torch.device) -> torch.Tensor:
+    """Cut or zero-extend a decoded chunk to the length its input implies.
+
+    Only ever touches the tail, which is correct once the leading pad is gone:
+    the start is the anchor, so any residual length error belongs at the end.
+    """
+    if pred.shape[-1] > target_out:
+        return pred[:, :target_out]
+    if pred.shape[-1] < target_out:
+        pad = torch.zeros(pred.shape[0], target_out - pred.shape[-1], device=device)
+        return torch.cat([pred, pad], dim=-1)
+    return pred
+
+
 def run_separation_chunked(wav: torch.Tensor, sample_rate: int, num_steps: int, device: torch.device) -> tuple[torch.Tensor, int]:
     models = load_models(device)
     out_sr = models["sample_rate"]
@@ -181,8 +220,14 @@ def run_separation_chunked(wav: torch.Tensor, sample_rate: int, num_steps: int, 
     total_samples = wav_16k.shape[-1]
     if total_samples <= chunk_samples:
         max_val = wav_16k.abs().max().clamp_min(1e-6)
-        wav_norm = torch.nn.functional.pad(0.9 * wav_16k / max_val, (160, 160))
+        wav_norm = torch.nn.functional.pad(
+            0.9 * wav_16k / max_val, (PAD_SAMPLES_IN, PAD_SAMPLES_IN))
         separated = _separate_chunk(wav_norm, num_steps, models, device)
+        # Drop the leading pad first, then cut to the length that was asked
+        # for. Trimming only the tail would keep the whole result shifted late.
+        separated = _drop_lead_pad(separated, out_sr)
+        target_out = max(1, round(total_samples * out_sr / SAMPLE_RATE_IN))
+        separated = _fit_length(separated, target_out, device)
         # Undo the input scaling so the result sits at the level of the audio
         # that was handed in. With one chunk this only affects absolute level,
         # but doing it here keeps both paths on the same scale.
@@ -198,7 +243,8 @@ def run_separation_chunked(wav: torch.Tensor, sample_rate: int, num_steps: int, 
         end = min(start + chunk_samples, total_samples)
         chunk = wav_16k[:, start:end]
         max_val = chunk.abs().max().clamp_min(1e-6)
-        chunk_norm = torch.nn.functional.pad(0.9 * chunk / max_val, (160, 160))
+        chunk_norm = torch.nn.functional.pad(
+            0.9 * chunk / max_val, (PAD_SAMPLES_IN, PAD_SAMPLES_IN))
         pred = _separate_chunk(chunk_norm, num_steps, models, device)
         # Each chunk is normalised by its own peak, so two neighbours whose
         # loudness differs come back on different scales. Crossfading them then
@@ -206,12 +252,11 @@ def run_separation_chunked(wav: torch.Tensor, sample_rate: int, num_steps: int, 
         # each chunk's own scaling first puts them all back in the recording's
         # units, which is what makes the blend meaningful.
         pred = pred * (max_val / 0.9)
+        # The pad has to go before the length fit, or every chunk enters the
+        # seam cross-fade shifted late against its neighbour.
+        pred = _drop_lead_pad(pred, out_sr)
         target_out = max(1, round((end - start) * out_sr / SAMPLE_RATE_IN))
-        if pred.shape[-1] > target_out:
-            pred = pred[:, :target_out]
-        elif pred.shape[-1] < target_out:
-            pad = torch.zeros(2, target_out - pred.shape[-1], device=device)
-            pred = torch.cat([pred, pad], dim=-1)
+        pred = _fit_length(pred, target_out, device)
 
         if stitched is None:
             stitched = pred

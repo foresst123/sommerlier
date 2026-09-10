@@ -54,7 +54,14 @@ REASONS = (
     "short_track",      # Model trả về thiếu mẫu âm thanh
     "empty_track",      # Track im lặng ngay tại nơi mixture có lời
     "same_speaker",     # Hai segment cùng speaker, không cần tách hai giọng
+    "below_threshold",  # Overlap ngắn hơn ngưỡng chạy model
 )
+
+# Lý do mà vùng giữ nguyên mixture vẫn chỉ chứa giọng của chính speaker đó.
+# Bước xuất dual-channel xóa vùng thất bại để chặn giọng người khác lọt sang
+# track sai; với các lý do dưới đây không có giọng nào để chặn, nên xóa chỉ
+# làm mất lời nói thật.
+SAFE_FAIL_REASONS = frozenset({"same_speaker"})
 
 
 class SeparationService:
@@ -280,7 +287,10 @@ class SeparationService:
             return True          # Mixture im lặng nên không có lời cần bảo toàn
 
         # Track đã bỏ giọng nhiễu có thể nhỏ hơn; so theo thang của chính track.
-        alive = t >= max(t.max() * 0.15, BSS_SILENCE_RMS * 0.5)
+        # Sàn tuyệt đối bằng đúng ngưỡng im lặng dùng ở cổng unscorable: chỉ so
+        # theo t.max() thì một track nhiễu đều ở mức rất thấp cũng có mọi khung
+        # vượt ngưỡng, đúng kiểu lọt mà _gather_probe đã phải thêm sàn để chặn.
+        alive = t >= max(t.max() * 0.15, BSS_SILENCE_RMS)
         return float(np.mean(alive[voiced])) >= 0.35
 
     def _cross_fade(self, orig_audio: np.ndarray, new_audio: np.ndarray, fade_samples: int) -> np.ndarray:
@@ -453,7 +463,14 @@ class SeparationService:
 
     def process_overlaps(self, segments: List[Segment], audio: AudioData, overlap_threshold: float = 0.1) -> List[SpeechSegment]:
         if not self.bss_model:
-            return [SpeechSegment(**s.__dict__) for s in segments]
+            # passthrough gắn mixture vào từng segment. Trả SpeechSegment rỗng
+            # audio ở đây làm checkpoint, bước xuất clip và dual-channel đều
+            # nhận về giá trị None mà không có dấu hiệu nào là separation đã
+            # không chạy.
+            if self.logger:
+                self.logger.warning(
+                    "[TSE] no separator is loaded; every overlap stays raw mixture")
+            return self.passthrough(segments, audio)
 
         if self.logger:
             self.logger.info("Processing overlaps with blind source separation")
@@ -481,9 +498,18 @@ class SeparationService:
         seg_by_index = {s.index: s for s in speech}
 
         self._same_speaker_pairs = []
-        queue = [job for job in self._group_jobs(pairs)
-                 if max(p["overlap_end"] for p in job[2]) -
-                    min(p["overlap_start"] for p in job[2]) >= overlap_threshold]
+        queue, below = [], []
+        for job in self._group_jobs(pairs):
+            span = (max(p["overlap_end"] for p in job[2])
+                    - min(p["overlap_start"] for p in job[2]))
+            (queue if span >= overlap_threshold else below).append(job)
+        # Quá ngắn để chạy model vẫn là overlap. Bỏ qua mà không ghi lý do thì
+        # vùng đó vắng mặt trong cả bss_spans lẫn bss_failed_spans, và bước xuất
+        # dual-channel đọc mixture ở đó như thể là giọng sạch của một người.
+        for _a, _b, plist in below:
+            for sd, lo, hi in self._splice_pairs(plist):
+                self._fail(seg_by_index.get(sd["index"]), lo, hi, "below_threshold",
+                           f"span={hi - lo:.3f}s th={overlap_threshold}")
         planner = WindowPlanner(
             segments, pairs, waveform, sr, music_map=self.music_map,
             seams=self.seams(), vad=getattr(self.bss_model, "_vad", None),
@@ -645,7 +671,7 @@ class SeparationService:
                 # bảo đảm overlap có lời: từng có trường hợp sim=0.67 trên mẫu trước đó
                 # 19 giây nhưng track im lặng ở chính overlap.
                 host = enh.audio[dst:dst + limit]
-                if not self._track_has_speech(host, track[src:src + limit]):
+                if not self._track_has_speech(host, track[src:src + limit], sr_hint=sr):
                     self._fail(enh, ov_lo, ov_hi, "empty_track",
                                "silent where mixture has speech")
                     continue
@@ -693,9 +719,15 @@ class SeparationService:
         spk_0 = speakers[0]
         spk_1 = speakers[1] if len(speakers) > 1 else None
 
+        # Hai segment cùng speaker chồng nhau chứa cùng một đoạn ghi âm. Cộng cả
+        # hai vào track làm biên độ vùng đó gấp đôi rồi safe_limit kéo cả track
+        # xuống để bù, nên chỉ lấy bản đầu tiên chạm tới mỗi mẫu.
+        filled = {spk: np.zeros(total_samples, dtype=bool)
+                  for spk in (spk_0, spk_1) if spk is not None}
+
         written = dropped = 0
         for seg in speech_segments:
-            if seg.speaker not in (spk_0, spk_1) or seg.audio is None:
+            if seg.speaker not in filled or seg.audio is None:
                 continue
             start_idx = int(seg.start * sr)
             end_idx = min(total_samples, start_idx + len(seg.audio))
@@ -703,20 +735,28 @@ class SeparationService:
                 continue
             chunk = seg.audio[: end_idx - start_idx].copy()
 
+            fresh = ~filled[seg.speaker][start_idx:end_idx]
+            filled[seg.speaker][start_idx:end_idx] = True
+
             if strict:
-                keep = np.ones(end_idx - start_idx, dtype=bool)
+                keep = np.array(fresh)
                 # Checkpoint cũ có thể chưa có bss_failed_spans; pickle không tự điền
                 # giá trị mặc định mới của dataclass nên đọc bằng getattr.
-                for a, b, _reason, _detail in getattr(seg, "bss_failed_spans", ()):
+                for a, b, reason, _detail in getattr(seg, "bss_failed_spans", ()):
+                    # Vùng chỉ có một người nói không mang giọng ai khác sang
+                    # track sai; xóa nó chỉ làm mất lời nói thật.
+                    if reason in SAFE_FAIL_REASONS:
+                        continue
                     i = max(start_idx, int(a * sr)) - start_idx
                     j = min(end_idx, int(b * sr)) - start_idx
                     if j > i:
                         keep[i:j] = False
-                dropped += int((~keep).sum())
+                dropped += int((fresh & ~keep).sum())
                 written += int(keep.sum())
                 chunk = chunk * keep
             else:
-                written += end_idx - start_idx
+                written += int(fresh.sum())
+                chunk = chunk * fresh
 
             if seg.speaker == spk_0:
                 track_0[start_idx:end_idx] += chunk

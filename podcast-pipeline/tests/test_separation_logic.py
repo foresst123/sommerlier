@@ -177,6 +177,52 @@ def test_every_overlap_is_accounted_for():
         )
 
 
+def test_an_overlap_too_short_to_separate_is_still_recorded():
+    """Overlap ngắn hơn ngưỡng vẫn phải có lý do, không được lặng lẽ biến mất.
+    Bộ lọc queue từng bỏ các job này mà không ghi bss_failed_spans, nên bước
+    xuất strict đọc mixture ở đó như thể là giọng sạch của một người."""
+    segs = [
+        Segment(index="00001", start=0.0, end=30.0, speaker="SPEAKER_00"),
+        Segment(index="00002", start=14.0, end=14.05, speaker="SPEAKER_01"),  # 0.05s < 0.1
+        Segment(index="00003", start=32.0, end=40.0, speaker="SPEAKER_01"),
+        Segment(index="00004", start=42.0, end=48.0, speaker="SPEAKER_00"),
+    ]
+    fake = FakeTSE()
+    svc = SeparationService(fake, logger=None)
+    out = svc.process_overlaps(segs, _audio(), overlap_threshold=0.1)
+
+    assert fake.calls == [], "overlap dưới ngưỡng không được chạy model"
+    n_bad = sum(len(s.bss_failed_spans) for s in out)
+    assert n_bad == 2, "cả hai segment nguồn phải mang dấu vết của overlap bị bỏ"
+    assert {r for s in out for _a, _b, r, _d in s.bss_failed_spans} == {"below_threshold"}
+
+    # Và vùng đó phải bị mask khi xuất: nó vẫn là mixture hai giọng.
+    t0, _t1 = svc.export_sdlm_dual_channel(out, 60.0, SR, strict=True)
+    lo, hi = int(14.0 * SR), int(14.05 * SR)
+    assert np.allclose(t0[lo:hi], 0.0), "A's track must not carry B's overlapping speech"
+
+
+def test_same_speaker_overlap_is_kept_and_not_counted_twice():
+    """Hai segment cùng speaker chồng nhau chỉ chứa giọng người đó.
+    Xóa vùng đó làm mất lời nói thật; cộng cả hai bản làm biên độ gấp đôi."""
+    segs = [
+        Segment(index="00001", start=0.0, end=15.0, speaker="SPEAKER_00"),
+        Segment(index="00002", start=14.0, end=30.0, speaker="SPEAKER_00"),
+        Segment(index="00003", start=32.0, end=40.0, speaker="SPEAKER_01"),
+    ]
+    svc = SeparationService(FakeTSE(), logger=None)
+    out = svc.process_overlaps(segs, _audio(), overlap_threshold=0.1)
+    assert {r for s in out for _a, _b, r, _d in s.bss_failed_spans} == {"same_speaker"}
+
+    t0, _ = svc.export_sdlm_dual_channel(out, 60.0, SR, strict=True)
+    audio = _audio().waveform
+    lo, hi = int(14.1 * SR), int(14.9 * SR)
+    assert np.abs(t0[lo:hi]).sum() > 0, "lời nói của chính speaker đó không được xóa"
+    # Một bản, không phải tổng của hai bản giống nhau.
+    assert np.allclose(t0[lo:hi], audio[lo:hi], atol=1e-6), (
+        "vùng chồng cùng speaker bị cộng hai lần")
+
+
 
 
 
