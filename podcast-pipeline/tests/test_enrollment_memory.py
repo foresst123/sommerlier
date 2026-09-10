@@ -1,14 +1,7 @@
-"""Growing enrollments from the separations that went well, and fusing the
-overlaps that were too close together to be balanced.
-
-Both come from the same measurement. Similarity against the mined enrollment
-sat flat at 0.58 -- flat with span length and with segment length, so a ceiling
-rather than noise -- and the spans whose window held under 40% target audio
-scored 0.518 against 0.613 for the rest. Roughly half the spans were paying
-that.
-
-Run:  python -m pytest tests/test_enrollment_memory.py -q   (from podcast-pipeline/)
-"""
+"""Kiểm thử bộ nhớ mẫu giọng và cách nhóm overlap nối liền.
+Bộ nhớ chỉ thêm các kết quả có điểm cao. Chính sách mới không gộp
+các overlap rời dù cùng hai speaker.
+Chạy: python -m pytest tests/test_enrollment_memory.py -q"""
 import os
 import sys
 
@@ -30,10 +23,10 @@ def _memory(**kw):
     return EnrollmentMemory(**kw)
 
 
-# --- the switch -------------------------------------------------------------
+# --- Công tắc bật bộ nhớ ---------------------------------------------------
 
 def test_it_is_off_unless_asked_for():
-    """It changes what the separator is conditioned on, so it is opt-in."""
+    """Bộ nhớ thay đổi mẫu đối chiếu nên phải chủ động bật."""
     off = EnrollmentMemory(enabled=False)
     assert not off.offer("1", _clip(), 0.9, SR)
     assert off.extend("1", ["mined"], SR) == ["mined"]
@@ -48,7 +41,7 @@ def test_both_profiles_declare_the_setting():
         assert "enrollment_memory" in profile["models"]["bss"], name
 
 
-# --- what gets in -----------------------------------------------------------
+# --- Điều kiện nhận mẫu ---------------------------------------------------
 
 def test_a_well_separated_track_is_kept():
     memory = _memory()
@@ -56,13 +49,13 @@ def test_a_well_separated_track_is_kept():
 
 
 def test_a_poorly_separated_track_is_refused():
-    """Usable is a lower bar than exemplary; only the second belongs here."""
+    """Mẫu dùng đối chiếu phải tốt hơn mức chỉ vừa đủ vượt QC."""
     memory = _memory()
     assert not memory.offer("1", _clip(), 0.30, SR)
 
 
 def test_a_track_just_above_the_qc_gate_is_still_refused():
-    """0.25 passes QC (0.20) but must not become reference audio."""
+    """Điểm 0.25 vượt QC 0.20 nhưng chưa đủ làm mẫu đối chiếu."""
     memory = _memory()
     assert not memory.offer("1", _clip(), 0.25, SR)
 
@@ -78,15 +71,15 @@ def test_a_clip_too_short_to_embed_is_refused():
 
 
 def test_a_missing_similarity_is_not_treated_as_zero_or_as_pass():
-    """Spans with no solo region score None; they are unjudged, not bad."""
+    """Điểm None là chưa đánh giá được, không đồng nghĩa chất lượng kém."""
     memory = _memory()
     assert not memory.offer("1", _clip(), None, SR)
 
 
-# --- what it does with them -------------------------------------------------
+# --- Cách dùng mẫu --------------------------------------------------------
 
 def test_the_mined_enrollment_is_extended_never_replaced():
-    """The worst case has to be the original behaviour."""
+    """Mẫu ban đầu phải được giữ để không mất đường đối chiếu gốc."""
     memory = _memory()
     memory.offer("1", _clip(seed=1), 0.9, SR)
     mined = ["mined-a", "mined-b"]
@@ -109,7 +102,7 @@ def test_memory_is_per_speaker():
 
 
 def test_the_budget_keeps_the_strongest_clips():
-    """Over budget, similarity decides what stays."""
+    """Vượt ngân sách thì giữ các mẫu có similarity cao hơn."""
     memory = _memory(budget=2.0)
     memory.offer("1", _clip(1.0, seed=3), 0.70, SR)
     memory.offer("1", _clip(1.0, seed=4), 0.95, SR)
@@ -124,10 +117,10 @@ def test_one_clip_is_kept_even_when_it_exceeds_the_budget():
     assert len(memory.extend("1", [], SR)) == 1
 
 
-# --- across files -----------------------------------------------------------
+# --- Ranh giới giữa các file ----------------------------------------------
 
 def test_reset_clears_everything():
-    """Speaker "1" in the next file is a different person."""
+    """Speaker mang nhãn 1 ở file sau có thể là người khác."""
     memory = _memory()
     memory.offer("1", _clip(seed=7), 0.9, SR)
     memory.reset()
@@ -136,7 +129,7 @@ def test_reset_clears_everything():
 
 
 def test_the_separation_service_clears_it_between_files():
-    """Wiring, not just the class: reset_stats() has to reach the memory."""
+    """reset_stats() của dịch vụ phải gọi đến bộ nhớ, không chỉ xóa bộ đếm."""
     import services.separation_service as sep
 
     service = sep.SeparationService.__new__(sep.SeparationService)
@@ -149,7 +142,7 @@ def test_the_separation_service_clears_it_between_files():
     assert service.memory.extend("1", [], SR) == []
 
 
-# --- fusing overlaps that sit too close to be balanced ----------------------
+# --- Chỉ nhóm overlap giao hoặc chạm nhau ---------------------------------
 
 def _pair(start, end, a="1", b="2"):
     return {"overlap_start": start, "overlap_end": end,
@@ -157,40 +150,39 @@ def _pair(start, end, a="1", b="2"):
             "seg1": {"speaker": a}, "seg2": {"speaker": b}}
 
 
-def _fuse(pairs, gap=0.6):
+def _groups(pairs):
     import services.separation_service as sep
-    return sep.SeparationService._fuse_adjacent(pairs, gap=gap)
+    return [job[2] for job in sep.SeparationService()._group_jobs(pairs)]
 
 
-def test_two_overlaps_half_a_second_apart_become_one():
-    """The measured case: gaps of 0.36-0.52s, which cost the stitched window."""
-    fused = _fuse([_pair(1427.07, 1427.57), _pair(1428.07, 1428.11)])
-    assert len(fused) == 1
-    assert fused[0]["overlap_start"] == 1427.07
-    assert fused[0]["overlap_end"] == 1428.11
+def test_a_half_second_gap_keeps_targets_separate():
+    """Không lấp khoảng trống giữa hai overlap dù cùng cặp speaker."""
+    grouped = _groups([_pair(1427.07, 1427.57), _pair(1428.07, 1428.11)])
+    assert len(grouped) == 2
 
 
 def test_overlaps_far_apart_stay_separate():
-    fused = _fuse([_pair(10.0, 10.5), _pair(30.0, 30.5)])
-    assert len(fused) == 2
+    assert len(_groups([_pair(10.0, 10.5), _pair(30.0, 30.5)])) == 2
 
 
-def test_the_fused_duration_is_recomputed():
-    fused = _fuse([_pair(5.0, 5.4), _pair(5.8, 6.2)])
-    assert abs(fused[0]["overlap_duration"] - 1.2) < 1e-9
+def test_touching_overlaps_keep_their_original_ranges():
+    pairs = [_pair(5.0,5.4),_pair(5.4,6.2)]
+    grouped = _groups(pairs)
+    assert len(grouped) == 1
+    assert grouped[0] == pairs
 
 
 def test_fusing_does_not_mutate_the_input():
     pairs = [_pair(5.0, 5.4), _pair(5.8, 6.2)]
-    _fuse(pairs)
+    _groups(pairs)
     assert pairs[0]["overlap_end"] == 5.4
 
 
-def test_a_zero_gap_disables_fusing():
+def test_any_positive_gap_keeps_targets_separate():
     pairs = [_pair(5.0, 5.4), _pair(5.5, 6.2)]
-    assert len(_fuse(pairs, gap=0.0)) == 2
+    assert len(_groups(pairs)) == 2
 
 
 def test_a_single_overlap_is_returned_unchanged():
     pairs = [_pair(5.0, 5.4)]
-    assert _fuse(pairs) is pairs
+    assert _groups(pairs) == [pairs]

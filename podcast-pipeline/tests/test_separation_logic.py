@@ -1,10 +1,7 @@
-"""Logic tests for SeparationService that need no GPU and no models.
-
-The separator is stubbed, so these check windowing, job grouping, per-track
-gating and the dual-channel leakage mask -- not audio quality.
-
-Run:  python -m pytest tests/test_separation_logic.py -q     (from podcast-pipeline/)
-"""
+"""Kiểm thử logic SeparationService, không dùng GPU hay model thật.
+Model giả giúp kiểm tra cửa sổ, nhóm overlap, QC từng track và mặt nạ
+chống lọt giọng; không đánh giá chất lượng âm thanh tách thực tế.
+Chạy trong podcast-pipeline: python -m pytest tests/test_separation_logic.py -q"""
 import os
 import sys
 
@@ -21,7 +18,7 @@ SR = 24000
 
 
 class FakeTSE:
-    """Returns two tracks of a known constant so splices are identifiable."""
+    """Trả hai track hằng số khác nhau để nhận biết phần đã ghép trả."""
 
     def __init__(self, sim_a=0.6, sim_b=0.6):
         self.sim_a, self.sim_b = sim_a, sim_b
@@ -42,30 +39,30 @@ class FakeTSE:
 
 def _audio(duration=60.0):
     rng = np.random.default_rng(0)
-    return AudioData(waveform=rng.normal(0, 0.05, int(duration * SR)).astype(np.float32),
+    wave = rng.normal(0, 0.05, int(duration * SR)).astype(np.float32)
+    # Khoảng nghỉ để thuật toán có điểm cắt hợp lệ, không cắt ngang tiếng.
+    wave[np.arange(len(wave)) % (SR // 2) < int(0.08 * SR)] = 0
+    return AudioData(waveform=wave,
                      sample_rate=SR, name="test", audio_segment=None, duration=duration)
 
 
 def _dialogue():
-    """A talks 0-30s; B has a 0.4s backchannel at 14.0s and a real turn 32-40s."""
+    """A nói 0–30 s; B chen 0.4 s tại giây 14, rồi có lượt nói sạch 32–40 s.
+    A có thêm mẫu sạch 42–48 s vì segment chứa overlap không được làm support."""
     return [
         Segment(index="00001", start=0.0, end=30.0, speaker="SPEAKER_00"),
         Segment(index="00002", start=14.0, end=14.4, speaker="SPEAKER_01"),
         Segment(index="00003", start=32.0, end=40.0, speaker="SPEAKER_01"),
+        Segment(index="00004", start=42.0, end=48.0, speaker="SPEAKER_00"),
     ]
 
 
 
 
 def test_a_backchannel_window_is_grown_well_past_the_overlap():
-    """Sidon separates blind, so the window has two jobs: give it enough
-    context to tell the voices apart, and contain a stretch where one speaker
-    is audible alone for ECAPA to identify the tracks from.
-
-    This was briefly 2.0s, which is what USEF's ONNX graph fixed it at. Handing
-    that to a blind separator took ECAPA similarity to p50 0.15 -- the score two
-    unrelated speakers get -- because a 2s window centred on an overlap holds no
-    solo stretch by construction."""
+    """Cửa sổ phải đủ ngữ cảnh để Sidon phân biệt giọng và ECAPA nhận diện track.
+    Cửa sổ 2 s trước đây không có solo đủ dài, làm similarity xuống mức
+    p50 0.15; kiểm tra không quay lại kiểu cửa sổ quá ngắn đó."""
     fake = FakeTSE()
     svc = SeparationService(fake, logger=None)
     svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
@@ -76,24 +73,22 @@ def test_a_backchannel_window_is_grown_well_past_the_overlap():
 
 
 def test_the_window_carries_solo_audio_for_the_assignment_to_use():
-    """An empty probe reads downstream as "score the whole track", which for a
-    blind backend means scoring a track that may be either speaker against an
-    enrolment for one of them. The probe is what makes the answer mean
-    something."""
+    """Probe rỗng khiến model chấm cả track, có thể chứa giọng của người khác.
+    Hai probe phải có lời solo riêng để phép gán speaker có ý nghĩa."""
     fake = FakeTSE()
     svc = SeparationService(fake, logger=None)
     svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
     call = fake.calls[0]
     assert call["probe_A_sec"] >= 2.0 and call["probe_B_sec"] >= 2.0, (
         "no solo audio in the window; ECAPA has nothing to assign from")
-    # Both speakers contribute the same amount, which is the whole point of the
-    # stitched window: an 85:1 imbalance is what made Sidon collapse to "one
-    # source carries everything".
-    assert call["probe_A_sec"] == pytest.approx(call["probe_B_sec"], abs=0.1)
+    # Tỷ lệ gần cân bằng nhưng không ép hai probe bằng nhau, vì còn ưu tiên
+    # giữ nội dung nền và điểm cắt tự nhiên.
+    assert min(call["probe_A_sec"], call["probe_B_sec"]) / max(
+        call["probe_A_sec"], call["probe_B_sec"]) >= 0.5
 
 
 def test_low_scoring_track_does_not_discard_the_good_one():
-    # A scores well, B fails QC -- the old code dropped both.
+    # A đạt điểm, B không đạt QC: giữ track A thay vì bỏ cả hai.
     fake = FakeTSE(sim_a=0.60, sim_b=0.05)
     svc = SeparationService(fake, logger=None)
     out = svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
@@ -105,22 +100,23 @@ def test_low_scoring_track_does_not_discard_the_good_one():
     assert b_seg.bss_status == "failed"
 
 
-def test_nearby_overlaps_share_one_separation_call():
+def test_nearby_disconnected_overlaps_get_separate_calls():
     segs = [
         Segment(index="00001", start=0.0, end=30.0, speaker="SPEAKER_00"),
         Segment(index="00002", start=10.0, end=10.4, speaker="SPEAKER_01"),
         Segment(index="00003", start=13.0, end=13.4, speaker="SPEAKER_01"),
         Segment(index="00004", start=32.0, end=40.0, speaker="SPEAKER_01"),
+        Segment(index="00005", start=42.0, end=48.0, speaker="SPEAKER_00"),
     ]
     fake = FakeTSE()
     svc = SeparationService(fake, logger=None)
     svc.process_overlaps(segs, _audio(), overlap_threshold=0.1)
-    assert len(fake.calls) == 1, f"two nearby overlaps should share one call, got {len(fake.calls)}"
+    assert len(fake.calls) == 2, "Overlap rời phải được xử lý độc lập"
     assert svc.stats["pairs"] == 2
 
 
 def test_sdlm_export_zeroes_unseparated_overlap():
-    fake = FakeTSE(sim_a=0.05, sim_b=0.05)   # everything fails QC
+    fake = FakeTSE(sim_a=0.05, sim_b=0.05)   # Cả hai track không đạt QC
     svc = SeparationService(fake, logger=None)
     out = svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
     t0, _t1 = svc.export_sdlm_dual_channel(out, 60.0, SR, strict=True)
@@ -130,7 +126,7 @@ def test_sdlm_export_zeroes_unseparated_overlap():
 
 
 def test_sdlm_export_keeps_separated_overlap():
-    fake = FakeTSE(sim_a=0.6, sim_b=0.6)     # separation succeeds
+    fake = FakeTSE(sim_a=0.6, sim_b=0.6)     # Hai track đạt kiểm tra
     svc = SeparationService(fake, logger=None)
     out = svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
     t0, _t1 = svc.export_sdlm_dual_channel(out, 60.0, SR, strict=True)
@@ -139,23 +135,19 @@ def test_sdlm_export_keeps_separated_overlap():
 
 
 class DuplicatingTSE:
-    """Sidon's realistic failure mode on short, lopsided overlaps: the dominant
-    speaker is emitted on BOTH tracks. sim_A is high, sim_B is at chance."""
+    """Giả lập lỗi model chép giọng người nói chính lên cả hai track."""
 
     def separate_two_speakers(self, mixture_audio, enroll_A, enroll_B, sample_rate,
                               id_A, id_B, probe_A=None, probe_B=None, core_range=None):
         a_voice = np.full(len(mixture_audio), 0.5, dtype=np.float32)
-        # Identical tracks -> the anchor matches both equally -> no margin.
+        # Hai track giống nhau nên giọng neo khớp cả hai, không có khoảng cách điểm.
         return a_voice, a_voice.copy(), 0.46, -0.05, {
             "anchor_self": 0.46, "anchor_other": 0.45, "other_rms": 0.5}
 
 
 def test_max_rule_would_paste_speaker_a_into_speaker_b():
-    """Guard against the max(sim_A, sim_B) QC rule.
-
-    Under max(), 0.46 passes and B's segment gets spliced with A's voice.
-    Per-track gating must leave B untouched.
-    """
+    """Không dùng max(sim_A, sim_B) để quyết định cả hai track.
+    Điểm A=0.46 không cho phép ghi giọng A vào segment B; B phải giữ nguyên."""
     svc = SeparationService(DuplicatingTSE(), logger=None)
     out = svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
 
@@ -171,14 +163,14 @@ def test_max_rule_would_paste_speaker_a_into_speaker_b():
 
 
 def test_every_overlap_is_accounted_for():
-    """The core invariant: no overlap may vanish without a recorded reason."""
+    """Mọi overlap phải có kết quả hoặc lý do thất bại, không được biến mất."""
     for fake in (FakeTSE(0.6, 0.6), FakeTSE(0.6, 0.05), FakeTSE(0.05, 0.05),
                  DuplicatingTSE()):
         svc = SeparationService(fake, logger=None)
         out = svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
         n_ok = sum(len(s.bss_spans) for s in out)
         n_bad = sum(len(s.bss_failed_spans) for s in out)
-        # one overlap x two segments (A's and B's side)
+        # Một overlap được ghi trên hai segment nguồn
         assert n_ok + n_bad == 2, (
             f"{type(fake).__name__}: {n_ok} spliced + {n_bad} failed != 2 -- "
             "some code path discarded an overlap without recording it"
@@ -190,15 +182,16 @@ def test_every_overlap_is_accounted_for():
 
 
 def test_no_window_does_not_block_later_overlaps():
-    """A skipped overlap must not take the next one down with it."""
+    """Một overlap không xử lý được không được chặn các overlap tiếp theo."""
     segs = [
         Segment(index="00001", start=0.0, end=55.0, speaker="SPEAKER_00"),
-        Segment(index="00002", start=5.0, end=5.3, speaker="SPEAKER_01"),   # B has no solo nearby
+        Segment(index="00002", start=5.0, end=5.3, speaker="SPEAKER_01"),   # B chưa có đoạn solo gần đây
         Segment(index="00003", start=50.0, end=50.4, speaker="SPEAKER_01"),
-        Segment(index="00004", start=56.0, end=59.0, speaker="SPEAKER_01"), # B's only solo turn
+        Segment(index="00004", start=56.0, end=59.0, speaker="SPEAKER_01"), # Lượt solo duy nhất của B
+        Segment(index="00005", start=61.0, end=68.0, speaker="SPEAKER_00"),
     ]
     svc = SeparationService(FakeTSE(), logger=None)
-    out = svc.process_overlaps(segs, _audio(60.0), overlap_threshold=0.1)
+    out = svc.process_overlaps(segs, _audio(70.0), overlap_threshold=0.1)
     n_ok = sum(len(s.bss_spans) for s in out)
     n_bad = sum(len(s.bss_failed_spans) for s in out)
     assert n_ok + n_bad == 4, "both overlaps (x2 sides) must be accounted for"
@@ -206,7 +199,7 @@ def test_no_window_does_not_block_later_overlaps():
 
 
 class AllRejectTSE:
-    """Rejects on the grouped window but succeeds on a single-overlap retry."""
+    """Từ chối lần đầu, chấp nhận lần tiếp theo để kiểm tra các job độc lập."""
 
     def __init__(self):
         self.calls = 0
@@ -220,18 +213,19 @@ class AllRejectTSE:
                 {"anchor_self": 0.6, "anchor_other": 0.1, "other_rms": 0.5})
 
 
-def test_failed_group_job_retries_each_overlap():
+def test_failed_job_does_not_force_other_disconnected_jobs_to_retry():
     segs = [
         Segment(index="00001", start=0.0, end=30.0, speaker="SPEAKER_00"),
         Segment(index="00002", start=10.0, end=10.4, speaker="SPEAKER_01"),
         Segment(index="00003", start=13.0, end=13.4, speaker="SPEAKER_01"),
         Segment(index="00004", start=32.0, end=40.0, speaker="SPEAKER_01"),
+        Segment(index="00005", start=42.0, end=48.0, speaker="SPEAKER_00"),
     ]
     fake = AllRejectTSE()
     svc = SeparationService(fake, logger=None)
     out = svc.process_overlaps(segs, _audio(), overlap_threshold=0.1)
-    assert svc.stats["retried"] == 1, "the rejected group job should have been split"
-    assert fake.calls > 1, "retry must actually re-run separation"
+    assert svc.stats["retried"] == 0
+    assert fake.calls == 2
     assert sum(len(s.bss_spans) for s in out) > 0, "retries should recover the overlaps"
 
 
@@ -245,11 +239,9 @@ def test_sdlm_mask_uses_failed_spans():
 
 
 def test_old_checkpoint_unpickles_without_new_fields():
-    """Resuming a run checkpointed before bss_spans/bss_failed_spans existed.
-
-    Pickle restores __dict__ directly and does not apply dataclass defaults, so
-    without __setstate__ the first append raises AttributeError mid-pipeline.
-    """
+    """Khôi phục checkpoint trước khi có bss_spans/bss_failed_spans.
+    Pickle gán __dict__ mà không áp mặc định dataclass nên __setstate__
+    phải bổ sung các trường mới trước khi pipeline ghi tiếp."""
     import pickle
     from schemas.segment import SpeechSegment
 
@@ -267,7 +259,7 @@ def test_old_checkpoint_unpickles_without_new_fields():
     assert np.allclose(t0[:SR], 0.0), "failed span must still be masked after unpickling"
 
 
-# --- stitched window + splice-site QC ---------------------------------------
+# --- Cửa sổ ghép và QC tại vị trí thay thế --------------------------------
 
 def _svc():
     return SeparationService.__new__(SeparationService)
@@ -279,7 +271,7 @@ def _diar(spans):
 
 
 def _buried_case():
-    """A 0.34s backchannel inside a long turn -- the shape that broke Sidon."""
+    """Lời chen 0.34 s nằm trong một lượt dài, dạng từng khiến Sidon mất giọng."""
     segs = _diar([(730.0, 758.4, "2"), (758.4, 787.7, "1"),
                   (777.33, 777.67, "2"), (788.2, 816.5, "1")])
     svc = _svc()
@@ -294,20 +286,18 @@ def _buried_case():
 
 
 def test_qc_rejects_a_track_that_is_silent_where_the_mixture_speaks():
-    """The observed failure: sim scored 0.67 on solo audio 19s away while the
-    track held silence across the backchannel and the other speaker after it."""
+    """Giả lập sim=0.67 trên solo cách 19 s nhưng track im lặng ở overlap."""
     rng = np.random.default_rng(0)
     n = int(0.34 * SR)
     host = (rng.standard_normal(n) * 0.12).astype(np.float32)
 
-    # Silent across the backchannel, the other speaker's tail at the end --
-    # the measured shape of the real failure (00046: 11 of 17 frames flat).
+    # Track im lặng phần lớn lời chen, chỉ có đuôi người khác ở cuối;
+    # trường hợp thực tế 00046 có 11/17 khung phẳng.
     bad = np.zeros(n, dtype=np.float32)
     tail = int(n * 0.72)
     bad[tail:] = rng.standard_normal(n - tail) * 0.08
     assert SeparationService._track_has_speech(host, bad) is False
-    # Whole-clip RMS is far above the silence threshold, which is why the
-    # existing gate let this through.
+    # RMS cả đoạn vẫn cao nên phép kiểm tra tổng năng lượng không bắt được lỗi.
     assert float(np.sqrt(np.mean(bad ** 2))) > 0.002
 
     good = (host * 0.5).astype(np.float32)
@@ -320,31 +310,26 @@ def test_qc_accepts_a_quieter_track_and_rejects_an_empty_one():
     host = (rng.standard_normal(n) * 0.15).astype(np.float32)
     assert SeparationService._track_has_speech(host, host * 0.08) is True
     assert SeparationService._track_has_speech(host, np.zeros(n, np.float32)) is False
-    # Nothing to preserve where the mixture is silent.
+    # Mixture im lặng thì không có lời cần giữ.
     z = np.zeros(n, dtype=np.float32)
     assert SeparationService._track_has_speech(z, z) is True
 
 
 def test_the_run_report_can_actually_be_built():
-    """It could not, and no test noticed for a whole change set.
-
-    _report_payload named BSS_MIN_SOLO, BSS_WINDOW_TARGET and BSS_WINDOW_MAX,
-    three constants deleted with the Sidon window strategy. Every test called
-    process_overlaps directly; only the pipeline calls this, and only after
-    separation finishes -- so the run reached the end of the separation stage
-    and died there with NameError, on both files, after 34 minutes."""
+    """Báo cáo phải dựng được sau separation; hằng số cửa sổ từng bị xóa
+    nhưng vẫn được tham chiếu, gây NameError sau khi chạy model rất lâu."""
     fake = FakeTSE()
     svc = SeparationService(fake, logger=None)
     svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
 
     payload = svc.report_payload()
     assert set(payload) >= {"thresholds", "music_map", "stats", "failures"}
-    assert payload["thresholds"]["window_target"] == 20.0
+    assert payload["thresholds"]["window_target"] == 15.0
+    assert payload["windows"]
 
 
 def test_no_module_reads_a_constant_nobody_defines():
-    """The static version of the same failure: a deleted constant that some
-    other line still names shows up only when that line runs."""
+    """Kiểm tra tĩnh để phát hiện tham chiếu hằng số không còn định nghĩa."""
     import ast
     import builtins
 
@@ -372,8 +357,7 @@ def test_no_module_reads_a_constant_nobody_defines():
                 elif isinstance(node, ast.arg):
                     bound.add(node.arg)
             for node in ast.walk(tree):
-                # Constants only: lowercase names are far more likely to be a
-                # false positive from a scope this walk does not model.
+                # Chỉ xét hằng số viết hoa để giảm báo nhầm do chưa mô phỏng phạm vi tên.
                 if (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
                         and node.id.isupper() and node.id not in bound):
                     dangling.append(f"{os.path.relpath(path, root)}:{node.lineno} {node.id}")
@@ -381,19 +365,10 @@ def test_no_module_reads_a_constant_nobody_defines():
 
 
 def test_no_identifier_names_a_processing_step_that_does_not_exist():
-    """No model here alters speech to improve it -- that was ruled out for this
-    corpus, because what a denoiser invents becomes training data for a
-    conversation that never happened.
-
-    The names said otherwise. A segment's audio was `enhanced_audio` on an
-    `EnhancedSegment`, which reads as a stage that does not exist, and did
-    mislead a reader into believing one did. It is a slice of the recording;
-    for an overlap it is the separated track. Neither improves anything.
-
-    Read through the parse tree, not the text: prose explaining why enhancement
-    is absent is the point of that prose, and a comment recording the old name
-    is how someone finds their way from an old checkpoint.
-    """
+    """Không đặt tên như thể pipeline có bước tái tạo/cải thiện giọng.
+    Âm thanh là bản ghi hoặc kết quả tách overlap, không phải giọng được
+    model sáng tạo lại. Duyệt AST để chỉ kiểm tra identifier; comment nhắc
+    tên cũ như EnhancedSegment vẫn cần cho việc đọc checkpoint cũ."""
     import ast
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -425,11 +400,9 @@ def test_no_identifier_names_a_processing_step_that_does_not_exist():
 
 
 def test_one_long_clip_is_preferred_over_a_patchwork():
-    """Measured on eight synthetic mixtures from this corpus: a single
-    continuous clip scores +8.39 dB SI-SDR improvement where the same clips
-    concatenated score +6.86. Crossfading the joins recovers almost none of it
-    (+6.94), so what the model loses is the continuity of a voice, not the
-    discontinuity at each join."""
+    """Mẫu liền mạch từng đạt +8.39 dB SI-SDR, so với +6.86 dB khi ghép và
+    +6.94 dB khi crossfade trên tám mixture thử nghiệm. Kiểm tra tiếp tục
+    ưu tiên mẫu dài đủ dùng thay vì chia thành nhiều mẩu."""
     import numpy as np
     from schemas.audio import AudioData
     from schemas.segment import Segment
@@ -441,7 +414,7 @@ def test_one_long_clip_is_preferred_over_a_patchwork():
     audio = AudioData(name="t", waveform=np.ones(120 * sr, dtype=np.float32),
                       sample_rate=sr, duration=120.0, audio_segment=None)
     segments = [
-        Segment(index="1", start=10.0, end=16.0, speaker="A"),   # 6s, alone enough
+        Segment(index="1", start=10.0, end=16.0, speaker="A"),   # Mẫu solo 6 s đủ dùng riêng
         Segment(index="2", start=20.0, end=21.0, speaker="A"),
         Segment(index="3", start=30.0, end=31.0, speaker="A"),
     ]
@@ -451,7 +424,7 @@ def test_one_long_clip_is_preferred_over_a_patchwork():
 
 
 def test_short_clips_are_still_gathered_when_none_is_long_enough():
-    """Too little speech is its own failure, and worse than a patchwork."""
+    """Nếu không có mẫu đủ dài, vẫn cần gom đủ lượng lời để đối chiếu."""
     import numpy as np
     from schemas.audio import AudioData
     from schemas.segment import Segment

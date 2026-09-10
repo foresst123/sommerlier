@@ -71,3 +71,6 @@ results/
 
 # Playwright MCP scratch output
 .playwright-mcp/
+
+# Thư viện dùng riêng để chạy kiểm thử trên máy này.
+.test-deps/

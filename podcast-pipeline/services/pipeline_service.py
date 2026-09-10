@@ -8,14 +8,13 @@ from utils.steps import LEGACY_FLAG, step_enabled
 from services.stage_output_service import StageOutputService
 from schemas.audio import AudioData
 
-# Above this share of a recording marked for removal, the map is not trusted:
-# a podcast that is mostly music is either mis-tagged or the wrong file, and
-# either way an empty waveform downstream is the worst possible answer.
+# Nếu tỷ lệ bản ghi bị đánh dấu xóa quá lớn, không tin bản đồ nhạc.
+# Có thể ngưỡng sai hoặc chọn nhầm file; không để toàn bộ âm thanh biến mất.
 CUT_SHARE_LIMIT = float(os.environ.get("MUSIC_CUT_SHARE_LIMIT", "0.60"))
 
 
 class PipelineService:
-    """Orchestrates the entire ASR pipeline using the defined services and Checkpoint mechanism."""
+    """Điều phối các dịch vụ xử lý âm thanh và lưu/khôi phục bằng checkpoint."""
     
     def __init__(self, 
                  audio_svc, 
@@ -39,43 +38,30 @@ class PipelineService:
         self.export_svc = export_svc
         self.logger = logger
         self.model_loader = model_loader
-        # {"diarizen": svc, "qwen3": svc, ...} so each worker's VRAM can be
-        # released as soon as its stage is done rather than at process exit.
+        # Ánh xạ tên sang dịch vụ worker để giải phóng VRAM ngay khi xong bước.
         self.worker_services = worker_services or {}
-        # The cut timeline this run works in, set once music analysis has
-        # decided what to remove. Empty means nothing was cut, which is also
-        # the right answer for a run that never reaches that stage.
+        # Timeline sau cắt nhạc. Rỗng nghĩa là chưa cắt phần nào của bản ghi.
         self.timeline = TimelineMap()
-        # Framewise non-speech noise, when the detector ran. None means the
-        # check did not happen -- not that the recording is clean.
+        # Bản đồ nhiễu ngoài lời nói theo khung. None nghĩa là chưa kiểm tra,
+        # không đồng nghĩa với bản ghi sạch.
         self.noise_track = None
-        # Non-None while a stage-major pass is running: model and worker
-        # releases collect here instead of firing at the end of each file.
+        # Khi chạy theo giai đoạn cho cả batch, gom các yêu cầu giải phóng tại đây.
         self.defer_free = None
         self.defer_workers = None
 
     def _load(self, group: str):
-        """Load one stage's models, at the point that stage runs.
-
-        Loading everything up front put DiariZen (5.15GB),
-        PhoWhisper, Whisper, Demucs and the captioner on the card before the
-        first stage had produced anything, so peak VRAM was the sum of every
-        model rather than the largest pair. Each loader is idempotent, so under
-        stage-major execution -- where this is reached once per file -- only the
-        first call pays for it.
-
-        A stage that loads from checkpoint never calls this, which is the point:
-        a resumed run does not pay for models it will not use.
-        """
+        """Chỉ tải model khi bắt đầu bước cần dùng.
+        Tải tất cả ngay đầu khiến VRAM phải chứa đồng thời DiariZen, Whisper,
+        PhoWhisper, Demucs và model caption. Loader có thể gọi lại an toàn nên
+        chạy theo giai đoạn chỉ trả chi phí tải ở lần đầu. Bước đọc checkpoint
+        không gọi hàm này và không tốn VRAM cho model không sử dụng."""
         if self.model_loader is None:
             return
         w = self.worker_services
 
-        # A stage's worker is started here, at the stage, not at the start of
-        # the run. main() also launches them up front so several warm up at
-        # once, but that is a prefetch and is allowed to fail quietly: this is
-        # the call that has to succeed, and it is made only by a stage that is
-        # actually running. A worker already up is a no-op.
+        # Bảo đảm worker đang chạy khi bước thực sự bắt đầu. main() có thể khởi
+        # động sớm để làm nóng, nhưng tại đây lỗi phải được báo; worker đang chạy
+        # thì không cần khởi động thêm.
         worker = self.WORKER_FOR_STAGE.get(group)
         if worker:
             self._ensure_worker(worker)
@@ -90,37 +76,28 @@ class PipelineService:
             "caption":     lambda: self.model_loader.load_caption_model(),
         }[group]()
 
-    # Which worker subprocess a stage needs before its models will load. The
-    # loader reads `service.process`, so a worker that has not started yet
-    # hands it None and the stage connects to nothing.
+    # Worker cần cho mỗi bước. Loader đọc service.process nên phải có tiến
+    # trình thật trước khi dựng client kết nối.
     WORKER_FOR_STAGE = {
         "diarization": "diarizen",
         "separation": "sidon",
         "asr": "qwen3",
     }
 
-    # A stage's switch in the profile, falling back to the flag that used to
-    # control it. The answer lives in utils.steps because the model loader has
-    # to reach the same verdict -- see the note there.
+    # Công tắc bước lấy từ profile, dự phòng bằng cờ cũ. Dùng chung utils.steps
+    # để model loader và pipeline có cùng quyết định.
     _LEGACY_FLAG = LEGACY_FLAG
 
     @classmethod
     def step_enabled(cls, args, name: str) -> bool:
-        """Whether `name` runs. Unlisted steps run, which is the old behaviour."""
+        """Kiểm tra bước có chạy không; bước không được liệt kê vẫn chạy như trước."""
         return step_enabled(args, name)
 
     def _free(self, args, *model_names):
-        """Unload finished models unless the caller asked to keep them.
-
-        --keep_models trades peak VRAM for reload time: worth it when several
-        files run back to back on a GPU with room for everything, wrong when
-        the models only fit because each stage releases the last.
-
-        Under stage-major execution the caller runs one stage across every file
-        before starting the next, so freeing here -- at the end of each file --
-        would drop the model the very next file is about to use. The names are
-        recorded instead and released once, when the stage finishes.
-        """
+        """Giải phóng model khi xong, trừ khi bật --keep_models.
+        Giữ model giảm thời gian tải lại nhưng tăng đỉnh VRAM. Khi chạy theo
+        giai đoạn, chờ xử lý hết file của bước hiện tại mới giải phóng, tránh
+        gỡ model ngay trước khi file tiếp theo cần nó."""
         if getattr(args, "keep_models", False) or not self.model_loader:
             return
         if self.defer_free is not None:
@@ -130,12 +107,12 @@ class PipelineService:
             self.model_loader.unload(name)
 
     def begin_stage_scope(self):
-        """Hold model releases until end_stage_scope(), for stage-major runs."""
+        """Hoãn giải phóng model đến end_stage_scope() khi chạy theo giai đoạn."""
         self.defer_free = set()
         self.defer_workers = set()
 
     def end_stage_scope(self):
-        """Release everything the stage deferred. Safe when no scope is open."""
+        """Giải phóng các model/worker đã hoãn; an toàn khi không có phạm vi mở."""
         names, workers = self.defer_free, self.defer_workers
         self.defer_free = None
         self.defer_workers = None
@@ -155,14 +132,9 @@ class PipelineService:
                     self.logger.warning(f"Failed to stop {worker} worker: {e}")
 
     def _release_worker(self, args, name: str):
-        """Stop a worker subprocess now that its stage is finished.
-
-        Honours --keep_models for the same reason _free does, and for a sharper
-        one: the workers are spawned once in main(), before the file loop, and
-        nothing spawns them again. Stopping one here without that guard leaves
-        every later file in the run without a worker to talk to -- invisible on
-        a single file, fatal from the second onwards.
-        """
+        """Dừng worker khi xong bước, tuân theo --keep_models.
+        File tiếp theo cần khởi động lại nếu worker đã dừng, nếu không client
+        sẽ trỏ vào tiến trình chết."""
         if getattr(args, "keep_models", False):
             return
         if self.defer_workers is not None:
@@ -180,11 +152,8 @@ class PipelineService:
                 self.logger.warning(f"Failed to stop {name} worker: {e}")
 
     def _rebind_worker(self, args, worker_name: str, service, attr: str):
-        """Restart `worker_name` if needed and hand the live process to its client.
-
-        No-op when the worker is still running, which is the --keep_models case
-        and the first file of any run.
-        """
+        """Khởi động lại worker nếu cần và gán tiến trình sống cho client hiện có.
+        Worker đang chạy thì không làm thêm."""
         if service is None or self.model_loader is None:
             return
         client = getattr(service, attr, None)
@@ -195,15 +164,9 @@ class PipelineService:
             client.process = process
 
     def _ensure_worker(self, name: str):
-        """Start `name` if it is not already running, and return its process.
-
-        Called from two places, for the same reason: a stage cannot talk to a
-        worker that is not up. _load calls it when the stage begins -- the
-        first time, or after --keep_models-off released it at the end of the
-        previous file -- and _rebind_worker calls it to hand the live process
-        to a client that already exists. Returns None when there is no such
-        worker, which is how an optional one stays optional.
-        """
+        """Khởi động worker chưa chạy và trả tiến trình của nó.
+        _load gọi khi bước bắt đầu; _rebind_worker dùng để cập nhật client đã có.
+        Trả None nếu bước không cấu hình worker riêng."""
         service = self.worker_services.get(name)
         if service is None:
             return None
@@ -215,10 +178,8 @@ class PipelineService:
             service.spawn()
             service.wait_ready()
         except Exception as e:
-            # Raised, not swallowed: the stage that asked for this worker is
-            # about to run and has nothing to run on. Returning None here made
-            # the loader build a client wired to no process, and the failure
-            # then surfaced as an empty result several steps later.
+            # Báo lỗi thay vì trả None: bước sắp chạy không thể dùng client thiếu
+            # worker. Nuốt lỗi ở đây từng dẫn đến đầu ra rỗng ở bước phía sau.
             if self.logger:
                 self.logger.error(f"Could not start the {name} worker: {e}")
             raise
@@ -226,18 +187,9 @@ class PipelineService:
 
 
     def _resolve_output_dir(self, args, audio_path: str) -> str:
-        """The single place that decides where one file's outputs live.
-
-        Every file gets its own directory, whether or not --save_path was given.
-        The old code only built a per-file path when save_path was left at the
-        literal default, so passing --save_path made a whole batch share one
-        directory -- and export_separated_audio, which names its files
-        "{index}_{speaker}_separated.wav" with an index that restarts at 00000
-        per audio, then overwrote the previous file's audio with no warning.
-
-        Returning a path that always ends in the audio's name is what keeps that
-        collision impossible: every later export is relative to this directory.
-        """
+        """Xác định duy nhất thư mục đầu ra riêng cho mỗi file.
+        Ngay cả khi có --save_path, vẫn thêm tên audio để các clip có chỉ số
+        bắt đầu lại từ 00000 không ghi đè kết quả của file trước trong batch."""
         audio_name = os.path.splitext(os.path.basename(audio_path))[0]
         save_path = getattr(args, "save_path", None) or "./output"
 
@@ -261,17 +213,15 @@ class PipelineService:
         return os.path.join(root, audio_name)
 
     def run(self, args: Any, config: dict, audio_path: str):
-        # Scope the checkpoint to this audio file. Sharing one job_id across a
-        # batch would make the second file load the first file's diarization and
-        # emit its transcript -- the checkpoint exists, so nothing recomputes.
-        # Resolved once, at the top: the separation dump needs it long before
-        # the export stage does, and computing it twice is how they drifted apart.
+        # Checkpoint phải gắn với từng file; dùng chung job_id có thể khiến file
+        # sau đọc diarization của file trước. Tính đường dẫn một lần để dữ liệu
+        # đối chiếu separation và đầu ra cuối luôn cùng thư mục.
         output_dir = self._resolve_output_dir(args, audio_path)
         if self.logger:
             self.logger.info(f"Outputs for this file: {output_dir}")
 
-        # Stage artifacts are written as each stage completes, so --stop_after
-        # and a mid-pipeline crash both leave the finished work on disk.
+        # Ghi kết quả ngay khi xong từng bước để --stop_after hoặc lỗi giữa chừng
+        # vẫn giữ được phần đã hoàn thành.
         stage_out = StageOutputService(
             output_dir, logger=self.logger,
             enabled=not getattr(args, "no_stage_output", False))
@@ -280,86 +230,69 @@ class PipelineService:
         job_id = f"{base_job}_{os.path.splitext(os.path.basename(audio_path))[0]}"
         cache_dir = getattr(args, "cache_dir", "cache")
         checkpoint = CheckpointManager(cache_dir, job_id)
+        # Separation mới làm thay đổi đầu vào ASR và các bước tiếp theo.
+        # Tách không gian lưu để cả chuỗi dùng cùng phiên bản, không xóa bản cũ.
+        window_version = getattr(self.separation_svc, "checkpoint_version", None)
+        if window_version:
+            checkpoint.namespaces = {
+                stage: window_version for stage in (
+                    "separation", "separation_report", "asr", "captioning", "refinement")}
 
-        # Services are constructed once and reused for every file in a batch.
+        # Các dịch vụ được tạo một lần rồi dùng lại cho mọi file trong batch.
         for svc in (self.separation_svc, self.refinement_svc):
             reset = getattr(svc, "reset_stats", None)
             if reset:
                 reset()
 
-        # Without --keep_models each stage releases its worker when it finishes,
-        # so a second file arrives with dead workers and they have to be
-        # restarted. Only the ones this call will actually reach, though:
-        # reviving all three at the top meant that by the refinement stage the
-        # diarizer (5.15GB) and the separator were both resident again, and
-        # the LLM hit OOM with 0.03GB free on a card that had just been emptied
-        # for it. A checkpointed stage does not need its worker at all.
+        # Nếu không giữ model, worker của file trước đã dừng và cần khởi động
+        # lại. Chỉ khởi động worker cho bước sẽ chạy; hồi sinh tất cả từng khiến
+        # LLM thiếu VRAM dù các bước trước đã giải phóng. Bước có checkpoint
+        # không cần worker riêng.
         if not checkpoint.exists("diarization"):
             self._rebind_worker(args, "diarizen", self.diarization_svc, "diarizer")
 
         if not checkpoint.exists("asr"):
             self._rebind_worker(args, "qwen3", self.asr_svc, "qwen3")
 
-        # The separator only needs a worker when the backend is out of process.
-        # An in-process one has no `process` to rebind and the call falls
-        # through on the None check, so this costs nothing there.
+        # Chỉ backend chạy ngoài tiến trình mới có worker cần gán lại.
         if not checkpoint.exists("separation"):
             self._rebind_worker(args, "sidon", self.separation_svc, "bss_model")
         
-        # 1. Audio Preprocessing
+        # 1. Chuẩn bị âm thanh
         audio_data = self.audio_svc.load_audio(audio_path, target_sr=24000)
         
-        # Stage artifacts are written once per file, not once per run() entry:
-        # under stage-major execution this method is re-entered per stage.
+        # Chỉ ghi dữ liệu đầu vào một lần mỗi file, không ghi lại ở từng lần
+        # run() khi chạy theo giai đoạn.
         computed_stages = set()
 
-        # 2. What is playing, before anything else looks at the audio.
-        #
-        # SSLAM labels each frame across all 527 AudioSet classes, and what
-        # the map does with that splits two ways: music with nobody talking is
-        # cut out of the recording, a music bed under speech is stripped and
-        # the speech kept, and clean speech is left alone -- which on this
-        # corpus is almost all of it.
-        #
-        # Swept first so that everything downstream sees the verdict:
-        # diarization segments cleaned audio, and separation's search for solo
-        # speech to enrol on can avoid the beds.
-        # The same sweep also reads the non-speech, non-music AudioSet groups.
-        # Nothing is removed for those: they mark segments so a dirty one can
-        # be left out of the corpus rather than repaired. Enhancement is
-        # deliberately not an option here -- see doc/audio-cleanliness.md.
+        # 2. Phân loại nội dung trước các bước xử lý khác.
+        # SSLAM đánh nhãn 527 lớp AudioSet: nhạc không có lời được cắt, nhạc nền
+        # được tách để giữ giọng, lời sạch giữ nguyên. Các bước sau dùng cùng
+        # quyết định này. Nhóm nhiễu khác chỉ được đánh dấu để lọc corpus,
+        # không tự sửa hay tái tạo giọng; xem doc/audio-cleanliness.md.
         if checkpoint.exists("music_map"):
             music_map = MusicMap.from_json(checkpoint.load("music_map"))
             self.noise_track = NoiseTrack.from_json(checkpoint.load("noise_track", fmt="json"))
         else:
             music_map = MusicMap()
             if self.step_enabled(args, "music_analysis"):
-                # The tagger only. The vocal separator is loaded below, and
-                # only when the map actually found a bed to strip.
+                # Chỉ tải model phân loại. Model tách nhạc sẽ tải nếu thực sự phát hiện nền.
                 self._load("tagger")
                 detector = self.model_loader.get("tagger") if self.model_loader else None
                 music_map, self.noise_track = build_maps(
                     audio_data.waveform, audio_data.sample_rate, detector,
                     logger=self.logger)
                 checkpoint.save("music_map", music_map.to_json())
-                # Kept in the ORIGINAL timeline, like the map it came from:
-                # provenance hands it original-time spans to score against.
+                # Giữ timeline GỐC vì bước truy nguồn cần chấm trên các khoảng thời gian gốc.
                 checkpoint.save("noise_track", self.noise_track.to_json(), fmt="json")
-        # Strip the beds now, so the diarizer -- and everything after it --
-        # works on audio without music under the speech.
-        #
-        # The result is cached as the replaced stretches rather than as the
-        # whole waveform. Under stage-major execution run() is re-entered once
-        # per stage and reloads the audio from disk each time, so the strip has
-        # to be re-applied on every entry or later stages would see the bed
-        # again; caching a 50-minute waveform to achieve that would cost
-        # ~290MB per file, while the stretches themselves are seconds.
+        # Tách nhạc nền trước diarization. Cache các lát được thay thế thay vì
+        # cả waveform dài. Mỗi lần run() đọc lại audio gốc phải áp các lát cache
+        # để mọi bước đều nhìn thấy cùng âm thanh đã bỏ nhạc.
         from utils.music_map import MUSIC
         if music_map.total_of(MUSIC) > 0 and self.step_enabled(args, "music_removal"):
             patches = checkpoint.load("music_patches")
             if patches is None:
-                # Loaded only now: the map found something, so the separator
-                # has work. A recording with no bed never pays for it.
+                # Chỉ tải model tách khi bản đồ đã tìm thấy vùng cần xử lý.
                 self._load("music")
                 self.music_svc.bs_roformer = (self.model_loader.get("bs_roformer")
                                          if self.model_loader else None)
@@ -374,23 +307,15 @@ class PipelineService:
                     self.logger.info(f"Re-applied {len(patches)} cached music "
                                      "patch(es) to the waveform")
 
-        # Cut the sung and standalone-music stretches out before anything else
-        # sees the audio. Marking them and letting later stages skip does not
-        # work: the diarizer still clusters on them and ASR still receives them,
-        # so song lyrics reach the transcript scored as dialogue.
-        #
-        # This shortens the recording, so every timestamp downstream is in the
-        # cut timeline and has to be translated back at export. The map is
-        # checkpointed for exactly that.
+        # Cắt phần hát/nhạc độc lập trước diarization và ASR để lời bài hát không
+        # lọt vào hội thoại. Timeline bị rút ngắn nên lưu ánh xạ để đổi về thời
+        # gian gốc lúc xuất.
         timeline = TimelineMap.from_json(checkpoint.load("timeline", fmt="json"))
         cuts = (music_map.excised_spans()
                 if self.step_enabled(args, "cut_music") else [])
 
-        # Refuse to cut away the recording. A tagger that calls most of a
-        # podcast music has gone wrong -- thresholds set too low, or a file
-        # that is genuinely music and does not belong in this corpus -- and
-        # deleting the audio would turn that into a run that produces nothing
-        # and says why only in a log line.
+        # Không cho phép xóa gần hết bản ghi. Bộ phân loại có thể đặt ngưỡng sai
+        # hoặc file không phù hợp; báo lỗi thay vì cho pipeline chạy trên âm thanh rỗng.
         if cuts:
             share = sum(b - a for a, b, _ in cuts) / max(audio_data.duration, 1e-9)
             if share > CUT_SHARE_LIMIT:
@@ -414,24 +339,13 @@ class PipelineService:
                     f"Cut {timeline.removed:.1f}s of standalone music from "
                     f"{len(cuts)} stretch(es); {audio_data.duration / 60:.1f} min remain")
         elif timeline:
-            # A later run() entry: the audio was reloaded whole, so re-cut it to
-            # match the timeline the earlier stages already worked in.
-            #
-            # The spans come from the timeline, not from the map. `cuts` is
-            # rebuilt on every entry out of thresholds that may have moved and
-            # a `cut_music` flag that may have been switched off since --
-            # and when it comes back empty, re-cutting with it leaves the audio
-            # whole while `self.timeline` still says it was shortened. Nothing
-            # downstream would notice: diarization would run on one timeline
-            # and every timestamp after the first cut would be read against
-            # another. The timeline is the record of what actually happened.
+            # Ở lần run() sau, cắt lại audio gốc theo timeline đã lưu, không theo
+            # bản đồ vừa tính bằng ngưỡng/cờ có thể đã đổi. Nếu không, audio và
+            # checkpoint diarization sẽ dùng hai hệ thời gian khác nhau.
             replay = timeline.removed_spans(audio_data.duration)
             if self.logger:
-                # Both sides have to be merged before they can be compared.
-                # `cuts` is the raw span list and the music map pads each kind
-                # separately, so overlapping spans are counted twice in it --
-                # which made this warn on every ordinary re-entry, naming a
-                # difference that was only the overlap.
+                # Hợp các khoảng trước khi so sánh; padding riêng từng loại nhạc có thể
+                # làm các khoảng giao nhau và khiến tổng thô bị đếm lặp.
                 from utils.excise import _merge
                 wanted = sum(b - a for a, b in _merge([(a, b) for a, b, _ in cuts]))
                 have = sum(b - a for a, b in replay)
@@ -447,25 +361,16 @@ class PipelineService:
             audio_data.duration = len(trimmed) / float(audio_data.sample_rate)
         self.timeline = timeline
 
-        # The tagger is done: the map is built and the beds are stripped, and
-        # nothing later in the run asks it anything.
-        #
-        # Released here, at the end of the stage that used it. The release
-        # used to sit at the end of the per-segment music pass much further
-        # down, which under stage-major execution was never reached: the run
-        # finishes this stage for every file and leaves for diarization. The
-        # tagger then sat on VRAM for the rest of the run, on a card that has
-        # to hold DiariZen, the embedder, TSE and ASR after it.
+        # Đã phân loại và tách nhạc xong: giải phóng model tại đây để không giữ
+        # VRAM suốt các bước DiariZen, embedding, separation và ASR phía sau.
         self._free(args, "tagger")
 
-        # Everything after the cut works in the shortened timeline, so the map
-        # separation consults has to move with it.
+        # Sau khi cắt, bản đồ nhạc cũng phải chuyển sang timeline đã rút ngắn.
         self.separation_svc.music_map = (music_map.remap(timeline) if timeline
                                          else music_map)
-        # The joins the cut left behind. Separation widens its mixture windows
-        # and must not reach across one.
+        # Separation không được mở rộng cửa sổ xuyên các mối nối do cắt.
         self.separation_svc.timeline = timeline
-        # Diarization needs them too, to keep a segment from straddling a join.
+        # Diarization cũng cần mối nối để không tạo segment vượt qua chúng.
         self.diarization_svc.timeline = timeline
 
         if "music" not in computed_stages:
@@ -480,12 +385,9 @@ class PipelineService:
                                       "stopped_after": "music"})
             return None
 
-        # 3. Diarization (with VAD & Chunking)
-        # Stage artifacts are written only when a stage actually computes.
-        # Under stage-major execution run() is re-entered once per stage, so a
-        # later stage re-reads every earlier checkpoint; rewriting their output
-        # each time re-emitted the same JSON, the same clips and the same
-        # warnings four times over for a single file.
+        # 3. Phân đoạn người nói, VAD và chia khối.
+        # Chỉ ghi artifact khi thực sự tính toán. Chạy theo giai đoạn sẽ đọc lại
+        # checkpoint nhiều lần; ghi lại mỗi lần sẽ lặp JSON, clip và cảnh báo.
         computed = set()
 
         diarization_result = None
@@ -524,13 +426,13 @@ class PipelineService:
                                       "stopped_after": "diarization"})
             return None
             
-        # 4. Speech Separation (Overlap)
+        # 4. Tách giọng tại vùng overlap
         speech_segments = None
         if not self.step_enabled(args, "separation"):
             if self.logger:
                 self.logger.info("Step 'separation' is off in the profile; skipping")
-            # Even when separation is off, downstream stages need
-            # SpeechSegments. Passthrough wraps raw diarization segments.
+            # Dù tắt separation, các bước sau vẫn cần SpeechSegment;
+            # passthrough bọc segment diarization với âm thanh gốc.
             if diarization_result is not None:
                 if checkpoint.exists("separation"):
                     speech_segments = checkpoint.load("separation")
@@ -546,9 +448,8 @@ class PipelineService:
             try:
                 speech_segments = checkpoint.load("separation")
             except (AttributeError, ModuleNotFoundError) as exc:
-                # A checkpoint pickled before EnhancedSegment was renamed names
-                # a class that no longer exists. Recomputing is cheap next to
-                # leaving the operator with an unreadable traceback.
+                # Checkpoint trước khi đổi tên EnhancedSegment tham chiếu lớp không còn.
+                # Cần tính lại bước thay vì để lỗi pickle khó đọc tới người vận hành.
                 if self.logger:
                     self.logger.warning(
                         f"Separation checkpoint predates a rename ({exc}); "
@@ -574,9 +475,8 @@ class PipelineService:
             stage_out.write_separated_audio(speech_segments, audio_data.sample_rate)
 
         self._free(args, "separator", "embedder")
-        # The worker holds the separator's weights on the same card DiariZen
-        # and ASR need next, and nothing after this stage speaks to it. A run
-        # on the in-process backend never spawned one, so this is a no-op there.
+        # Worker giữ trọng số separator trên GPU mà ASR sắp cần; dừng sau bước
+        # này. Backend trong cùng tiến trình không có worker nên không cần làm gì.
         self._release_worker(args, "sidon")
 
         if getattr(args, "stop_after", None) == "separation":
@@ -585,15 +485,10 @@ class PipelineService:
                                       "stopped_after": "separation"})
             return None
             
-        # There is no per-segment music pass any more. It ran here, after
-        # diarization, on each segment in turn -- and once the sweep moved to
-        # the front of the run the waveform reaching this point had already had
-        # its beds stripped whole-file, so the pass spent its time confirming
-        # that. It gated itself off whenever a music map existed, which on any
-        # ordinary run was always, leaving a stage that could only fire when
-        # the stage it duplicated had been switched off.
+        # Không còn tách nhạc theo từng segment ở đây. Bước quét và bỏ nhạc đã
+        # chuyển lên đầu để diarization và các bước sau cùng dùng âm thanh sạch.
 
-        # 5. ASR Ensemble (MoE)
+        # 5. Nhận dạng lời nói bằng tổ hợp ASR (MoE)
         transcripts = None
         if not self.step_enabled(args, "asr"):
             if self.logger:
@@ -623,7 +518,7 @@ class PipelineService:
                                       "stopped_after": "asr"})
             return transcripts
             
-        # 6. Qwen3-Omni Captioning
+        # 6. Mô tả âm thanh bằng Qwen3-Omni
         if not self.step_enabled(args, "captioning"):
             if self.logger:
                 self.logger.info("Step 'captioning' is off in the profile; skipping")
@@ -645,7 +540,7 @@ class PipelineService:
                                       "stopped_after": "captioning"})
             return transcripts
                 
-        # 7. LLM Refinement
+        # 7. Hiệu chỉnh bằng LLM
         if not self.step_enabled(args, "refinement"):
             if self.logger:
                 self.logger.info("Step 'refinement' is off in the profile; skipping")
@@ -670,7 +565,7 @@ class PipelineService:
                 self.refinement_svc.unload()
 
         
-        # 8. Export Results
+        # 8. Xuất kết quả
         save_path = output_dir
         os.makedirs(save_path, exist_ok=True)
         base_name = os.path.splitext(os.path.basename(audio_path))[0]
@@ -693,11 +588,8 @@ class PipelineService:
             if self.logger: self.logger.info(f"Pipeline completed successfully. Results saved to {save_path}")
             return transcripts
 
-        # Everything above ran in the cut timeline. Write down what that
-        # corresponds to in the recording as delivered before anything leaves
-        # this process: the timestamps in the export are otherwise unusable for
-        # going back to the source, and the gaps between turns are unusable for
-        # measuring turn taking without knowing which ones a join broke.
+        # Các bước trên dùng timeline đã cắt. Ghi ánh xạ về bản ghi nguồn trước
+        # khi xuất để truy lại timestamp và phân biệt khoảng nghỉ thật với mối nối.
         from utils.provenance import annotate as annotate_provenance, summary as provenance_summary
         annotate_provenance(transcripts, self.timeline,
                             noise=getattr(self, "noise_track", None))
@@ -723,8 +615,8 @@ class PipelineService:
             "bss_enabled": getattr(args, "bss", False),
             "llm_refinement": getattr(args, "llm_refinement", False),
             "qwen3omni_caption": getattr(args, "qwen3omni", False),
-            # Timestamps in `segments` are in the cut timeline; `orig_spans` on
-            # each segment is the same audio in this file's own clock.
+            # Timestamp của segments thuộc timeline đã cắt; orig_spans ánh xạ về
+            # các khoảng tương ứng trong file gốc.
             "timeline": self.timeline.to_json() if self.timeline else None,
             "provenance": provenance,
         }

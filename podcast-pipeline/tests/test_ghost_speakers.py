@@ -1,15 +1,8 @@
-"""Two fixes for overlaps that separation refused for the wrong reason.
-
-On one 41-minute two-person podcast, eleven of thirteen unseparable overlaps
-traced back to a single cause: the diarizer emitted a third speaker holding 3.2
-seconds across the whole recording. That speaker was never in any overlap, but
-
-  * it could not be enrolled (under 1.5s of clean audio), and
-  * it fell inside the *window* of a merged job, which was tested for a third
-    voice and rejected.
-
-Run:  python -m pytest tests/test_ghost_speakers.py -q     (from podcast-pipeline/)
-"""
+"""Kiểm thử xử lý nhãn speaker giả và ghi nhận overlap không cần tách.
+Trường hợp cũ trên podcast 41 phút có nhãn thứ ba chỉ chiếm 3.2 s;
+nhãn này làm thiếu mẫu và khiến cửa sổ bị từ chối. Các kiểm thử bảo vệ
+việc phân biệt nhãn giả với người ít nói thật.
+Chạy: python -m pytest tests/test_ghost_speakers.py -q"""
 import os
 import sys
 
@@ -29,11 +22,11 @@ def _shares(segments):
     return held
 
 
-# --- dissolving a ghost -----------------------------------------------------
+# --- Hợp nhãn speaker giả -------------------------------------------------
 
 def test_a_three_second_speaker_in_an_hour_is_dissolved():
-    """The case this was written for, at the measured proportions."""
-    # The real proportions: 2.3s of ghost against ~41 minutes of conversation.
+    """Tái hiện tỷ lệ thời lượng của trường hợp đã đo."""
+    # Nhãn giả có 2.3 s trên khoảng 41 phút hội thoại.
     segments = ([_seg(i * 10.0, i * 10.0 + 8.0, "1") for i in range(250)]
                 + [_seg(i * 10.0 + 8.0, i * 10.0 + 9.5, "2") for i in range(250)]
                 + [_seg(100.1, 101.3, "0"), _seg(102.2, 103.3, "0")])
@@ -60,18 +53,18 @@ def test_total_speech_time_is_unchanged():
     assert abs(before - after) < 1e-9
 
 
-# --- and not dissolving anyone else -----------------------------------------
+# --- Không hợp nhầm người thật --------------------------------------------
 
 def test_a_quiet_but_real_participant_is_left_alone():
-    """Someone who speaks little still holds whole turns; a ghost holds scraps."""
+    """Người ít nói vẫn có lượt trọn vẹn; nhãn giả thường chỉ có mẩu rất ngắn."""
     segments = ([_seg(i * 10.0, i * 10.0 + 8.0, "1") for i in range(30)]
                 + [_seg(i * 10.0 + 8.0, i * 10.0 + 9.5, "2") for i in range(30)]
-                + [_seg(500.0, 512.0, "3")])          # one 12s turn
+                + [_seg(500.0, 512.0, "3")])          # Một lượt dài 12 s
     assert "3" in _shares(merge_ghost_speakers(segments))
 
 
 def test_two_speakers_are_never_reduced_to_one():
-    """With two speakers the quieter one is a participant, however quiet."""
+    """Chỉ có hai người thì người nói ít vẫn là thành viên hội thoại."""
     segments = [_seg(0.0, 600.0, "1"), _seg(600.0, 600.9, "2")]
     assert set(_shares(merge_ghost_speakers(segments))) == {"1", "2"}
 
@@ -85,7 +78,7 @@ def test_an_empty_list_is_returned_as_is():
     assert merge_ghost_speakers([]) == []
 
 
-# --- the window test that rejected two-speaker overlaps ---------------------
+# --- Kiểm tra người thứ ba trong cửa sổ -----------------------------------
 
 def _service():
     import services.separation_service as sep
@@ -101,15 +94,12 @@ def _service():
 
 
 
-# --- overlaps that need no separation still have to be recorded -------------
+# --- Overlap không cần tách vẫn phải được ghi nhận -------------------------
 
 def test_a_speaker_overlapping_themselves_is_recorded_not_dropped():
-    """Merging a ghost into a neighbour turns its overlaps into same-speaker ones.
-
-    There is nothing to separate -- one voice is already one source -- but the
-    invariant is that every overlap lands in bss_spans or bss_failed_spans.
-    Before this, _group_jobs skipped the pair with a bare `continue`.
-    """
+    """Hợp nhãn giả với người bên cạnh có thể tạo overlap cùng speaker.
+    Không cần tách hai nguồn nhưng phải ghi bss_spans hoặc bss_failed_spans;
+    không được continue rồi mất dấu vùng đó."""
     import numpy as np
 
     from schemas.audio import AudioData
@@ -139,12 +129,8 @@ def test_a_speaker_overlapping_themselves_is_recorded_not_dropped():
 
 
 def test_fusing_sorts_before_merging():
-    """An unsorted list must not lose entries.
-
-    The merge compares each pair with the last kept one, so out of order it
-    silently drops whatever precedes its predecessor -- losing an overlap
-    rather than failing.
-    """
+    """Nhóm phải sắp xếp trước để danh sách đầu vào lộn thứ tự không làm mất
+    các overlap xuất hiện sớm hơn."""
     import services.separation_service as sep
 
     def pair(start, end):
@@ -152,6 +138,7 @@ def test_fusing_sorts_before_merging():
                 "overlap_duration": end - start,
                 "seg1": {"speaker": "1"}, "seg2": {"speaker": "2"}}
 
-    fused = sep.SeparationService._fuse_adjacent([pair(5.0, 5.2), pair(1.0, 1.2)])
+    fused = [job[2][0] for job in sep.SeparationService()._group_jobs(
+        [pair(5.0, 5.2), pair(1.0, 1.2)])]
     assert len(fused) == 2
     assert fused[0]["overlap_start"] == 1.0
