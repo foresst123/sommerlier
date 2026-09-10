@@ -1,0 +1,76 @@
+vi_audio_final/*
+sommerlier14-8*
+vi_audio_output(2) copy
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+qwen3_env/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+# *.ipynb
+
+# Project specific caches and outputs
+.cache/
+cache/
+podcast-pipeline/cache/
+podcast-pipeline/output/
+output/
+*_opus_cache/
+*.pkl
+checkpoint_*.pkl
+processed_folders_log.txt
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+offline_weights
+download_offline_weights.sh
+vi_audio_output
+test_dir
+vi_audio_output(2)
+vi_audio_output copy
+test_env
+tmp
+# Result dumps pulled back from a run: kaggle/, "kaggle 2", "kaggle 3", ...
+# One pattern rather than a line per download -- a space in a pattern is a
+# literal character, so "kaggle *" never matched anything.
+kaggle*/
+new_data_run/
+
+# A/B listening samples generated to check the spectral EQ by ear. Audio,
+# regenerated on demand from the run output -- never source.
+podcast-pipeline/eq_samples/
+
+# Same idea for the inpainting comparison: tools/try_inpaint.py --dump writes
+# mixture/sidon/bridge per span so the two methods can be judged by ear.
+podcast-pipeline/inpaint_samples/
+
+# PANNs raw dumps: binary, regenerable with tools/dump_panns.py
+data/panns/*.npz
+data/panns/*.csv
+
+# Kết quả chạy tải về: nặng (review HTML ~107MB/file) và có repo lồng bên trong
+results/
+
+# Playwright MCP scratch output
+.playwright-mcp/
+
+# Thư viện dùng riêng để chạy kiểm thử trên máy này.
+.test-deps/

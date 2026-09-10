@@ -1,0 +1,38 @@
+{
+  "audio": "/Users/lam/Documents/sommelier/sommerlier/kaggle/working/vi_audio/thu_that_thach_10m.mp3",
+  "duration_seconds": 599.99,
+  "sample_rate": 16000,
+  "frames": 59998,
+  "rows_stored": 1875,
+  "row_seconds": 0.32,
+  "fps_advertised": 100.0,
+  "block_frames": 32,
+  "block_spread_max": 0.0,
+  "lossless_block_reduction": true,
+  "labels": 527,
+  "dtype": "float16",
+  "scale_applied": 0.901798,
+  "file_mb": 1.46,
+  "thresholds": {
+    "music_threshold": 0.1,
+    "singing_threshold": 0.35,
+    "singing_margin": 0.15,
+    "speech_present": 0.2,
+    "min_span_seconds": 0.3,
+    "merge_gap_seconds": 0.5,
+    "pad_seconds": 0.3
+  },
+  "group_seconds": {
+    "speech": 376.94,
+    "singing": 0.0,
+    "music": 9.28,
+    "noise_speech": 0.0,
+    "noise_env": 0.0,
+    "noise_room": 0.0
+  },
+  "flag_seconds": {
+    "is_singing": 0.0,
+    "is_song": 9.92,
+    "is_music": 0.32
+  }
+}

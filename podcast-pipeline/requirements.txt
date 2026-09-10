@@ -1,0 +1,56 @@
+numpy==2.2.2
+torch==2.8.0
+torchaudio==2.8.0
+torchvision==0.23.0
+lightning==2.4.0
+torchmetrics==1.6.2
+onnxruntime-gpu==1.19.2
+# nemo-toolkit[asr]==2.2.0
+# Removed: it is imported by models/sortformer.py alone, and that module's
+# import in services/model_loader.py is commented out -- nothing loads it. It
+# also made this file unsatisfiable: nemo 2.2.0 requires numba==0.61.0 while
+# librosa/whisperx here want 0.61.2, so `uv pip install -r` failed outright.
+# Re-enabling Sortformer means installing nemo alongside, and pinning numba to
+# whatever that build of nemo wants.
+pyannote.audio==4.0.7
+speechbrain==1.0.2
+faster-whisper==1.2.0
+whisperx==3.8.6
+ctranslate2==4.5.0
+
+# BS-RoFormer for vocal isolation. The checkpoint is models.bs_roformer.model in
+# the profile; the windowing knobs beside it are passed through as mdxc_params.
+# Checkpoints are pulled from UVR (not the HF hub) on first use, so an offline
+# run needs download_offline_weights.py and BS_ROFORMER_MODEL_DIR.
+audio-separator>=0.47.0
+librosa==0.10.2.post1
+soundfile==0.13.1
+pydub==0.25.1
+julius==0.2.7
+numba==0.61.2
+transformers==4.53.0
+# SSLAM's remote code builds its ViT through timm; without it the
+# checkpoint loads and then dies on the first forward pass.
+timm==1.0.29
+accelerate>=0.30.0
+# transformers 4.53, pyannote.audio 4.0.7 and whisperx 3.8.6 all require >=0.30
+huggingface-hub==0.33.4
+diffusers>=0.31.0
+g2pk
+jamo
+nltk==3.9.1
+openai==1.63.0
+tritony==0.0.20
+tritonclient[grpc,http]
+pandas==2.2.3
+PyYAML==6.0.2
+tqdm==4.67.1
+wandb==0.19.6
+requests==2.32.4
+einops==0.8.1
+hydra-core==1.3.2
+omegaconf==2.3.0
+yt-dlp
+setuptools==75.0.0
+sacrebleu
+git+https://github.com/BUTSpeechFIT/DiariZen.git

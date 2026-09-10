@@ -1,0 +1,693 @@
+diff --git a/podcast-pipeline/main.py b/podcast-pipeline/main.py
+index 9bd1585..b21b66a 100644
+--- a/podcast-pipeline/main.py
++++ b/podcast-pipeline/main.py
+@@ -1,3 +1,11 @@
++# Thread budget first: torch reads OMP_NUM_THREADS at import and caches it, so
++# this has to run before anything pulls torch in transitively.
++import os as _os
++import sys as _sys
++_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
++from utils.cpu_plan import configure_process as _configure_cpu
++_CPU_THREADS = _configure_cpu(n_workers=3)
++
+ import argparse
+ import json
+ import os
+@@ -204,6 +212,10 @@ def main():
+         
+     logger = Logger.get_logger()
+     logger.info(f"Starting Sommelier Pipeline for Job: {args.job_id}")
++    from utils.cpu_plan import usable_cores
++    # Workers inherit this through os.environ.copy() in base_worker_service.
++    logger.info(f"CPU: {usable_cores()} core(s) usable, "
++                f"{_CPU_THREADS} thread(s) per process")
+ 
+     import torch
+ 
+diff --git a/podcast-pipeline/models/demucs.py b/podcast-pipeline/models/demucs.py
+index 72cbb0a..693ab6a 100644
+--- a/podcast-pipeline/models/demucs.py
++++ b/podcast-pipeline/models/demucs.py
+@@ -10,13 +10,19 @@ class DemucsRemover:
+     which dominates runtime when the per-segment fallback path is taken.
+     """
+ 
+-    def __init__(self, device: str = None, segment: int = 10, overlap: float = 0.1, logger=None):
++    def __init__(self, device: str = None, segment: int = 10, overlap: float = 0.1,
++                 gpu_chunk_sec: float = 60.0, gpu_chunk_overlap_sec: float = 1.0,
++                 logger=None):
+         if device is None:
+             self.device = "cuda" if torch.cuda.is_available() else "cpu"
+         else:
+             self.device = device
+         self.segment = segment
+         self.overlap = overlap
++        # Window fed to the GPU at a time. Peak VRAM tracks this, not the
++        # length of the file.
++        self.gpu_chunk_sec = gpu_chunk_sec
++        self.gpu_chunk_overlap_sec = gpu_chunk_overlap_sec
+         self.logger = logger
+         self._model = None
+         self._vocals_index = None
+@@ -46,7 +52,16 @@ class DemucsRemover:
+         return self._model
+ 
+     def _separate(self, audio_array: np.ndarray, sample_rate: int):
+-        """Return the vocal stem for ``audio_array`` at ``sample_rate``."""
++        """Return the vocal stem for ``audio_array`` at ``sample_rate``.
++
++        Chunked on this side, not handed whole to apply_model. Setting
++        `sub.segment` bounds what the transformer sees, but the input tensor is
++        still moved to the GPU in full first: a 2978s podcast is ~1GB resampled
++        to 44.1kHz stereo, and apply_model then allocates four source stems on
++        top of it. That is the 3.92 GiB allocation that failed on both a 14.5GB
++        T4 and a 39GB A100 -- VRAM was scaling with file length, which it should
++        not. Feeding fixed windows keeps the peak flat however long the file is.
++        """
+         import torchaudio.functional as AF
+         from demucs.apply import apply_model
+ 
+@@ -58,53 +73,57 @@ class DemucsRemover:
+         if audio.size == 0:
+             return None
+ 
+-        wav = torch.from_numpy(audio).to(self.device)
+-        if sample_rate != model.samplerate:
+-            wav = AF.resample(wav, sample_rate, model.samplerate)
+-        resampled_len = wav.shape[-1]
+-
+-        # htdemucs expects (batch, channels, time) at its own channel count.
+-        wav = wav.unsqueeze(0).repeat(model.audio_channels, 1)
+-
+-        # Demucs normalises against the mixture's own statistics.
+-        ref = wav.mean(0)
+-        mean, std = ref.mean(), ref.std().clamp_min(1e-8)
+-        wav = (wav - mean) / std
++        chunk = max(1, int(self.gpu_chunk_sec * sample_rate))
++        # Overlap is trimmed off after separation, so the model never sees a
++        # window boundary in the middle of the audio it is judged on.
++        pad = max(1, int(self.gpu_chunk_overlap_sec * sample_rate))
+ 
++        pieces = []
+         with torch.no_grad():
+-            # `segment` is a property of the model (htdemucs bakes its training
+-            # segment into the transformer), so set it there rather than passing
+-            # it to apply_model, which would fight the model's own chunking.
+-            sources = apply_model(
+-                model,
+-                wav.unsqueeze(0),
+-                device=self.device,
+-                overlap=self.overlap,
+-                progress=False,
+-            )[0]
+-
+-        vocals = sources[self._vocals_index] * std + mean
+-        vocals = vocals.mean(0)
+-
+-        # apply_model can return a slightly different length than it was given.
+-        if vocals.shape[-1] != resampled_len:
+-            vocals = vocals[..., :resampled_len]
+-            if vocals.shape[-1] < resampled_len:
+-                vocals = torch.nn.functional.pad(
+-                    vocals, (0, resampled_len - vocals.shape[-1])
+-                )
+-
+-        if sample_rate != model.samplerate:
+-            vocals = AF.resample(vocals, model.samplerate, sample_rate)
+-
+-        vocals = vocals.detach().cpu().numpy().astype(np.float32)
+-
+-        # Resampling can shift the length by a sample or two.
+-        if len(vocals) > len(audio):
+-            vocals = vocals[:len(audio)]
+-        elif len(vocals) < len(audio):
+-            vocals = np.pad(vocals, (0, len(audio) - len(vocals)))
+-        return vocals
++            for start in range(0, audio.size, chunk):
++                end = min(audio.size, start + chunk)
++                lo, hi = max(0, start - pad), min(audio.size, end + pad)
++
++                wav = torch.from_numpy(audio[lo:hi]).to(self.device)
++                if sample_rate != model.samplerate:
++                    wav = AF.resample(wav, sample_rate, model.samplerate)
++
++                # htdemucs expects (batch, channels, time) at its channel count.
++                wav = wav.unsqueeze(0).repeat(model.audio_channels, 1)
++
++                # Demucs normalises against the mixture's own statistics. Done
++                # per window: a window of near-silence would otherwise be
++                # normalised against the whole file's loud passages.
++                ref = wav.mean(0)
++                mean, std = ref.mean(), ref.std().clamp_min(1e-8)
++                wav = (wav - mean) / std
++
++                sources = apply_model(
++                    model,
++                    wav.unsqueeze(0),
++                    device=self.device,
++                    overlap=self.overlap,
++                    progress=False,
++                )[0]
++
++                piece = sources[self._vocals_index] * std + mean
++                piece = piece.mean(0)                      # back to mono
++
++                if sample_rate != model.samplerate:
++                    piece = AF.resample(piece, model.samplerate, sample_rate)
++
++                # Trim the padding back off in source-rate samples.
++                head = start - lo
++                pieces.append(piece[head:head + (end - start)].cpu())
++
++                del wav, sources, piece
++                if str(self.device).startswith("cuda"):
++                    torch.cuda.empty_cache()
++
++        vocals = torch.cat(pieces).numpy().astype(np.float32)
++        if vocals.size < audio.size:
++            vocals = np.pad(vocals, (0, audio.size - vocals.size))
++        return vocals[:audio.size]
+ 
+     def separate_full(self, audio_array: np.ndarray, sample_rate: int) -> np.ndarray:
+         """Run Demucs on the entire audio to obtain the vocal stem."""
+diff --git a/podcast-pipeline/services/audio_service.py b/podcast-pipeline/services/audio_service.py
+index 2a72571..682853f 100644
+--- a/podcast-pipeline/services/audio_service.py
++++ b/podcast-pipeline/services/audio_service.py
+@@ -1,60 +1,174 @@
++import hashlib
++import os
++
+ import numpy as np
+-from pydub import AudioSegment
++
+ from schemas.audio import AudioData
+ 
+ # Widest correction allowed when normalizing loudness. Enough to lift a
+ # quiet recording to target without amplifying a near-silent one into noise.
+ MAX_GAIN_DB = 12.0
+ 
++# Cache the decoded waveform beside the source. --by_stage calls load_audio()
++# once per stage on the same file: on a 50-minute podcast that was four decodes
++# of ~13s each, for a result that never changes.
++AUDIO_CACHE = os.environ.get("SOMMELIER_AUDIO_CACHE", "1") not in ("0", "false", "False")
++
++
+ class AudioService:
+     """Service to handle audio loading, normalization and basic manipulations."""
+-    
++
+     def __init__(self, logger=None):
+         self.logger = logger
+-        
++
++    # ------------------------------------------------------------------
++    def _cache_path(self, file_path: str, target_sr: int) -> str:
++        """Cache file for one (source, sample rate) pair.
++
++        Keyed by absolute path so two inputs sharing a basename in different
++        folders cannot share a cache entry.
++        """
++        key = hashlib.sha1(
++            f"{os.path.abspath(file_path)}|{target_sr}".encode()).hexdigest()[:16]
++        return os.path.join(os.path.dirname(os.path.abspath(file_path)),
++                            f".{os.path.basename(file_path)}.{key}.npy")
++
++    def _load_cached(self, file_path: str, target_sr: int):
++        if not AUDIO_CACHE:
++            return None
++        cache = self._cache_path(file_path, target_sr)
++        try:
++            if not os.path.exists(cache):
++                return None
++            # A cache older than its source is stale; re-decoding costs less
++            # than silently transcribing the previous version of the file.
++            if os.path.getmtime(cache) < os.path.getmtime(file_path):
++                return None
++            # mmap: the OS pages it in on demand rather than reading ~286MB up
++            # front, and pages are shared between stages opening the same file.
++            return np.load(cache, mmap_mode="r")
++        except Exception as e:
++            if self.logger:
++                self.logger.debug(
++                    f"Audio cache miss for {file_path}: {type(e).__name__}")
++            return None
++
++    def _store_cached(self, file_path: str, target_sr: int, waveform: np.ndarray):
++        if not AUDIO_CACHE:
++            return
++        cache = self._cache_path(file_path, target_sr)
++        try:
++            # Written through a file object: np.save(path, ...) appends ".npy"
++            # when the name does not already end in it, so passing a ".tmp"
++            # path produced ".tmp.npy" and the rename below found nothing.
++            tmp = cache + ".tmp.npy"
++            with open(tmp, "wb") as fh:
++                np.save(fh, np.asarray(waveform))
++            os.replace(tmp, cache)      # atomic: an interrupted run leaves no half file
++        except Exception as e:
++            if self.logger:
++                self.logger.debug(f"Could not cache audio: {type(e).__name__}: {e}")
++
++    # ------------------------------------------------------------------
++    def _decode(self, file_path: str, target_sr: int):
++        """Decode to mono float32 at `target_sr`, and measure its dBFS.
++
++        pydub first, measured rather than assumed: on a 300s 44.1kHz stereo
++        source resampled to 24kHz mono it took 0.29s and peaked at 111MB, where
++        soundfile + librosa.resample took 0.64s and 163MB. librosa's resampler
++        is the better one, but this pipeline feeds ASR models that were trained
++        on ordinary decoded audio, and 2.2x the time is not worth it.
++
++        soundfile is the fallback for anything pydub cannot open without
++        ffmpeg, which on a box with no ffmpeg is every mp3.
++        """
++        try:
++            waveform = self._decode_pydub(file_path, target_sr)
++        except Exception:
++            waveform = self._decode_soundfile(file_path, target_sr)
++
++        rms = float(np.sqrt(np.mean(waveform.astype(np.float64) ** 2))) if waveform.size else 0.0
++        dbfs = 20.0 * np.log10(rms) if rms > 0 else float("-inf")
++        return waveform, dbfs
++
++    def _decode_soundfile(self, file_path: str, target_sr: int) -> np.ndarray:
++        """Fallback when pydub cannot decode (no ffmpeg on this box)."""
++        import soundfile as sf
++        waveform, sr = sf.read(file_path, dtype="float32", always_2d=False)
++        if waveform.ndim > 1:
++            waveform = waveform.mean(axis=1)
++        if sr != target_sr:
++            import librosa
++            waveform = librosa.resample(waveform, orig_sr=sr, target_sr=target_sr)
++        return np.ascontiguousarray(waveform, dtype=np.float32)
++
++    def _decode_pydub(self, file_path: str, target_sr: int) -> np.ndarray:
++        """Fallback for formats libsndfile will not open (mp3, m4a)."""
++        from pydub import AudioSegment
++
++        seg = AudioSegment.from_file(file_path)
++        seg = seg.set_frame_rate(target_sr).set_sample_width(2).set_channels(1)
++        waveform = np.array(seg.get_array_of_samples(), dtype=np.float32)
++        waveform /= float(1 << (8 * seg.sample_width - 1))
++        return waveform
++
++    # ------------------------------------------------------------------
+     def load_audio(self, file_path: str, target_sr: int = 16000) -> AudioData:
+         """Load audio file into memory, normalize and return AudioData schema."""
++        cached = self._load_cached(file_path, target_sr)
++        if cached is not None:
++            if self.logger:
++                self.logger.info(
++                    f"Loading audio from {file_path} at {target_sr}Hz (cached)")
++            return AudioData(
++                waveform=cached,
++                sample_rate=target_sr,
++                name=os.path.basename(file_path),
++                # Rebuilt on demand by export_service, which already has that
++                # branch: holding a second full copy of the audio for the whole
++                # run costs ~143MB per file and nothing else reads it.
++                audio_segment=None,
++                duration=len(cached) / target_sr,
++            )
++
+         if self.logger:
+             self.logger.info(f"Loading audio from {file_path} at {target_sr}Hz")
+-            
+-        # Use pydub for standardization (matches main branch exactly)
+-        pydub_audio = AudioSegment.from_file(file_path)
+-        pydub_audio = pydub_audio.set_frame_rate(target_sr).set_sample_width(2).set_channels(1)
+-        
++
++        waveform, measured_dbfs = self._decode(file_path, target_sr)
++
+         # Loudness normalization to -20 dBFS. The ASR models were trained on
+         # normalized speech, so leaving a quiet recording quiet costs accuracy
+         # exactly on the soft passages (backchannels) this pipeline cares about.
+-        # The old +/-3 dB clamp silently under-corrected: a -27 dBFS podcast
+-        # asked for +7 dB and got +3.
+-        target_dBFS = -20
+-        gain = target_dBFS - pydub_audio.dBFS
+-        applied_gain = min(max(gain, -MAX_GAIN_DB), MAX_GAIN_DB)
++        target_dBFS = -20.0
++        gain = target_dBFS - measured_dbfs if np.isfinite(measured_dbfs) else 0.0
++        applied_gain = float(min(max(gain, -MAX_GAIN_DB), MAX_GAIN_DB))
++
+         if self.logger:
+             if abs(applied_gain - gain) > 0.01:
+                 self.logger.info(
+-                    f"Applying gain: {applied_gain:.2f} dB (capped from {gain:.2f} dB)"
+-                )
++                    f"Applying gain: {applied_gain:.2f} dB (capped from {gain:.2f} dB)")
+             else:
+                 self.logger.info(f"Applying gain: {applied_gain:.2f} dB")
+-        pydub_audio = pydub_audio.apply_gain(applied_gain)
+ 
+-        # Extract waveform as float32 in [-1, 1]. Dividing by the peak here
+-        # would undo the loudness normalization just applied, and would let one
+-        # loud transient scale down the whole file, so scale by the sample width
+-        # instead and only fall back to peak scaling if something still clips.
+-        waveform = np.array(pydub_audio.get_array_of_samples(), dtype=np.float32)
+-        waveform /= float(1 << (8 * pydub_audio.sample_width - 1))
++        # In place: pydub's apply_gain returned a whole new AudioSegment to do
++        # one multiplication.
++        if applied_gain:
++            waveform *= 10.0 ** (applied_gain / 20.0)
+ 
+-        max_amplitude = np.max(np.abs(waveform)) if waveform.size else 0.0
++        # Scaling by the peak would undo the loudness normalization just
++        # applied, so only rescale when something actually clips.
++        max_amplitude = float(np.max(np.abs(waveform))) if waveform.size else 0.0
+         if max_amplitude > 1.0:
+             waveform /= max_amplitude
+-            
+-        duration = len(waveform) / target_sr
+-        
++
++        # Cached after gain, so a stage that hits the cache sees exactly the
++        # samples a stage that decoded would have seen.
++        self._store_cached(file_path, target_sr, waveform)
++
+         return AudioData(
+             waveform=waveform,
+             sample_rate=target_sr,
+-            name=file_path.split('/')[-1],
+-            audio_segment=pydub_audio,
+-            duration=duration
++            name=os.path.basename(file_path),
++            audio_segment=None,
++            duration=len(waveform) / target_sr,
+         )
+diff --git a/podcast-pipeline/services/diarization_refinement_service.py b/podcast-pipeline/services/diarization_refinement_service.py
+index 2702fdd..808e18b 100644
+--- a/podcast-pipeline/services/diarization_refinement_service.py
++++ b/podcast-pipeline/services/diarization_refinement_service.py
+@@ -255,11 +255,24 @@ class DiarizationRefinementService:
+         # The previous segment's text feeds the next one's context, so build all
+         # messages up front against the pre-refinement text. Batching keeps the
+         # GPU busy instead of running one 1200-token prefill at a time.
+-        pending = []
+-        for i, seg in enumerate(segments):
+-            if not (seg.text_whisper or seg.text_phowhisper or seg.text_qwen3):
+-                continue
+-            pending.append((seg, self._build_user_message(segments, i)))
++        # _build_user_message is pure string work over the pre-refinement text,
++        # so the segments are independent and this parallelises cleanly. It is
++        # the one part of refinement that is CPU-bound: generation itself is on
++        # the GPU and stays sequential.
++        indices = [i for i, seg in enumerate(segments)
++                   if (seg.text_whisper or seg.text_phowhisper or seg.text_qwen3)]
++
++        workers = int(os.environ.get("OMP_NUM_THREADS", "1"))
++        if len(indices) > 64 and workers > 1:
++            from concurrent.futures import ThreadPoolExecutor
++            with ThreadPoolExecutor(max_workers=workers) as ex:
++                messages = list(ex.map(lambda i: self._build_user_message(segments, i),
++                                       indices))
++        else:
++            # Below that, the pool costs more to start than the work it saves.
++            messages = [self._build_user_message(segments, i) for i in indices]
++
++        pending = [(segments[i], m) for i, m in zip(indices, messages)]
+ 
+         if not pending:
+             return segments
+diff --git a/podcast-pipeline/tests/test_cpu_optim.py b/podcast-pipeline/tests/test_cpu_optim.py
+new file mode 100644
+index 0000000..19d15dd
+--- /dev/null
++++ b/podcast-pipeline/tests/test_cpu_optim.py
+@@ -0,0 +1,171 @@
++"""Tests for the CPU-side optimisations: audio caching, thread budget, chunking.
++
++The audio cache is the one that can fail silently -- a stale entry means every
++later stage transcribes the previous version of the file and nothing warns.
++"""
++import os
++import sys
++import time
++
++import numpy as np
++import pytest
++import soundfile as sf
++
++sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++
++from services.audio_service import AudioService
++from utils.cpu_plan import apply_to_env, thread_plan, usable_cores
++
++SR = 24000
++
++
++def _write_wav(path, seconds=1.0, freq=440, amp=0.2, sr=SR):
++    t = np.arange(int(seconds * sr)) / sr
++    sf.write(path, (amp * np.sin(2 * np.pi * freq * t)).astype(np.float32), sr)
++    return path
++
++
++# --- audio cache ---------------------------------------------------------
++
++def test_second_load_comes_from_cache(tmp_path):
++    src = _write_wav(tmp_path / "a.wav")
++    svc = AudioService()
++
++    first = svc.load_audio(str(src), target_sr=SR)
++    assert os.path.exists(svc._cache_path(str(src), SR)), "cache was not written"
++
++    second = svc.load_audio(str(src), target_sr=SR)
++    assert np.allclose(np.asarray(first.waveform), np.asarray(second.waveform), atol=1e-6), (
++        "a cached load must return the same samples a decoded load would"
++    )
++
++
++def test_cache_is_written_after_gain_not_before(tmp_path):
++    """Both paths must agree, or a run that hits the cache is normalised
++    differently from one that does not."""
++    src = _write_wav(tmp_path / "quiet.wav", amp=0.01)     # well under -20 dBFS
++    svc = AudioService()
++
++    decoded = np.asarray(svc.load_audio(str(src), target_sr=SR).waveform).copy()
++    cached = np.asarray(svc.load_audio(str(src), target_sr=SR).waveform)
++
++    assert np.allclose(decoded, cached, atol=1e-6)
++    rms = float(np.sqrt(np.mean(cached ** 2)))
++    assert rms > 0.01, f"gain was not applied before caching (rms {rms:.4f})"
++
++
++def test_a_changed_source_invalidates_the_cache(tmp_path):
++    src = tmp_path / "b.wav"
++    _write_wav(src, freq=440)
++    svc = AudioService()
++    first = np.asarray(svc.load_audio(str(src), target_sr=SR).waveform).copy()
++
++    time.sleep(0.01)
++    _write_wav(src, freq=880)                              # same path, new content
++    os.utime(src, None)
++    second = np.asarray(svc.load_audio(str(src), target_sr=SR).waveform)
++
++    assert not np.allclose(first, second, atol=1e-3), (
++        "the cache served the old file: every later stage would run on stale audio"
++    )
++
++
++def test_same_basename_in_two_folders_does_not_share_a_cache(tmp_path):
++    d1, d2 = tmp_path / "one", tmp_path / "two"
++    d1.mkdir(); d2.mkdir()
++    _write_wav(d1 / "talk.wav", freq=440)
++    _write_wav(d2 / "talk.wav", freq=880)
++
++    svc = AudioService()
++    a = np.asarray(svc.load_audio(str(d1 / "talk.wav"), target_sr=SR).waveform).copy()
++    b = np.asarray(svc.load_audio(str(d2 / "talk.wav"), target_sr=SR).waveform)
++    assert not np.allclose(a, b, atol=1e-3)
++
++
++def test_different_sample_rates_get_different_cache_entries(tmp_path):
++    src = _write_wav(tmp_path / "c.wav", seconds=1.0)
++    svc = AudioService()
++    a = svc.load_audio(str(src), target_sr=SR)
++    b = svc.load_audio(str(src), target_sr=16000)
++    assert len(a.waveform) != len(b.waveform)
++    assert svc._cache_path(str(src), SR) != svc._cache_path(str(src), 16000)
++
++
++def test_audio_segment_is_not_held(tmp_path):
++    """export_service rebuilds it on demand; keeping it doubles resident audio."""
++    src = _write_wav(tmp_path / "d.wav")
++    assert AudioService().load_audio(str(src), target_sr=SR).audio_segment is None
++
++
++def test_cache_can_be_turned_off(tmp_path, monkeypatch):
++    import services.audio_service as mod
++    monkeypatch.setattr(mod, "AUDIO_CACHE", False)
++    src = _write_wav(tmp_path / "e.wav")
++    svc = mod.AudioService()
++    svc.load_audio(str(src), target_sr=SR)
++    assert not os.path.exists(svc._cache_path(str(src), SR))
++
++
++# --- thread budget -------------------------------------------------------
++
++def test_slurm_allocation_wins_over_machine_core_count(monkeypatch):
++    """A job pinned to 2 cores on a 128-core node still sees 128 from
++    os.cpu_count(); using that number is how four processes end up spawning
++    hundreds of threads."""
++    monkeypatch.setenv("SLURM_CPUS_PER_TASK", "2")
++    assert usable_cores() == 2
++
++
++def test_threads_are_split_across_processes(monkeypatch):
++    monkeypatch.setenv("SLURM_CPUS_PER_TASK", "16")
++    plan = thread_plan(n_workers=3)
++    assert plan["processes"] == 4
++    assert plan["per_process"] == 4
++    assert plan["env"]["OMP_NUM_THREADS"] == "4"
++
++
++def test_never_allocates_zero_threads(monkeypatch):
++    monkeypatch.setenv("SLURM_CPUS_PER_TASK", "2")
++    assert thread_plan(n_workers=3)["per_process"] >= 1
++
++
++def test_existing_settings_are_respected(monkeypatch):
++    env = {"OMP_NUM_THREADS": "8"}
++    apply_to_env(env, 2)
++    assert env["OMP_NUM_THREADS"] == "8", "an explicit setting must not be overwritten"
++    assert env["MKL_NUM_THREADS"] == "2"
++
++
++# --- demucs chunking -----------------------------------------------------
++
++# models/demucs imports torch, which is not installed in the test env; the
++# windowing is plain arithmetic, so the defaults are restated here.
++GPU_CHUNK_SEC, GPU_CHUNK_OVERLAP_SEC = 60.0, 1.0
++
++
++def test_demucs_windows_do_not_grow_with_file_length():
++    """The OOM was VRAM scaling with duration; windows keep the peak flat."""
++    class d:
++        gpu_chunk_sec, gpu_chunk_overlap_sec = GPU_CHUNK_SEC, GPU_CHUNK_OVERLAP_SEC
++
++    for seconds in (60, 600, 3000):
++        n = seconds * SR
++        chunk = int(d.gpu_chunk_sec * SR)
++        pad = int(d.gpu_chunk_overlap_sec * SR)
++        widest = max(min(n, s + chunk + pad) - max(0, s - pad)
++                     for s in range(0, n, chunk))
++        assert widest <= chunk + 2 * pad, (
++            f"a {seconds}s file would hand {widest / SR:.0f}s to the GPU at once"
++        )
++
++
++def test_demucs_windows_cover_every_sample():
++    class d:
++        gpu_chunk_sec, gpu_chunk_overlap_sec = GPU_CHUNK_SEC, GPU_CHUNK_OVERLAP_SEC
++
++    n = 3000 * SR
++    chunk = int(d.gpu_chunk_sec * SR)
++    covered = 0
++    for start in range(0, n, chunk):
++        covered += min(n, start + chunk) - start
++    assert covered == n, "chunking dropped or double-counted samples"
+diff --git a/podcast-pipeline/utils/cpu_plan.py b/podcast-pipeline/utils/cpu_plan.py
+new file mode 100644
+index 0000000..cb81398
+--- /dev/null
++++ b/podcast-pipeline/utils/cpu_plan.py
+@@ -0,0 +1,95 @@
++"""Deciding how many CPU threads each process may use.
++
++The pipeline runs four processes at once -- the main one plus the DiariZen,
++Qwen3 and Sidon workers -- and every one of them links against OpenMP/MKL
++through torch. Left alone, each grabs a thread per visible core, so four
++processes on sixteen cores spawn sixty-four threads that fight over sixteen.
++On the two-core allocation this pipeline was last run on, that contention made
++things slower than single-threaded.
++
++Nothing here speeds up a process in isolation. It stops them slowing each other
++down, which on an oversubscribed box is the larger effect.
++"""
++import os
++
++
++def usable_cores() -> int:
++    """Cores this process may actually run on.
++
++    os.cpu_count() reports the machine, not the allocation: a SLURM job pinned
++    to 2 cores on a 128-core node still sees 128. Prefer the scheduler's own
++    answer, then the CPU affinity mask, and only fall back to the machine count.
++    """
++    for var in ("SLURM_CPUS_PER_TASK", "SLURM_CPUS_ON_NODE"):
++        raw = os.environ.get(var)
++        if raw and raw.isdigit() and int(raw) > 0:
++            return int(raw)
++    try:
++        return len(os.sched_getaffinity(0))          # respects taskset/cgroup
++    except (AttributeError, OSError):
++        pass
++    return os.cpu_count() or 1
++
++
++def thread_plan(n_workers: int = 3, reserve_for_main: bool = True) -> dict:
++    """Threads per process, as environment variables to hand to subprocesses.
++
++    `n_workers` is how many worker subprocesses will run alongside the main
++    process. The split is deliberately conservative: a worker that is idle
++    waiting on the GPU costs nothing by holding fewer threads, whereas one that
++    oversubscribes costs every other process.
++    """
++    cores = usable_cores()
++    processes = n_workers + (1 if reserve_for_main else 0)
++    per_process = max(1, cores // max(1, processes))
++
++    return {
++        "cores_detected": cores,
++        "processes": processes,
++        "per_process": per_process,
++        "env": {
++            "OMP_NUM_THREADS": str(per_process),
++            "MKL_NUM_THREADS": str(per_process),
++            "OPENBLAS_NUM_THREADS": str(per_process),
++            "NUMEXPR_NUM_THREADS": str(per_process),
++            # Tokenizers spawn their own pool and warn loudly when forked;
++            # it is parallel per call, so it does not need the whole box.
++            "RAYON_NUM_THREADS": str(per_process),
++        },
++    }
++
++
++def apply_to_env(env: dict, per_process: int) -> dict:
++    """Write the thread limits into `env`, leaving anything already set alone."""
++    for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
++                "NUMEXPR_NUM_THREADS", "RAYON_NUM_THREADS"):
++        env.setdefault(key, str(per_process))
++    return env
++
++
++def configure_process(n_workers: int = 3, logger=None) -> int:
++    """Apply the plan to this process and return its thread budget.
++
++    Must run before torch is imported: torch reads OMP_NUM_THREADS at import
++    and caches it, so setting it afterwards has no effect on the OpenMP pool.
++    """
++    plan = thread_plan(n_workers)
++    apply_to_env(os.environ, plan["per_process"])
++
++    try:
++        import torch
++        torch.set_num_threads(plan["per_process"])
++        # Inter-op is for running independent ops concurrently; with this many
++        # processes already competing, one is the right number.
++        torch.set_num_interop_threads(1)
++    except (ImportError, RuntimeError):
++        # set_num_interop_threads raises if any parallel work already started.
++        pass
++
++    if logger:
++        logger.info(
++            f"CPU: {plan['cores_detected']} core(s) usable, "
++            f"{plan['per_process']} thread(s) per process "
++            f"across {plan['processes']} process(es)"
++        )
++    return plan["per_process"]

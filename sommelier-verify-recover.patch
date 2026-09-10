@@ -1,0 +1,646 @@
+diff --git a/podcast-pipeline/services/verification_service.py b/podcast-pipeline/services/verification_service.py
+new file mode 100644
+index 0000000..272590f
+--- /dev/null
++++ b/podcast-pipeline/services/verification_service.py
+@@ -0,0 +1,160 @@
++"""Verify what separation produced, and recover when it made things worse.
++
++The pipeline's QC gate decides whether to splice at all, using ECAPA similarity
++on solo regions. That answers "is this the right speaker", not "is this audio
++better than what we had". A resynthesising separator can hand back a track that
++is unmistakably the right speaker and still be worse input for ASR: level jumps
++at the splice, VAE artefacts, low-frequency junk, or interference that was never
++actually removed.
++
++This module runs after splicing and asks the second question, per span:
++
++    did BAK improve?   (DNSMOS background-intrusiveness: is the other speaker
++                        quieter than in the mixture -- a reference-free stand-in
++                        for SIR, which needs ground truth we do not have)
++    did SIG survive?   (speech quality: did resynthesis cost more than the
++                        interference removal gained)
++
++and picks one of three outcomes: keep, blend, or revert. Blending exists because
++all-or-nothing throws away partial wins -- a track with the interferer 6dB down
++but some vocoder roughness is often better ASR input at alpha=0.6 than either
++the raw mixture or the full separation.
++
++DNSMOS is optional: pass `scorer=None` and the level/DC repairs still run, which
++are worth having on their own.
++"""
++import numpy as np
++
++# Keep the separated track when the background got at least this much quieter
++# and speech quality did not fall further than the tolerance. Both are MOS
++# points on DNSMOS's 1-5 scale. NOT CALIBRATED -- see docs/ note below.
++VERIFY_BAK_GAIN = 0.15
++VERIFY_SIG_DROP = 0.30
++VERIFY_BLEND_ALPHA = 0.6
++
++HIGHPASS_HZ = 60.0
++
++
++def rms(x: np.ndarray) -> float:
++    if x.size == 0:
++        return 0.0
++    return float(np.sqrt(np.mean(x.astype(np.float64) ** 2) + 1e-12))
++
++
++def remove_dc(x: np.ndarray) -> np.ndarray:
++    """Strip the DC offset a VAE decoder can leave behind.
++
++    A constant offset is inaudible but shifts every frame's energy, which moves
++    VAD boundaries and log-mel features that ASR front-ends compute.
++    """
++    if x.size == 0:
++        return x
++    return (x - np.mean(x)).astype(np.float32)
++
++
++def highpass(x: np.ndarray, sr: int, cutoff: float = HIGHPASS_HZ) -> np.ndarray:
++    """One-pole high-pass. Generative decoders leave rumble below the voice band
++    that carries no information but does move the energy statistics ASR uses."""
++    if x.size < 2:
++        return x
++    dt = 1.0 / sr
++    rc = 1.0 / (2.0 * np.pi * cutoff)
++    a = rc / (rc + dt)
++    out = np.empty_like(x, dtype=np.float32)
++    out[0] = x[0]
++    prev_x, prev_y = x[0], x[0]
++    for i in range(1, x.size):
++        y = a * (prev_y + x[i] - prev_x)
++        out[i] = y
++        prev_x, prev_y = x[i], y
++    return out
++
++
++def restore_gain(track: np.ndarray, track_sum: np.ndarray, mixture: np.ndarray,
++                 max_gain_db: float = 12.0) -> np.ndarray:
++    """Undo Sidon's per-chunk peak normalisation with a single common gain.
++
++    Sidon normalises every 20s chunk by its own peak, so the returned tracks sit
++    at an arbitrary level and a spliced span lands several dB away from the
++    audio around it. ASR front-ends read that seam as an event.
++
++    The gain is derived from the SUM of both separated tracks against the
++    mixture, not from this track against its neighbours. Matching a track to the
++    audio beside it would drag a backchannel -- naturally 10-20dB below the main
++    speaker -- up to the main speaker's level, destroying exactly the relative
++    dynamics the recording had. One common gain fixes the chunk normalisation
++    while leaving the two speakers' relative levels alone.
++
++    Clamped so a near-silent track cannot be amplified into noise.
++    """
++    r_sum, r_mix = rms(track_sum), rms(mixture)
++    if r_sum < 1e-8 or r_mix < 1e-8:
++        return np.asarray(track, dtype=np.float32)
++    limit = 10.0 ** (max_gain_db / 20.0)
++    gain = float(np.clip(r_mix / r_sum, 1.0 / limit, limit))
++    return (np.asarray(track, dtype=np.float32) * gain).astype(np.float32)
++
++
++def blend(separated: np.ndarray, original: np.ndarray, alpha: float) -> np.ndarray:
++    """alpha=1 keeps the separation, alpha=0 keeps the mixture."""
++    n = min(len(separated), len(original))
++    a = float(np.clip(alpha, 0.0, 1.0))
++    return (a * separated[:n] + (1.0 - a) * original[:n]).astype(np.float32)
++
++
++def decide(before: dict, after: dict,
++           bak_gain: float = VERIFY_BAK_GAIN,
++           sig_drop: float = VERIFY_SIG_DROP) -> tuple:
++    """Choose keep / blend / revert from DNSMOS scores.
++
++    Returns (action, detail).
++    """
++    d_bak = after["BAK"] - before["BAK"]
++    d_sig = after["SIG"] - before["SIG"]
++    detail = f"dBAK={d_bak:+.2f} dSIG={d_sig:+.2f}"
++
++    if d_bak < bak_gain:
++        # The interferer is no quieter than in the mixture. Whatever the track
++        # is, it is not a separation, so the artefacts buy nothing.
++        return "revert", detail + " (no interference removed)"
++    if d_sig < -sig_drop:
++        # Interference did drop, but resynthesis cost more speech quality than
++        # the gain is worth at full strength.
++        return "blend", detail + " (quality cost too high for full strength)"
++    return "keep", detail
++
++
++def verify_span(separated: np.ndarray, original: np.ndarray, sr: int,
++                scorer=None, other_track: np.ndarray = None,
++                alpha: float = VERIFY_BLEND_ALPHA):
++    """Repair, score and choose for one spliced span.
++
++    `scorer(audio, sr) -> {"SIG":..., "BAK":..., "OVRL":...}`; None skips scoring
++    and keeps the repaired separation.
++    `other_track` is the separator's OTHER output over the same span; passing it
++    lets the common gain be derived from both tracks against the mixture. Without
++    it the gain falls back to this track alone, which is right for a dominant
++    speaker and wrong for a quiet backchannel.
++    """
++    audio = highpass(remove_dc(np.asarray(separated, dtype=np.float32)), sr)
++    if other_track is not None and len(other_track):
++        n = min(len(audio), len(other_track))
++        audio = restore_gain(audio, audio[:n] + np.asarray(other_track[:n], dtype=np.float32), original)
++    else:
++        audio = restore_gain(audio, audio, original)
++
++    if scorer is None:
++        return audio, "keep", "no scorer"
++
++    try:
++        before, after = scorer(original, sr), scorer(audio, sr)
++    except Exception as e:
++        # A scorer failure must not lose the separation; fall through to keep.
++        return audio, "keep", f"scorer failed: {type(e).__name__}"
++
++    action, detail = decide(before, after)
++    if action == "revert":
++        return np.asarray(original, dtype=np.float32), action, detail
++    if action == "blend":
++        return blend(audio, original, alpha), action, detail
++    return audio, action, detail
+diff --git a/podcast-pipeline/tests/test_bss_metrics.py b/podcast-pipeline/tests/test_bss_metrics.py
+new file mode 100644
+index 0000000..4038279
+--- /dev/null
++++ b/podcast-pipeline/tests/test_bss_metrics.py
+@@ -0,0 +1,66 @@
++"""Sanity checks for the SI-SDR/SIR/SAR implementation in tools/eval_separation.py.
++
++No audio, no models: these pin the maths against signals whose answer is known.
++"""
++import os
++import sys
++
++import numpy as np
++
++sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
++
++from eval_separation import _align, bss_metrics
++
++
++def _sources(n=24000, seed=0):
++    rng = np.random.default_rng(seed)
++    return rng.normal(0, 1, n), rng.normal(0, 1, n)
++
++
++def test_perfect_separation_reports_a_ceiling_not_nan():
++    s1, s2 = _sources()
++    sdr, sir, sar = bss_metrics(s1.copy(), s1, s2)
++    assert sdr > 50 and sir > 50 and sar > 50
++    assert not any(np.isnan([sdr, sir, sar]))
++
++
++def test_metrics_are_scale_invariant():
++    s1, s2 = _sources()
++    a = bss_metrics(s1.copy(), s1, s2)
++    b = bss_metrics(3.0 * s1, s1, s2)
++    assert np.allclose(a, b, atol=0.1), "a gain change must not move the score"
++
++
++def test_leakage_lowers_sir_monotonically():
++    s1, s2 = _sources()
++    sirs = [bss_metrics(s1 + k * s2, s1, s2)[1] for k in (0.05, 0.1, 0.5)]
++    assert sirs[0] > sirs[1] > sirs[2]
++
++
++def test_emitting_the_wrong_speaker_is_caught_by_sir_not_sar():
++    """Sidon's known failure mode: a clean copy of the wrong speaker.
++
++    SAR stays high because nothing was invented; only SIR exposes it. A quality
++    check that reads SAR alone would call this a success.
++    """
++    s1, s2 = _sources()
++    sdr, sir, sar = bss_metrics(s2.copy(), s1, s2)
++    assert sir < -20, f"SIR {sir:.1f} should be strongly negative"
++    assert sar > 50, f"SAR {sar:.1f} stays high: no artefacts, just the wrong source"
++
++
++def test_invented_audio_lowers_sar():
++    s1, s2 = _sources()
++    noise = np.random.default_rng(7).normal(0, 1, len(s1))
++    assert bss_metrics(noise, s1, s2)[2] < 0
++
++
++def test_alignment_recovers_a_decoder_time_shift():
++    s1, s2 = _sources()
++    shifted = np.concatenate([np.zeros(120), s1[:-120]])
++    before = bss_metrics(shifted, s1, s2)[0]
++    after = bss_metrics(_align(shifted, s1, 240), s1, s2)[0]
++    assert before < 0 < after, (
++        f"5ms of decoder latency scored {before:.1f}dB unaligned and {after:.1f}dB "
++        "aligned; without alignment SI-SDR punishes latency as separation error"
++    )
+diff --git a/podcast-pipeline/tests/test_verification.py b/podcast-pipeline/tests/test_verification.py
+new file mode 100644
+index 0000000..3125d01
+--- /dev/null
++++ b/podcast-pipeline/tests/test_verification.py
+@@ -0,0 +1,134 @@
++"""Tests for post-separation verification and repair.
++
++No models: DNSMOS is injected as a callable, so the decision logic and the
++signal repairs are pinned without a GPU.
++"""
++import os
++import sys
++
++import numpy as np
++
++sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++
++from services.verification_service import (
++    blend, decide, highpass, remove_dc, restore_gain, rms, verify_span,
++)
++
++SR = 24000
++
++
++def _tone(freq, n=SR, amp=0.2, sr=SR):
++    t = np.arange(n) / sr
++    return (amp * np.sin(2 * np.pi * freq * t)).astype(np.float32)
++
++
++def _scorer(sig, bak):
++    return lambda audio, sr: {"SIG": sig, "BAK": bak, "OVRL": (sig + bak) / 2}
++
++
++# --- repairs -------------------------------------------------------------
++
++def test_dc_offset_is_removed():
++    x = _tone(200) + 0.05
++    assert abs(np.mean(remove_dc(x))) < 1e-6
++
++
++def test_highpass_attenuates_rumble_and_keeps_voice():
++    rumble, voice = _tone(20, amp=0.5), _tone(300, amp=0.5)
++    out = highpass(rumble + voice, SR)
++    kept = rms(highpass(voice, SR)) / rms(voice)
++    killed = rms(highpass(rumble, SR)) / rms(rumble)
++    assert kept > 0.8, f"voice band lost {1 - kept:.0%}"
++    assert killed < kept / 2, f"rumble {killed:.2f} vs voice {kept:.2f}"
++
++
++def test_common_gain_restores_the_mixture_level():
++    """Sidon peak-normalises each 20s chunk, so both tracks come back at an
++    arbitrary level and the spliced seam becomes a step change."""
++    loud, quiet = _tone(300, amp=0.20), _tone(700, amp=0.02)
++    mixture = loud + quiet
++    # The separator returns both at 1/4 of the original level.
++    sep_loud, sep_quiet = loud * 0.25, quiet * 0.25
++    out = restore_gain(sep_loud, sep_loud + sep_quiet, mixture)
++    assert abs(rms(out) - rms(loud)) / rms(loud) < 0.05
++
++
++def test_a_quiet_backchannel_keeps_its_relative_level():
++    """The point of one common gain: matching the quiet track to its loud
++    neighbour would drag a backchannel up to the main speaker's level."""
++    loud, quiet = _tone(300, amp=0.20), _tone(700, amp=0.02)
++    mixture = loud + quiet
++    sep_loud, sep_quiet = loud * 0.25, quiet * 0.25
++    out = restore_gain(sep_quiet, sep_loud + sep_quiet, mixture)
++    ratio = rms(out) / rms(loud)
++    assert 0.05 < ratio < 0.15, (
++        f"backchannel came back at {ratio:.2f} of the main speaker; it started "
++        "at 0.10 and must not be normalised up to match it"
++    )
++
++
++def test_gain_will_not_amplify_near_silence():
++    silence = np.zeros(SR, dtype=np.float32) + 1e-9
++    out = restore_gain(silence, silence, _tone(300, amp=0.2))
++    assert np.abs(out).max() < 0.01, "an empty track must not be gained up into noise"
++
++
++def test_gain_is_clamped():
++    tiny = _tone(300, amp=0.001)
++    out = restore_gain(tiny, tiny, _tone(300, amp=0.5), max_gain_db=12.0)
++    assert rms(out) / rms(tiny) <= 10 ** (12.0 / 20.0) + 1e-3
++
++
++def test_blend_endpoints():
++    a, b = _tone(300), _tone(700)
++    assert np.allclose(blend(a, b, 1.0), a)
++    assert np.allclose(blend(a, b, 0.0), b)
++    assert np.allclose(blend(a, b, 0.5), 0.5 * a + 0.5 * b, atol=1e-6)
++
++
++# --- decision ------------------------------------------------------------
++
++def test_clear_improvement_is_kept():
++    action, _ = decide({"SIG": 3.0, "BAK": 2.0}, {"SIG": 3.0, "BAK": 3.5})
++    assert action == "keep"
++
++
++def test_no_interference_removed_reverts():
++    """The separator returned something, but the other speaker is just as loud.
++    Whatever artefacts came with it bought nothing."""
++    action, detail = decide({"SIG": 3.0, "BAK": 3.0}, {"SIG": 2.6, "BAK": 3.0})
++    assert action == "revert", detail
++
++
++def test_big_quality_cost_blends_instead_of_all_or_nothing():
++    action, detail = decide({"SIG": 3.5, "BAK": 2.0}, {"SIG": 2.6, "BAK": 3.4})
++    assert action == "blend", detail
++
++
++# --- orchestration -------------------------------------------------------
++
++def test_verify_span_reverts_to_the_original_audio():
++    sep, orig = _tone(700, amp=0.2), _tone(300, amp=0.2)
++    scores = iter([{"SIG": 3.0, "BAK": 3.0}, {"SIG": 2.9, "BAK": 3.0}])
++    out, action, _ = verify_span(sep, orig, SR, scorer=lambda a, s: next(scores))
++    assert action == "revert"
++    assert np.allclose(out, orig), "revert must return the mixture untouched"
++
++
++def test_verify_span_without_a_scorer_still_repairs():
++    sep = _tone(300, amp=0.05) + 0.05          # quiet and DC-shifted
++    orig = _tone(300, amp=0.20)
++    out, action, _ = verify_span(sep, orig, SR, scorer=None)
++    assert action == "keep"
++    assert abs(np.mean(out)) < 1e-3, "DC should be gone even with no scorer"
++    assert rms(out) > rms(remove_dc(sep)) * 1.5, "level should have been restored upward"
++
++
++def test_scorer_failure_does_not_lose_the_separation():
++    def boom(audio, sr):
++        raise RuntimeError("onnx session died")
++
++    sep, orig = _tone(700, amp=0.2), _tone(300, amp=0.2)
++    out, action, detail = verify_span(sep, orig, SR, scorer=boom)
++    assert action == "keep" and "scorer failed" in detail
++    assert len(out) == len(sep)
+diff --git a/podcast-pipeline/tools/eval_separation.py b/podcast-pipeline/tools/eval_separation.py
+new file mode 100644
+index 0000000..e1178a6
+--- /dev/null
++++ b/podcast-pipeline/tools/eval_separation.py
+@@ -0,0 +1,262 @@
++"""Measure separation quality on mixtures simulated from the user's own audio.
++
++SI-SDR/SIR/SAR need reference signals, which a real podcast does not provide.
++This builds them: take a stretch where speaker A talks alone, overlay a stretch
++where speaker B talks alone at a known level and duration, and the two clean
++sources become the references.
++
++The sweep deliberately reproduces the shape that failed in production -- a short,
++quiet backchannel buried inside a long turn -- so the numbers say where Sidon
++stops working rather than how it does on balanced mixtures it was trained on.
++
++It also records the ECAPA similarity the pipeline's QC actually gates on, so the
++two can be correlated: that is what turns TSE_QC_SIM_THRESHOLD from a guess into
++a measurement.
++
++Caveat worth reading before trusting the numbers: Sidon resynthesises speech
++through a VAE decoder, and SI-SDR is a waveform metric. Perceptually fine output
++can score badly. Read SIR (how much of the other speaker leaked) and the ECAPA
++column alongside it, and trust relative trends across rows more than absolute
++values.
++
++Usage:
++    python tools/eval_separation.py --audio /path/to.mp3 \\
++        --diarization cache/default_job_<name>/diarization/result.pkl \\
++        --out eval_separation.csv
++"""
++import argparse
++import csv
++import os
++import sys
++
++import numpy as np
++
++sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++
++SR = 24000
++
++
++# --- metrics -------------------------------------------------------------
++
++def _align(est: np.ndarray, ref: np.ndarray, max_shift: int) -> np.ndarray:
++    """Undo the time offset a resynthesising decoder can introduce.
++
++    Without this, SI-SDR punishes a few milliseconds of latency as if it were
++    separation error.
++    """
++    n = min(len(est), len(ref))
++    est, ref = est[:n], ref[:n]
++    if max_shift <= 0:
++        return est
++    corr = np.correlate(est, ref, mode="full")
++    centre = len(est) - 1
++    lo, hi = centre - max_shift, centre + max_shift + 1
++    shift = int(np.argmax(np.abs(corr[lo:hi]))) - max_shift
++    if shift > 0:
++        return np.concatenate([est[shift:], np.zeros(shift, dtype=est.dtype)])
++    if shift < 0:
++        return np.concatenate([np.zeros(-shift, dtype=est.dtype), est[:shift]])
++    return est
++
++
++def bss_metrics(est: np.ndarray, target: np.ndarray, interferer: np.ndarray):
++    """Scale-invariant SDR / SIR / SAR in dB.
++
++    Decomposition projects the estimate onto the span of the sources:
++      e_target = component along the target
++      e_interf = the rest of what lies in the source span (the other speaker)
++      e_artif  = whatever lies outside it (what the model invented)
++    """
++    n = min(len(est), len(target), len(interferer))
++    est, target, interferer = est[:n], target[:n], interferer[:n]
++    est = est - est.mean()
++
++    S = np.stack([target - target.mean(), interferer - interferer.mean()], axis=1)
++    if np.linalg.norm(S) < 1e-9 or np.linalg.norm(est) < 1e-9:
++        return float("nan"), float("nan"), float("nan")
++
++    # Least-squares projection of est onto span{target, interferer}.
++    coef, *_ = np.linalg.lstsq(S, est, rcond=None)
++    proj = S @ coef
++
++    t = S[:, 0]
++    e_target = (np.dot(est, t) / (np.dot(t, t) + 1e-12)) * t
++    e_interf = proj - e_target
++    e_artif = est - proj
++
++    CEILING_DB = 100.0
++
++    def db(num, den):
++        num, den = float(np.sum(num ** 2)), float(np.sum(den ** 2))
++        if num < 1e-12:
++            return -CEILING_DB          # nothing of the target survived
++        if den < 1e-12:
++            return CEILING_DB           # nothing left over: report a ceiling, not nan
++        return float(np.clip(10.0 * np.log10(num / den), -CEILING_DB, CEILING_DB))
++
++    sdr = db(e_target, e_interf + e_artif)
++    sir = db(e_target, e_interf)
++    sar = db(proj, e_artif)
++    return sdr, sir, sar
++
++
++# --- mixture construction ------------------------------------------------
++
++def solo_spans(segments):
++    """Per-speaker stretches where nobody else is talking."""
++    by_spk = {}
++    for s in segments:
++        by_spk.setdefault(s.speaker, []).append((s.start, s.end))
++    out = {}
++    for spk, own in by_spk.items():
++        others = sorted((a, b) for o, iv in by_spk.items() if o != spk for a, b in iv)
++        spans = []
++        for a, b in sorted(own):
++            cur = a
++            for oa, ob in others:
++                if ob <= cur:
++                    continue
++                if oa >= b:
++                    break
++                if cur < oa:
++                    spans.append((cur, min(oa, b)))
++                cur = max(cur, ob)
++                if cur >= b:
++                    break
++            if cur < b:
++                spans.append((cur, b))
++        out[spk] = [(a, b) for a, b in spans if b - a > 0.5]
++    return out
++
++
++def rms(x):
++    return float(np.sqrt(np.mean(x ** 2) + 1e-12))
++
++
++def build_mixture(host, guest, guest_dur, snr_db, window_sec=20.0):
++    """Place `guest` inside `host` at the given duration and level.
++
++    Returns (mixture, ref_host, ref_guest, core_slice).
++    """
++    n = int(window_sec * SR)
++    host = host[:n] if len(host) >= n else np.pad(host, (0, n - len(host)))
++
++    g_n = int(guest_dur * SR)
++    guest = guest[:g_n] if len(guest) >= g_n else np.pad(guest, (0, g_n - len(guest)))
++    guest = guest * (rms(host) / (rms(guest) + 1e-12)) * (10.0 ** (snr_db / 20.0))
++
++    start = (n - g_n) // 2
++    ref_guest = np.zeros(n, dtype=np.float32)
++    ref_guest[start:start + g_n] = guest
++
++    mixture = (host + ref_guest).astype(np.float32)
++    peak = np.abs(mixture).max()
++    if peak > 0.99:
++        scale = 0.99 / peak
++        mixture, host, ref_guest = mixture * scale, host * scale, ref_guest * scale
++
++    return mixture, host.astype(np.float32), ref_guest, slice(start, start + g_n)
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--audio", required=True)
++    ap.add_argument("--diarization", required=True,
++                    help="cache/<job>/diarization/result.pkl from a previous run")
++    ap.add_argument("--out", default="eval_separation.csv")
++    ap.add_argument("--trials", type=int, default=3, help="mixtures per condition")
++    ap.add_argument("--durations", default="0.25,0.5,1.0,2.0,4.0")
++    ap.add_argument("--snrs", default="0,-6,-12,-18", help="guest level vs host, dB")
++    args = ap.parse_args()
++
++    import pickle
++    import librosa
++
++    with open(args.diarization, "rb") as f:
++        diar = pickle.load(f)
++    segments = getattr(diar, "segments", diar)
++
++    wav, _ = librosa.load(args.audio, sr=SR, mono=True)
++    spans = solo_spans(segments)
++    speakers = sorted(spans, key=lambda s: -sum(b - a for a, b in spans[s]))
++    if len(speakers) < 2:
++        print("Need two speakers with solo audio; found:", list(spans))
++        return
++    host_spk, guest_spk = speakers[0], speakers[1]
++    print(f"host={host_spk} guest={guest_spk}")
++
++    from models.tse_model import TargetSpeakerExtractor
++    from services.sidon_worker_service import SidonWorkerService
++    import json
++    import types
++
++    config = json.load(open(os.path.join(os.path.dirname(__file__), "..", "config.json")))
++    svc_args = types.SimpleNamespace(tse=True, env=os.environ.get("SOMMELIER_ENV", "kaggle"),
++                                     config="config.json")
++    sidon = SidonWorkerService(config, svc_args, None)
++    sidon.spawn()
++    sidon.wait_ready()
++    tse = TargetSpeakerExtractor(sidon_process=sidon.process)
++
++    def take(spk, want):
++        for a, b in sorted(spans[spk], key=lambda s: -(s[1] - s[0])):
++            if b - a >= want:
++                return wav[int(a * SR):int((a + want) * SR)].copy()
++        return None
++
++    host_pool = take(host_spk, 20.0)
++    guest_pool = take(guest_spk, 8.0)
++    if host_pool is None or guest_pool is None:
++        print("Not enough solo audio to build mixtures")
++        sidon.stop()
++        return
++
++    enroll_host = [take(host_spk, 6.0)]
++    enroll_guest = [take(guest_spk, 6.0)]
++
++    rows = []
++    for dur in [float(d) for d in args.durations.split(",")]:
++        for snr in [float(s) for s in args.snrs.split(",")]:
++            for t in range(args.trials):
++                off = t * int(2.0 * SR)
++                mix, ref_h, ref_g, core = build_mixture(
++                    host_pool, guest_pool[off:off + int(8 * SR)] if off else guest_pool,
++                    dur, snr)
++                probe_h = [(0, core.start)]          # host alone before the guest
++                probe_g = None                        # guest never speaks alone here
++                try:
++                    est_h, est_g, sim_h, sim_g, _diag = tse.separate_two_speakers(
++                        mix, enroll_A=enroll_host, enroll_B=enroll_guest,
++                        sample_rate=SR, id_A=f"H{t}{dur}{snr}", id_B=f"G{t}{dur}{snr}",
++                        probe_A=probe_h, probe_B=probe_g,
++                        core_range=(core.start, core.stop))
++                except Exception as e:
++                    print(f"dur={dur} snr={snr} trial={t}: FAILED {e}")
++                    continue
++
++                shift = int(0.05 * SR)
++                sdr_h, sir_h, sar_h = bss_metrics(_align(est_h, ref_h, shift), ref_h, ref_g)
++                gc = slice(core.start, core.stop)
++                sdr_g, sir_g, sar_g = bss_metrics(
++                    _align(est_g[gc], ref_g[gc], shift), ref_g[gc], ref_h[gc])
++
++                rows.append(dict(duration=dur, snr_db=snr, trial=t,
++                                 host_sdr=sdr_h, host_sir=sir_h, host_sar=sar_h,
++                                 guest_sdr=sdr_g, guest_sir=sir_g, guest_sar=sar_g,
++                                 ecapa_host=sim_h, ecapa_guest=sim_g))
++                print(f"dur={dur:4.2f}s snr={snr:+5.0f}dB  "
++                      f"host SDR={sdr_h:6.2f} SIR={sir_h:6.2f}  "
++                      f"guest SDR={sdr_g:6.2f} SIR={sir_g:6.2f}  "
++                      f"ecapa_host={sim_h}")
++
++    sidon.stop()
++    if rows:
++        with open(args.out, "w", newline="") as f:
++            w = csv.DictWriter(f, fieldnames=list(rows[0]))
++            w.writeheader()
++            w.writerows(rows)
++        print(f"\nwrote {len(rows)} rows to {args.out}")
++
++
++if __name__ == "__main__":
++    main()

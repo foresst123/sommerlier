@@ -1,0 +1,229 @@
+{
+    "language": {
+        "multilingual": false,
+        "supported": [
+            "en",
+            "ko",
+            "ja",
+            "zh",
+            "es",
+            "fr",
+            "de",
+            "it",
+            "pt",
+            "ru",
+            "ar",
+            "hi"
+        ]
+    },
+    "entrypoint": {
+        "input_folder_path": "audio_pipeline/test",
+        "SAMPLE_RATE": 16000
+    },
+    "huggingface_token": "hf_XXXXXXXXXXXXXXXXXXXXXXXX",
+    "environments": {
+        "kaggle": {
+            "offline_mode": false,
+            "gpu_1": 0,
+            "gpu_2": 1,
+            "steps": {
+                "music_analysis": true,
+                "music_removal": true,
+                "cut_music": true,
+                "diarization": true,
+                "separation": true,
+                "asr": true,
+                "captioning": true,
+                "refinement": true,
+                "export": true
+            },
+            "pipeline": {
+                "vad": true,
+                "bss": true,
+                "music": true,
+                "ASRMoE": true,
+                "llm_refinement": true,
+                "qwen3omni": false,
+                "dia3": false,
+                "keep_models": false,
+                "prefetch_workers": false,
+                "by_stage": true,
+                "review_page": true,
+                "review_max_mb": 400,
+                "initprompt": true,
+                "lang": "vi",
+                "LLM": "case_0",
+                "merge_gap": 0.3,
+                "max_segment_length": 20.0,
+                "seg_th": 0.11,
+                "min_cluster_size": 11,
+                "clust_th": 0.5
+            },
+            "models": {
+                "vad": {
+                    "vad_threshold": 2.0,
+                    "max_segment": 20.0
+                },
+                "whisper": {
+                    "model_size": "large-v3",
+                    "compute_type": "float16",
+                    "batch_size": 16
+                },
+                "phowhisper": {
+                    "compute_type": "float16",
+                    "batch_size": 16
+                },
+                "qwen3": {
+                    "batch_size": 6,
+                    "use_flash_attention": false,
+                    "torch_dtype": "float16"
+                },
+                "diarizen": {
+                    "batch_size": 12,
+                    "seg_duration": 16,
+                    "segmentation_step": 0.1,
+                    "apply_median_filtering": false,
+                    "clustering_method": "VBxClustering",
+                    "min_speakers": 1,
+                    "max_speakers": 10,
+                    "ahc_threshold": 0.6
+                },
+                "bss": {
+                    "qc_sim_threshold": 0.2,
+                    "min_voiced_sec": 1.0,
+                    "enrollment_memory": false,
+                    "separator": "sidon"
+                },
+                "bs_roformer": {
+                    "model": "model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt",
+                    "chunk_duration": 300,
+                    "normalization_threshold": 1.0,
+                    "native_fp16": true,
+                    "torch_compile": false,
+                    "hi_res": true
+                },
+                "refinement": {
+                    "model_name": "Qwen/Qwen2.5-3B-Instruct",
+                    "batch_size": 2,
+                    "torch_dtype": "bfloat16",
+                    "prefix_cache": false
+                },
+                "sidon": {
+                    "num_steps": 100
+                }
+            },
+            "allow_tf32": true,
+            "batch": {
+                "max_hours_per_run": 5.0
+            }
+        },
+        "a100": {
+            "offline_mode": false,
+            "gpu_1": 0,
+            "gpu_2": 0,
+            "steps": {
+                "music_analysis": true,
+                "music_removal": true,
+                "cut_music": true,
+                "diarization": true,
+                "separation": true,
+                "asr": true,
+                "captioning": false,
+                "refinement": true,
+                "export": true
+            },
+            "pipeline": {
+                "vad": true,
+                "bss": true,
+                "music": true,
+                "ASRMoE": true,
+                "llm_refinement": true,
+                "qwen3omni": false,
+                "dia3": false,
+                "keep_models": false,
+                "prefetch_workers": false,
+                "by_stage": true,
+                "review_page": true,
+                "review_max_mb": 400,
+                "initprompt": true,
+                "lang": "vi",
+                "LLM": "case_0",
+                "merge_gap": 0.3,
+                "max_segment_length": 20.0,
+                "seg_th": 0.11,
+                "min_cluster_size": 11,
+                "clust_th": 0.5
+            },
+            "models": {
+                "vad": {
+                    "vad_threshold": 2.0,
+                    "max_segment": 20.0
+                },
+                "whisper": {
+                    "model_size": "large-v3",
+                    "compute_type": "float32",
+                    "batch_size": 128
+                },
+                "phowhisper": {
+                    "compute_type": "float32",
+                    "batch_size": 128
+                },
+                "qwen3": {
+                    "batch_size": 128,
+                    "use_flash_attention": false,
+                    "torch_dtype": "float32"
+                },
+                "diarizen": {
+                    "batch_size": 64,
+                    "seg_duration": 16,
+                    "segmentation_step": 0.5,
+                    "apply_median_filtering": false,
+                    "clustering_method": "VBxClustering",
+                    "min_speakers": 1,
+                    "max_speakers": 20,
+                    "ahc_threshold": 0.6
+                },
+                "bss": {
+                    "qc_sim_threshold": 0.2,
+                    "min_voiced_sec": 1.0,
+                    "enrollment_memory": false,
+                    "separator": "sidon"
+                },
+
+                "bs_roformer": {
+                    "model": "model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt",
+                    "chunk_duration": 600,
+                    "normalization_threshold": 1.0,
+                    "native_fp16": true,
+                    "torch_compile": false,
+                    "hi_res": true
+                },
+                "refinement": {
+                    "model_name": "Qwen/Qwen3-8B",
+                    "batch_size": 128,
+                    "torch_dtype": "bfloat16",
+                    "prefix_cache": false
+                },
+                "sidon": {
+                    "num_steps": 100
+                }
+            },
+            "allow_tf32": false,
+            "batch": {
+                "max_hours_per_run": 20.0
+            }
+        }
+    },
+    "batch": {
+        "max_hours_per_run": 5.0,
+        "audio_extensions": [
+            ".mp3",
+            ".wav",
+            ".m4a",
+            ".flac",
+            ".opus",
+            ".ogg",
+            ".aac"
+        ]
+    }
+}

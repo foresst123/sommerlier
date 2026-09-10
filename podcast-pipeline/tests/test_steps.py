@@ -1,0 +1,452 @@
+"""Turning stages on and off from the profile.
+
+`steps` replaces reasoning about which flag gates which stage. Each key is one
+stage; false skips it. The old flags still work for anything the profile does
+not mention, so a config written before this exists behaves exactly as it did.
+
+Run:  python -m pytest tests/test_steps.py -q     (from podcast-pipeline/)
+"""
+import argparse
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from services.pipeline_service import PipelineService
+from utils import steps
+
+STEPS = ("music_analysis", "music_removal",
+         "cut_music", "diarization", "separation", "asr", "captioning",
+         "refinement", "export")
+
+
+def _args(**kw):
+    return argparse.Namespace(**kw)
+
+
+# --- the switch --------------------------------------------------------------
+
+def test_a_step_set_true_runs():
+    assert PipelineService.step_enabled(_args(step_separation=True), "separation")
+
+
+def test_a_step_set_false_is_skipped():
+    assert not PipelineService.step_enabled(_args(step_separation=False), "separation")
+
+
+def test_the_profile_wins_over_the_flag_it_replaced():
+    """`bss` used to gate separation; `steps` is the newer, clearer answer."""
+    args = _args(bss=True, step_separation=False)
+    assert not PipelineService.step_enabled(args, "separation")
+
+
+def test_an_unlisted_step_falls_back_to_its_old_flag():
+    """A config written before `steps` existed must behave as it always did."""
+    assert not PipelineService.step_enabled(_args(bss=False), "separation")
+    assert PipelineService.step_enabled(_args(bss=True), "separation")
+    assert not PipelineService.step_enabled(_args(qwen3omni=False), "captioning")
+
+
+def test_a_step_with_neither_runs():
+    """Silence is not a reason to skip: an unknown step is on."""
+    assert PipelineService.step_enabled(_args(), "diarization")
+    assert PipelineService.step_enabled(_args(), "export")
+
+
+def test_one_flag_can_gate_two_steps_independently():
+    """`panns` gated both the sweep and the removal; they are separable now."""
+    args = _args(music=True, step_music_removal=False)
+    assert PipelineService.step_enabled(args, "music_analysis")
+    assert not PipelineService.step_enabled(args, "music_removal")
+
+
+# --- the profile -------------------------------------------------------------
+
+def test_both_profiles_list_every_step():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "config.json"), encoding="utf-8") as fh:
+        config = json.load(fh)
+    for name, profile in config["environments"].items():
+        steps = profile.get("steps")
+        assert steps is not None, f"{name} has no steps block"
+        for step in STEPS:
+            assert step in steps, f"{name} is missing '{step}'"
+            assert isinstance(steps[step], bool), f"{name}.{step} is not a boolean"
+
+
+def test_steps_are_kept_apart_from_the_tuning_values():
+    """`pipeline` mixes switches with thresholds; `steps` is only switches, so
+    a stage's name can never collide with a number that shares it."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "config.json"), encoding="utf-8") as fh:
+        config = json.load(fh)
+    for name, profile in config["environments"].items():
+        assert set(profile["steps"]) & set(profile["pipeline"]) == set(), name
+
+
+# --- skipping a load-bearing stage ends the run ------------------------------
+
+def test_a_stage_checks_its_own_input_rather_than_a_global_gate():
+    """There used to be one up-front check that refused the whole run unless
+    diarization, ASR and export were all on. It is gone: a stage now decides
+    for itself, from whether the data it needs exists.
+
+    That is what makes `--stop_after music` and a music-only profile work at
+    all -- under the old gate, switching export off silently disabled
+    diarization, which is a hard thing to see from a config file."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    source = open(os.path.join(root, "services", "pipeline_service.py"),
+                  encoding="utf-8").read()
+    assert 'for _required in ("diarization", "asr", "export"):' not in source
+    assert "no segments available" in source
+
+
+def test_separation_off_still_produces_segments_of_the_same_shape():
+    """ASR and the exporters read audio either way; only the overlap
+    replacement is missing."""
+    import numpy as np
+
+    from schemas.audio import AudioData
+    from schemas.segment import Segment
+    import services.separation_service as sep
+
+    service = sep.SeparationService.__new__(sep.SeparationService)
+    segments = [Segment(index="00001", start=0.0, end=1.0, speaker="1"),
+                Segment(index="00002", start=1.0, end=2.0, speaker="2")]
+    audio = AudioData(name="t", waveform=np.ones(24000 * 3, dtype=np.float32),
+                      sample_rate=24000, duration=3.0, audio_segment=None)
+
+    out = service.passthrough(segments, audio)
+    assert len(out) == 2
+    assert all(s.audio is not None and len(s.audio) for s in out)
+    assert all(not s.bss for s in out)
+
+
+def test_the_per_segment_pass_is_gone_entirely():
+    """It predated the waveform pass and did the same job a stage later, one
+    segment at a time. With the sweep at the front of the run it was redundant
+    on every ordinary run and gated itself off; what remained was a stage that
+    could only fire when the stage it duplicated was switched off."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "config.json"), encoding="utf-8") as fh:
+        config = json.load(fh)
+    for name, profile in config["environments"].items():
+        assert "music_removal_fallback" not in profile["steps"], name
+
+    source = open(os.path.join(root, "services", "pipeline_service.py"),
+                  encoding="utf-8").read()
+    assert "music_removal_fallback" not in source
+    assert "process_segments" not in source
+
+
+# --- the loader has to reach the same verdict --------------------------------
+
+def _stub_model_modules():
+    """Import services.model_loader without the model stack behind it.
+
+    It imports eleven model wrappers at module level, each pulling a framework
+    that has no bearing on which switch decides whether a model loads.
+    """
+    import types
+
+    import importlib.util
+
+    # Only what is genuinely absent. A stub left in sys.modules for something
+    # real -- librosa, pandas -- would be inherited by every test that runs
+    # after this one, and they would fail somewhere unrelated.
+    for name in ("faster_whisper", "whisperx", "whisperx.audio", "whisperx.asr",
+                 "panns_inference", "pyannote", "pyannote.audio", "librosa",
+                 "onnxruntime", "soundfile", "pandas"):
+        if name in sys.modules:
+            continue
+        try:
+            if importlib.util.find_spec(name) is not None:
+                continue
+        except (ImportError, ValueError):
+            pass
+        sys.modules[name] = types.ModuleType(name)
+    for name in ("models.whisper", "models.whisper_wrapper", "models.phowhisper",
+                 "models.silero_vad", "models.pyannote", "models.diarizen_model",
+                 "models.pyannote_embedding", "models.bss_model", "models.sslam",
+                 "models.bs_roformer", "models.qwen3_omni", "models.qwen3_asr"):
+        module = types.ModuleType(name)
+        for attr in ("WhisperASR", "PhoWhisperASR", "SileroVAD", "PyannoteDiarizer",
+                     "DiariZenDiarizer", "PyannoteEmbedder", "BssSeparator",
+                     "SSLAMDetector", "BSRoformerRemover", "Qwen3OmniCaptioner",
+                     "Qwen3ASRClient", "load_asr_model"):
+            setattr(module, attr, type(attr, (), {"__init__": lambda self, *a, **k: None}))
+        sys.modules.setdefault(name, module)
+
+    from services.model_loader import ModelLoader
+    return ModelLoader
+
+
+def _loader(monkeypatch, **flags):
+    ModelLoader = _stub_model_modules()
+
+    # Patched on the loader module rather than left to the stubs: by the time
+    # the whole suite runs, models.sslam may already be imported for real, and
+    # the real detector would try to pull a 362MB checkpoint off the Hub.
+    import services.model_loader as ml
+    monkeypatch.setattr(ml, "SSLAMDetector", lambda *a, **k: object())
+
+    loader = ModelLoader.__new__(ModelLoader)
+    loader.args = _args(**flags)
+    loader.models = {}
+    loader.logger = None
+    loader.device_1 = "cpu"
+    loader.device_2 = "cpu"
+    loader.config = {"environments": {"kaggle": {"models": {"bs_roformer": {}}}}}
+    return loader
+
+
+def test_the_profile_alone_is_enough_to_load_the_tagger(monkeypatch):
+    """`steps.music_analysis: true` with no --panns used to load nothing.
+
+    The stage then ran, found no detector, and reported an empty music map --
+    a run that says it swept the audio and did not.
+    """
+    loader = _loader(monkeypatch, env="kaggle", step_music_analysis=True)
+    loader.load_tagger()
+    assert "tagger" in loader.models
+
+
+def test_turning_the_step_off_leaves_the_tagger_unloaded(monkeypatch):
+    loader = _loader(monkeypatch, env="kaggle", music=True, step_music_analysis=False)
+    loader.load_tagger()
+    assert "tagger" not in loader.models
+
+
+def test_the_old_flag_still_loads_it(monkeypatch):
+    loader = _loader(monkeypatch, env="kaggle", music=True)
+    loader.load_tagger()
+    assert "tagger" in loader.models
+
+
+# --- reachability, which is not the same question ----------------------------
+
+def _music_only(**kw):
+    """A profile that stops after the music stage: diarization off, rest on."""
+    base = dict(step_music_analysis=True, step_music_removal=True,
+                step_cut_music=True, step_diarization=False,
+                step_separation=True, step_asr=True, step_export=True,
+                ASRMoE=True, bss=True, dia3=False)
+    base.update(kw)
+    return _args(**base)
+
+
+def test_a_switched_off_stage_does_not_run():
+    """`will_run` is now exactly `step_enabled`, so what a profile says is what
+    happens. The reachability logic it used to carry -- ASR is on but the run
+    stops before it, so do not spawn its worker -- moved into the stages
+    themselves, which is where the run actually knows."""
+    args = _music_only()
+    assert not steps.step_enabled(args, "diarization")
+    assert not steps.will_run(args, "diarization")
+    assert steps.will_run(args, "music_analysis")
+
+
+def test_the_music_stages_run_regardless():
+    """They come before the load-bearing check, which is the point of them."""
+    args = _music_only()
+    for stage in ("music_analysis", "music_removal", "cut_music"):
+        assert steps.will_run(args, stage), stage
+
+
+def test_everything_on_means_everything_runs():
+    args = _music_only(step_diarization=True)
+    for stage in ("music_analysis", "diarization", "separation", "asr", "export"):
+        assert steps.will_run(args, stage), stage
+
+
+def test_a_stage_switched_off_is_not_reached_either():
+    args = _music_only(step_diarization=True, step_separation=False)
+    assert not steps.will_run(args, "separation")
+    assert steps.will_run(args, "asr"), "separation is not load-bearing"
+
+
+def test_export_off_no_longer_disables_diarization():
+    """The old up-front gate made this true, and it was the reason a profile
+    with export off produced no diarization and said so nowhere. Stages are
+    independent now: switching one off is a statement about that stage."""
+    args = _music_only(step_diarization=True, step_export=False)
+    assert steps.will_run(args, "diarization")
+    assert not steps.will_run(args, "export")
+    assert steps.will_run(args, "music_removal")
+
+
+def test_an_old_profile_reaches_every_stage_it_used_to():
+    """Nothing in `steps` at all: reachability must not become a new gate."""
+    args = _args(bss=True, ASRMoE=True, music=True)
+    for stage in ("music_analysis", "diarization", "separation", "asr", "export"):
+        assert steps.will_run(args, stage), stage
+
+
+# --- the interpreter is found when the worker starts, not before -------------
+
+def test_the_interpreter_is_resolved_at_spawn():
+    """A callable python_bin is what lets a missing venv stay a stage's problem.
+
+    Resolving at construction is what turned a music-only run into
+    `FileNotFoundError: No interpreter found for the 'qwen3' worker`, thrown
+    before any audio was opened, for a stage the run never reaches.
+    """
+    from services.base_worker_service import WorkerProcessService
+
+    calls = []
+
+    def resolve():
+        calls.append(1)
+        return "/definitely/not/here/bin/python"
+
+    worker = WorkerProcessService(name="Probe", python_bin=resolve,
+                                  worker_script="worker.py")
+    assert calls == [], "constructing it must not go looking"
+
+    try:
+        worker.spawn()
+    except FileNotFoundError:
+        pass
+    else:
+        raise AssertionError("a missing interpreter must still fail, at spawn")
+    assert calls == [1]
+
+
+# --- saying it on the command line -------------------------------------------
+
+def _parse(argv):
+    """main.py's own parsing, run in a subprocess: the steps block is applied
+    at module scope, so importing main is the only way to exercise it."""
+    import json as _json
+    import subprocess
+    import tempfile
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    probe = (
+        "import sys, json, runpy, types\n"
+        "sys.argv = ['main.py'] + " + repr(argv) + "\n"
+        "mod = types.ModuleType('probe')\n"
+        "src = open('main.py').read().split('# 2. DELAYED IMPORTS')[0]\n"
+        # A real module always has __file__, and main.py uses it above the
+        # split marker to put the repo on sys.path. Without it the probe dies
+        # in the first ten lines with a NameError, and every step assertion
+        # below reports as a failure of the thing it was checking.
+        "ns = {'__name__': 'probe', '__file__': 'main.py'}\n"
+        "exec(compile(src, 'main.py', 'exec'), ns)\n"
+        "print(json.dumps({k: v for k, v in vars(ns['args']).items() "
+        "if k.startswith('step_')}))\n"
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, dir=root) as fh:
+        fh.write(probe)
+        path = fh.name
+    try:
+        out = subprocess.run([sys.executable, path], cwd=root,
+                             capture_output=True, text=True)
+        assert out.returncode == 0, out.stderr[-2000:]
+        return _json.loads(out.stdout.strip().splitlines()[-1])
+    finally:
+        os.unlink(path)
+
+
+BASE = ["--audio", "x.wav", "--env", "kaggle"]
+
+
+def test_the_profile_supplies_the_steps():
+    assert _parse(BASE)["step_diarization"] is True
+
+
+def test_the_command_line_overrides_the_profile():
+    """The reason this flag exists: editing config.json is reverted by a
+    re-clone, silently, and the run then does something else entirely."""
+    parsed = _parse(BASE + ["--steps", "diarization=off"])
+    assert parsed["step_diarization"] is False
+    assert parsed["step_music_analysis"] is True, "only the named step moves"
+
+
+def test_several_steps_at_once():
+    parsed = _parse(BASE + ["--steps", "diarization=off,separation=off,asr=on"])
+    assert parsed["step_diarization"] is False
+    assert parsed["step_separation"] is False
+    assert parsed["step_asr"] is True
+
+
+def test_a_bare_name_means_on():
+    assert _parse(BASE + ["--steps", "captioning"])["step_captioning"] is True
+
+
+def test_every_spelling_of_off():
+    for word in ("off", "false", "no", "0"):
+        assert _parse(BASE + ["--steps", f"diarization={word}"])["step_diarization"] is False, word
+
+
+def test_a_step_the_profile_never_mentions_can_be_added():
+    parsed = _parse(BASE + ["--steps", "brand_new=off"])
+    assert parsed["step_brand_new"] is False
+
+
+def test_requirements_do_not_pull_in_a_disabled_model():
+    """nemo-toolkit is imported by models/sortformer.py and nothing else, and
+    model_loader's import of that module is commented out. Listing it made the
+    file unresolvable -- nemo 2.2.0 pins numba==0.61.0 against the 0.61.2 here
+    -- so `uv pip install -r requirements.txt` failed before installing
+    anything. If Sortformer is switched back on, this test is the reminder that
+    the numba pin has to move with it."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    loader = open(os.path.join(root, "services", "model_loader.py"), encoding="utf-8").read()
+    reqs = open(os.path.join(root, "requirements.txt"), encoding="utf-8").read()
+
+    sortformer_live = any(
+        line.strip().startswith("from models.sortformer import")
+        for line in loader.splitlines())
+    nemo_required = any(
+        line.strip().startswith("nemo-toolkit") for line in reqs.splitlines())
+
+    assert sortformer_live == nemo_required, (
+        "Sortformer is enabled" if sortformer_live else "Sortformer is disabled"
+    ) + f" but nemo-toolkit is {'listed' if nemo_required else 'not listed'} in requirements.txt"
+
+
+def test_an_interactive_matplotlib_backend_cannot_reach_the_pipeline():
+    """A notebook kernel exports MPLBACKEND=module://matplotlib_inline...,
+    which exists only inside that kernel's interpreter. matplotlib arrives here
+    five imports deep (whisperx -> pyannote -> lightning -> torchmetrics) and
+    reads the variable on import, so an inherited one killed every run launched
+    from Kaggle before it reached a stage.
+
+    The caller cannot fix it reliably -- IPython rewrites the variable when
+    matplotlib is first configured -- so main.py sets it, ahead of every other
+    import."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    source = open(os.path.join(root, "main.py"), encoding="utf-8").read()
+
+    guard = source.index('MPLBACKEND')
+    first_real_import = min(
+        source.index("\nimport argparse"),
+        source.index("from utils.cpu_plan import"))
+    assert guard < first_real_import, (
+        "the backend must be pinned before anything can import matplotlib")
+    assert 'startswith("module://")' in source, (
+        "an explicit non-notebook backend should be left alone")
+
+
+def test_the_backend_guard_actually_replaces_a_notebook_backend():
+    import subprocess
+    import sys as _sys
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    snippet = (
+        "import os\n"
+        "if os.environ.get('MPLBACKEND', '').startswith('module://'):\n"
+        "    os.environ['MPLBACKEND'] = 'Agg'\n"
+        "else:\n"
+        "    os.environ.setdefault('MPLBACKEND', 'Agg')\n"
+        "print(os.environ['MPLBACKEND'])\n")
+    poisoned = dict(os.environ, MPLBACKEND="module://matplotlib_inline.backend_inline")
+    out = subprocess.run([_sys.executable, "-c", snippet], capture_output=True,
+                         text=True, env=poisoned, cwd=root).stdout.strip()
+    assert out == "Agg", out
+
+    chosen = dict(os.environ, MPLBACKEND="pdf")
+    out = subprocess.run([_sys.executable, "-c", snippet], capture_output=True,
+                         text=True, env=chosen, cwd=root).stdout.strip()
+    assert out == "pdf", "a deliberate backend must survive"

@@ -1,0 +1,28 @@
+clip_id,source_channel,source_url,license,stress_condition,predicted_failure,observed_failure,failure_severity,notes
+vi_poc_clean_1,,,,"Clean 1-on-1 interview, no music","Baseline; nếu fail → vấn đề nền tảng",,,Gợi ý: Vietcetera *Have A Sip*
+vi_poc_clean_2,,,,"Clean 1-on-1 interview, no music","Baseline; nếu fail → vấn đề nền tảng",,,Gợi ý: *The Quoc Khanh Show*
+vi_poc_clean_3,,,,"Clean 1-on-1 interview, no music","Baseline; nếu fail → vấn đề nền tảng",,,Chọn channel khác để có speaker variety
+vi_poc_backchannel_1,,,,"Interview với dạ/vâng dày đặc","VAD/diarization mất segment ngắn",,,Tìm đoạn interviewer im nghe, intervewee nói dài
+vi_poc_backchannel_2,,,,"Interview với dạ/vâng dày đặc","VAD/diarization mất segment ngắn",,,*Tâm Sự Bí Mật* hoặc phỏng vấn tâm sự
+vi_poc_backchannel_3,,,,"Interview với dạ/vâng dày đặc","VAD/diarization mất segment ngắn",,,Đoạn nghe nhiều `ừ`/`ờ`/`ừm`
+vi_poc_multispk_1,,,,"3+ speakers, turn nhanh","Diarization fragment, overlap label sai",,,Gợi ý: VTV *Cà Phê Sáng*
+vi_poc_multispk_2,,,,"3+ speakers, turn nhanh","Diarization fragment, overlap label sai",,,Gợi ý: *Quán Thanh Xuân* hoặc talk show 3-4 MC
+vi_poc_multispk_3,,,,"3+ speakers, turn nhanh","Diarization fragment, overlap label sai",,,Chọn đoạn có nhiều người cướp lời
+vi_poc_music_1,,,,"Có nhạc nền (show intro / vlog BGM)","Music removal artifact, speaker confusion",,,Đoạn intro show có nhạc + lời thoại
+vi_poc_music_2,,,,"Có nhạc nền (show intro / vlog BGM)","Music removal artifact, speaker confusion",,,Vlog du lịch có nhạc BGM dưới giọng nói
+vi_poc_music_3,,,,"Có nhạc nền (show intro / vlog BGM)","Music removal artifact, speaker confusion",,,Test xem nhạc khác nhau ảnh hưởng khác nhau
+vi_poc_noisy_1,,,,"Outdoor / noisy environment","ASR hallucination, VAD over-trigger",,,Vlog street / chợ / sảnh khách sạn
+vi_poc_noisy_2,,,,"Outdoor / noisy environment","ASR hallucination, VAD over-trigger",,,Audio có gió / xe cộ
+vi_poc_noisy_3,,,,"Outdoor / noisy environment","ASR hallucination, VAD over-trigger",,,Audio có người nói chuyện nền (cocktail party)
+vi_poc_codeswitch_1,,,,"Code-switching VN–EN","ASR detect lang sai, mất dấu",,,Podcast youth / tech / startup talk
+vi_poc_codeswitch_2,,,,"Code-switching VN–EN","ASR detect lang sai, mất dấu",,,Đoạn có term tiếng Anh (meeting, deadline, OK...)
+vi_poc_codeswitch_3,,,,"Code-switching VN–EN","ASR detect lang sai, mất dấu",,,Test cả pure VN + pure EN trong cùng clip
+vi_poc_accent_bac_1,,,,"Regional accent — Bắc","WER spike, mất dấu",,,Hà Nội YouTuber / VTV miền Bắc
+vi_poc_accent_bac_2,,,,"Regional accent — Bắc","WER spike, mất dấu",,,Người Hà Nội phát âm chuẩn
+vi_poc_accent_trung_1,,,,"Regional accent — Trung","WER spike, mất dấu",,,Huế / Đà Nẵng / Quảng Nam vlogger
+vi_poc_accent_trung_2,,,,"Regional accent — Trung","WER spike, mất dấu",,,Accent Trung là khó nhất → ưu tiên thu
+vi_poc_accent_nam_1,,,,"Regional accent — Nam","WER spike, mất dấu",,,Sài Gòn talk show / YouTuber miền Nam
+vi_poc_accent_nam_2,,,,"Regional accent — Nam","WER spike, mất dấu",,,Vinpearl Nha Trang phục vụ nhiều khách miền Nam
+vi_poc_endhalluc_1,,,,"Audio fade / end mid-sentence","End-of-audio hallucination (kiểu `Em giỡn`, `Cảm ơn các bạn đã xem`)",,,Cắt clip để kết thúc giữa câu
+vi_poc_endhalluc_2,,,,"Audio fade / end mid-sentence","End-of-audio hallucination (kiểu `Em giỡn`, `Cảm ơn các bạn đã xem`)",,,Outro YouTube với fade
+vi_poc_endhalluc_3,,,,"Audio fade / end mid-sentence","End-of-audio hallucination (kiểu `Em giỡn`, `Cảm ơn các bạn đã xem`)",,,Audio có trailing silence dài
