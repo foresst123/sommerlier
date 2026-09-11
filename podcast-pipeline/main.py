@@ -44,6 +44,10 @@ def _build_parser():
     parser.add_argument("--config", default="config.json", help="Path to config file")
     parser.add_argument("--job_id", default="default", help="Job ID for checkpointing")
     parser.add_argument("--cache_dir", default="cache", help="Cache directory")
+    parser.add_argument("--cache_parents", nargs="*", default=[],
+                        help="Upstream checkpoint job IDs, nearest parent first")
+    parser.add_argument("--ledger", default="_sommelier_progress.json",
+                        help="Progress ledger name or absolute path for this run")
     parser.add_argument("--save_path", default="./output", help="Output directory")
     parser.add_argument("--gpu_1", default=0, type=int, help="GPU for VAD/Diarization/Separation/Whisper")
     parser.add_argument("--gpu_2", default=1, type=int, help="GPU for PhoWhisper/Sortformer/Qwen3")
@@ -533,7 +537,7 @@ def main():
         # across that whole group before moving on. Re-scanning is what lets
         # files be added while the run is going: they are simply there on the
         # next pass.
-        ledger = ProgressLedger(args.audio_dir, logger=logger)
+        ledger = ProgressLedger(args.audio_dir, name=args.ledger, logger=logger)
         if ledger.done or ledger.failed:
             logger.info(f"Resuming: {ledger.summary(len(paths))} "
                         f"(ledger: {os.path.basename(ledger.path)})")

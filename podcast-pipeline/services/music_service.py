@@ -122,3 +122,18 @@ class MusicService:
             end = min(total, start + len(chunk))
             if end > start:
                 waveform[start:end] = chunk[:end - start]
+
+    def denoise(self, audio: AudioData, model):
+        """A requested experiment must fail visibly if it cannot change audio."""
+        source = np.asarray(audio.waveform, dtype=np.float32)
+        result = model.separate_full(source, audio.sample_rate)
+        if result is None or result.shape != source.shape or not np.isfinite(result).all():
+            raise RuntimeError("Denoiser returned no valid stem")
+        delta = float(np.sqrt(np.mean((result.astype(np.float64) - source) ** 2)))
+        if delta <= 1e-8:
+            raise RuntimeError("Denoiser returned unchanged input; axis B is ineffective")
+        audio.waveform = result
+        diagnostic = {"selected_stem": model.selected_stem, "rms_delta": delta}
+        if self.logger:
+            self.logger.info(f"[denoise:applied] {diagnostic}")
+        return diagnostic

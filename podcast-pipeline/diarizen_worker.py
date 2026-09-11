@@ -167,11 +167,11 @@ def load_model(config_path=None, env_name="kaggle"):
 
     device = torch.device("cuda:0") # CUDA_VISIBLE_DEVICES remaps physical GPU → cuda:0
 
-    print(json.dumps({"status": "loading", "model": "BUT-FIT/diarizen-wavlm-large-s80-md-v2"}), flush=True)
-
-    pipeline = DiariZenPipeline.from_pretrained("BUT-FIT/diarizen-wavlm-large-s80-md-v2")
-
     diar_cfg = _load_diarizen_config(config_path, env_name)
+    model_id = (os.environ.get("DIARIZEN_MODEL") or diar_cfg.get("model")
+                or "BUT-FIT/diarizen-wavlm-large-s80-md-v2")
+    print(json.dumps({"status": "loading", "model": model_id}), flush=True)
+    pipeline = DiariZenPipeline.from_pretrained(model_id)
     if diar_cfg:
         try:
             _apply_diarizen_config(pipeline, diar_cfg)

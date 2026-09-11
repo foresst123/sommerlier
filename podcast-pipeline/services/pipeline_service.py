@@ -229,7 +229,9 @@ class PipelineService:
         base_job = getattr(args, "job_id", "default_job")
         job_id = f"{base_job}_{os.path.splitext(os.path.basename(audio_path))[0]}"
         cache_dir = getattr(args, "cache_dir", "cache")
-        checkpoint = CheckpointManager(cache_dir, job_id)
+        stem = os.path.splitext(os.path.basename(audio_path))[0]
+        parents = [f"{parent}_{stem}" for parent in getattr(args, "cache_parents", ())]
+        checkpoint = CheckpointManager(cache_dir, job_id, parents=parents)
         # Separation mới làm thay đổi đầu vào ASR và các bước tiếp theo.
         # Tách không gian lưu để cả chuỗi dùng cùng phiên bản, không xóa bản cũ.
         window_version = getattr(self.separation_svc, "checkpoint_version", None)
@@ -260,6 +262,28 @@ class PipelineService:
         
         # 1. Chuẩn bị âm thanh
         audio_data = self.audio_svc.load_audio(audio_path, target_sr=24000)
+        denoised = bool(getattr(args, "step_noise_removal", False))
+        if denoised:
+            clean = checkpoint.load("denoised_audio")
+            if clean is None:
+                from models.bs_roformer import BSRoformerRemover
+                profile = config.get("environments", {}).get(args.env, {})
+                options = dict(profile.get("models", {}).get("denoise", {}))
+                model_id = os.environ.get("DENOISE_MODEL") or options.pop("model", None)
+                options.pop("model", None)
+                if not model_id:
+                    raise RuntimeError("noise_removal requires models.denoise.model")
+                device = str(getattr(self.model_loader, "device_1", "cpu"))
+                model = BSRoformerRemover(device=device, model_filename=model_id,
+                                          logger=self.logger, **options)
+                try:
+                    diagnostic = self.music_svc.denoise(audio_data, model)
+                    checkpoint.save("denoise_diagnostics", diagnostic, fmt="json")
+                    checkpoint.save("denoised_audio", audio_data.waveform)
+                finally:
+                    model.unload()
+            else:
+                audio_data.waveform = clean
         
         # Chỉ ghi dữ liệu đầu vào một lần mỗi file, không ghi lại ở từng lần
         # run() khi chạy theo giai đoạn.
@@ -285,6 +309,19 @@ class PipelineService:
                 checkpoint.save("music_map", music_map.to_json())
                 # Giữ timeline GỐC vì bước truy nguồn cần chấm trên các khoảng thời gian gốc.
                 checkpoint.save("noise_track", self.noise_track.to_json(), fmt="json")
+        if getattr(args, "step_ina_scan", False):
+            from services.ina_worker_service import scan_and_merge
+            merged = checkpoint.load("ina_music_map", fmt="json")
+            if merged is None:
+                music_map, self.noise_track, diagnostic = scan_and_merge(
+                    audio_data, music_map, self.noise_track, config, args, self.logger)
+                checkpoint.save("ina_music_map", music_map.to_json(), fmt="json")
+                checkpoint.save("ina_noise_track", self.noise_track.to_json(), fmt="json")
+                checkpoint.save("ina_diagnostics", diagnostic, fmt="json")
+            else:
+                music_map = MusicMap.from_json(merged)
+                self.noise_track = NoiseTrack.from_json(
+                    checkpoint.load("ina_noise_track", fmt="json"))
         # Tách nhạc nền trước diarization. Cache các lát được thay thế thay vì
         # cả waveform dài. Mỗi lần run() đọc lại audio gốc phải áp các lát cache
         # để mọi bước đều nhìn thấy cùng âm thanh đã bỏ nhạc.
@@ -298,7 +335,7 @@ class PipelineService:
                                          if self.model_loader else None)
                 patches = self.music_svc.strip_music_spans(
                     audio_data, music_map, logger=self.logger,
-                    source_path=audio_path)
+                    source_path=None if denoised else audio_path)
                 checkpoint.save("music_patches", patches)
                 self._free(args, "bs_roformer")
             else:
@@ -313,6 +350,12 @@ class PipelineService:
         timeline = TimelineMap.from_json(checkpoint.load("timeline", fmt="json"))
         cuts = (music_map.excised_spans()
                 if self.step_enabled(args, "cut_music") else [])
+        if os.environ.get("NOISE_EXCISE", "0") == "1" and self.noise_track:
+            cuts += self.noise_track.excise_spans()
+        if cuts:
+            from utils.excise import _merge
+            cuts = [(a, b, "combined") for a, b in _merge(
+                [(max(0.0, a), min(audio_data.duration, b)) for a, b, _ in cuts])]
 
         # Không cho phép xóa gần hết bản ghi. Bộ phân loại có thể đặt ngưỡng sai
         # hoặc file không phù hợp; báo lỗi thay vì cho pipeline chạy trên âm thanh rỗng.

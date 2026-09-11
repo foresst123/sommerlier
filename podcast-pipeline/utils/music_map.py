@@ -82,9 +82,12 @@ PAD_SECONDS = float(os.environ.get("MUSIC_MAP_PAD", "0.30"))
 #            model imagines a voice to be out of an instrumental.
 MUSIC = "music"
 SONG = "song"
+SINGING = "singing"
+EXCISE_SINGING = os.environ.get("MUSIC_MAP_EXCISE_SINGING", "0") == "1"
+SINGING_THRESHOLD = float(os.environ.get("MUSIC_MAP_SINGING_THRESHOLD", "0.10"))
 
 # Spans that leave the recording entirely rather than being cleaned.
-EXCISED = (SONG,)
+EXCISED = (SONG, SINGING) if EXCISE_SINGING else (SONG,)
 
 # Below this the frame carries no speech worth keeping, so music there is a
 # song rather than a bed.
@@ -197,7 +200,8 @@ class MusicMap:
     def summary(self) -> dict:
         return {"spans": len(self.spans),
                 "music_seconds": round(self.total_of(MUSIC), 2),
-                "song_seconds": round(self.total_of(SONG), 2)}
+                "song_seconds": round(self.total_of(SONG), 2),
+                "singing_seconds": round(self.total_of(SINGING), 2)}
 
 
 def _runs(flags, fps, min_span, merge_gap, pad=0.0):
@@ -283,6 +287,10 @@ def build_maps(waveform, sample_rate, detector, logger=None,
     loud_music = (music >= music_threshold)
     is_song = loud_music & (speech < SPEECH_PRESENT)
     is_music = loud_music & ~is_song
+    is_singing = (np.asarray(scores.get("singing", np.zeros_like(music)))
+                  >= SINGING_THRESHOLD) & (speech < SPEECH_PRESENT)
+    if EXCISE_SINGING:
+        is_song &= ~is_singing
 
     # SONG leaves the recording; MUSIC is only cleaned. Deleting audio asks for
     # more evidence than cleaning it, so SONG clears a longer run -- see
@@ -293,6 +301,10 @@ def build_maps(waveform, sample_rate, detector, logger=None,
                 _runs(is_music, fps, MIN_SPAN_SECONDS, MERGE_GAP_SECONDS, PAD_SECONDS)])
 
     found = MusicMap(spans, fps=fps)
+    if EXCISE_SINGING:
+        spans.extend((a, b, SINGING) for a, b in _runs(
+            is_singing, fps, MIN_SPAN_EXCISED, MERGE_GAP_SECONDS, PAD_SECONDS))
+        found = MusicMap(spans, fps=fps)
     if logger:
         duration = len(waveform) / max(sample_rate, 1)
         logger.info(

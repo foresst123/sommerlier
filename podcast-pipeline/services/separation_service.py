@@ -426,7 +426,8 @@ class SeparationService:
                 for lo, hi in merge_ranges(spans)]
 
     # ------------------------------------------------------------------
-    def _dump_tracks(self, subdir, tag, mixture, track_1, track_2, sr):
+    def _dump_tracks(self, subdir, tag, mixture, track_1, track_2, sr,
+                     metadata=None, enrollments=None):
         """Ghi mixture và hai track để nghe đối chiếu, cả khi lượt tách thành công.
         Cần nghe để phân biệt lỗi model với việc đặt ngưỡng QC chưa phù hợp."""
         if not (BSS_DUMP_FAILED and self.dump_dir):
@@ -438,7 +439,17 @@ class SeparationService:
             sf.write(os.path.join(d, f"{tag}_mix.wav"), mixture, sr)
             if track_1 is not None:
                 sf.write(os.path.join(d, f"{tag}_trackA.wav"), track_1, sr)
+            if track_2 is not None:
                 sf.write(os.path.join(d, f"{tag}_trackB.wav"), track_2, sr)
+            if metadata is not None:
+                import json
+                for label, clips in zip(("A", "B"), enrollments or ()):
+                    if clips:
+                        sf.write(os.path.join(d, f"{tag}_enroll{label}.wav"),
+                                 np.concatenate(clips), sr)
+                # Commit the sidecar last so a partial dump is never scoreable.
+                with open(os.path.join(d, f"{tag}.json"), "w", encoding="utf-8") as f:
+                    json.dump(metadata, f, ensure_ascii=False, indent=2)
         except Exception as e:
             # Chỉ cảnh báo một lần nếu thiếu soundfile hoặc không ghi được thư mục,
             # tránh lặp thông báo trên từng clip nhưng vẫn báo mất dữ liệu đối chiếu.
@@ -619,11 +630,30 @@ class SeparationService:
                     rejected[spk] = ("not_a_fail",
                                      f"margin={own - other:.2f} th={BSS_NOT_A_MARGIN}")
 
+            metadata = {
+                "schema_version": 1, "sr": sr,
+                "job": [float(job_lo), float(job_hi)],
+                "core": [int(core[0]), int(core[1])],
+                "core_units": "samples", "probe_units": "samples",
+                "speakers": [spk_a, spk_b],
+                "probes": {str(spk_a): [[int(a), int(b)] for a, b in probe_a_s],
+                           str(spk_b): [[int(a), int(b)] for a, b in probe_b_s]},
+                "sims": {str(spk_a): float(sim_A) if sim_A is not None else None,
+                         str(spk_b): float(sim_B) if sim_B is not None else None},
+                "accepted": list(accepted), "rejected": rejected,
+                "enrollment_lengths": [[len(clip) for clip in clips]
+                                       for clips in (enroll_a, enroll_b)],
+                "window_layout": layout,
+            }
+            self._dump_tracks("separated" if accepted else "failed",
+                              f"{job_lo:.2f}_{spk_a}_{spk_b}",
+                              window_audio, track_A, track_B, sr,
+                              metadata=metadata, enrollments=(enroll_a, enroll_b))
+
             if not accepted:
                 for sd, lo, hi in targets:
                     r, d = rejected.get(sd["speaker"], ("unscorable", "no verdict"))
                     self._fail(seg_by_index.get(sd["index"]), lo, hi, r, d)
-                self._dump_failed(f"{job_lo:.2f}_{spk_a}_{spk_b}", window_audio, track_A, track_B, sr)
                 continue
 
             # Ghi thông tin đầu vào, kết quả và điểm của các track đạt kiểm tra.
@@ -638,9 +668,6 @@ class SeparationService:
                     f"solo_b={sum(b - a for a, b in solo_b):.1f}s | accepted: {who}"
                     + (f" | rejected: {sorted(rejected)}" if rejected else "")
                 )
-            self._dump_tracks("separated", f"{job_lo:.2f}_{spk_a}_{spk_b}",
-                              window_audio, track_A, track_B, sr)
-
             fade_samples = int(0.02 * sr)
             for sd, ov_lo, ov_hi in targets:
                 spk = sd["speaker"]

@@ -129,7 +129,8 @@ def group_scores(framewise, labels, reported=None):
     labels for the same event fire together, and adding them would double-count
     it.
     """
-    groups = [("speech", SPEECH_LABELS), ("music", MUSIC_LABELS)]
+    groups = [("speech", SPEECH_LABELS), ("music", MUSIC_LABELS),
+              ("singing", SINGING_LABELS)]
     groups += list(NOISE_GROUPS.items())
     out = {}
     for key, names in groups:

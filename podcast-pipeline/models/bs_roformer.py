@@ -67,9 +67,12 @@ class BSRoformerRemover:
                  batch_size: int = None, chunk_duration: float = None,
                  normalization_threshold: float = None, native_fp16: bool = False,
                  torch_compile: bool = False, hi_res: bool = True,
+                 stem: str = "vocals",
                  logger=None, **_ignored):
         self.device = device
         self.model_filename = model_filename or DEFAULT_MODEL
+        self.stem = stem.lower()
+        self.selected_stem = None
         # Where audio-separator keeps checkpoints. It defaults to a temp dir
         # and downloads on first use, which is a failed run on an offline box;
         # the env var is what download_offline_weights.py tells you to export.
@@ -215,14 +218,23 @@ class BSRoformerRemover:
             # Stems are named "<input>_(Vocals)_<model>.wav"; picking by name
             # rather than by position because the order is not documented and
             # taking the instrumental stem would be a silent, total failure.
-            vocals = next((p for p in paths if "vocal" in os.path.basename(p).lower()), None)
+            if self.stem == "vocals":
+                vocals = next((p for p in paths if "vocal" in os.path.basename(p).lower()), None)
+            else:
+                matches = [p for p in paths if self.stem in os.path.basename(p).lower()]
+                if not matches:
+                    matches = [p for p in paths if "noise" not in os.path.basename(p).lower()]
+                vocals = matches[0] if len(matches) == 1 else None
             if vocals is None:
                 if self.logger:
                     self.logger.warning(
-                        f"BS-RoFormer produced no vocal stem "
+                        f"BS-RoFormer produced no unambiguous {self.stem} stem "
                         f"({[os.path.basename(p) for p in paths]}); keeping the mixture")
                 return None
 
+            self.selected_stem = os.path.basename(vocals)
+            if self.logger:
+                self.logger.info(f"[separator:stem] {self.selected_stem}")
             out, out_sr = sf.read(vocals, dtype="float32", always_2d=stereo_in)
             if not stereo_in and out.ndim > 1:
                 out = out.mean(axis=1)

@@ -1,8 +1,30 @@
 import os
 import argparse
-from huggingface_hub import snapshot_download, hf_hub_download
+
+def download_dnsmos():
+    """Fetch only the measurement checkpoint, independently of pipeline weights."""
+    from pathlib import Path
+    from urllib.request import urlopen
+    import hashlib
+    import json
+    target = Path(__file__).resolve().parent / "offline_weights/dnsmos/sig_bak_ovr.onnx"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    url = "https://raw.githubusercontent.com/microsoft/DNS-Challenge/master/DNSMOS/DNSMOS/sig_bak_ovr.onnx"
+    if not target.exists():
+        with urlopen(url, timeout=120) as response:
+            data = response.read()
+        if len(data) < 100000:
+            raise RuntimeError("DNSMOS download is too small to be a model")
+        temporary = target.with_suffix(".download")
+        temporary.write_bytes(data)
+        temporary.replace(target)
+    target.with_suffix(".source.json").write_text(json.dumps({
+        "url": url, "sha256": hashlib.sha256(target.read_bytes()).hexdigest()}, indent=2))
+    print(f"DNSMOS_MODEL={target}")
+    return target
 
 def download_models(token=None):
+    from huggingface_hub import snapshot_download
     # Set cache directories
     base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "offline_weights")
     hf_cache = os.path.join(base_dir, "huggingface")
@@ -13,6 +35,7 @@ def download_models(token=None):
     
     os.environ["HF_HOME"] = hf_cache
     os.environ["TORCH_HOME"] = torch_cache
+    download_dnsmos()
     
     print(f"=====================================================")
     print(f"BẮT ĐẦU TẢI MODELS VỀ THƯ MỤC: {base_dir}")
@@ -152,6 +175,10 @@ def download_models(token=None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Tải toàn bộ Model Weights về máy tính")
     parser.add_argument("--token", type=str, help="HuggingFace Access Token", default=None)
+    parser.add_argument("--dnsmos-only", action="store_true")
     args = parser.parse_args()
     
-    download_models(args.token)
+    if args.dnsmos_only:
+        download_dnsmos()
+    else:
+        download_models(args.token)

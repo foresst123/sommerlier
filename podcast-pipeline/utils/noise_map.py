@@ -103,6 +103,13 @@ class NoiseTrack:
             return None
         return round(float(np.percentile(frames, percentile)), 4)
 
+    def excise_spans(self, threshold=NOTICEABLE, min_span=0.96,
+                     merge_gap=0.5, pad=0.3):
+        """Experimental cuts, called only when NOISE_EXCISE is enabled."""
+        from utils.music_map import _runs
+        return [(a, b, "noise") for a, b in _runs(
+            self.combined >= threshold, self.fps, min_span, merge_gap, pad)]
+
     def breakdown(self, spans, percentile: float = 90.0):
         """The same score per kind, so a filter can treat voices differently."""
         out = {}
