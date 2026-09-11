@@ -14,12 +14,14 @@ import numpy as np
 import onnxruntime
 
 # Segments longer than this are re-cut on Silero's own speech boundaries;
-# shorter ones keep the diarizer's edges untouched. It used to be 20s, which
-# meant that once max_segment_length dropped to 20 nothing reached the VAD at
-# all and every boundary came straight from the diarizer's 0.8s frame grid.
-# A couple of seconds is enough audio for Silero to place an edge on the
-# waveform rather than on a frame index.
-VAD_THRESHOLD = float(os.environ.get("VAD_THRESHOLD", "2.0"))
+# shorter ones keep the diarizer's edges untouched. At 2.0 this mixed two
+# boundary systems in one timeline -- short turns on the diarizer's 0.8s frame
+# grid, long ones on Silero's waveform edges -- and every turn change between
+# the two produced 19-60ms phantom overlaps. 0.5 sends effectively everything
+# through Silero so one system decides every edge. Backchannels sit just above
+# it and keep their own edges, which is what we want: they are the shortest
+# real speech in the corpus and nothing should re-cut them.
+VAD_THRESHOLD = float(os.environ.get("VAD_THRESHOLD", "0.5"))
 # Longest run of speech `segment_speech` will hand back as one piece before it
 # splits at the widest internal pause. Independent of VAD_THRESHOLD: that one
 # decides whether the VAD runs, this one decides how it carves the result.
@@ -203,23 +205,30 @@ class SileroVAD:
         audio_data = audio["waveform"]
 
         out = []
-        last_end = 0
+        # Per speaker, not global. A global cursor would clip one speaker's
+        # start against another's end -- which is exactly the cross-speaker
+        # overlap the separator exists to recover. Only a speaker overlapping
+        # themselves is a labelling artefact worth removing.
+        last_end_by_speaker = {}
         speakers_seen = set()
         count_id = 0
 
         for index, row in speakerdia.iterrows():
             start = float(row["start"])
             end = float(row["end"])
+            speaker = row["speaker"]
 
-            if end <= last_end:
-                pass
-            else:
-                last_end = end
+            cursor = last_end_by_speaker.get(speaker, 0.0)
+            if end <= cursor:
+                # Wholly inside a turn already emitted for this speaker.
+                continue
+            start = max(start, cursor)
+            last_end_by_speaker[speaker] = end
 
             start_frame = int(start * sampling_rate)
             end_frame = int(end * sampling_rate)
-            if row["speaker"] not in speakers_seen:
-                speakers_seen.add(row["speaker"])
+            if speaker not in speakers_seen:
+                speakers_seen.add(speaker)
 
             if end - start <= self.vad_threshold:
                 out.append(
@@ -227,7 +236,7 @@ class SileroVAD:
                         "index": str(count_id).zfill(5),
                         "start": start,  # in seconds
                         "end": end,
-                        "speaker": row["speaker"],  # same for all
+                        "speaker": speaker,  # same for all
                     }
                 )
                 count_id += 1
@@ -251,7 +260,7 @@ class SileroVAD:
                         "index": str(count_id).zfill(5),
                         "start": start_frame_sub / SAMPLING_RATE,  # in seconds
                         "end": end_frame_sub / SAMPLING_RATE,
-                        "speaker": row["speaker"],  # same for all
+                        "speaker": speaker,  # same for all
                     }
                 )
                 count_id += 1

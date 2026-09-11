@@ -14,7 +14,8 @@ from utils.segment_utils import (
     deduplicate_segments_by_index,
     split_long_segments,
     split_at_seams,
-    cut_by_speaker_label
+    cut_by_speaker_label,
+    merge_ghost_speakers
 )
 from algorithms.diarization.fusion import align_speakers_across_chunks
 from algorithms.diarization.overlap import detect_overlapping_segments
@@ -195,23 +196,28 @@ class DiarizationService:
         # source and silence. Keep merge and split reading the same number.
         max_seg = getattr(args, "max_segment_length", None) or 30.0
         self._log_segment_stats("post-vad", raw_list)
-        # smoothed_list = cut_by_speaker_label(
-        #     raw_list, merge_gap=merge_gap, max_segment_length=max_seg,
-        #     logger=self.logger, seams=seams)
-        # self._log_segment_stats(f"post-merge(gap={merge_gap} max={max_seg})", smoothed_list)
+        # min_segment_length is deliberately below the 0.1s overlap threshold
+        # used downstream: the shortest real overlap measured on this corpus is
+        # 0.24s, so a backchannel must survive this filter. Only the 19-60ms
+        # boundary jitter is meant to go.
+        smoothed_list = cut_by_speaker_label(
+            raw_list, merge_gap=merge_gap, min_segment_length=0.1,
+            max_segment_length=max_seg, logger=self.logger, seams=seams)
+        self._log_segment_stats(f"post-merge(gap={merge_gap} max={max_seg})", smoothed_list)
 
         # Dissolve speakers too small to be participants before anything
         # downstream has to reason about them. Target extraction is the caller
         # that cares: it refuses an overlap whose window holds three speakers
         # and cannot enrol anyone with under 1.5s of clean audio, so a
         # three-second cluster costs far more than its length.
-        # self._log_segment_stats("post-ghost-merge", smoothed_list)
+        smoothed_list = merge_ghost_speakers(smoothed_list, logger=self.logger)
+        self._log_segment_stats("post-ghost-merge", smoothed_list)
 
         # Split segments that are too long. Passing the waveform lets the cut
         # land on a pause instead of on the stopwatch, so a forced split stops
         # clipping words in half.
         final_list = split_long_segments(
-            raw_list, max_duration=max_seg,
+            smoothed_list, max_duration=max_seg,
             waveform=audio.waveform, sample_rate=audio.sample_rate)
         self._log_segment_stats("post-split", final_list)
 
