@@ -38,7 +38,8 @@ def band_shape(parts, sr):
     if total == 0 or not np.any(sums):
         return None
     power = sums / total
-    centers = 100 * 2 ** (np.arange(20) / 3)
+    centers = np.array([100, 125, 160, 200, 250, 315, 400, 500, 630, 800,
+                        1000, 1250, 1600, 2000, 2500, 3150, 4000, 5000, 6300, 8000])
     bands = [float(power[(frequencies >= c / 2 ** (1/6)) &
                          (frequencies < c * 2 ** (1/6))].sum())
              for c in centers if c <= min(8000, sr / 2)]

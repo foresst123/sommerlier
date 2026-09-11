@@ -222,20 +222,10 @@ def test_enrollment_is_never_mined_from_speech_over_music():
 #
 # --- the singing branch, and why it is gone ---------------------------------
 
-def test_nothing_reintroduces_a_singing_kind():
-    """There used to be a third kind for a voice that sings rather than speaks.
-
-    It is gone, and this pins that rather than trusting a comment. Under PANNs
-    it fired for 10s, 0s and 0s across three recordings; under SSLAM every
-    detection that cleared the speech margin was a single isolated frame, so no
-    run ever reached the two consecutive frames MIN_SPAN_EXCISED asks for and
-    the branch could not produce a span at all. A branch that cannot fire is
-    worse than no branch: it reads as a working safeguard.
-    """
+def test_singing_excision_is_opt_in():
+    """The matrix may test singing cuts; ordinary runs keep their old policy."""
     import utils.music_map as mm
-    assert not hasattr(mm, "SINGING")
-    assert not hasattr(mm, "SINGING_THRESHOLD")
-    assert not hasattr(mm, "SINGING_MARGIN")
+    assert not mm.EXCISE_SINGING
     assert mm.EXCISED == (mm.SONG,)
 
 

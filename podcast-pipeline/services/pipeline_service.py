@@ -416,7 +416,7 @@ class PipelineService:
         # Diarization cũng cần mối nối để không tạo segment vượt qua chúng.
         self.diarization_svc.timeline = timeline
 
-        if "music" not in computed_stages:
+        if "music" not in computed_stages and not parents:
             stage_out.write_music(music_map, timeline,
                                   audio_data.waveform, audio_data.sample_rate)
             computed_stages.add("music")

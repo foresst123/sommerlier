@@ -40,6 +40,7 @@ Two things this module is careful about, both learned the hard way:
 
 import inspect
 import os
+import re
 import tempfile
 
 import numpy as np
@@ -221,9 +222,13 @@ class BSRoformerRemover:
             if self.stem == "vocals":
                 vocals = next((p for p in paths if "vocal" in os.path.basename(p).lower()), None)
             else:
-                matches = [p for p in paths if self.stem in os.path.basename(p).lower()]
+                # Check the stem label, not the whole filename: "denoise" in
+                # the checkpoint name otherwise makes *every* stem look noisy.
+                labels = {p: re.findall(r"_\(([^)]+)\)", os.path.basename(p)) for p in paths}
+                labels = {p: names[0].lower() for p, names in labels.items() if names}
+                matches = [p for p, label in labels.items() if label == self.stem]
                 if not matches:
-                    matches = [p for p in paths if "noise" not in os.path.basename(p).lower()]
+                    matches = [p for p, label in labels.items() if "noise" not in label]
                 vocals = matches[0] if len(matches) == 1 else None
             if vocals is None:
                 if self.logger:

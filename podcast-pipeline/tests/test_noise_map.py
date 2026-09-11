@@ -219,7 +219,9 @@ def test_nothing_here_modifies_audio():
     for banned in ("soundfile", "librosa", "torch", "torchaudio", "scipy",
                    "audio_separator", "pydub"):
         assert banned not in imported, f"noise_map imports {banned}"
-    assert imported <= {"numpy", "os"}, f"unexpected imports: {sorted(imported)}"
+    assert imported <= {"numpy", "os", "utils"}, f"unexpected imports: {sorted(imported)}"
+    assert all(node.module == "utils.music_map" for node in ast.walk(tree)
+               if isinstance(node, ast.ImportFrom) and node.module.startswith("utils"))
 
 
 # --- the noticeable level, against what the model actually produces ----------
