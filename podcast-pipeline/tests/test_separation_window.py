@@ -251,3 +251,33 @@ def test_pad_less_fallback_never_exceeds_the_15s_target():
         assert planner.detail == "fallback_base_exceeds_15s"
     else:
         assert result.layout["duration_seconds"] <= 15.0, result.layout
+
+
+def test_own_pair_survives_a_pickle_round_trip_without_self_rejecting():
+    """build() phải nhận diện cặp overlap của chính nó bằng giá trị, không bằng id().
+
+    group và self.pairs được tạo cùng một chỗ nên chia sẻ tham chiếu object khi
+    chạy trong một process -- id() khớp là tình cờ, không phải bất biến. Gửi
+    pairs/group qua pickle (worker process, cache, checkpoint) tạo object mới
+    cùng nội dung nhưng id() khác hẳn: nếu build() vẫn so bằng id(), nó tưởng
+    cặp overlap của chính job là "cặp lạ" và tự chặn nhầm chính mình -- mọi
+    job đều fail foreign_overlap_in_target dù hình học hợp lệ.
+    """
+    import pickle
+
+    planner, jobs = setup(basic())
+    group = jobs[0][2]
+
+    baseline = planner.build(group)
+    assert baseline is not None, planner.detail
+
+    pairs_rt = pickle.loads(pickle.dumps(planner.pairs))
+    group_rt = pickle.loads(pickle.dumps(group))
+    planner.pairs = pairs_rt
+
+    result = planner.build(group_rt)
+    assert result is not None, (
+        f"reason={planner.reason} detail={planner.detail} -- "
+        "build() tự chặn nhầm cặp overlap của chính nó sau khi pickle")
+    assert np.array_equal(result.audio, baseline.audio)
+    assert result.core == baseline.core

@@ -8,6 +8,8 @@ from schemas.segment import Segment, SpeechSegment
 from algorithms.diarization.overlap import detect_overlapping_segments
 from utils.audio_normalize import match_splice_level, safe_limit
 from utils.separation_window import POLICY_VERSION, WindowPlanner, clean_segments, merge_ranges
+from utils.window_pool import WindowBuildPool
+from utils.cpu_plan import usable_cores
 from utils.music_map import MusicMap
 from utils.enrollment_memory import EnrollmentMemory, ENABLED as BSS_MEMORY
 
@@ -19,6 +21,43 @@ _NO_MEMORY = EnrollmentMemory(enabled=False)
 BSS_STITCH_EDGE_PAD = float(os.environ.get("BSS_STITCH_EDGE_PAD", "2.0"))
 BSS_STITCH_SEARCH = float(os.environ.get("BSS_STITCH_SEARCH", "400.0"))
 BSS_MIN_SOLO = 1.0
+
+# --- Song song hoá việc dựng cửa sổ ----------------------------------------
+# WindowPlanner.build() là CPU/numpy thuần và có thể tốn vài giây một job khi
+# overlap có nhiều support candidate (đo được ~3.5s/job trên kịch bản lượt
+# nói ngắn xen kẽ) -- trong khi bss_model.separate_two_speakers() sau đó lại
+# chạy GPU tuần tự. Build của job N+1 không phụ thuộc gì vào việc tách của
+# job N nên chạy song song trong lúc GPU bận: pipeline, không phải theo lô.
+# Xem utils/window_pool.py để biết cơ chế đầy đủ.
+#
+# Mặc định để trống (None) = tự tính theo usable_cores(); đặt số để ép cứng,
+# đặt 0 hoặc 1 để tắt hẳn (chạy tuần tự như trước khi có tối ưu này).
+_BSS_WINDOW_WORKERS_ENV = os.environ.get("BSS_WINDOW_WORKERS")
+# Dưới ngưỡng này, chi phí spawn pool (~0.5-0.8s/process, đo trên máy dev 8
+# core) ăn hết lợi ích -- đo được 6 job -> 2.16x, số job càng ít speedup càng
+# tiệm cận 1x hoặc âm. Dựng pool chỉ đáng khi có đủ job bù lại.
+BSS_WINDOW_POOL_MIN_JOBS = int(os.environ.get("BSS_WINDOW_POOL_MIN_JOBS", "3"))
+
+
+def _resolve_window_workers(n_jobs: int) -> int:
+    """Bao nhiêu process cho việc dựng cửa sổ song song; 0 nghĩa là tắt.
+
+    Tôn trọng usable_cores() (utils/cpu_plan.py) thay vì hard-code: module đó
+    đo được rằng trên máy ít core, mở thêm process làm CHẬM đi vì tranh CPU
+    với main process và Sidon worker (SIDON_CPU_THREADS đã giữ phần của nó).
+    Trần 5 khớp với phép đo thực tế (3.36-3.76x với 5 worker trên máy 8 core);
+    quá đó lợi ích giảm dần trong khi rủi ro tranh CPU với Sidon tăng lên.
+    """
+    if _BSS_WINDOW_WORKERS_ENV is not None:
+        try:
+            return max(0, int(_BSS_WINDOW_WORKERS_ENV))
+        except ValueError:
+            pass
+    if n_jobs < BSS_WINDOW_POOL_MIN_JOBS:
+        return 0
+    # Main process + Sidon worker subprocess đã chiếm ít nhất 2 "chỗ"; phần
+    # còn lại mới dành cho pool build cửa sổ.
+    return max(0, min(5, usable_cores() - 2))
 
 # --- Mẫu giọng đối chiếu --------------------------------------------------
 BSS_ENROLL_BUDGET = float(os.environ.get("BSS_ENROLL_BUDGET", "8.0"))
@@ -510,10 +549,23 @@ class SeparationService:
             for sd, lo, hi in self._splice_pairs(plist):
                 self._fail(seg_by_index.get(sd["index"]), lo, hi, "below_threshold",
                            f"span={hi - lo:.3f}s th={overlap_threshold}")
-        planner = WindowPlanner(
-            segments, pairs, waveform, sr, music_map=self.music_map,
-            seams=self.seams(), vad=getattr(self.bss_model, "_vad", None),
-            context_seconds=BSS_STITCH_EDGE_PAD, search_seconds=BSS_STITCH_SEARCH)
+        # Bỏ trước những job thiếu enrollment: build cửa sổ cho chúng chỉ để
+        # vứt đi ngay sau đó là lãng phí CPU (và với pool, cả RAM/IPC).
+        buildable = []
+        for spk_a, spk_b, plist in queue:
+            self.stats["jobs"] += 1
+            self.stats["pairs"] += len(plist)
+            for p in plist:
+                self.overlap_durations.append(p["overlap_end"] - p["overlap_start"])
+            targets = self._splice_pairs(plist)
+            if not enrollments.get(spk_a) or not enrollments.get(spk_b):
+                missing = spk_a if not enrollments.get(spk_a) else spk_b
+                for sd, lo, hi in targets:
+                    self._fail(seg_by_index.get(sd["index"]), lo, hi, "no_enroll",
+                               f"speaker={missing}")
+                continue
+            buildable.append((spk_a, spk_b, plist, targets))
+
         # Ghi nhận overlap cùng speaker trên cả hai segment để không mất dấu.
         by_index = {e.index: e for e in speech}
         for p in self._same_speaker_pairs:
@@ -522,184 +574,218 @@ class SeparationService:
                            p["overlap_start"], p["overlap_end"],
                            "same_speaker", f"speaker={p[side].get('speaker')}")
         if self.logger:
-            self.logger.info(f"[TSE] {len(pairs)} overlap pairs -> {len(queue)} separation jobs")
+            self.logger.info(f"[TSE] {len(pairs)} overlap pairs -> {len(queue)} separation jobs "
+                              f"({len(buildable)} with enrollment)")
+
+        # Dựng cửa sổ song song khi đủ job bù chi phí spawn pool; job build
+        # (CPU) không phụ thuộc lượt tách (GPU) trước nó nên chồng lấp được --
+        # xem utils/window_pool.py. Pool lỗi lúc khởi tạo (môi trường không
+        # cho fork/spawn, hết RAM cho shared_memory, ...) thì rơi về tuần tự
+        # thay vì làm hỏng cả lượt chạy.
+        #
+        # use_vad=False: nhiều worker mới spawn cùng lúc tự tải Silero VAD gây
+        # crash tầng native thật (libc++abi recursive_mutex, không phải
+        # exception Python bắt được) khi cache torch.hub còn rỗng -- xem
+        # window_pool.py. Cửa sổ dựng song song dùng energy-based cut thay vì
+        # Silero, kém chính xác hơn một chút so với nhánh tuần tự (vốn dùng
+        # Silero GPU của chính bss_model); đổi lấy không crash cả lượt chạy.
+        pool = None
+        n_workers = _resolve_window_workers(len(buildable))
+        if n_workers > 1 and buildable:
+            try:
+                pool = WindowBuildPool(
+                    segments, pairs, waveform, sr, music_map=self.music_map,
+                    seams=self.seams(), context_seconds=BSS_STITCH_EDGE_PAD,
+                    search_seconds=BSS_STITCH_SEARCH, n_workers=n_workers, use_vad=False)
+                if self.logger:
+                    self.logger.info(f"[TSE] building windows with {n_workers} worker process(es)")
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(
+                        f"[TSE] window pool failed to start ({type(e).__name__}: {e}); "
+                        "falling back to sequential build")
+                pool = None
+
+        if pool is not None:
+            window_iter = pool.build_all([plist for _a, _b, plist, _t in buildable])
+        else:
+            planner = WindowPlanner(
+                segments, pairs, waveform, sr, music_map=self.music_map,
+                seams=self.seams(), vad=getattr(self.bss_model, "_vad", None),
+                context_seconds=BSS_STITCH_EDGE_PAD, search_seconds=BSS_STITCH_SEARCH)
+
+            def window_iter():
+                for _a, _b, plist, _t in buildable:
+                    r = planner.build(plist)
+                    yield r, planner.reason, planner.detail
+            window_iter = window_iter()
 
         from tqdm import tqdm
-        pbar = tqdm(total=len(queue), desc="[TSE Extractor]", leave=True)
-        while queue:
-            spk_a, spk_b, plist = queue.pop(0)
-            pbar.total = pbar.n + len(queue) + 1
-            pbar.update(1)
-            self.stats["jobs"] += 1
-            self.stats["pairs"] += len(plist)
-            for p in plist:
-                self.overlap_durations.append(p["overlap_end"] - p["overlap_start"])
+        pbar = tqdm(total=len(buildable), desc="[TSE Extractor]", leave=True)
+        try:
+            for (spk_a, spk_b, plist, targets), (built, reason, detail) in zip(buildable, window_iter):
+                pbar.update(1)
 
-            targets = self._splice_pairs(plist)
+                def fail_all(reason, detail="", targets=targets):
+                    for sd, lo, hi in targets:
+                        self._fail(seg_by_index.get(sd["index"]), lo, hi, reason, detail)
 
-            def fail_all(reason, detail=""):
-                for sd, lo, hi in targets:
-                    self._fail(seg_by_index.get(sd["index"]), lo, hi, reason, detail)
+                job_lo = min(p["overlap_start"] for p in plist)
+                job_hi = max(p["overlap_end"] for p in plist)
 
-            if not enrollments.get(spk_a) or not enrollments.get(spk_b):
-                missing = spk_a if not enrollments.get(spk_a) else spk_b
-                fail_all("no_enroll", f"speaker={missing}")
-                continue
-
-            job_lo = min(p["overlap_start"] for p in plist)
-            job_hi = max(p["overlap_end"] for p in plist)
-
-            built = planner.build(plist)
-            if built is None:
-                fail_all(planner.reason, planner.detail)
-                self.window_layouts.append({
-                    "source_overlap": [job_lo, job_hi],
-                    "status": "skipped", "reason": planner.detail})
-                continue
-            window_audio, core = built.audio, built.core
-            probe_a_s, probe_b_s = built.probes[spk_a], built.probes[spk_b]
-            layout = built.layout
-            self.window_layouts.append(layout)
-            # core[0] is where core_source_samples[0] lands in the window, and
-            # that is NOT job_lo: for an overlap under short_core_threshold the
-            # planner pads the core outward, so the two differ by up to the pad.
-            # Mapping window <-> source through job_lo read the window 2s early.
-            core_src_lo = layout["core_source_samples"][0]
-            win_lo = (core_src_lo - core[0]) / sr
-            win_hi = win_lo + len(window_audio) / sr
-            solo_a = [(a/sr, b/sr) for a, b in probe_a_s]
-            solo_b = [(a/sr, b/sr) for a, b in probe_b_s]
-            anchor = spk_a if sum(b-a for a,b in solo_a) >= sum(b-a for a,b in solo_b) else spk_b
-            self.stats["stitched"] += 1
-            if self.logger:
-                self.logger.info(
-                    f"[BSS:window] {job_lo:.2f}-{job_hi:.2f}s -> "
-                    f"{len(window_audio)/sr:.2f}s; overlap @ {core[0]/sr:.3f}s; "
-                    f"balance={layout['ratio']:.2f}:1")
-
-            # Nếu bật bộ nhớ, bổ sung mẫu từ các kết quả tốt trước đó trong cùng file.
-            # Mẫu sạch khai thác ban đầu luôn ở đầu danh sách và không bị thay thế.
-            memory = getattr(self, "memory", None) or _NO_MEMORY
-            enroll_a = memory.extend(spk_a, enrollments[spk_a], sr)
-            enroll_b = memory.extend(spk_b, enrollments[spk_b], sr)
-
-            track_A, track_B, sim_A, sim_B, diag = self.bss_model.separate_two_speakers(
-                window_audio,
-                enroll_A=enroll_a, enroll_B=enroll_b,
-                sample_rate=sr, id_A=spk_a, id_B=spk_b,
-                probe_A=probe_a_s,
-                probe_B=probe_b_s,
-                core_range=core,
-            )
-
-            for sim in (sim_A, sim_B):
-                if sim is not None:
-                    self.sims.append(sim)
-
-            # Chỉ nhận vào bộ nhớ các track đạt ngưỡng cao để hạn chế học nhầm giọng.
-            for spk, track, sim in ((spk_a, track_A, sim_A), (spk_b, track_B, sim_B)):
-                memory.offer(spk, track, sim, sr)
-
-            # Đánh giá từng track độc lập; một track kém không làm mất track còn tốt.
-            accepted, rejected = {}, {}
-            for spk, track, sim in ((spk_a, track_A, sim_A), (spk_b, track_B, sim_B)):
-                if sim is not None:
-                    if sim >= BSS_QC_SIM_THRESHOLD:
-                        accepted[spk] = (track, sim)
-                    else:
-                        rejected[spk] = ("qc_sim", f"sim={sim:.2f} th={BSS_QC_SIM_THRESHOLD}")
+                if built is None:
+                    fail_all(reason, detail)
+                    self.window_layouts.append({
+                        "source_overlap": [job_lo, job_hi],
+                        "status": "skipped", "reason": detail})
                     continue
-
-                # Nếu thiếu solo để chấm điểm, dùng phép so tương đối với giọng neo
-                # để kiểm tra track có chỉ là bản sao của giọng đó hay không.
-                own, other, rms = diag["anchor_self"], diag["anchor_other"], diag["other_rms"]
-                if rms is not None and rms < BSS_SILENCE_RMS:
-                    rejected[spk] = ("unscorable", f"rms={rms:.5f}")
-                elif own is None or other is None:
-                    rejected[spk] = ("unscorable", "no core embedding")
-                elif (own - other) > BSS_NOT_A_MARGIN:
-                    accepted[spk] = (track, None)
-                    self.stats["accept_not_a"] += 1
-                else:
-                    rejected[spk] = ("not_a_fail",
-                                     f"margin={own - other:.2f} th={BSS_NOT_A_MARGIN}")
-
-            if not accepted:
-                for sd, lo, hi in targets:
-                    r, d = rejected.get(sd["speaker"], ("unscorable", "no verdict"))
-                    self._fail(seg_by_index.get(sd["index"]), lo, hi, r, d)
-                self._dump_failed(f"{job_lo:.2f}_{spk_a}_{spk_b}", window_audio, track_A, track_B, sr)
-                continue
-
-            # Ghi thông tin đầu vào, kết quả và điểm của các track đạt kiểm tra.
-            if self.logger:
-                who = ", ".join(
-                    f"{spk}=" + (f"{sim:.2f}" if sim is not None else "not-A")
-                    for spk, (_, sim) in accepted.items()
-                )
-                self.logger.info(
-                    f"[TSE:sep] {win_lo:.2f}-{win_hi:.2f}s ({win_hi - win_lo:.1f}s window) "
-                    f"anchor={anchor} solo_a={sum(b - a for a, b in solo_a):.1f}s "
-                    f"solo_b={sum(b - a for a, b in solo_b):.1f}s | accepted: {who}"
-                    + (f" | rejected: {sorted(rejected)}" if rejected else "")
-                )
-            self._dump_tracks("separated", f"{job_lo:.2f}_{spk_a}_{spk_b}",
-                              window_audio, track_A, track_B, sr)
-
-            fade_samples = int(0.02 * sr)
-            for sd, ov_lo, ov_hi in targets:
-                spk = sd["speaker"]
-                enh = seg_by_index.get(sd["index"])
-                if enh is None:
-                    continue
-                if spk not in accepted:
-                    r, d = rejected.get(spk, ("unscorable", "no verdict"))
-                    self._fail(enh, ov_lo, ov_hi, r, d)
-                    continue
-
-                track, sim = accepted[spk]
-                src = core[0] + int(ov_lo * sr) - core_src_lo
-                dst = int(ov_lo * sr) - int(enh.start * sr)
-                if src < 0 or dst < 0:
-                    self._fail(enh, ov_lo, ov_hi, "short_track", "negative offset")
-                    continue
-                limit = min(int(ov_hi * sr) - int(ov_lo * sr), len(track) - src,
-                            len(enh.audio) - dst)
-                if limit <= 0:
-                    self._fail(enh, ov_lo, ov_hi, "short_track", f"limit={limit}")
-                    continue
-                if any(not (ov_hi <= a or ov_lo >= b) for a, b, _ in enh.bss_spans):
-                    self._fail(enh, ov_lo, ov_hi, "already_spliced", "")
-                    continue
-
-                # Kiểm tra ngay vùng sắp ghép trả có lời. Điểm tốt trên solo ở xa không
-                # bảo đảm overlap có lời: từng có trường hợp sim=0.67 trên mẫu trước đó
-                # 19 giây nhưng track im lặng ở chính overlap.
-                host = enh.audio[dst:dst + limit]
-                if not self._track_has_speech(host, track[src:src + limit], sr_hint=sr):
-                    self._fail(enh, ov_lo, ov_hi, "empty_track",
-                               "silent where mixture has speech")
-                    continue
-
-                # Track đã bỏ giọng nhiễu thường nhỏ hơn mixture. Khớp mức RMS trước
-                # khi ghép trả để tránh bước nhảy âm lượng; crossfade tiếp tục làm mượt biên.
-                patch = match_splice_level(
-                    enh.audio[dst:dst + limit], track[src:src + limit])
-                enh.audio[dst:dst + limit] = self._cross_fade(
-                    enh.audio[dst:dst + limit], patch, fade_samples)
-                enh.bss = True
-                enh.bss_spans.append((ov_lo, ov_lo + limit / sr,
-                                      float(sim) if sim is not None else -1.0))
-                self.stats["spliced"] += 1
+                window_audio, core = built.audio, built.core
+                probe_a_s, probe_b_s = built.probes[spk_a], built.probes[spk_b]
+                layout = built.layout
+                self.window_layouts.append(layout)
+                # core[0] is where core_source_samples[0] lands in the window, and
+                # that is NOT job_lo: for an overlap under short_core_threshold the
+                # planner pads the core outward, so the two differ by up to the pad.
+                # Mapping window <-> source through job_lo read the window 2s early.
+                core_src_lo = layout["core_source_samples"][0]
+                win_lo = (core_src_lo - core[0]) / sr
+                win_hi = win_lo + len(window_audio) / sr
+                solo_a = [(a/sr, b/sr) for a, b in probe_a_s]
+                solo_b = [(a/sr, b/sr) for a, b in probe_b_s]
+                anchor = spk_a if sum(b-a for a,b in solo_a) >= sum(b-a for a,b in solo_b) else spk_b
+                self.stats["stitched"] += 1
                 if self.logger:
                     self.logger.info(
-                        f"[TSE:splice] seg {sd['index']} spk={spk} "
-                        f"{ov_lo:.2f}-{ov_lo + limit / sr:.2f}s "
-                        f"({limit / sr:.2f}s) sim="
-                        + (f"{sim:.2f}" if sim is not None else "not-A")
-                    )
+                        f"[BSS:window] {job_lo:.2f}-{job_hi:.2f}s -> "
+                        f"{len(window_audio)/sr:.2f}s; overlap @ {core[0]/sr:.3f}s; "
+                        f"balance={layout['ratio']:.2f}:1")
 
-        pbar.close()
+                # Nếu bật bộ nhớ, bổ sung mẫu từ các kết quả tốt trước đó trong cùng file.
+                # Mẫu sạch khai thác ban đầu luôn ở đầu danh sách và không bị thay thế.
+                memory = getattr(self, "memory", None) or _NO_MEMORY
+                enroll_a = memory.extend(spk_a, enrollments[spk_a], sr)
+                enroll_b = memory.extend(spk_b, enrollments[spk_b], sr)
+
+                track_A, track_B, sim_A, sim_B, diag = self.bss_model.separate_two_speakers(
+                    window_audio,
+                    enroll_A=enroll_a, enroll_B=enroll_b,
+                    sample_rate=sr, id_A=spk_a, id_B=spk_b,
+                    probe_A=probe_a_s,
+                    probe_B=probe_b_s,
+                    core_range=core,
+                )
+
+                for sim in (sim_A, sim_B):
+                    if sim is not None:
+                        self.sims.append(sim)
+
+                # Chỉ nhận vào bộ nhớ các track đạt ngưỡng cao để hạn chế học nhầm giọng.
+                for spk, track, sim in ((spk_a, track_A, sim_A), (spk_b, track_B, sim_B)):
+                    memory.offer(spk, track, sim, sr)
+
+                # Đánh giá từng track độc lập; một track kém không làm mất track còn tốt.
+                accepted, rejected = {}, {}
+                for spk, track, sim in ((spk_a, track_A, sim_A), (spk_b, track_B, sim_B)):
+                    if sim is not None:
+                        if sim >= BSS_QC_SIM_THRESHOLD:
+                            accepted[spk] = (track, sim)
+                        else:
+                            rejected[spk] = ("qc_sim", f"sim={sim:.2f} th={BSS_QC_SIM_THRESHOLD}")
+                        continue
+
+                    # Nếu thiếu solo để chấm điểm, dùng phép so tương đối với giọng neo
+                    # để kiểm tra track có chỉ là bản sao của giọng đó hay không.
+                    own, other, rms = diag["anchor_self"], diag["anchor_other"], diag["other_rms"]
+                    if rms is not None and rms < BSS_SILENCE_RMS:
+                        rejected[spk] = ("unscorable", f"rms={rms:.5f}")
+                    elif own is None or other is None:
+                        rejected[spk] = ("unscorable", "no core embedding")
+                    elif (own - other) > BSS_NOT_A_MARGIN:
+                        accepted[spk] = (track, None)
+                        self.stats["accept_not_a"] += 1
+                    else:
+                        rejected[spk] = ("not_a_fail",
+                                         f"margin={own - other:.2f} th={BSS_NOT_A_MARGIN}")
+
+                if not accepted:
+                    for sd, lo, hi in targets:
+                        r, d = rejected.get(sd["speaker"], ("unscorable", "no verdict"))
+                        self._fail(seg_by_index.get(sd["index"]), lo, hi, r, d)
+                    self._dump_failed(f"{job_lo:.2f}_{spk_a}_{spk_b}", window_audio, track_A, track_B, sr)
+                    continue
+
+                # Ghi thông tin đầu vào, kết quả và điểm của các track đạt kiểm tra.
+                if self.logger:
+                    who = ", ".join(
+                        f"{spk}=" + (f"{sim:.2f}" if sim is not None else "not-A")
+                        for spk, (_, sim) in accepted.items()
+                    )
+                    self.logger.info(
+                        f"[TSE:sep] {win_lo:.2f}-{win_hi:.2f}s ({win_hi - win_lo:.1f}s window) "
+                        f"anchor={anchor} solo_a={sum(b - a for a, b in solo_a):.1f}s "
+                        f"solo_b={sum(b - a for a, b in solo_b):.1f}s | accepted: {who}"
+                        + (f" | rejected: {sorted(rejected)}" if rejected else "")
+                    )
+                self._dump_tracks("separated", f"{job_lo:.2f}_{spk_a}_{spk_b}",
+                                  window_audio, track_A, track_B, sr)
+
+                fade_samples = int(0.02 * sr)
+                for sd, ov_lo, ov_hi in targets:
+                    spk = sd["speaker"]
+                    enh = seg_by_index.get(sd["index"])
+                    if enh is None:
+                        continue
+                    if spk not in accepted:
+                        r, d = rejected.get(spk, ("unscorable", "no verdict"))
+                        self._fail(enh, ov_lo, ov_hi, r, d)
+                        continue
+
+                    track, sim = accepted[spk]
+                    src = core[0] + int(ov_lo * sr) - core_src_lo
+                    dst = int(ov_lo * sr) - int(enh.start * sr)
+                    if src < 0 or dst < 0:
+                        self._fail(enh, ov_lo, ov_hi, "short_track", "negative offset")
+                        continue
+                    limit = min(int(ov_hi * sr) - int(ov_lo * sr), len(track) - src,
+                                len(enh.audio) - dst)
+                    if limit <= 0:
+                        self._fail(enh, ov_lo, ov_hi, "short_track", f"limit={limit}")
+                        continue
+                    if any(not (ov_hi <= a or ov_lo >= b) for a, b, _ in enh.bss_spans):
+                        self._fail(enh, ov_lo, ov_hi, "already_spliced", "")
+                        continue
+
+                    # Kiểm tra ngay vùng sắp ghép trả có lời. Điểm tốt trên solo ở xa không
+                    # bảo đảm overlap có lời: từng có trường hợp sim=0.67 trên mẫu trước đó
+                    # 19 giây nhưng track im lặng ở chính overlap.
+                    host = enh.audio[dst:dst + limit]
+                    if not self._track_has_speech(host, track[src:src + limit], sr_hint=sr):
+                        self._fail(enh, ov_lo, ov_hi, "empty_track",
+                                   "silent where mixture has speech")
+                        continue
+
+                    # Track đã bỏ giọng nhiễu thường nhỏ hơn mixture. Khớp mức RMS trước
+                    # khi ghép trả để tránh bước nhảy âm lượng; crossfade tiếp tục làm mượt biên.
+                    patch = match_splice_level(
+                        enh.audio[dst:dst + limit], track[src:src + limit])
+                    enh.audio[dst:dst + limit] = self._cross_fade(
+                        enh.audio[dst:dst + limit], patch, fade_samples)
+                    enh.bss = True
+                    enh.bss_spans.append((ov_lo, ov_lo + limit / sr,
+                                          float(sim) if sim is not None else -1.0))
+                    self.stats["spliced"] += 1
+                    if self.logger:
+                        self.logger.info(
+                            f"[TSE:splice] seg {sd['index']} spk={spk} "
+                            f"{ov_lo:.2f}-{ov_lo + limit / sr:.2f}s "
+                            f"({limit / sr:.2f}s) sim="
+                            + (f"{sim:.2f}" if sim is not None else "not-A")
+                        )
+
+            pbar.close()
+        finally:
+            if pool is not None:
+                pool.close()
         self._report_stats()
         return speech
 

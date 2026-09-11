@@ -464,9 +464,22 @@ class WindowPlanner:
         # Overlaps of the two window speakers from OTHER pairs: also block.
         # A segment of one speaker alone is fine; a cross-speaker overlap
         # means the separator would face two voices at the cut point.
-        group_ids = {id(p) for p in group}
+        #
+        # Identity is by VALUE (segment indices + overlap span), not id(): a
+        # pair sent through pickle -- to a worker process, into a cache, onto
+        # disk -- comes back a distinct object with the same content, and
+        # id() would then call the job's own pair "foreign" and reject every
+        # window outright. group and self.pairs are the same objects here
+        # (both built in-process), so this only bites once something crosses
+        # a process boundary -- but that is exactly the case a value key has
+        # to survive.
+        def _pair_key(p):
+            return (p["seg1"]["index"], p["seg2"]["index"],
+                    p["overlap_start"], p["overlap_end"])
+
+        group_keys = {_pair_key(p) for p in group}
         for p in self.pairs:
-            if id(p) in group_ids:
+            if _pair_key(p) in group_keys:
                 continue
             s1, s2 = p["seg1"]["speaker"], p["seg2"]["speaker"]
             if s1 not in speakers or s2 not in speakers:

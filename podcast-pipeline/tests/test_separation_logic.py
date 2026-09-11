@@ -532,3 +532,74 @@ def test_expanded_core_splices_the_real_overlap_not_two_seconds_earlier():
             want = audio.waveform[int(lo * SR) + edge:][:len(got)]
             assert np.max(np.abs(got - want)) < 1e-4, (
                 f"seg {seg.index} {lo:.2f}-{hi:.2f}s ghép nhầm audio")
+
+
+# --- pool build cửa sổ song song (utils/window_pool.py) --------------------
+
+def _independent_pair_block(block_index, speakers, block_dur=90.0, seed=0):
+    """Một khối 90s độc lập: 2 speaker nói xen kẽ, có 1 backchannel ngắn.
+    Dùng chung công thức đã đo là tốn việc thật cho WindowPlanner.build()."""
+    rng = np.random.default_rng(seed)
+    t0 = block_index * block_dur
+    rows = []
+    x = 0.0
+    toggle = 0
+    while x < block_dur - 5:
+        L = rng.uniform(2.0, 4.0)
+        rows.append((t0 + x, t0 + x + L, speakers[toggle]))
+        x += L + rng.uniform(0.1, 0.3)
+        toggle ^= 1
+    host = next(r for r in rows if r[2] == speakers[0] and (r[0] - t0) > 30)
+    rows.append((host[0] + 0.5, host[0] + 1.2, speakers[1]))
+    return rows
+
+
+def _multi_pair_scenario(n_blocks=4, block_dur=90.0):
+    letters = [chr(ord('A') + i) for i in range(2 * n_blocks)]
+    rows = []
+    for i in range(n_blocks):
+        rows.extend(_independent_pair_block(i, (letters[2*i], letters[2*i+1]),
+                                             block_dur=block_dur, seed=i))
+    segs = [Segment(index=str(i), start=a, end=b, speaker=s)
+            for i, (a, b, s) in enumerate(rows)]
+    total_dur = n_blocks * block_dur
+    rng = np.random.default_rng(99)
+    wave = rng.normal(0, 0.05, int(total_dur * SR)).astype(np.float32)
+    wave[np.arange(len(wave)) % (SR // 2) < int(0.08 * SR)] = 0
+    audio = AudioData(waveform=wave, sample_rate=SR, name="multi", audio_segment=None,
+                       duration=total_dur)
+    return segs, audio
+
+
+def _run_with_workers(n_workers):
+    segs, audio = _multi_pair_scenario(n_blocks=4)
+    os.environ["BSS_WINDOW_WORKERS"] = str(n_workers)
+    try:
+        svc = SeparationService(FakeTSE(), logger=None)
+        out = svc.process_overlaps(segs, audio, overlap_threshold=0.1)
+    finally:
+        del os.environ["BSS_WINDOW_WORKERS"]
+    return out, svc
+
+
+def test_window_pool_matches_sequential_build_end_to_end():
+    """Bật pool (nhiều process) phải cho đúng kết quả ghép trả như tắt pool.
+
+    4 cặp speaker độc lập -> 4 job, đủ vượt BSS_WINDOW_POOL_MIN_JOBS để pool
+    thật sự được dùng (không rơi về tuần tự vì quá ít job). So sánh bss_spans
+    và nội dung audio đã ghép trả giữa hai lượt chạy.
+    """
+    out_seq, svc_seq = _run_with_workers(0)
+    out_par, svc_par = _run_with_workers(3)
+
+    assert svc_par.stats["jobs"] >= 3, "kịch bản phải sinh đủ job để pool được kích hoạt"
+    assert svc_seq.stats["spliced"] == svc_par.stats["spliced"] > 0
+    assert svc_seq.stats["stitched"] == svc_par.stats["stitched"]
+
+    by_index_seq = {s.index: s for s in out_seq}
+    by_index_par = {s.index: s for s in out_par}
+    assert set(by_index_seq) == set(by_index_par)
+    for idx, seg_seq in by_index_seq.items():
+        seg_par = by_index_par[idx]
+        assert seg_seq.bss_spans == seg_par.bss_spans, f"seg {idx}: bss_spans khác nhau"
+        assert np.array_equal(seg_seq.audio, seg_par.audio), f"seg {idx}: audio khác nhau"
