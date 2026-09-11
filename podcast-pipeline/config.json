@@ -81,12 +81,12 @@
                 "diarizen": {
                     "batch_size": 12,
                     "seg_duration": 16,
-                    "segmentation_step": 0.1,
-                    "apply_median_filtering": false,
+                    "segmentation_step": 0.02,
+                    "apply_median_filtering": true,
                     "clustering_method": "VBxClustering",
                     "min_speakers": 1,
                     "max_speakers": 10,
-                    "ahc_threshold": 0.6
+                    "ahc_threshold": 0.5
                 },
                 "bss": {
                     "qc_sim_threshold": 0.2,
@@ -176,12 +176,12 @@
                 "diarizen": {
                     "batch_size": 64,
                     "seg_duration": 16,
-                    "segmentation_step": 0.5,
-                    "apply_median_filtering": false,
+                    "segmentation_step": 0.02,
+                    "apply_median_filtering": true,
                     "clustering_method": "VBxClustering",
                     "min_speakers": 1,
-                    "max_speakers": 20,
-                    "ahc_threshold": 0.6
+                    "max_speakers": 10,
+                    "ahc_threshold": 0.5
                 },
                 "bss": {
                     "qc_sim_threshold": 0.2,
