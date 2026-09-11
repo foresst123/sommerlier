@@ -9,7 +9,7 @@ from itertools import combinations
 
 import numpy as np
 
-POLICY_VERSION = "connected-balanced-15s-v3"
+POLICY_VERSION = "connected-balanced-15s-v4"
 
 
 def clean_segments(segments):
@@ -231,13 +231,27 @@ class WindowPlanner:
         # had left, which measured 1.39s on average against 5.58s on the left.
         # At 1.5s the base can sit close to the core and a prefix support piece
         # carries the core out to the anchor instead.
+        # base occupies window seconds 3-10 (7s budget).
+        # base_core_min: minimum left context before core inside base.
+        # At 1.5s this is the normal floor; the edge-case logic in build()
+        # may go as low as BASE_CORE_EDGE_MIN when the core sits near the
+        # host boundary and there is no room on that side.
         self.base_core_min = round(1.5 * sr)
         self.base_core_max = round(10.0 * sr)
+        # Absolute minimum base length (3s). Below this the separator has
+        # too little host context to anchor its estimate.
+        self.base_min_total = round(3.0 * sr)
+        # When the core span is shorter than this, expand ±short_core_pad
+        # on each side before searching for base cuts, so Sidon sees enough
+        # audio around the overlap itself.
+        # Only truly micro overlaps (boundary jitter, 19-60ms from the old
+        # VAD bug) need the pad. Real backchannels start at 0.24s; anything
+        # above 0.2s is genuine speech and Sidon can anchor on it without
+        # extra padding.
+        self.short_core_threshold = round(0.2 * sr)
+        self.short_core_pad = round(2.0 * sr)
         # The base is budgeted roughly window seconds 3-10; past that, extra
-        # host is not worth having. Retention used to be measured against the
-        # full 15s target, so on a 20s host the score kept rewarding a wider
-        # base right up to swallowing the window -- leaving nothing for the
-        # other speaker and making ratio_error fight loss for every window.
+        # host is not worth having.
         self.base_target = round(7.0 * sr)
         self.final_core_min = round(5.0 * sr)
         self.final_core_max = round(8.0 * sr)
@@ -466,8 +480,43 @@ class WindowPlanner:
             if a >= core_hi:
                 ceiling = min(ceiling, a)
 
-        lo = max(floor, core_lo - self.base_core_max)
-        hi = min(ceiling, max(core_hi + self.fade, core_lo + self.target - self.base_core_min))
+        # --- core expansion for short overlaps ----------------------------
+        # When the overlap itself is very short (< 1s), Sidon barely sees
+        # the competing voice. Expand the effective core region by ±2s so
+        # the base always carries real context around the overlap, stopping
+        # at floor/ceiling so no third speaker leaks in.
+        core_span = core_hi - core_lo
+        if core_span < self.short_core_threshold:
+            pad = self.short_core_pad
+            eff_core_lo = max(floor, core_lo - pad)
+            eff_core_hi = min(ceiling, core_hi + pad)
+        else:
+            eff_core_lo = core_lo
+            eff_core_hi = core_hi
+
+        # --- base search range -----------------------------------------
+        # Base is bounded to window seconds 3-10 (base_target = 7s).
+        # The left cut must be at least base_core_min before eff_core_lo
+        # (normal case: 1.5s). When the overlap sits near the host edge
+        # there may not be 1.5s available on one side; in that case we
+        # allow the cut to go as close as the fade (0.02s), provided the
+        # total base still reaches base_min_total (3s). This is the "edge
+        # expansion" case: the base grows toward the other side to make up
+        # the deficit, still capped at base_core_max.
+        room_left  = eff_core_lo - floor
+        room_right = ceiling - eff_core_hi
+
+        # How much left context does base need at minimum?
+        # Normal: base_core_min. Edge: whatever fits, ≥ fade.
+        if room_left < self.base_core_min:
+            # Near left edge -- relax the left floor to fade, require
+            # right side to compensate so total >= base_min_total.
+            left_min = self.fade
+        else:
+            left_min = self.base_core_min
+
+        lo = max(floor, eff_core_lo - self.base_core_max)
+        hi = min(ceiling, eff_core_hi + self.base_core_max)
         cuts, voiced, method = self.cuts.analyse(lo, hi)
         cuts = dict(cuts)
 
@@ -482,12 +531,14 @@ class WindowPlanner:
             if lo <= edge <= hi:
                 cuts[edge] = "segment"
 
-        lefts = [a for a in cuts if core_lo - self.base_core_max <= a <= core_lo - self.base_core_min and core_lo - a >= self.fade]
+        lefts = [a for a in cuts
+                 if eff_core_lo - self.base_core_max <= a <= eff_core_lo - left_min
+                 and eff_core_lo - a >= self.fade]
         if not lefts:
             self.detail = "no_safe_left_cut_for_3_10s_base"
             return None
 
-        right_pool = [b for b in cuts if b >= core_hi + self.fade]
+        right_pool = [b for b in cuts if b >= eff_core_hi + self.fade]
         if not right_pool:
             self.detail = "no_safe_right_cut"
             return None
@@ -506,7 +557,7 @@ class WindowPlanner:
         best = None
 
         for a in sorted(lefts):
-            raw_core_pos = core_lo - a
+            raw_core_pos = eff_core_lo - a
             if raw_core_pos > self.final_core_max:
                 continue
 
@@ -520,11 +571,11 @@ class WindowPlanner:
             if prefix_max < 0:
                 continue
 
-            temp_end = core_hi + self.fade
+            temp_end = eff_core_hi + self.fade
             if temp_end > ceiling:
                 continue
             temp_base = Piece(a, temp_end, host.speaker, str(host.index), "base", cuts[a], "temporary")
-            prefixes = self._sequences(left_spk, core_lo, prefix_min, prefix_max, temp_base)
+            prefixes = self._sequences(left_spk, eff_core_lo, prefix_min, prefix_max, temp_base)
 
             for prefix in prefixes:
                 pre = sum(p.end - p.start - self.fade for p in prefix)
@@ -532,8 +583,14 @@ class WindowPlanner:
                 if not (self.final_core_min <= core_pos <= self.final_core_max):
                     continue
 
-                max_base_end = min(ceiling, a + self.target - pre)
-                min_base_end = core_hi + self.fade
+                # base is capped at base_core_max (10s) from its left cut;
+                # beyond that any extra host goes into the pad piece instead.
+                max_base_end = min(ceiling,
+                                   a + self.base_core_max,
+                                   a + self.target - pre)
+                # base must reach at least eff_core_hi and total >= base_min_total
+                min_base_end = max(eff_core_hi + self.fade,
+                                   a + self.base_min_total)
                 if max_base_end < min_base_end:
                     continue
 
@@ -564,7 +621,7 @@ class WindowPlanner:
                         continue
 
                     missing = min(speakers, key=lambda s: counts[s])
-                    suffixes = self._sequences(missing, core_hi, 0, available, base)
+                    suffixes = self._sequences(missing, eff_core_hi, 0, available, base)
 
                     for suffix in suffixes:
                         support = prefix + suffix
@@ -606,8 +663,8 @@ class WindowPlanner:
                         # nothing. The host resuming after the backchannel is
                         # what shows the blip belonged to the other speaker, and
                         # that evidence is entirely on the right.
-                        context_error = (max(0, self.context - (core_lo - a))
-                                         + max(0, self.context - (b - core_hi))) / (2 * self.context)
+                        context_error = (max(0, self.context - (eff_core_lo - a))
+                                         + max(0, self.context - (b - eff_core_hi))) / (2 * self.context)
                         score = (0.28 * loss + 0.28 * ratio_error
                                  + 0.08 * (self.target - duration) / self.target
                                  + 0.10 * anchor_error + 0.25 * context_error
@@ -622,7 +679,7 @@ class WindowPlanner:
             return None
 
         _, prefix, base, suffix, voice, method, core_pos = best
-        result = self._assemble(prefix, base, suffix, speakers, core_lo, core_hi, solos)
+        result = self._assemble(prefix, base, suffix, speakers, eff_core_lo, eff_core_hi, solos)
         result.layout.update({
             "policy": POLICY_VERSION,
             "host_segment": str(host.index),
@@ -632,8 +689,9 @@ class WindowPlanner:
             "ratio": max(voice.values()) / max(1, min(voice.values())),
             "core_position_seconds": core_pos / self.sr,
             "base_core_position_seconds": (core_lo - base.start) / self.sr,
-            "context_seconds": [(core_lo - base.start) / self.sr, (base.end - core_hi) / self.sr],
-            "context_shortfall_seconds": [max(0, self.context - (core_lo - base.start)) / self.sr, max(0, self.context - (base.end - core_hi)) / self.sr],
+            "context_seconds": [(eff_core_lo - base.start) / self.sr, (base.end - eff_core_hi) / self.sr],
+            "context_shortfall_seconds": [max(0, self.context - (eff_core_lo - base.start)) / self.sr, max(0, self.context - (base.end - eff_core_hi)) / self.sr],
+            "core_expanded": core_span < self.short_core_threshold,
             "overlaps": [[p["overlap_start"], p["overlap_end"]] for p in group],
         })
         return result
