@@ -93,7 +93,7 @@
                     "min_voiced_sec": 1.0,
                     "enrollment_memory": false,
                     "separator": "sidon",
-                    "window_workers": 0
+                    "window_workers": 8
                 },
                 "bs_roformer": {
                     "model": "model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt",
@@ -163,14 +163,14 @@
                 "whisper": {
                     "model_size": "large-v3",
                     "compute_type": "float32",
-                    "batch_size": 128
+                    "batch_size": 256
                 },
                 "phowhisper": {
                     "compute_type": "float32",
-                    "batch_size": 128
+                    "batch_size": 256
                 },
                 "qwen3": {
-                    "batch_size": 128,
+                    "batch_size": 256,
                     "use_flash_attention": false,
                     "torch_dtype": "float32"
                 },
@@ -189,7 +189,7 @@
                     "min_voiced_sec": 1.0,
                     "enrollment_memory": false,
                     "separator": "sidon",
-                    "window_workers": 5
+                    "window_workers": 8
                 },
 
                 "bs_roformer": {
