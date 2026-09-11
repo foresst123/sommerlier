@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sommelier Matrix</title>
+<style>
+:root{font-family:system-ui,sans-serif;color:#19242b;background:#f7f9fa;font-size:14px;letter-spacing:0}
+*{box-sizing:border-box}body{margin:0}header{padding:20px 24px;background:#fff;border-bottom:1px solid #ccd4d8;display:flex;gap:12px;align-items:center;flex-wrap:wrap}h1{font-size:24px;margin:0}h2{font-size:18px;margin:0 0 12px}h3{font-size:15px;margin:8px 0}p{line-height:1.5}button,select,input,textarea{font:inherit}button,select{border:1px solid #abb9bf;background:#fff;color:inherit;border-radius:4px;min-height:34px;padding:5px 9px}button{cursor:pointer}button:hover{background:#e7f1ef}button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid #168577;outline-offset:2px}header .actions{margin-left:auto;display:flex;gap:8px}main{padding:20px 24px;max-width:1800px;margin:auto}section{margin-bottom:28px}.warnings{padding:12px 16px;border-left:3px solid #b68017;background:#fff7df;margin-bottom:22px}.warnings p{margin:3px 0}.muted{color:#596c77;font-size:12px}.filters{display:flex;gap:12px;flex-wrap:wrap;margin:12px 0}.filters label{display:flex;align-items:center;gap:5px}.scroll{overflow:auto;max-width:100%;border:1px solid #cbd5d9;background:#fff}table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums;font-size:12px}th,td{text-align:left;padding:9px 10px;border-bottom:1px solid #e3e9ec;white-space:nowrap}th{background:#edf2f4;position:sticky;top:0;font-weight:600}th button{padding:0;border:0;background:transparent;min-height:24px;font-size:12px}td.number{text-align:right}tr[data-row]{cursor:pointer}tr[data-row]:hover{outline:1px solid #168577;outline-offset:-1px}tr.active{background:#e1f0ed}.status{color:#7b5a17}.status.measured{color:#087565}.status.partial{color:#a44732}.listening{border-top:2px solid #168577;padding-top:16px}.clip{border-top:1px solid #cad5d9;padding:16px 0}.audio-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:12px 0}audio{width:100%;height:36px;display:block;margin-top:5px}.notes{display:flex;gap:16px;align-items:center;flex-wrap:wrap}.notes label{display:flex;align-items:center;gap:4px}.notes textarea{width:100%;min-height:60px;border:1px solid #b4c2c9;border-radius:4px;padding:8px}.detail-title{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.detail-title .muted{overflow-wrap:anywhere;max-width:100%}.summary-line{display:flex;gap:20px;margin:0 0 12px}.empty{padding:18px;color:#586c76}.effect-n{font-size:11px;color:#637682}.clip.selected{border-left:3px solid #168577;padding-left:12px}a{color:#096f65}.error{color:#9c3e2b}#live{min-height:18px}@media(max-width:640px){header,main{padding:16px}header .actions{margin-left:0}.audio-grid{grid-template-columns:1fr}.summary-line{flex-wrap:wrap;gap:8px}.filters{gap:8px}}
+</style>
+</head>
+<body>
+<header><h1>Sommelier Matrix</h1><span id="counts" class="muted"></span><div class="actions"><button id="save">Save HTML</button><button id="export">Export JSON</button></div></header>
+<main>
+<div id="warnings" class="warnings"></div>
+<section><h2>Marginal Effects</h2><p class="muted">Recording medians, equal weight per matched axis setting. Only F compares the same windows. A-E and G compare different window populations.</p><div id="effects" class="scroll"></div></section>
+<section><h2>Matrix</h2><div id="filters" class="filters"></div><div id="matrix" class="scroll"></div><p id="live" class="muted" aria-live="polite"></p></section>
+<section id="detail" class="listening"><p class="empty">No cell selected</p></section>
+</main>
+<script id="payload" type="application/json">__MATRIX_PAYLOAD__</script>
+<script>
+const data=JSON.parse(document.getElementById('payload').textContent);
+const state={filters:{},sort:'id',direction:1,active:null,clip:0};
+const $=id=>document.getElementById(id);
+const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const number=value=>value===null||value===undefined?'':Number(value).toFixed(2);
+const valid=value=>typeof value==='number'&&Number.isFinite(value);
+const keys=Object.keys(data.metrics);
+$('warnings').innerHTML=data.warnings.map(w=>'<p>'+esc(w)+'</p>').join('');
+$('counts').textContent=data.rows.length+' cells / '+data.rows.filter(r=>r.status==='measured').length+' measured';
+$('filters').innerHTML=Object.entries(data.axes).map(([key,values])=>`<label>${esc(key)}<select data-axis="${esc(key)}"><option value="">All</option>${values.map(v=>`<option>${esc(v)}</option>`).join('')}</select></label>`).join('');
+document.querySelectorAll('[data-axis]').forEach(select=>select.addEventListener('change',()=>{state.filters[select.dataset.axis]=select.value;renderTable()}));
+function renderEffects(){
+ const headings=keys.map(k=>'<th>'+esc(data.metrics[k])+'</th>').join('');
+ $('effects').innerHTML='<table><thead><tr><th>Axis</th><th>Control / treatment</th><th>Windows</th>'+headings+'</tr></thead><tbody>'+data.effects.map(effect=>'<tr><td>'+esc(effect.axis)+'</td><td>'+esc(effect.control)+' / '+esc(effect.treatment)+'</td><td>'+(effect.paired_windows?'Paired':'Unpaired')+'</td>'+keys.map(k=>{const m=effect.metrics[k];return '<td class="number" title="'+esc(m.n?'Control '+number(m.control)+'; treatment '+number(m.treatment):'Not measured')+'">'+number(m.delta)+' <span class="effect-n">n='+m.n+'</span></td>'}).join('')+'</tr>').join('')+'</tbody></table>';
+}
+function tableRows(){return data.rows.filter(row=>Object.entries(state.filters).every(([k,v])=>!v||row.axes[k]===v)).sort((a,b)=>{const av=state.sort in a.metrics?a.metrics[state.sort]:a[state.sort]??a.axes[state.sort];const bv=state.sort in b.metrics?b.metrics[state.sort]:b[state.sort]??b.axes[state.sort];if(av==null)return bv==null?0:1;if(bv==null)return -1;return (typeof av==='number'?av-bv:String(av).localeCompare(String(bv)))*state.direction})}
+function renderTable(){
+ const rows=tableRows(),axes=Object.keys(data.axes);
+ const ranges=Object.fromEntries(keys.map(k=>{const values=rows.map(r=>r.metrics[k]).filter(valid);return [k,[Math.min(...values),Math.max(...values)]]}));
+ const columns=[['status','State'],...axes.map(k=>[k,k]),...keys.map(k=>[k,data.metrics[k]])];
+ $('matrix').innerHTML='<table><thead><tr>'+columns.map(([k,label])=>`<th><button data-sort="${esc(k)}">${esc(label)}${state.sort===k?(state.direction===1?' +':' -'):''}</button></th>`).join('')+'</tr></thead><tbody>'+rows.map(row=>`<tr data-row="${esc(row.id)}" tabindex="0" class="${state.active===row.id?'active':''}" title="${esc(row.reasons.join('; '))}"><td class="status ${esc(row.status)}">${esc(row.status)}</td>`+axes.map(k=>'<td>'+esc(row.axes[k])+'</td>').join('')+keys.map(k=>{const v=row.metrics[k],r=ranges[k],t=valid(v)&&r[1]>r[0]?(v-r[0])/(r[1]-r[0]):0;return '<td class="number" style="background:rgba(15,133,117,'+(valid(v)?(0.04+t*0.2):0)+')" title="'+esc(valid(v)?data.metrics[k]:row.reasons.join('; ')||'Not measured')+'">'+number(v)+'</td>'}).join('')+'</tr>').join('')+'</tbody></table>';
+ $('live').textContent=rows.length+' cells';
+ document.querySelectorAll('[data-sort]').forEach(button=>button.onclick=()=>{state.direction=state.sort===button.dataset.sort?-state.direction:1;state.sort=button.dataset.sort;renderTable()});
+ document.querySelectorAll('[data-row]').forEach(row=>{row.onclick=()=>selectCell(row.dataset.row);row.onkeydown=e=>{if(e.key==='Enter')selectCell(row.dataset.row)}});
+}
+function audioControl(path,label){
+ const item=data.media[path];
+ if(!item||item.error)return '<div>'+esc(label)+'<p class="muted">'+esc(item?.error||'Not produced')+'</p></div>';
+ return '<div><span>'+esc(label)+'</span><audio preload="none" controls src="'+esc(item.src)+'"></audio>'+(item.embedded?'':'<a href="'+esc(item.src)+'">Open local audio</a>')+'</div>';
+}
+function selectCell(id){
+ document.querySelectorAll('audio').forEach(a=>a.pause());state.active=id;state.clip=0;renderTable();
+ const row=data.rows.find(r=>r.id===id);
+ let html='<div class="detail-title"><h2>Listening / '+esc(row.status)+'</h2><span class="muted">'+esc(row.id)+'</span></div>';
+ html+=row.reasons.map(reason=>'<p class="error">'+esc(reason)+'</p>').join('');
+ if(row.files.length){html+='<h3>Diarization and separation by recording</h3><div class="scroll"><table><thead><tr><th>Recording</th><th>Speakers</th><th>Segments</th><th>Overlap s</th><th>Overlap %</th><th>Jobs</th><th>Spliced spans</th><th>Failures</th></tr></thead><tbody>'+row.files.map(file=>{const d=file.diarization,s=file.separation.stats||{},ov=d.overlap||{};return '<tr><td>'+esc(file.stem)+'</td><td>'+esc(d.num_speakers??d.speakers??'')+'</td><td>'+esc(d.count??d.segments??'')+'</td><td>'+number(ov.seconds)+'</td><td>'+number(ov.pct_of_audio)+'</td><td>'+esc(s.jobs??'')+'</td><td>'+esc(s.spliced??'')+'</td><td>'+esc(Object.entries(s).filter(([k])=>k.startsWith('fail_')).map(([k,v])=>k+': '+v).join(', '))+'</td></tr>'}).join('')+'</tbody></table></div>'}
+ html+=row.clips.map((clip,i)=>{const note=data.notes[clip.id]||{};return '<article class="clip '+(i===0?'selected':'')+'" data-clip="'+i+'"><h3>'+esc(clip.stem)+' / '+esc(clip.tag)+'</h3><div class="audio-grid">'+Object.entries(clip.audio).map(([label,path])=>audioControl(path,label)).join('')+'</div><div class="scroll"><table><thead><tr><th>Track</th>'+keys.map(k=>'<th>'+esc(data.metrics[k])+'</th>').join('')+'</tr></thead><tbody>'+Object.entries(clip.metrics).map(([track,metrics])=>'<tr><td>'+esc(track)+'</td>'+keys.map(k=>'<td class="number">'+number(metrics[k])+'</td>').join('')+'</tr>').join('')+'</tbody></table></div><div class="notes">'+['artefact','wrong speaker','tone damage','prefer to mix'].map(label=>'<label><input type="checkbox" data-note="'+esc(clip.id)+'" data-field="'+esc(label)+'" '+(note[label]?'checked':'')+'>'+esc(label)+'</label>').join('')+'<textarea aria-label="Notes" placeholder="Notes" data-note="'+esc(clip.id)+'" data-field="text">'+esc(note.text||'')+'</textarea></div></article>'}).join('');
+ if(!row.clips.length)html+='<p class="empty">No measured windows yet</p>';
+ $('detail').innerHTML=html;
+ document.querySelectorAll('[data-note]').forEach(input=>input.addEventListener('input',()=>{const note=data.notes[input.dataset.note]??={};note[input.dataset.field]=input.type==='checkbox'?input.checked:input.value}));
+ document.querySelectorAll('audio').forEach(audio=>audio.addEventListener('play',()=>document.querySelectorAll('audio').forEach(other=>{if(other!==audio)other.pause()})));
+}
+function download(blob,name){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}
+$('export').onclick=()=>download(new Blob([JSON.stringify({notes:data.notes,rows:data.rows,effects:data.effects},null,2)],{type:'application/json'}),'matrix_review.json');
+$('save').onclick=()=>{const clone=document.documentElement.cloneNode(true);clone.querySelector('#payload').textContent=JSON.stringify(data).replace(/</g,'\\u003c');clone.querySelector('#detail').innerHTML='';clone.querySelector('#matrix').innerHTML='';clone.querySelector('#effects').innerHTML='';download(new Blob(['<!doctype html>\n'+clone.outerHTML],{type:'text/html'}),'matrix_report.html')};
+document.addEventListener('keydown',e=>{if(/INPUT|TEXTAREA|SELECT|BUTTON/.test(e.target.tagName))return;const clips=[...document.querySelectorAll('[data-clip]')];if(e.key==='j'||e.key==='k'){e.preventDefault();state.clip=Math.max(0,Math.min(clips.length-1,state.clip+(e.key==='j'?1:-1)));clips.forEach((c,i)=>c.classList.toggle('selected',i===state.clip));clips[state.clip]?.scrollIntoView({block:'center'})}if(e.code==='Space'){const audio=clips[state.clip]?.querySelector('audio');if(audio){e.preventDefault();audio.paused?audio.play():audio.pause()}}});
+renderEffects();renderTable();
+</script>
+</body>
+</html>
