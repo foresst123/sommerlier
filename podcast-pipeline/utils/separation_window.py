@@ -423,24 +423,22 @@ class WindowPlanner:
             return None
 
         floor, ceiling = 0, len(self.waveform)
-        blockers = []
-        group_ids = {id(p) for p in group}
+        # floor and ceiling mark how far the base may extend left and right.
+        #
+        # What the base may cross:
+        #   - segment boundaries of the two speakers in the window
+        #   - recording seams and music beds
+        # What it must not cross:
+        #   - a segment of a third speaker (would corrupt the extraction)
+        #   - an overlap of the two window speakers from a different pair
+        #     (the separator would see two voices competing at that point)
+        #
+        # The old code also blocked on every segment of the non-host speaker
+        # outside host_lo..host_hi, and on seams. Both restrictions are lifted.
 
-        for p in self.pairs:
-            if id(p) not in group_ids:
-                a, b = int(p["overlap_start"] * self.sr), int(p["overlap_end"] * self.sr)
-                if p["seg1"]["speaker"] != p["seg2"]["speaker"]:
-                    blockers.append((a, b))
-
-        blockers.extend(r for s, rs in self.by_speaker.items() if s not in speakers for r in rs)
-
-        for s, rs in self.by_speaker.items():
-            if s != host.speaker:
-                for a, b in rs:
-                    blockers.extend(intersect([(a, b)], 0, min(host_lo, core_lo)))
-                    blockers.extend(intersect([(a, b)], max(host_hi, core_hi), len(self.waveform)))
-
-        for a, b in blockers:
+        # Third-speaker segments: must not enter base.
+        for a, b in (r for s, rs in self.by_speaker.items()
+                     if s not in speakers for r in rs):
             if a < core_hi and b > core_lo:
                 self.detail = "foreign_overlap_in_target"
                 return None
@@ -449,14 +447,24 @@ class WindowPlanner:
             if a >= core_hi:
                 ceiling = min(ceiling, a)
 
-        for seam in self.seams:
-            if core_lo < seam < core_hi:
-                self.detail = "target_crosses_recording_seam"
+        # Overlaps of the two window speakers from OTHER pairs: also block.
+        # A segment of one speaker alone is fine; a cross-speaker overlap
+        # means the separator would face two voices at the cut point.
+        group_ids = {id(p) for p in group}
+        for p in self.pairs:
+            if id(p) in group_ids:
+                continue
+            s1, s2 = p["seg1"]["speaker"], p["seg2"]["speaker"]
+            if s1 not in speakers or s2 not in speakers:
+                continue
+            a, b = int(p["overlap_start"] * self.sr), int(p["overlap_end"] * self.sr)
+            if a < core_hi and b > core_lo:
+                self.detail = "foreign_overlap_in_target"
                 return None
-            if seam <= core_lo:
-                floor = max(floor, seam)
-            if seam >= core_hi:
-                ceiling = min(ceiling, seam)
+            if b <= core_lo:
+                floor = max(floor, b)
+            if a >= core_hi:
+                ceiling = min(ceiling, a)
 
         lo = max(floor, core_lo - self.base_core_max)
         hi = min(ceiling, max(core_hi + self.fade, core_lo + self.target - self.base_core_min))
