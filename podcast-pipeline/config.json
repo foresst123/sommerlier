@@ -92,7 +92,8 @@
                     "qc_sim_threshold": 0.2,
                     "min_voiced_sec": 1.0,
                     "enrollment_memory": false,
-                    "separator": "sidon"
+                    "separator": "sidon",
+                    "window_workers": 0
                 },
                 "bs_roformer": {
                     "model": "model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt",
@@ -187,7 +188,8 @@
                     "qc_sim_threshold": 0.2,
                     "min_voiced_sec": 1.0,
                     "enrollment_memory": false,
-                    "separator": "sidon"
+                    "separator": "sidon",
+                    "window_workers": 5
                 },
 
                 "bs_roformer": {

@@ -254,7 +254,14 @@ from utils.worker_env import resolve_worker_python
 # imports run -- or the modules capture the defaults instead. An env var set by
 # hand still wins, which keeps a quick sweep possible without editing config.
 for _cfg_key, _env_key in (("qc_sim_threshold", "BSS_QC_SIM_THRESHOLD"),
-                           ("min_voiced_sec", "BSS_MIN_VOICED_SEC")):
+                           ("min_voiced_sec", "BSS_MIN_VOICED_SEC"),
+                           # 0 = tắt hẳn pool build cửa sổ song song; số dương
+                           # ép cứng số worker; để trống trong config thì
+                           # separation_service tự tính theo usable_cores().
+                           # Mặc định trong config.json là 0 (tắt) -- lợi ích
+                           # đo được phụ thuộc số job overlap và độ trễ Sidon
+                           # thật, chưa được xác nhận trên dữ liệu sản xuất.
+                           ("window_workers", "BSS_WINDOW_WORKERS")):
     _value = env_profile.get("models", {}).get("bss", {}).get(_cfg_key)
     if _value is not None and _env_key not in os.environ:
         os.environ[_env_key] = str(_value)

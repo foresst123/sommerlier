@@ -30,12 +30,21 @@ BSS_MIN_SOLO = 1.0
 # job N nên chạy song song trong lúc GPU bận: pipeline, không phải theo lô.
 # Xem utils/window_pool.py để biết cơ chế đầy đủ.
 #
-# Mặc định để trống (None) = tự tính theo usable_cores(); đặt số để ép cứng,
-# đặt 0 hoặc 1 để tắt hẳn (chạy tuần tự như trước khi có tối ưu này).
+# Đọc từ config.json (models.bss.window_workers, main.py bắc cầu sang biến
+# này) hoặc đặt tay để sweep nhanh không cần sửa config. Mặc định trong
+# config.json là 0 (TẮT): kết quả (build() không có GPU, tách biệt) rất khác
+# khi đo lồng vào bss_model.separate_two_speakers() thật -- Sidon mất vài
+# giây/lần gọi, và kết quả window PHẢI trả đúng thứ tự nộp (giữ nguyên hành vi
+# enrollment_memory tích luỹ tuần tự), nên nếu job đầu hàng đợi lại là job
+# build nặng nhất, main thread vẫn chờ đúng nó dù các job sau đã build xong.
+# Đo trên máy dev (8 lõi, GPU giả lập 3s/job): 8 job -> pool chậm hơn tuần tự
+# (~28.6s so với ~28.0s), phần build "lộ" ra chỉ ~4s trên tổng ~28s GPU. Lợi
+# ích thật phụ thuộc số job overlap/file và độ trễ Sidon thật -- cần tự đo
+# trên dữ liệu sản xuất trước khi bật > 0.
+#
+# Để trống (None, không đặt trong config lẫn env) = tự tính theo
+# usable_cores() khi có đủ job (xem BSS_WINDOW_POOL_MIN_JOBS); 0 = tắt hẳn.
 _BSS_WINDOW_WORKERS_ENV = os.environ.get("BSS_WINDOW_WORKERS")
-# Dưới ngưỡng này, chi phí spawn pool (~0.5-0.8s/process, đo trên máy dev 8
-# core) ăn hết lợi ích -- đo được 6 job -> 2.16x, số job càng ít speedup càng
-# tiệm cận 1x hoặc âm. Dựng pool chỉ đáng khi có đủ job bù lại.
 BSS_WINDOW_POOL_MIN_JOBS = int(os.environ.get("BSS_WINDOW_POOL_MIN_JOBS", "3"))
 
 
