@@ -56,7 +56,13 @@ def test_window_anchor_support_crossfade_and_exact_core_mapping():
     before = planner.waveform.copy()
     result = planner.build(jobs[0][2])
     assert result is not None, planner.detail
-    assert 6 <= result.core[0]/SR <= 8
+    # The module's own band is final_core_min..final_core_max = 5..8s. The
+    # assertion used to read 6, which matched an anchor that aimed at 6.5 and
+    # so starved the right context -- every second of core position past 5 is
+    # a second the right side cannot have.
+    assert 5 <= result.core[0]/SR <= 8
+    left, right = result.layout["context_seconds"]
+    assert right >= 2.0, f"right context starved: {left:.2f}s left vs {right:.2f}s right"
     assert len(result.audio) <= 15*SR
     assert np.array_equal(result.audio[slice(*result.core)],before[20*SR:21*SR])
     assert np.array_equal(planner.waveform,before)

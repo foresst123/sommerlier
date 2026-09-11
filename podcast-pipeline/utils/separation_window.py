@@ -9,7 +9,7 @@ from itertools import combinations
 
 import numpy as np
 
-POLICY_VERSION = "connected-balanced-15s-v2"
+POLICY_VERSION = "connected-balanced-15s-v3"
 
 
 def clean_segments(segments):
@@ -223,8 +223,22 @@ class WindowPlanner:
         self.target = round(15.0 * sr)
         self.fade = round(0.020 * sr)
         self.minimum = round(1.5 * sr)
-        self.base_core_min = round(3.0 * sr)
+        # How far the base may start before the core. The floor was 3.0s, which
+        # combined with the 5-8s anchor to force every window's left context to
+        # 5-8s: with no prefix piece the core's position in the window just is
+        # its position in the base, so satisfying the anchor meant starting the
+        # base that far back. The right side then got whatever the 15s budget
+        # had left, which measured 1.39s on average against 5.58s on the left.
+        # At 1.5s the base can sit close to the core and a prefix support piece
+        # carries the core out to the anchor instead.
+        self.base_core_min = round(1.5 * sr)
         self.base_core_max = round(10.0 * sr)
+        # The base is budgeted roughly window seconds 3-10; past that, extra
+        # host is not worth having. Retention used to be measured against the
+        # full 15s target, so on a 20s host the score kept rewarding a wider
+        # base right up to swallowing the window -- leaving nothing for the
+        # other speaker and making ratio_error fight loss for every window.
+        self.base_target = round(7.0 * sr)
         self.final_core_min = round(5.0 * sr)
         self.final_core_max = round(8.0 * sr)
         self.cuts = AcousticCuts(waveform, sr, vad)
@@ -569,9 +583,27 @@ class WindowPlanner:
 
                         ratio_error = abs(total_voice[speakers[0]] - total_voice[speakers[1]]) / max(1, sum(total_voice.values()))
                         retained = max(0, min(b, host_hi) - max(a, host_lo))
-                        loss = 1 - retained / max(1, min(host_hi - host_lo, self.target))
-                        anchor_error = abs(core_pos / self.sr - 6.5) / 1.5
-                        score = 0.40 * loss + 0.35 * ratio_error + 0.10 * (self.target - duration) / self.target + 0.10 * anchor_error + 0.015 * len(support)
+                        budget = min(host_hi - host_lo, self.base_target)
+                        loss = 1 - min(retained, budget) / max(1, budget)
+                        # With no prefix the core's position in the window just
+                        # is its left context, and every extra second there is
+                        # a second the right cannot have. Aiming at 6.5 -- the
+                        # middle of the legal 5-8s band -- therefore starved the
+                        # right by construction. 5.0 is the bottom of the same
+                        # band: still legal, and it leaves the budget for the
+                        # side that carries the evidence.
+                        anchor_error = max(0, core_pos / self.sr - 5.0) / 3.0
+                        # self.context is the target on BOTH sides and was only
+                        # ever reported, never scored -- so the right side cost
+                        # nothing. The host resuming after the backchannel is
+                        # what shows the blip belonged to the other speaker, and
+                        # that evidence is entirely on the right.
+                        context_error = (max(0, self.context - (core_lo - a))
+                                         + max(0, self.context - (b - core_hi))) / (2 * self.context)
+                        score = (0.28 * loss + 0.28 * ratio_error
+                                 + 0.08 * (self.target - duration) / self.target
+                                 + 0.10 * anchor_error + 0.25 * context_error
+                                 + 0.010 * len(support))
                         rank = (score, len(support), -retained)
 
                         if best is None or rank < best[0]:
