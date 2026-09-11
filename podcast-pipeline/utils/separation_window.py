@@ -9,7 +9,7 @@ from itertools import combinations
 
 import numpy as np
 
-POLICY_VERSION = "connected-balanced-15s-v4"
+POLICY_VERSION = "connected-balanced-15s-v5"
 
 
 def clean_segments(segments):
@@ -675,8 +675,76 @@ class WindowPlanner:
                             best = (rank, prefix, base, suffix, total_voice, method, core_pos)
 
         if best is None:
-            self.detail = "no_layout_with_clean_support_and_5_8s_anchor"
-            return None
+            # --- pad-less fallback: stretch base toward both edges ----------
+            # No support material was found for the non-host speaker. Rather
+            # than failing, widen the base on both sides (2-10s each) so
+            # Sidon at least sees the transition region. The base may cross
+            # the other speaker's segments freely; it only stops at a third-
+            # speaker boundary (floor / ceiling).
+            # Pick the widest clean cut available on each side, bounded by
+            # floor, ceiling, and the 10s cap per side.
+            BASE_FALLBACK_MIN = round(2.0 * self.sr)
+            BASE_FALLBACK_MAX = round(10.0 * self.sr)
+
+            fb_lefts = sorted(
+                [a for a in cuts
+                 if eff_core_lo - BASE_FALLBACK_MAX <= a <= eff_core_lo - BASE_FALLBACK_MIN
+                 and eff_core_lo - a >= self.fade],
+                reverse=True  # farthest left first → widest base
+            )
+            fb_rights = sorted(
+                [b for b in cuts
+                 if eff_core_hi + BASE_FALLBACK_MIN <= b <= eff_core_hi + BASE_FALLBACK_MAX
+                 and b - eff_core_hi >= self.fade],
+            )  # nearest right first → keep base tight
+
+            fb_best = None
+            for fa in fb_lefts:
+                for fb in fb_rights:
+                    if fa >= fb:
+                        continue
+                    # In fallback mode we accept any pair that gives each
+                    # speaker at least one voiced frame -- the separator will
+                    # do its best with whatever is here; failing is worse.
+                    fb_voice = {s: sum(y - x for x, y in intersect(voiced_by_speaker[s], fa, fb))
+                                for s in speakers}
+                    if min(fb_voice.values()) < 1:
+                        continue
+                    fb_best = (fa, fb, fb_voice)
+                    break
+                if fb_best:
+                    break
+
+            if fb_best is None:
+                self.detail = "no_layout_with_clean_support_and_5_8s_anchor"
+                return None
+
+            fa, fb, fb_voice = fb_best
+            fb_base = Piece(fa, fb, host.speaker, str(host.index), "base",
+                            cuts.get(fa, "silero"), cuts.get(fb, "silero"))
+            fb_core_pos = eff_core_lo - fa
+            fb_result = self._assemble((), fb_base, (), speakers,
+                                       eff_core_lo, eff_core_hi, solos)
+            fb_result.layout.update({
+                "policy": POLICY_VERSION,
+                "host_segment": str(host.index),
+                "host_source_samples": [host_lo, host_hi],
+                "cut_method": method,
+                "estimated_voice_seconds": {s: v / self.sr for s, v in fb_voice.items()},
+                "ratio": max(fb_voice.values()) / max(1, min(fb_voice.values())),
+                "core_position_seconds": fb_core_pos / self.sr,
+                "base_core_position_seconds": (core_lo - fa) / self.sr,
+                "context_seconds": [(eff_core_lo - fa) / self.sr,
+                                    (fb - eff_core_hi) / self.sr],
+                "context_shortfall_seconds": [
+                    max(0, self.context - (eff_core_lo - fa)) / self.sr,
+                    max(0, self.context - (fb - eff_core_hi)) / self.sr,
+                ],
+                "core_expanded": core_span < self.short_core_threshold,
+                "pad_fallback": True,
+                "overlaps": [[p["overlap_start"], p["overlap_end"]] for p in group],
+            })
+            return fb_result
 
         _, prefix, base, suffix, voice, method, core_pos = best
         result = self._assemble(prefix, base, suffix, speakers, eff_core_lo, eff_core_hi, solos)
