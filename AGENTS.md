@@ -38,3 +38,4 @@ Recent commits use conventional prefixes such as `fix(...)`, `feat(...)`, and `d
 ## Agent-Specific Instructions
 
 For Kaggle work, use the external Chrome profile, not the Codex in-app browser. Verify Google Account `lamkdhe180931@fpt.edu.vn`, then open Kaggle. To download notebook outputs, use the Kaggle sidebar: hover/click `/kaggle/working`, expand with the small arrow, hover the target file such as `result.zip`, click its three-dot menu, then choose **Download**. Do not rely on `FileLink` or direct `kkb-production...` URLs; they can open as `404`.
+# test push Fri Sep 11 04:21:59 UTC 2026
