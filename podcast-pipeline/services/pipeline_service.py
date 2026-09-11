@@ -415,7 +415,13 @@ class PipelineService:
             computed.add("diarization")
 
         if "diarization" in computed:
-            stage_out.write_diarization(diarization_result.segments, audio_data.duration)
+            stage_out.write_diarization(
+                diarization_result.segments,
+                total_dur=audio_data.duration,
+                raw_segments=getattr(diarization_result, "raw_segments", None),
+                audio=audio_data.waveform,
+                sample_rate=audio_data.sample_rate,
+            )
 
         self._free(args, "diarizer", "vad")
         self._release_worker(args, "diarizen")

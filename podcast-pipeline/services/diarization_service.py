@@ -196,6 +196,10 @@ class DiarizationService:
         # source and silence. Keep merge and split reading the same number.
         max_seg = getattr(args, "max_segment_length", None) or 30.0
         self._log_segment_stats("post-vad", raw_list)
+        # Snapshot trước khi merge để stage_output lưu song song raw và processed.
+        raw_snapshot = [Segment(index=str(d.get("index", "00000")).zfill(5),
+                                start=d["start"], end=d["end"], speaker=d["speaker"])
+                        for d in raw_list]
         # min_segment_length is deliberately below the 0.1s overlap threshold
         # used downstream: the shortest real overlap measured on this corpus is
         # 0.24s, so a backchannel must survive this filter. Only the 19-60ms
@@ -231,5 +235,6 @@ class DiarizationService:
         return DiarizationResult(
             segments=final_segments,
             num_speakers=num_spk,
-            method="diarizen" if is_diarizen else "pyannote"
+            method="diarizen" if is_diarizen else "pyannote",
+            raw_segments=raw_snapshot,
         )

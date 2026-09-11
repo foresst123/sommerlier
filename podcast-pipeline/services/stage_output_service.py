@@ -331,9 +331,68 @@ class StageOutputService:
                 if self.logger:
                     self.logger.warning(f"Could not write after_music.wav: {exc}")
 
-    def write_diarization(self, segments, total_dur=None):
-        return self._finish("diarization", "segments.json", segments,
-                            self.segment_stats(segments, total_dur))
+    def write_diarization(self, segments, total_dur=None,
+                          raw_segments=None, audio=None, sample_rate=None):
+        """Write diarization artifacts.
+
+        Lưu hai file JSON song song:
+          segments.json      -- đầu ra đã xử lý (merge + ghost dissolution)
+          segments_raw.json  -- đầu ra thẳng từ diarizer, chưa qua xử lý
+
+        Và audio clips cho từng segment của cả hai phiên bản vào:
+          audio/processed/<idx>_<speaker>_<start>-<end>.wav
+          audio/raw/<idx>_<speaker>_<start>-<end>.wav
+
+        Clip bắt đầu/kết thúc đúng biên segment, không có padding thêm,
+        để nghe kiểm tra xem cắt đúng chỗ chuyển lượt không.
+        """
+        d = self._finish("diarization", "segments.json", segments,
+                         self.segment_stats(segments, total_dur),
+                         extra={"segments_raw.json": [_as_dict(r) for r in raw_segments]}
+                         if raw_segments else None)
+
+        if audio is None or sample_rate is None or not self.enabled:
+            return d
+
+        try:
+            import soundfile as sf
+        except Exception as e:
+            if self.logger and not self._warned_sf:
+                self.logger.warning(f"[stage-out] soundfile unavailable, no diarization clips: {e}")
+                self._warned_sf = True
+            return d
+
+        def _write_clips(seg_list, subdir):
+            clip_dir = self.stage_dir("diarization", "audio", subdir)
+            written = 0
+            for seg in seg_list:
+                start_s = getattr(seg, "start", None)
+                end_s   = getattr(seg, "end", None)
+                spk     = getattr(seg, "speaker", "?")
+                idx     = getattr(seg, "index", "?")
+                if start_s is None or end_s is None or end_s <= start_s:
+                    continue
+                lo = max(0, int(start_s * sample_rate))
+                hi = min(len(audio), int(end_s   * sample_rate))
+                if hi <= lo:
+                    continue
+                fname = f"{idx}_{spk}_{start_s:.3f}-{end_s:.3f}.wav"
+                try:
+                    sf.write(os.path.join(clip_dir, fname),
+                             audio[lo:hi], sample_rate, subtype="PCM_16")
+                    written += 1
+                except Exception as exc:
+                    if self.logger:
+                        self.logger.warning(f"[stage-out] clip write failed {fname}: {exc}")
+            return written
+
+        n_proc = _write_clips(segments,     "processed")
+        n_raw  = _write_clips(raw_segments or [], "raw")
+        if self.logger:
+            self.logger.info(
+                f"[stage-out] diarization clips: {n_proc} processed, {n_raw} raw"
+            )
+        return d
 
     def write_separation(self, segments, total_dur=None, report=None):
         stats = self.separation_stats(segments)
