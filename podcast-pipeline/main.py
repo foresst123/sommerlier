@@ -25,7 +25,7 @@ else:
 import sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 from utils.cpu_plan import configure_process as _configure_cpu
-_CPU_THREADS = _configure_cpu(n_workers=3)
+_CPU_THREADS = _configure_cpu(n_workers=0)
 
 import argparse
 import json
