@@ -27,6 +27,11 @@ _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 from utils.cpu_plan import configure_process as _configure_cpu
 _CPU_THREADS = _configure_cpu(n_workers=0)
 
+# Sidon worker là subprocess riêng, nên publish rõ thread budget cho nó kế thừa.
+# WorkerProcessService/base worker thường dùng os.environ.copy(), vì vậy biến này
+# phải có trước khi SidonWorkerService spawn subprocess.
+_os.environ.setdefault("SIDON_CPU_THREADS", str(_CPU_THREADS))
+
 import argparse
 import json
 import os
@@ -428,16 +433,13 @@ def main():
     # so startup is bounded by the slowest rather than the sum -- that is the
     # whole point of doing it here. One that did not start is simply skipped;
     # its stage will start and join it.
-    for _svc in (qwen3_service, diarizen_service):
+    for _svc in (qwen3_service, diarizen_service, sidon_service):
         if _svc is not None and getattr(_svc, "process", None) is not None:
             try:
                 _svc.wait_ready()
             except Exception as e:
-                # Torn down, not left half-alive: _ensure_worker treats a
-                # non-None process as a working one, so a spawned-but-never-
-                # ready worker would be handed to the stage as if it were fine.
                 logger.warning(f"{_svc.name} worker did not come up ({e}); "
-                               "its stage will start it again")
+                            "its stage will start it again")
                 try:
                     _svc.stop()
                 except Exception:
@@ -609,8 +611,11 @@ def main():
             qwen3_service.stop()
         if diarizen_service:
             diarizen_service.stop()
+        if sidon_service:
+            sidon_service.stop()
 
         logger.info("Pipeline execution finished.")
+
 
 if __name__ == "__main__":
     main()
