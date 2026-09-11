@@ -1,14 +1,15 @@
 """Dựng cửa sổ hai người nói, giữ nguồn và ánh xạ theo mẫu âm thanh.
 
 Mô-đun chỉ cần NumPy. Silero được truyền vào từ model đã tải; khi không có
-Silero hoặc suy luận lỗi, dùng khoảng năng lượng thấp để tìm chỗ ngắt.
+Silero hoặc suy luận lỗi, dùng khoảng năng lượng thấp và khe giữa từ/âm tiết
+để tìm điểm cắt an toàn.
 """
 from dataclasses import dataclass
 from itertools import combinations
 
 import numpy as np
 
-POLICY_VERSION = "connected-balanced-15s-v1"
+POLICY_VERSION = "connected-balanced-15s-v2"
 
 
 def clean_segments(segments):
@@ -61,67 +62,133 @@ def subtract(ranges, blockers):
 
 
 class AcousticCuts:
-    """Lưu VAD theo vùng; chỉ chấp nhận điểm cắt nội bộ ở khoảng nghỉ.
-
-    Không coi điểm qua zero đơn lẻ là hết chữ. Nhánh năng lượng yêu cầu một
-    khoảng thấp liên tục ít nhất 40 ms. Biên segment vẫn là ứng viên có nguồn
-    từ diarization; thông tin này được lưu riêng với điểm ngắt đo từ âm thanh.
-    """
+    """Tìm điểm cắt an toàn từ VAD, pause và khe năng lượng giữa từ/âm tiết."""
 
     def __init__(self, waveform, sr, vad=None):
         self.waveform, self.sr, self.vad = waveform, sr, vad
         self.cache = {}
 
     def analyse(self, lo, hi):
+        """Trả cuts, voiced và phương pháp; ưu tiên pause thật rồi mới dùng local energy valley."""
         key = (int(lo), int(hi))
         if key in self.cache:
             return self.cache[key]
-        lo, hi = key
+
+        lo, hi = max(0, key[0]), min(len(self.waveform), key[1])
+        if hi <= lo:
+            result = ({lo: "segment", hi: "segment"}, [], "energy")
+            self.cache[key] = result
+            return result
+
         wave = self.waveform[lo:hi]
         voiced, method = None, "energy"
+
         if self.vad is not None:
             try:
-                timestamps = self.vad.get_speech_timestamps(
-                    wave, sampling_rate=self.sr)
-                voiced = merge_ranges((lo + max(0, int(t["start"])),
-                                       min(hi, lo + int(t["end"])))
-                                      for t in timestamps)
+                timestamps = self.vad.get_speech_timestamps(wave, sampling_rate=self.sr)
+                voiced = merge_ranges((lo + max(0, int(t["start"])), min(hi, lo + int(t["end"]))) for t in timestamps)
                 method = "silero"
             except Exception:
-                # Lỗi VAD không cho phép cắt tùy ý; chuyển sang khoảng nghỉ
-                # đo bằng năng lượng và ghi rõ phương pháp trong layout.
-                voiced = None
+                voiced, method = None, "energy"
+
+        energy_frame = max(1, round(self.sr * 0.010))
+        starts = np.arange(0, len(wave), energy_frame, dtype=np.int64)
+        frame_rms = None
+        if len(starts):
+            squared = np.square(wave.astype(np.float64))
+            counts = np.minimum(energy_frame, len(wave) - starts)
+            sums = np.add.reduceat(squared, starts)
+            frame_rms = np.sqrt(sums / np.maximum(counts, 1))
+
         if voiced is None:
-            step = max(1, round(self.sr * 0.01))
-            starts = np.arange(0, len(wave), step)
-            if len(starts):
-                squared = np.square(wave.astype(np.float64))
-                counts = np.minimum(step, len(wave) - starts)
-                rms = np.sqrt(np.add.reduceat(squared, starts) / counts)
-                threshold = max(1e-5, float(np.percentile(rms, 90)) * 0.10)
-                voiced = merge_ranges((lo + int(i), min(hi, lo + int(i) + step))
-                                      for i, value in zip(starts, rms)
-                                      if value > threshold)
+            if frame_rms is not None and len(frame_rms):
+                p90 = float(np.percentile(frame_rms, 90))
+                threshold = max(1e-5, p90 * 0.10)
+                voiced = merge_ranges((lo + int(start), min(hi, lo + int(start) + energy_frame)) for start, value in zip(starts, frame_rms) if value > threshold)
             else:
                 voiced = []
+
         pauses = subtract([(lo, hi)], voiced)
         cuts = {lo: "segment", hi: "segment"}
+        min_pause_samples = max(1, round(self.sr * 0.020))
         for a, b in pauses:
-            if b - a >= round(self.sr * 0.04):
+            if b - a >= min_pause_samples:
                 cuts[(a + b) // 2] = method
-        self.cache[key] = (cuts, voiced, method)
-        return self.cache[key]
+
+        valley_frame = max(1, round(self.sr * 0.010))
+        valley_hop = max(1, round(self.sr * 0.005))
+        if len(wave) >= valley_frame * 3:
+            valley_positions = np.arange(0, len(wave) - valley_frame + 1, valley_hop, dtype=np.int64)
+            squared = np.square(wave.astype(np.float64))
+            cumsum = np.concatenate((np.array([0.0], dtype=np.float64), np.cumsum(squared, dtype=np.float64)))
+            ends = valley_positions + valley_frame
+            energies = cumsum[ends] - cumsum[valley_positions]
+            valley_rms = np.sqrt(energies / valley_frame + 1e-12)
+
+            if len(valley_rms) >= 3:
+                global_ref = float(np.percentile(valley_rms, 75))
+                absolute_floor = 1e-5
+                neighbourhood_radius = 6
+                candidates = []
+
+                for i in range(1, len(valley_rms) - 1):
+                    here = float(valley_rms[i])
+                    if here > valley_rms[i - 1] or here > valley_rms[i + 1]:
+                        continue
+
+                    left_i = max(0, i - neighbourhood_radius)
+                    right_i = min(len(valley_rms), i + neighbourhood_radius + 1)
+                    neighbourhood = valley_rms[left_i:right_i]
+                    if len(neighbourhood) < 3:
+                        continue
+
+                    local_ref = float(np.percentile(neighbourhood, 75))
+                    if local_ref <= absolute_floor:
+                        continue
+
+                    valley_ratio = here / max(local_ref, absolute_floor)
+                    if valley_ratio > 0.60:
+                        continue
+                    if global_ref > absolute_floor and here > global_ref * 0.55:
+                        continue
+
+                    point = lo + int(valley_positions[i] + valley_frame // 2)
+                    edge_guard = max(self.sr // 100, valley_frame)
+                    if point - lo < edge_guard or hi - point < edge_guard:
+                        continue
+                    if any(a <= point <= b and b - a >= min_pause_samples for a, b in pauses):
+                        continue
+                    candidates.append((valley_ratio, here, point))
+
+                if candidates:
+                    candidates.sort(key=lambda x: x[2])
+                    cluster_distance = max(1, round(self.sr * 0.040))
+                    clusters, current = [], []
+                    for candidate in candidates:
+                        if current and candidate[2] - current[-1][2] > cluster_distance:
+                            clusters.append(current)
+                            current = []
+                        current.append(candidate)
+                    if current:
+                        clusters.append(current)
+                    for cluster in clusters:
+                        _, _, point = min(cluster, key=lambda x: (x[0], x[1]))
+                        cuts.setdefault(point, "word_gap")
+
+        result = (cuts, voiced, method)
+        self.cache[key] = result
+        return result
 
     def quiet_edge(self, point):
         """Biên tính toán chỉ được cắt khi có khoảng năng lượng thấp quanh nó."""
-        radius = max(1, round(0.02*self.sr))
-        lo, hi = max(0, point-radius), min(len(self.waveform), point+radius)
-        nearby = self.waveform[max(0,point-self.sr//2):min(len(self.waveform),point+self.sr//2)]
+        radius = max(1, round(0.02 * self.sr))
+        lo, hi = max(0, point - radius), min(len(self.waveform), point + radius)
+        nearby = self.waveform[max(0, point - self.sr // 2):min(len(self.waveform), point + self.sr // 2)]
         if hi <= lo or not len(nearby):
             return False
-        quiet = float(np.sqrt(np.mean(self.waveform[lo:hi].astype(np.float64)**2)))
-        reference = float(np.sqrt(np.mean(nearby.astype(np.float64)**2)))
-        return quiet <= max(1e-5, reference*0.1)
+        quiet = float(np.sqrt(np.mean(self.waveform[lo:hi].astype(np.float64) ** 2)))
+        reference = float(np.sqrt(np.mean(nearby.astype(np.float64) ** 2)))
+        return quiet <= max(1e-5, reference * 0.1)
 
 
 @dataclass(frozen=True)
@@ -144,10 +211,9 @@ class Window:
 
 
 class WindowPlanner:
-    """Tìm tổ hợp nền/support; không thêm im lặng hay quay về cửa sổ cũ."""
+    """Tìm base/support cho cửa sổ <=15s; base rộng 3-10s và core cuối ở 5-8s."""
 
-    def __init__(self, segments, pairs, waveform, sr, music_map=None,
-                 seams=(), vad=None, context_seconds=2.0, search_seconds=400.0):
+    def __init__(self, segments, pairs, waveform, sr, music_map=None, seams=(), vad=None, context_seconds=2.0, search_seconds=400.0):
         self.segments, self.pairs = segments, pairs
         self.waveform, self.sr = waveform, sr
         self.music_map = music_map
@@ -157,11 +223,14 @@ class WindowPlanner:
         self.target = round(15.0 * sr)
         self.fade = round(0.020 * sr)
         self.minimum = round(1.5 * sr)
+        self.base_core_min = round(3.0 * sr)
+        self.base_core_max = round(10.0 * sr)
+        self.final_core_min = round(5.0 * sr)
+        self.final_core_max = round(8.0 * sr)
         self.cuts = AcousticCuts(waveform, sr, vad)
         self.by_speaker = {}
         for s in segments:
-            self.by_speaker.setdefault(s.speaker, []).append(
-                (int(s.start * sr), int(s.end * sr)))
+            self.by_speaker.setdefault(s.speaker, []).append((int(s.start * sr), int(s.end * sr)))
         self.by_speaker = {s: merge_ranges(v) for s, v in self.by_speaker.items()}
         self.clean = clean_segments(segments)
         self.reason = "no_window"
@@ -182,78 +251,133 @@ class WindowPlanner:
         key = (speaker, centre)
         if key in self._support_cache:
             return self._support_cache[key]
-        candidates = [s for s in self.clean if s.speaker == speaker
-                      and abs((s.start + s.end) * self.sr / 2 - centre) <= self.search]
+
+        candidates = [s for s in self.clean if s.speaker == speaker and abs((s.start + s.end) * self.sr / 2 - centre) <= self.search]
         candidates.sort(key=lambda s: abs((s.start + s.end) * self.sr / 2 - centre))
         pieces = []
+
         for seg in candidates[:12]:
             spans = [(seg.start, seg.end)]
             if self.music_map:
                 spans = self.music_map.clean_parts(seg.start, seg.end)
+
             for start, end in spans:
                 lo, hi = max(0, int(start * self.sr)), min(len(self.waveform), int(end * self.sr))
-                # Một support không được vượt mối nối vốn có của bản ghi.
                 limits = [lo] + [s for s in self.seams if lo < s < hi] + [hi]
+
                 for a, b in zip(limits, limits[1:]):
                     cuts, voiced, _ = self.cuts.analyse(a, b)
                     cuts = dict(cuts)
-                    # Biên do cắt nhạc/mối nối tạo ra không phải biên câu gốc.
-                    for edge, original in ((a, int(seg.start*self.sr)), (b, int(seg.end*self.sr))):
+
+                    for edge, original in ((a, int(seg.start * self.sr)), (b, int(seg.end * self.sr))):
                         if edge != original:
                             if self.cuts.quiet_edge(edge):
                                 cuts[edge] = "energy"
                             else:
                                 cuts.pop(edge, None)
+
                     points = sorted(cuts)
-                    # Giới hạn số ứng viên theo thời gian, vẫn giữ hai biên.
-                    if len(points) > 48:
-                        points = [points[i] for i in np.linspace(0, len(points)-1, 48, dtype=int)]
+                    if len(points) > 64:
+                        keep = {points[0], points[-1]}
+                        keep.update(points[i] for i in np.linspace(0, len(points) - 1, 62, dtype=int))
+                        points = sorted(keep)
+
                     for x, y in combinations(points, 2):
-                        if self.minimum <= y - x <= round(8.04 * self.sr):
-                            voice = sum(v-u for u, v in intersect(voiced, x, y))
+                        if self.minimum <= y - x <= self.target + self.fade:
+                            voice = sum(v - u for u, v in intersect(voiced, x, y))
                             if voice >= self.sr:
-                                pieces.append(Piece(x, y, speaker, str(seg.index),
-                                                    "support", cuts[x], cuts[y]))
-        # Giữ ứng viên ở nhiều mức thời lượng, tránh toàn bộ danh sách chỉ
-        # gồm các đoạn ngắn nhất hoặc cùng một segment gần nhất.
+                                pieces.append(Piece(x, y, speaker, str(seg.index), "support", cuts[x], cuts[y]))
+
         buckets = {}
         for p in pieces:
-            bucket = round((p.end-p.start) / self.sr * 10)
+            bucket = round((p.end - p.start) / self.sr * 10)
             buckets.setdefault(bucket, []).append(p)
+
         result = []
         for bucket in sorted(buckets):
-            result.extend(sorted(buckets[bucket], key=lambda p: abs((p.start+p.end)/2-centre))[:2])
+            result.extend(sorted(buckets[bucket], key=lambda p: abs((p.start + p.end) / 2 - centre))[:2])
+
         self._support_cache[key] = result
         return result
 
-    def _sequences(self, speaker, centre, minimum, maximum, base):
-        """Tối đa hai support mỗi phía; mỗi đoạn độc lập phải đạt 1.5 s."""
-        options = [()] if minimum <= 0 else []
-        available = [p for p in self._support(speaker, centre)
-                     if p.end <= base.start or p.start >= base.end]
-        # Mỗi đoạn nối vào nền làm tăng thời lượng bằng độ dài trừ crossfade.
-        for p in available:
-            added = p.end-p.start-self.fade
-            if minimum <= added <= maximum:
-                options.append((p,))
-        # Dùng hai segment nguồn khác nhau khi không có một đoạn phù hợp.
-        short = [p for p in available if p.end-p.start-self.fade <= maximum]
-        for i, p in enumerate(short):
-            for q in short[i+1:]:
-                if p.source == q.source:
-                    continue
-                added = p.end-p.start+q.end-q.start-2*self.fade
-                if minimum <= added <= maximum:
-                    options.append(tuple(sorted((p, q), key=lambda z: z.start)))
-        # Giữ đa dạng thời lượng và ưu tiên ít mối nối/nguồn gần.
+    def _trim_support(self, piece, minimum, maximum, centre):
+        """Chỉ khi support nguyên bản không vừa budget mới cắt đoạn dài tại safe cut."""
+        if maximum < minimum or maximum <= 0:
+            return []
+
+        cuts, voiced, _ = self.cuts.analyse(piece.start, piece.end)
+        cuts = dict(cuts)
+        cuts[piece.start], cuts[piece.end] = piece.start_cut, piece.end_cut
+        points = sorted(cuts)
+
+        if len(points) > 64:
+            keep = {points[0], points[-1]}
+            keep.update(points[i] for i in np.linspace(0, len(points) - 1, 62, dtype=int))
+            points = sorted(keep)
+
+        result = []
+        for x, y in combinations(points, 2):
+            added = y - x - self.fade
+            if y - x < self.minimum or not (minimum <= added <= maximum):
+                continue
+            voice = sum(v - u for u, v in intersect(voiced, x, y))
+            if voice < self.sr:
+                continue
+            trimmed = Piece(x, y, piece.speaker, piece.source, piece.kind, cuts[x], cuts[y])
+            rank = (maximum - added, abs((x + y) / 2 - centre))
+            result.append((rank, trimmed))
+
+        result.sort(key=lambda item: item[0])
+        return [p for _, p in result]
+
+    def _rank_sequences(self, options, centre):
         buckets = {}
         for seq in options:
-            added = sum(p.end-p.start-self.fade for p in seq)
+            added = sum(p.end - p.start - self.fade for p in seq)
             bucket = round(added / self.sr * 10)
-            rank = (len(seq), sum(abs((p.start+p.end)/2-centre) for p in seq))
+            rank = (len(seq), -added, sum(abs((p.start + p.end) / 2 - centre) for p in seq))
             if bucket not in buckets or rank < buckets[bucket][0]:
                 buckets[bucket] = (rank, seq)
         return [item[1] for item in buckets.values()]
+
+    def _sequences(self, speaker, centre, minimum, maximum, base):
+        """Ưu tiên support nguyên bản vừa budget; chỉ khi không có mới trim support dài."""
+        if maximum < minimum or maximum < 0:
+            return []
+
+        available = [p for p in self._support(speaker, centre) if p.end <= base.start or p.start >= base.end]
+        empty = [()] if minimum <= 0 else []
+        native = []
+
+        for p in available:
+            added = p.end - p.start - self.fade
+            if minimum <= added <= maximum:
+                native.append((p,))
+
+        for i, p in enumerate(available):
+            ap = p.end - p.start - self.fade
+            if ap > maximum:
+                continue
+            for q in available[i + 1:]:
+                if p.source == q.source:
+                    continue
+                aq = q.end - q.start - self.fade
+                if minimum <= ap + aq <= maximum:
+                    native.append(tuple(sorted((p, q), key=lambda z: z.start)))
+
+        if native:
+            return self._rank_sequences(empty + native, centre)
+
+        trimmed = []
+        for p in available:
+            if p.end - p.start - self.fade <= maximum:
+                continue
+            for q in self._trim_support(p, minimum, maximum, centre)[:6]:
+                trimmed.append((q,))
+
+        if trimmed:
+            return self._rank_sequences(empty + trimmed, centre)
+        return empty
 
     def build(self, group):
         self.reason, self.detail = "no_window", "no_safe_layout"
@@ -261,48 +385,47 @@ class WindowPlanner:
         speakers = tuple(sorted((first["seg1"]["speaker"], first["seg2"]["speaker"])))
         core_lo = int(min(p["overlap_start"] for p in group) * self.sr)
         core_hi = int(max(p["overlap_end"] for p in group) * self.sr)
+
         if core_hi <= core_lo:
             self.detail = "overlap_shorter_than_one_sample"
             return None
-        if core_hi-core_lo > self.target-round(6*self.sr):
+        if core_hi - core_lo > self.target - self.final_core_min:
             self.detail = "overlap_does_not_fit_15s"
             return None
+
         sources = {str(p[side]["index"]) for p in group for side in ("seg1", "seg2")}
         hosts = [s for s in self.segments if str(s.index) in sources]
-        host = max(hosts, key=lambda s: (s.end-s.start, -s.start))
-        host_lo, host_hi = int(host.start*self.sr), int(host.end*self.sr)
-        if any(a < core_hi and b > core_lo for s, rs in self.by_speaker.items()
-               if s not in speakers for a, b in rs):
+        host = max(hosts, key=lambda s: (s.end - s.start, -s.start))
+        host_lo, host_hi = int(host.start * self.sr), int(host.end * self.sr)
+
+        if any(a < core_hi and b > core_lo for s, rs in self.by_speaker.items() if s not in speakers for a, b in rs):
             self.reason, self.detail = "multi_speaker", "third_speaker_in_connected_overlap"
             return None
 
-        # Overlap phụ phải nằm sâu ít nhất 1 s trong segment gốc đã chọn,
-        # đồng thời trong phần nền cuối cùng. Không lấy support để giả biên này.
-        extra = [p for p in group if
-                 (p["overlap_start"], p["overlap_end"]) !=
-                 (first["overlap_start"], first["overlap_end"])]
+        extra = [p for p in group if (p["overlap_start"], p["overlap_end"]) != (first["overlap_start"], first["overlap_end"])]
         margin = self.sr
-        if any(int(p["overlap_start"]*self.sr)-host_lo < margin or
-               host_hi-int(p["overlap_end"]*self.sr) < margin for p in extra):
+        if any(int(p["overlap_start"] * self.sr) - host_lo < margin or host_hi - int(p["overlap_end"] * self.sr) < margin for p in extra):
             self.detail = "secondary_overlap_near_original_edge"
             return None
 
         floor, ceiling = 0, len(self.waveform)
         blockers = []
         group_ids = {id(p) for p in group}
+
         for p in self.pairs:
             if id(p) not in group_ids:
-                a, b = int(p["overlap_start"]*self.sr), int(p["overlap_end"]*self.sr)
-                # Cặp cùng speaker là nhãn trùng, không tạo người thứ ba.
+                a, b = int(p["overlap_start"] * self.sr), int(p["overlap_end"] * self.sr)
                 if p["seg1"]["speaker"] != p["seg2"]["speaker"]:
                     blockers.append((a, b))
+
         blockers.extend(r for s, rs in self.by_speaker.items() if s not in speakers for r in rs)
-        # Ra ngoài segment nền thì dừng khi gặp speaker khác, kể cả đối tác.
+
         for s, rs in self.by_speaker.items():
             if s != host.speaker:
                 for a, b in rs:
                     blockers.extend(intersect([(a, b)], 0, min(host_lo, core_lo)))
                     blockers.extend(intersect([(a, b)], max(host_hi, core_hi), len(self.waveform)))
+
         for a, b in blockers:
             if a < core_hi and b > core_lo:
                 self.detail = "foreign_overlap_in_target"
@@ -311,6 +434,7 @@ class WindowPlanner:
                 floor = max(floor, b)
             if a >= core_hi:
                 ceiling = min(ceiling, a)
+
         for seam in self.seams:
             if core_lo < seam < core_hi:
                 self.detail = "target_crosses_recording_seam"
@@ -320,145 +444,199 @@ class WindowPlanner:
             if seam >= core_hi:
                 ceiling = min(ceiling, seam)
 
-        # Cho phép tìm điểm ngắt hơi quá 2 s (tối đa 0.5 s) khi mở rộng.
-        reach = self.context + round(0.5*self.sr)
-        lo = max(floor, min(host_lo, core_lo-reach))
-        hi = min(ceiling, max(host_hi, core_hi+reach))
+        lo = max(floor, core_lo - self.base_core_max)
+        hi = min(ceiling, max(core_hi + self.fade, core_lo + self.target - self.base_core_min))
         cuts, voiced, method = self.cuts.analyse(lo, hi)
         cuts = dict(cuts)
-        # lo/hi có thể chỉ là giới hạn tìm kiếm, không phải chỗ hết lời.
+
         for edge in (lo, hi):
             if edge not in (host_lo, host_hi, 0, len(self.waveform)):
                 if self.cuts.quiet_edge(edge):
                     cuts[edge] = "energy"
                 else:
                     cuts.pop(edge, None)
+
         for edge in (host_lo, host_hi):
             if lo <= edge <= hi:
                 cuts[edge] = "segment"
-        left_need = min(self.context, max(0, core_lo-floor))
-        right_need = min(self.context, max(0, ceiling-core_hi))
-        lefts = [a for a in cuts if core_lo-8*self.sr <= a <= core_lo-left_need]
-        rights = [b for b in cuts if core_hi+right_need <= b <= core_lo+9*self.sr]
-        # Khi bị chặn sát overlap, cần ít nhất đủ chỗ bảo vệ crossfade.
-        lefts = [a for a in lefts if core_lo-a >= self.fade]
-        rights = [b for b in rights if b-core_hi >= self.fade]
-        if not lefts or not rights:
-            self.detail = "no_safe_context_cut"
+
+        lefts = [a for a in cuts if core_lo - self.base_core_max <= a <= core_lo - self.base_core_min and core_lo - a >= self.fade]
+        if not lefts:
+            self.detail = "no_safe_left_cut_for_3_10s_base"
             return None
+
+        right_pool = [b for b in cuts if b >= core_hi + self.fade]
+        if not right_pool:
+            self.detail = "no_safe_right_cut"
+            return None
+
         voice_by_speaker = {s: intersect(self.by_speaker[s], lo, hi) for s in speakers}
-        voiced_by_speaker = {s: [r for a, b in voice_by_speaker[s]
-                                 for r in intersect(voiced, a, b)] for s in speakers}
+        voiced_by_speaker = {s: [r for a, b in voice_by_speaker[s] for r in intersect(voiced, a, b)] for s in speakers}
         solos = {s: self._voiced(self._solo(s, lo, hi)) for s in speakers}
         support_voice = {}
 
         def voice_count(piece):
             key = (piece.start, piece.end)
             if key not in support_voice:
-                support_voice[key] = sum(b-a for a, b in self.cuts.analyse(*key)[1])
+                support_voice[key] = sum(b - a for a, b in self.cuts.analyse(*key)[1])
             return support_voice[key]
 
         best = None
+
         for a in sorted(lefts):
-            for b in sorted(rights):
-                if b-a > self.target:
+            raw_core_pos = core_lo - a
+            if raw_core_pos > self.final_core_max:
+                continue
+
+            left_spk = host.speaker
+            at_left = [s for s in speakers if any(x <= a < y for x, y in self.by_speaker[s])]
+            if len(at_left) == 1:
+                left_spk = at_left[0]
+
+            prefix_min = max(0, self.final_core_min - raw_core_pos)
+            prefix_max = self.final_core_max - raw_core_pos
+            if prefix_max < 0:
+                continue
+
+            temp_end = core_hi + self.fade
+            if temp_end > ceiling:
+                continue
+            temp_base = Piece(a, temp_end, host.speaker, str(host.index), "base", cuts[a], "temporary")
+            prefixes = self._sequences(left_spk, core_lo, prefix_min, prefix_max, temp_base)
+
+            for prefix in prefixes:
+                pre = sum(p.end - p.start - self.fade for p in prefix)
+                core_pos = pre + raw_core_pos
+                if not (self.final_core_min <= core_pos <= self.final_core_max):
                     continue
-                if any(int(p["overlap_start"]*self.sr)-a < margin or
-                       b-int(p["overlap_end"]*self.sr) < margin for p in extra):
+
+                max_base_end = min(ceiling, a + self.target - pre)
+                min_base_end = core_hi + self.fade
+                if max_base_end < min_base_end:
                     continue
-                base = Piece(a, b, host.speaker, str(host.index), "base", cuts[a], cuts[b])
-                # Speaker sát mép trái được ưu tiên khi có nhãn chắc chắn.
-                left_spk = host.speaker
-                at_left = [s for s in speakers if any(x <= a < y for x, y in self.by_speaker[s])]
-                if len(at_left) == 1:
-                    left_spk = at_left[0]
-                prefixes = self._sequences(left_spk, core_lo,
-                    max(0, 6*self.sr-(core_lo-a)), 8*self.sr-(core_lo-a), base)
-                base_voice = {s: sum(y-x for x, y in intersect(voiced_by_speaker[s], a, b))
-                              for s in speakers}
-                base_solo = {s: sum(y-x for x, y in intersect(solos[s], a+self.fade, b-self.fade))
-                             for s in speakers}
-                for prefix in prefixes:
-                    pre = sum(p.end-p.start-self.fade for p in prefix)
-                    available = self.target-(b-a)-pre
+
+                valid_rights = [b for b in right_pool if min_base_end <= b <= max_base_end]
+                if not valid_rights:
+                    continue
+
+                for b in sorted(valid_rights, reverse=True):
+                    if pre + (b - a) > self.target:
+                        continue
+                    if any(int(p["overlap_start"] * self.sr) - a < margin or b - int(p["overlap_end"] * self.sr) < margin for p in extra):
+                        continue
+
+                    base = Piece(a, b, host.speaker, str(host.index), "base", cuts[a], cuts[b])
+                    if any(min(p.end, b) > max(p.start, a) for p in prefix):
+                        continue
+
+                    base_voice = {s: sum(y - x for x, y in intersect(voiced_by_speaker[s], a, b)) for s in speakers}
+                    base_solo = {s: sum(y - x for x, y in intersect(solos[s], a + self.fade, b - self.fade)) for s in speakers}
+                    counts = dict(base_voice)
+
+                    for p in prefix:
+                        counts[p.speaker] += max(0, voice_count(p) - 2 * self.fade)
+
+                    used = pre + (b - a)
+                    available = self.target - used
                     if available < 0:
                         continue
-                    counts = dict(base_voice)
-                    for p in prefix:
-                        counts[p.speaker] += max(0, voice_count(p)-2*self.fade)
+
                     missing = min(speakers, key=lambda s: counts[s])
                     suffixes = self._sequences(missing, core_hi, 0, available, base)
+
                     for suffix in suffixes:
                         support = prefix + suffix
                         if len({p.source for p in support}) != len(support):
                             continue
-                        # Không dùng hai lát trùng âm thanh, kể cả nhãn nguồn khác.
-                        if any(min(p.end,q.end)>max(p.start,q.start) for p,q in combinations(support,2)):
+                        if any(min(p.end, q.end) > max(p.start, q.start) for p, q in combinations(support, 2)):
                             continue
+                        if any(min(p.end, b) > max(p.start, a) for p in support):
+                            continue
+
                         total_voice, total_solo = dict(base_voice), dict(base_solo)
                         for p in support:
-                            amount = max(0, voice_count(p)-2*self.fade)
+                            amount = max(0, voice_count(p) - 2 * self.fade)
                             total_voice[p.speaker] += amount
                             total_solo[p.speaker] += amount
+
                         if min(total_solo.values()) < self.sr:
                             continue
-                        duration = b-a+pre+sum(p.end-p.start-self.fade for p in suffix)
-                        ratio_error = abs(total_voice[speakers[0]]-total_voice[speakers[1]]) / max(1, sum(total_voice.values()))
-                        retained = max(0, min(b,host_hi)-max(a,host_lo))
-                        # Giữ nền có trọng số cao; cân bằng vẫn có thể thắng
-                        # khi chỉ cần đổi một ít ngữ cảnh. Không ép đúng 1:1.
-                        loss = 1-retained/max(1, min(host_hi-host_lo,self.target))
-                        score = (0.45*loss + 0.40*ratio_error +
-                                 0.12*(self.target-duration)/self.target + 0.015*len(support))
+
+                        suffix_len = sum(p.end - p.start - self.fade for p in suffix)
+                        duration = b - a + pre + suffix_len
+                        if duration > self.target:
+                            continue
+
+                        ratio_error = abs(total_voice[speakers[0]] - total_voice[speakers[1]]) / max(1, sum(total_voice.values()))
+                        retained = max(0, min(b, host_hi) - max(a, host_lo))
+                        loss = 1 - retained / max(1, min(host_hi - host_lo, self.target))
+                        anchor_error = abs(core_pos / self.sr - 6.5) / 1.5
+                        score = 0.40 * loss + 0.35 * ratio_error + 0.10 * (self.target - duration) / self.target + 0.10 * anchor_error + 0.015 * len(support)
                         rank = (score, len(support), -retained)
+
                         if best is None or rank < best[0]:
-                            best = (rank, prefix, base, suffix, total_voice, method)
+                            best = (rank, prefix, base, suffix, total_voice, method, core_pos)
+
         if best is None:
-            self.detail = "no_layout_with_clean_support_and_6_8s_anchor"
+            self.detail = "no_layout_with_clean_support_and_5_8s_anchor"
             return None
-        _, prefix, base, suffix, voice, method = best
+
+        _, prefix, base, suffix, voice, method, core_pos = best
         result = self._assemble(prefix, base, suffix, speakers, core_lo, core_hi, solos)
-        result.layout.update({"policy": POLICY_VERSION, "host_segment": str(host.index),
-            "host_source_samples": [host_lo,host_hi], "cut_method": method,
-            "estimated_voice_seconds": {s: v/self.sr for s,v in voice.items()},
-            "ratio": max(voice.values())/max(1,min(voice.values())),
-            "context_seconds": [(core_lo-base.start)/self.sr,(base.end-core_hi)/self.sr],
-            "context_shortfall_seconds": [max(0,self.context-(core_lo-base.start))/self.sr,
-                                          max(0,self.context-(base.end-core_hi))/self.sr],
-            "overlaps": [[p["overlap_start"],p["overlap_end"]] for p in group]})
+        result.layout.update({
+            "policy": POLICY_VERSION,
+            "host_segment": str(host.index),
+            "host_source_samples": [host_lo, host_hi],
+            "cut_method": method,
+            "estimated_voice_seconds": {s: v / self.sr for s, v in voice.items()},
+            "ratio": max(voice.values()) / max(1, min(voice.values())),
+            "core_position_seconds": core_pos / self.sr,
+            "base_core_position_seconds": (core_lo - base.start) / self.sr,
+            "context_seconds": [(core_lo - base.start) / self.sr, (base.end - core_hi) / self.sr],
+            "context_shortfall_seconds": [max(0, self.context - (core_lo - base.start)) / self.sr, max(0, self.context - (base.end - core_hi)) / self.sr],
+            "overlaps": [[p["overlap_start"], p["overlap_end"]] for p in group],
+        })
         return result
 
     def _assemble(self, prefix, base, suffix, speakers, core_lo, core_hi, solos):
-        pieces = list(prefix)+( [base] )+list(suffix)
+        pieces = list(prefix) + [base] + list(suffix)
         output = None
         maps, probes = [], {s: [] for s in speakers}
         base_offset = None
-        for k,p in enumerate(pieces):
-            chunk = self.waveform[p.start:p.end].astype(np.float32,copy=True)
-            start = 0 if output is None else len(output)-self.fade
+
+        for k, p in enumerate(pieces):
+            chunk = self.waveform[p.start:p.end].astype(np.float32, copy=True)
+            start = 0 if output is None else len(output) - self.fade
+
             if output is None:
                 output = chunk
             else:
-                ramp = np.linspace(0,1,self.fade,dtype=np.float32)
-                output[-self.fade:] = output[-self.fade:]*(1-ramp)+chunk[:self.fade]*ramp
-                output = np.concatenate((output,chunk[self.fade:]))
-            end = start+len(chunk)
-            safe_lo = p.start+(self.fade if k else 0)
-            safe_hi = p.end-(self.fade if k+1<len(pieces) else 0)
+                ramp = np.linspace(0, 1, self.fade, dtype=np.float32)
+                output[-self.fade:] = output[-self.fade:] * (1 - ramp) + chunk[:self.fade] * ramp
+                output = np.concatenate((output, chunk[self.fade:]))
+
+            end = start + len(chunk)
+            safe_lo = p.start + (self.fade if k else 0)
+            safe_hi = p.end - (self.fade if k + 1 < len(pieces) else 0)
+
             for speaker in speakers:
-                ranges = solos[speaker] if p.kind == "base" else (
-                    self.cuts.analyse(p.start,p.end)[1] if p.speaker == speaker else [])
-                for a,b in intersect(ranges,safe_lo,safe_hi):
-                    probes[speaker].append((start+a-p.start,start+b-p.start))
+                ranges = solos[speaker] if p.kind == "base" else (self.cuts.analyse(p.start, p.end)[1] if p.speaker == speaker else [])
+                for a, b in intersect(ranges, safe_lo, safe_hi):
+                    probes[speaker].append((start + a - p.start, start + b - p.start))
+
             if p.kind == "base":
                 base_offset = start
-            maps.append({"kind":p.kind,"speaker":p.speaker,"source_segment":p.source,
-                         "source_samples":[p.start,p.end],"window_samples":[start,end],
-                         "cuts":[p.start_cut,p.end_cut]})
-        core = (base_offset+core_lo-base.start,base_offset+core_hi-base.start)
-        return Window(output,core,probes,{
-            "sample_rate":self.sr,"duration_seconds":len(output)/self.sr,
-            "core_samples":list(core),"core_source_samples":[core_lo,core_hi],
-            "core_start_seconds":core[0]/self.sr,"pieces":maps,
-            "crossfade_samples":self.fade,
-            "probe_samples":{s:[list(r) for r in rs] for s,rs in probes.items()}})
+
+            maps.append({"kind": p.kind, "speaker": p.speaker, "source_segment": p.source, "source_samples": [p.start, p.end], "window_samples": [start, end], "cuts": [p.start_cut, p.end_cut]})
+
+        core = (base_offset + core_lo - base.start, base_offset + core_hi - base.start)
+        return Window(output, core, probes, {
+            "sample_rate": self.sr,
+            "duration_seconds": len(output) / self.sr,
+            "core_samples": list(core),
+            "core_source_samples": [core_lo, core_hi],
+            "core_start_seconds": core[0] / self.sr,
+            "pieces": maps,
+            "crossfade_samples": self.fade,
+            "probe_samples": {s: [list(r) for r in rs] for s, rs in probes.items()},
+        })
