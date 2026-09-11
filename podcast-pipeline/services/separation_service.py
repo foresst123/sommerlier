@@ -560,7 +560,12 @@ class SeparationService:
             probe_a_s, probe_b_s = built.probes[spk_a], built.probes[spk_b]
             layout = built.layout
             self.window_layouts.append(layout)
-            win_lo = job_lo - core[0] / sr
+            # core[0] is where core_source_samples[0] lands in the window, and
+            # that is NOT job_lo: for an overlap under short_core_threshold the
+            # planner pads the core outward, so the two differ by up to the pad.
+            # Mapping window <-> source through job_lo read the window 2s early.
+            core_src_lo = layout["core_source_samples"][0]
+            win_lo = (core_src_lo - core[0]) / sr
             win_hi = win_lo + len(window_audio) / sr
             solo_a = [(a/sr, b/sr) for a, b in probe_a_s]
             solo_b = [(a/sr, b/sr) for a, b in probe_b_s]
@@ -653,7 +658,7 @@ class SeparationService:
                     continue
 
                 track, sim = accepted[spk]
-                src = core[0] + int(ov_lo * sr) - int(job_lo * sr)
+                src = core[0] + int(ov_lo * sr) - core_src_lo
                 dst = int(ov_lo * sr) - int(enh.start * sr)
                 if src < 0 or dst < 0:
                     self._fail(enh, ov_lo, ov_hi, "short_track", "negative offset")

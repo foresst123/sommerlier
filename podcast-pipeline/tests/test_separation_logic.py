@@ -485,3 +485,50 @@ def test_short_clips_are_still_gathered_when_none_is_long_enough():
                 for i in range(1, 6)]
     picked = svc.mine_enrollments(segments, audio)["A"]
     assert len(picked) > 1
+
+
+def test_expanded_core_splices_the_real_overlap_not_two_seconds_earlier():
+    """Ghép trả phải ánh xạ qua core_source_samples, không qua overlap gốc.
+
+    Overlap 0.15 s lọt ngưỡng 0.1 s nhưng dưới short_core_threshold 0.2 s nên
+    core nở ±2 s. Dùng overlap gốc làm mốc thì lấy nhầm audio sớm hơn 2 giây;
+    _track_has_speech không bắt được vì chỗ đó cũng có tiếng nói của host.
+    """
+    class IdentityTSE(FakeTSE):
+        """Bộ tách 'hoàn hảo': trả lại đúng mixture đã nhận."""
+
+        def separate_two_speakers(self, mixture_audio, **kwargs):
+            super().separate_two_speakers(mixture_audio, **kwargs)
+            track = np.asarray(mixture_audio, dtype=np.float32).copy()
+            return (track, track.copy(), self.sim_a, self.sim_b,
+                    {"anchor_self": 0.6, "anchor_other": 0.1, "other_rms": 0.5})
+
+    segs = [
+        Segment(index="00001", start=0.0, end=30.0, speaker="SPEAKER_00"),
+        Segment(index="00002", start=14.0, end=14.15, speaker="SPEAKER_01"),
+        Segment(index="00003", start=32.0, end=40.0, speaker="SPEAKER_01"),
+        Segment(index="00004", start=42.0, end=48.0, speaker="SPEAKER_00"),
+    ]
+    audio = _audio()
+    svc = SeparationService(IdentityTSE(), logger=None)
+    out = svc.process_overlaps(segs, audio, overlap_threshold=0.1)
+
+    layout = svc.window_layouts[0]
+    assert layout.get("core_expanded") is True, layout
+    spliced = [s for s in out if getattr(s, "bss_spans", None)]
+    assert spliced, "overlap 0.15 s phải được ghép trả"
+
+    # Bộ tách là identity nên vùng ghép trả phải trùng đúng mixture gốc.
+    # Chỉ so phần giữa: _cross_fade dùng ramp giữ công suất ở hai biên (mỗi
+    # biên tối đa 1/8 vùng thay thế), nên với hai tín hiệu trùng nhau hai đầu
+    # bị cộng lên tới +3 dB. Phần giữa được thay nguyên vẹn, và đó cũng chính
+    # là phần mà lỗi ánh xạ làm hỏng.
+    for seg in spliced:
+        for lo, hi, _sim in seg.bss_spans:
+            i = int(lo * SR) - int(seg.start * SR)
+            n = int((hi - lo) * SR)
+            edge = n // 8
+            got = seg.audio[i + edge:i + n - edge]
+            want = audio.waveform[int(lo * SR) + edge:][:len(got)]
+            assert np.max(np.abs(got - want)) < 1e-4, (
+                f"seg {seg.index} {lo:.2f}-{hi:.2f}s ghép nhầm audio")

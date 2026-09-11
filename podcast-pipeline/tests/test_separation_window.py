@@ -181,3 +181,73 @@ def test_checkpoint_namespace_preserves_old_results(tmp_path):
     new.save("separation",["new"])
     assert new.load("separation") == ["new"]
     assert old.load("separation") == ["old"]
+
+
+# --- hồi quy cho ba lỗi cửa sổ (core nở, kẹp floor, trần 15s) --------------
+
+def _sparse_waveform(duration=80, quiet=((15.4, 15.6), (42.4, 42.6))):
+    """Âm liên tục, chỉ có vài điểm lặng rời rạc.
+
+    Giữ cho `AcousticCuts` chỉ tìm được đúng mấy điểm cắt đó, để kiểm tra
+    nhánh fallback khi vật liệu cắt ở xa core.
+    """
+    t = np.arange(duration * SR) / SR
+    wave = (0.1 * np.sin(2 * np.pi * 83 * t)).astype(np.float32)
+    for a, b in quiet:
+        wave[int(a * SR):int(b * SR)] = 0
+    return wave
+
+
+def test_expanded_core_still_reports_the_real_overlap_position():
+    """core_source_samples phải là mốc duy nhất để ánh xạ ngược về nguồn.
+
+    Với overlap dưới 0.2 s, core nở ±2 s. Ai ánh xạ bằng overlap gốc thay vì
+    bằng core_source_samples sẽ lệch đúng phần đã nở -- đó là lỗi ghép trả
+    sớm 2 giây ở separation_service.
+    """
+    planner, jobs = setup([(10, 30, "A"), (20, 20.15, "B"), (0, 8, "A"), (40, 48, "B")])
+    result = planner.build(jobs[0][2])
+    assert result is not None, planner.detail
+    layout = result.layout
+    assert layout["core_expanded"] is True
+    base = next(p for p in layout["pieces"] if p["kind"] == "base")
+    core_src_lo = layout["core_source_samples"][0]
+    # core[0] là vị trí của core_source_samples[0] trong cửa sổ, không phải
+    # của overlap gốc.
+    assert result.core[0] == base["window_samples"][0] + core_src_lo - base["source_samples"][0]
+    assert core_src_lo < int(20.0 * SR), "core phải nở về bên trái"
+
+
+def test_short_overlap_does_not_fail_where_a_longer_one_passes():
+    """Nở core không được ăn hết chỗ mà base cần.
+
+    Cùng hình học, chỉ khác độ dài overlap: ca ngắn (bị nở) từng fail với
+    no_safe_left_cut_for_3_10s_base trong khi ca dài lại dựng được.
+    """
+    rows = [(19, 24, "A"), (0, 8, "A"), (40, 48, "B"), (17, 18.5, "C")]
+    planner_long, jobs_long = setup(rows + [(20, 20.5, "B")])
+    long_job = next(j for j in jobs_long if j[:2] == ("A", "B"))
+    assert planner_long.build(long_job[2]) is not None, planner_long.detail
+
+    planner_short, jobs_short = setup(rows + [(20, 20.15, "B")])
+    short_job = next(j for j in jobs_short if j[:2] == ("A", "B"))
+    assert planner_short.build(short_job[2]) is not None, planner_short.detail
+
+
+def test_pad_less_fallback_never_exceeds_the_15s_target():
+    """Nhánh fallback cũng phải tôn trọng trần 15 s như đường chính.
+
+    Khi điểm cắt sạch nằm xa core, fallback từng ghép ra cửa sổ 27 s và đưa
+    thẳng vào model vốn thiết kế cho 15 s.
+    """
+    segs = segments([(5, 55, "A"), (25, 33, "B")])
+    pairs = detect_overlapping_segments([s.__dict__ for s in segs], overlap_threshold=0)
+    planner = WindowPlanner(segs, pairs, _sparse_waveform(), SR)
+    jobs = SeparationService()._group_jobs(pairs)
+    result = planner.build(jobs[0][2])
+    if result is None:
+        # Từ chối hẳn còn hơn đưa cửa sổ quá khổ vào model; lý do phải nói rõ
+        # là vượt ngân sách, không lẫn với "không có support sạch".
+        assert planner.detail == "fallback_base_exceeds_15s"
+    else:
+        assert result.layout["duration_seconds"] <= 15.0, result.layout

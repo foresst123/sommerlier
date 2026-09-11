@@ -485,11 +485,20 @@ class WindowPlanner:
         # the competing voice. Expand the effective core region by ±2s so
         # the base always carries real context around the overlap, stopping
         # at floor/ceiling so no third speaker leaks in.
+        #
+        # The pad must leave base_core_min of room between the expanded core
+        # and floor/ceiling. Clamping straight to floor/ceiling let the pad
+        # eat the very context the base needs: with a third speaker ending
+        # 0.5s before the overlap, eff_core_lo landed on floor, no left cut
+        # could sit base_core_min earlier, and the window failed outright --
+        # while the same geometry with a longer overlap, which is not padded
+        # at all, built fine. Where that room does not exist the core simply
+        # is not expanded on that side.
         core_span = core_hi - core_lo
         if core_span < self.short_core_threshold:
             pad = self.short_core_pad
-            eff_core_lo = max(floor, core_lo - pad)
-            eff_core_hi = min(ceiling, core_hi + pad)
+            eff_core_lo = min(core_lo, max(core_lo - pad, floor + self.base_core_min))
+            eff_core_hi = max(core_hi, min(core_hi + pad, ceiling - self.base_core_min))
         else:
             eff_core_lo = core_lo
             eff_core_hi = core_hi
@@ -508,9 +517,13 @@ class WindowPlanner:
 
         # How much left context does base need at minimum?
         # Normal: base_core_min. Edge: whatever fits, ≥ fade.
-        if room_left < self.base_core_min:
+        if room_left <= self.base_core_min:
             # Near left edge -- relax the left floor to fade, require
             # right side to compensate so total >= base_min_total.
+            # The comparison has to include equality. At exactly base_core_min
+            # the only admissible left cut is floor itself, and that one is
+            # subject to the quiet_edge() veto, so the usual outcome of the
+            # strict form was no_safe_left_cut on a window that had room.
             left_min = self.fade
         else:
             left_min = self.base_core_min
@@ -681,8 +694,9 @@ class WindowPlanner:
             # Sidon at least sees the transition region. The base may cross
             # the other speaker's segments freely; it only stops at a third-
             # speaker boundary (floor / ceiling).
-            # Pick the widest clean cut available on each side, bounded by
-            # floor, ceiling, and the 10s cap per side.
+            # Both sides are walked nearest-cut-first, so the first pair that
+            # qualifies is the tightest one -- roughly self.context on each
+            # side, which is what the scored path aims for anyway.
             BASE_FALLBACK_MIN = round(2.0 * self.sr)
             BASE_FALLBACK_MAX = round(10.0 * self.sr)
 
@@ -690,7 +704,7 @@ class WindowPlanner:
                 [a for a in cuts
                  if eff_core_lo - BASE_FALLBACK_MAX <= a <= eff_core_lo - BASE_FALLBACK_MIN
                  and eff_core_lo - a >= self.fade],
-                reverse=True  # farthest left first → widest base
+                reverse=True  # largest a first → nearest the core → tightest base
             )
             fb_rights = sorted(
                 [b for b in cuts
@@ -698,10 +712,19 @@ class WindowPlanner:
                  and b - eff_core_hi >= self.fade],
             )  # nearest right first → keep base tight
 
-            fb_best = None
+            fb_best, fb_over_budget = None, False
             for fa in fb_lefts:
                 for fb in fb_rights:
                     if fa >= fb:
+                        continue
+                    # The fallback is a relaxation of the layout rules, not of
+                    # the window budget. Where clean cuts only exist far from
+                    # the core this used to hand the separator a 27s window
+                    # against a 15s design point; refusing the job is the
+                    # honest outcome, and it is recorded as a failed span
+                    # rather than passed off as clean mixture.
+                    if fb - fa > self.target:
+                        fb_over_budget = True
                         continue
                     # In fallback mode we accept any pair that gives each
                     # speaker at least one voiced frame -- the separator will
@@ -716,7 +739,11 @@ class WindowPlanner:
                     break
 
             if fb_best is None:
-                self.detail = "no_layout_with_clean_support_and_5_8s_anchor"
+                # Separating the two says whether the recording had no usable
+                # support at all, or only cuts too far out to stay inside the
+                # budget -- different problems, different fixes.
+                self.detail = ("fallback_base_exceeds_15s" if fb_over_budget
+                               else "no_layout_with_clean_support_and_5_8s_anchor")
                 return None
 
             fa, fb, fb_voice = fb_best
