@@ -1,6 +1,11 @@
 import collections
 import json
 import os
+import time as _time
+
+# Set BSS_TIMING=1 để bật log thời gian chi tiết từng bước trong separation loop.
+# Tắt mặc định vì mỗi job log thêm ~4 dòng, với 55 job sẽ rất dài.
+_BSS_TIMING = os.environ.get("BSS_TIMING", "0") == "1"
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 from schemas.audio import AudioData
@@ -688,6 +693,7 @@ class SeparationService:
         try:
             for (spk_a, spk_b, plist, targets), (built, reason, detail) in zip(buildable, window_iter):
                 pbar.update(1)
+                _t_job = _time.perf_counter()
 
                 def fail_all(reason, detail="", targets=targets):
                     for sd, lo, hi in targets:
@@ -695,6 +701,13 @@ class SeparationService:
 
                 job_lo = min(p["overlap_start"] for p in plist)
                 job_hi = max(p["overlap_end"] for p in plist)
+
+                _t_window = _time.perf_counter()
+                if _BSS_TIMING and self.logger:
+                    _wait = _t_window - _t_job
+                    self.logger.debug(
+                        f"[TIMING] {job_lo:.2f}s: window_wait={_wait:.2f}s"
+                        + (" (GPU idle!)" if _wait > 1.0 else ""))
 
                 if built is None:
                     fail_all(reason, detail)
@@ -729,6 +742,9 @@ class SeparationService:
                 enroll_a = memory.extend(spk_a, enrollments[spk_a], sr)
                 enroll_b = memory.extend(spk_b, enrollments[spk_b], sr)
 
+                _t_sidon = _time.perf_counter()
+                if _BSS_TIMING and self.logger:
+                    self.logger.debug(f"[TIMING] {job_lo:.2f}s: → Sidon")
                 track_A, track_B, sim_A, sim_B, diag = self.bss_model.separate_two_speakers(
                     window_audio,
                     enroll_A=enroll_a, enroll_B=enroll_b,
@@ -737,6 +753,10 @@ class SeparationService:
                     probe_B=probe_b_s,
                     core_range=core,
                 )
+                _t_sidon_done = _time.perf_counter()
+                if _BSS_TIMING and self.logger:
+                    self.logger.debug(
+                        f"[TIMING] {job_lo:.2f}s: ← Sidon {_t_sidon_done - _t_sidon:.2f}s")
 
                 for sim in (sim_A, sim_B):
                     if sim is not None:
@@ -845,6 +865,12 @@ class SeparationService:
                             + (f"{sim:.2f}" if sim is not None else "not-A")
                         )
 
+            if _BSS_TIMING and self.logger:
+                    self.logger.debug(
+                        f"[TIMING] {job_lo:.2f}s: total={_time.perf_counter()-_t_job:.2f}s "
+                        f"window={_t_sidon-_t_window:.2f}s "
+                        f"sidon={_t_sidon_done-_t_sidon:.2f}s "
+                        f"qc_splice={_time.perf_counter()-_t_sidon_done:.2f}s")
             pbar.close()
         finally:
             # Chỉ đóng shared memory của FILE NÀY -- pool process (nếu có)
