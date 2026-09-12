@@ -527,10 +527,21 @@ class SeparationService:
             import soundfile as sf
             d = os.path.join(self.dump_dir, subdir)
             os.makedirs(d, exist_ok=True)
+            _t0 = _time.perf_counter()
+            if _BSS_TIMING and self.logger:
+                n_bytes = (mixture.nbytes
+                           + (track_1.nbytes if track_1 is not None else 0)
+                           + (track_2.nbytes if track_2 is not None else 0))
+                self.logger.debug(
+                    f"[TIMING] dump_tracks: writing {n_bytes/1e6:.1f} MB "
+                    f"to {subdir}/{tag}_*.wav")
             sf.write(os.path.join(d, f"{tag}_mix.wav"), mixture, sr)
             if track_1 is not None:
                 sf.write(os.path.join(d, f"{tag}_trackA.wav"), track_1, sr)
                 sf.write(os.path.join(d, f"{tag}_trackB.wav"), track_2, sr)
+            if _BSS_TIMING and self.logger:
+                self.logger.debug(
+                    f"[TIMING] dump_tracks: done in {_time.perf_counter()-_t0:.2f}s")
         except Exception as e:
             # Chỉ cảnh báo một lần nếu thiếu soundfile hoặc không ghi được thư mục,
             # tránh lặp thông báo trên từng clip nhưng vẫn báo mất dữ liệu đối chiếu.
@@ -758,15 +769,26 @@ class SeparationService:
                     self.logger.debug(
                         f"[TIMING] {job_lo:.2f}s: ← Sidon {_t_sidon_done - _t_sidon:.2f}s")
 
+                _t_qc = _time.perf_counter()
+                if _BSS_TIMING and self.logger:
+                    self.logger.debug(
+                        f"[TIMING] {job_lo:.2f}s: → QC ECAPA "
+                        f"(sim_A={'?' if sim_A is None else f'{sim_A:.2f}'} "
+                        f"sim_B={'?' if sim_B is None else f'{sim_B:.2f}'})")
+
                 for sim in (sim_A, sim_B):
                     if sim is not None:
                         self.sims.append(sim)
 
                 # Chỉ nhận vào bộ nhớ các track đạt ngưỡng cao để hạn chế học nhầm giọng.
+                if _BSS_TIMING and self.logger:
+                    self.logger.debug(f"[TIMING] {job_lo:.2f}s: → memory.offer")
                 for spk, track, sim in ((spk_a, track_A, sim_A), (spk_b, track_B, sim_B)):
                     memory.offer(spk, track, sim, sr)
 
                 # Đánh giá từng track độc lập; một track kém không làm mất track còn tốt.
+                if _BSS_TIMING and self.logger:
+                    self.logger.debug(f"[TIMING] {job_lo:.2f}s: → sim threshold check (th={BSS_QC_SIM_THRESHOLD})")
                 accepted, rejected = {}, {}
                 for spk, track, sim in ((spk_a, track_A, sim_A), (spk_b, track_B, sim_B)):
                     if sim is not None:
@@ -809,9 +831,19 @@ class SeparationService:
                         f"solo_b={sum(b - a for a, b in solo_b):.1f}s | accepted: {who}"
                         + (f" | rejected: {sorted(rejected)}" if rejected else "")
                     )
+                if _BSS_TIMING and self.logger:
+                    self.logger.debug(f"[TIMING] {job_lo:.2f}s: → dump_tracks (accepted={sorted(accepted)})")
+                _t_dump = _time.perf_counter()
                 self._dump_tracks("separated", f"{job_lo:.2f}_{spk_a}_{spk_b}",
                                   window_audio, track_A, track_B, sr)
+                if _BSS_TIMING and self.logger:
+                    self.logger.debug(
+                        f"[TIMING] {job_lo:.2f}s: ← dump_tracks {_time.perf_counter()-_t_dump:.2f}s")
 
+                if _BSS_TIMING and self.logger:
+                    self.logger.debug(
+                        f"[TIMING] {job_lo:.2f}s: → splice loop ({len(targets)} target(s))")
+                _t_splice = _time.perf_counter()
                 fade_samples = int(0.02 * sr)
                 for sd, ov_lo, ov_hi in targets:
                     spk = sd["speaker"]
@@ -842,6 +874,10 @@ class SeparationService:
                     # bảo đảm overlap có lời: từng có trường hợp sim=0.67 trên mẫu trước đó
                     # 19 giây nhưng track im lặng ở chính overlap.
                     host = enh.audio[dst:dst + limit]
+                    if _BSS_TIMING and self.logger:
+                        self.logger.debug(
+                            f"[TIMING] {job_lo:.2f}s: → _track_has_speech "
+                            f"seg={sd['index']} spk={spk} limit={limit/sr:.3f}s")
                     if not self._track_has_speech(host, track[src:src + limit], sr_hint=sr):
                         self._fail(enh, ov_lo, ov_hi, "empty_track",
                                    "silent where mixture has speech")
@@ -849,6 +885,10 @@ class SeparationService:
 
                     # Track đã bỏ giọng nhiễu thường nhỏ hơn mixture. Khớp mức RMS trước
                     # khi ghép trả để tránh bước nhảy âm lượng; crossfade tiếp tục làm mượt biên.
+                    if _BSS_TIMING and self.logger:
+                        self.logger.debug(
+                            f"[TIMING] {job_lo:.2f}s: → match_splice_level + crossfade "
+                            f"seg={sd['index']} spk={spk}")
                     patch = match_splice_level(
                         enh.audio[dst:dst + limit], track[src:src + limit])
                     enh.audio[dst:dst + limit] = self._cross_fade(
@@ -866,11 +906,17 @@ class SeparationService:
                         )
 
             if _BSS_TIMING and self.logger:
+                    _t_end = _time.perf_counter()
                     self.logger.debug(
-                        f"[TIMING] {job_lo:.2f}s: total={_time.perf_counter()-_t_job:.2f}s "
-                        f"window={_t_sidon-_t_window:.2f}s "
+                        f"[TIMING] {job_lo:.2f}s: ← splice loop {_t_end - _t_splice:.3f}s")
+                    self.logger.debug(
+                        f"[TIMING] {job_lo:.2f}s: TOTAL={_t_end-_t_job:.2f}s | "
+                        f"window_wait={_t_window-_t_job:.2f}s "
+                        f"enroll={_t_sidon-_t_window:.3f}s "
                         f"sidon={_t_sidon_done-_t_sidon:.2f}s "
-                        f"qc_splice={_time.perf_counter()-_t_sidon_done:.2f}s")
+                        f"qc={_t_qc-_t_sidon_done:.3f}s "
+                        f"dump={_t_end-_t_dump:.3f}s "
+                        f"splice={_t_end-_t_splice:.3f}s")
             pbar.close()
         finally:
             # Chỉ đóng shared memory của FILE NÀY -- pool process (nếu có)
