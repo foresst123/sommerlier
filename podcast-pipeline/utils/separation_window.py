@@ -9,7 +9,7 @@ from itertools import combinations
 
 import numpy as np
 
-POLICY_VERSION = "connected-balanced-15s-v5"
+POLICY_VERSION = "connected-balanced-15s-v6"
 
 
 def clean_segments(segments):
@@ -613,131 +613,116 @@ class WindowPlanner:
         solos = {s: self._voiced(self._solo(s, lo, hi)) for s in speakers}
         support_voice = {}
 
-        def voice_count(piece):
-            key = (piece.start, piece.end)
-            if key not in support_voice:
-                support_voice[key] = sum(b - a for a, b in self.cuts.analyse(*key)[1])
-            return support_voice[key]
+        # ── Layout cứng: base nằm trong giây 3–10 của window 15s ──────────
+        # Window = [pad_left: 0-3s][base: 3-10s][pad_right: 10-15s]
+        #
+        # Base (host): tối đa 7s, bao trùm core.
+        #   - Chọn left cut gần core nhất còn đủ base_min_total (3s)
+        #   - Chọn right cut xa core nhất còn trong base_core_max (10s từ left)
+        #   - Nếu base ngắn hơn 7s: pad co vào lấp đầy khoảng trống
+        #
+        # Pad trái (host, giây 0-3): lấy host audio trước base
+        # Pad phải (non-host, giây 10-15): lấy non-host audio sau base
+        # Cả hai pad co giãn quanh base — base là neo cố định.
 
+        # Layout cứng: pad_left = 3s, pad_right = 5s.
+        # Core phải nằm ở giây ≥5 trong window = pad_left(3s) + left_in_base(≥2s).
+        # Chọn best_a sao cho:
+        #   - left context trong base = eff_core_lo - best_a ∈ [2s, 7s]
+        #     (2s để core ở giây 5 tối thiểu, 7s là cả base về bên trái)
+        #   - core_pos trong window = 3s(pad) + left_context ∈ [5s, 10s] ✓
+        # Chọn left_context gần 2s nhất (core ở giây 5) để phải có nhiều chỗ nhất.
+        LEFT_IN_BASE_MIN = round(2.0 * self.sr)   # core ở giây 5 tối thiểu
+        LEFT_IN_BASE_MAX = self.base_core_max       # tối đa 10s (cả base bên trái)
+
+        best_a = None
+        # Ưu tiên left_context gần LEFT_IN_BASE_MIN nhất (core sát giây 5)
+        valid_lefts = [a for a in lefts
+                       if LEFT_IN_BASE_MIN <= eff_core_lo - a <= LEFT_IN_BASE_MAX
+                       and not any(int(p["overlap_start"] * self.sr) - a < margin for p in extra)]
+        if valid_lefts:
+            # Gần core nhất trong range [2s, 10s] → reverse sort → phần tử đầu
+            best_a = max(valid_lefts)  # max(a) = gần eff_core_lo nhất = left_context nhỏ nhất
+        elif lefts:
+            # Không có a nào trong [2s,10s], dùng lefts bất kỳ đủ fade
+            best_a = max(a for a in lefts
+                         if not any(int(p["overlap_start"]*self.sr)-a < margin for p in extra)
+                         ) if lefts else None
+
+        # Chọn right cut: xa nhất trong base_core_max tính từ best_a
+        best_b = None
         best = None
+        if best_a is not None:
+            capped_rights = [b for b in sorted(right_pool)
+                             if best_a + self.base_min_total <= b <= best_a + self.base_core_max
+                             and b - eff_core_hi >= self.fade
+                             and not any(b - int(p["overlap_end"] * self.sr) < margin for p in extra)]
+            if capped_rights:
+                best_b = capped_rights[-1]  # xa nhất = base rộng nhất về phải
 
-        for a in sorted(lefts):
-            raw_core_pos = eff_core_lo - a
-            if raw_core_pos > self.final_core_max:
-                continue
+        if best_a is not None and best_b is not None:
+            base = Piece(best_a, best_b, host.speaker, str(host.index),
+                         "base", cuts.get(best_a, "energy"), cuts.get(best_b, "energy"))
+            base_width = best_b - best_a  # samples
 
-            left_spk = host.speaker
-            at_left = [s for s in speakers if any(x <= a < y for x, y in self.by_speaker[s])]
-            if len(at_left) == 1:
-                left_spk = at_left[0]
+            base_voice = {s: sum(y - x for x, y in intersect(voiced_by_speaker[s], best_a, best_b))
+                          for s in speakers}
+            base_solo  = {s: sum(y - x for x, y in intersect(solos[s], best_a + self.fade, best_b - self.fade))
+                          for s in speakers}
 
-            prefix_min = max(0, self.final_core_min - raw_core_pos)
-            prefix_max = self.final_core_max - raw_core_pos
-            if prefix_max < 0:
-                continue
+            # Pad trái (host): host audio trước best_a, tối đa 3s
+            PAD_LEFT_MAX  = round(3.0 * self.sr)
+            # Pad phải bị chặn bởi target 15s: prefix + base + suffix <= 15s
+            # prefix tối đa 3s, base tối đa 10s -> suffix tối đa 2s
+            # Tính động từ base thật sự được chọn
+            pad_used_so_far = PAD_LEFT_MAX + self.base_core_max
+            PAD_RIGHT_MAX = max(self.fade, self.target - pad_used_so_far)
 
-            temp_end = eff_core_hi + self.fade
-            if temp_end > ceiling:
-                continue
-            temp_base = Piece(a, temp_end, host.speaker, str(host.index), "base", cuts[a], "temporary")
-            prefixes = self._sequences(left_spk, eff_core_lo, prefix_min, prefix_max, temp_base)
+            pad_left_lo  = max(floor, best_a - PAD_LEFT_MAX)
+            pad_left_hi  = best_a
+            pad_right_lo = best_b if best_b else eff_core_hi
+            pad_right_hi = min(ceiling, pad_right_lo + PAD_RIGHT_MAX) if best_b else eff_core_hi
 
-            for prefix in prefixes:
-                pre = sum(p.end - p.start - self.fade for p in prefix)
-                core_pos = pre + raw_core_pos
-                if not (self.final_core_min <= core_pos <= self.final_core_max):
-                    continue
+            # Lấy pad trái từ host — đoạn host audio liền kề base bên trái
+            prefix = ()
+            if pad_left_hi > pad_left_lo + self.fade:
+                pl_cuts, _, _ = self.cuts.analyse(pad_left_lo, pad_left_hi)
+                pl_cuts = dict(pl_cuts)
+                pl_cuts[pad_left_hi] = "segment"
+                # Chọn cut xa nhất bên trái (tối đa 3s)
+                pl_lefts = sorted([c for c in pl_cuts if pad_left_lo <= c < pad_left_hi], reverse=False)
+                if pl_lefts:
+                    pl_a = pl_lefts[0]
+                    prefix = (Piece(pl_a, pad_left_hi, host.speaker, str(host.index),
+                                    "prefix", pl_cuts.get(pl_a, "energy"), "segment"),)
 
-                # base is capped at base_core_max (10s) from its left cut;
-                # beyond that any extra host goes into the pad piece instead.
-                max_base_end = min(ceiling,
-                                   a + self.base_core_max,
-                                   a + self.target - pre)
-                # base must reach at least eff_core_hi and total >= base_min_total
-                min_base_end = max(eff_core_hi + self.fade,
-                                   a + self.base_min_total)
-                if max_base_end < min_base_end:
-                    continue
+            # Lấy pad phải từ non-host — đoạn non-host audio sau base.
+            # _sequences trả về list, phần tử đầu là () (không có pad) --
+            # lấy sequence có nhiều voice nhất thay vì cái đầu tiên.
+            missing = min(speakers, key=lambda s: base_voice[s])
+            suffix = ()
+            if pad_right_hi > pad_right_lo + self.fade:
+                pr_seqs = self._sequences(missing, eff_core_hi, 0, PAD_RIGHT_MAX, base)
+                best_seq, best_v = (), 0
+                for seq in pr_seqs:
+                    v = sum(sum(y-x for x,y in self.cuts.analyse(p.start,p.end)[1])
+                            for p in seq)
+                    if v > best_v:
+                        best_v, best_seq = v, seq
+                suffix = best_seq
 
-                valid_rights = [b for b in right_pool if min_base_end <= b <= max_base_end]
-                if not valid_rights:
-                    continue
+            support = prefix + suffix
+            total_voice = dict(base_voice)
+            for p in support:
+                amount = sum(y - x for x, y in
+                             self.cuts.analyse(p.start, p.end)[1])
+                total_voice[p.speaker] = total_voice.get(p.speaker, 0) + max(0, amount - 2*self.fade)
 
-                for b in sorted(valid_rights, reverse=True):
-                    if pre + (b - a) > self.target:
-                        continue
-                    if any(int(p["overlap_start"] * self.sr) - a < margin or b - int(p["overlap_end"] * self.sr) < margin for p in extra):
-                        continue
-
-                    base = Piece(a, b, host.speaker, str(host.index), "base", cuts[a], cuts[b])
-                    if any(min(p.end, b) > max(p.start, a) for p in prefix):
-                        continue
-
-                    base_voice = {s: sum(y - x for x, y in intersect(voiced_by_speaker[s], a, b)) for s in speakers}
-                    base_solo = {s: sum(y - x for x, y in intersect(solos[s], a + self.fade, b - self.fade)) for s in speakers}
-                    counts = dict(base_voice)
-
-                    for p in prefix:
-                        counts[p.speaker] += max(0, voice_count(p) - 2 * self.fade)
-
-                    used = pre + (b - a)
-                    available = self.target - used
-                    if available < 0:
-                        continue
-
-                    missing = min(speakers, key=lambda s: counts[s])
-                    suffixes = self._sequences(missing, eff_core_hi, 0, available, base)
-
-                    for suffix in suffixes:
-                        support = prefix + suffix
-                        if len({p.source for p in support}) != len(support):
-                            continue
-                        if any(min(p.end, q.end) > max(p.start, q.start) for p, q in combinations(support, 2)):
-                            continue
-                        if any(min(p.end, b) > max(p.start, a) for p in support):
-                            continue
-
-                        total_voice, total_solo = dict(base_voice), dict(base_solo)
-                        for p in support:
-                            amount = max(0, voice_count(p) - 2 * self.fade)
-                            total_voice[p.speaker] += amount
-                            total_solo[p.speaker] += amount
-
-                        if min(total_solo.values()) < self.sr:
-                            continue
-
-                        suffix_len = sum(p.end - p.start - self.fade for p in suffix)
-                        duration = b - a + pre + suffix_len
-                        if duration > self.target:
-                            continue
-
-                        ratio_error = abs(total_voice[speakers[0]] - total_voice[speakers[1]]) / max(1, sum(total_voice.values()))
-                        retained = max(0, min(b, host_hi) - max(a, host_lo))
-                        budget = min(host_hi - host_lo, self.base_target)
-                        loss = 1 - min(retained, budget) / max(1, budget)
-                        # With no prefix the core's position in the window just
-                        # is its left context, and every extra second there is
-                        # a second the right cannot have. Aiming at 6.5 -- the
-                        # middle of the legal 5-8s band -- therefore starved the
-                        # right by construction. 5.0 is the bottom of the same
-                        # band: still legal, and it leaves the budget for the
-                        # side that carries the evidence.
-                        anchor_error = max(0, core_pos / self.sr - 5.0) / 3.0
-                        # self.context is the target on BOTH sides and was only
-                        # ever reported, never scored -- so the right side cost
-                        # nothing. The host resuming after the backchannel is
-                        # what shows the blip belonged to the other speaker, and
-                        # that evidence is entirely on the right.
-                        context_error = (max(0, self.context - (eff_core_lo - a))
-                                         + max(0, self.context - (b - eff_core_hi))) / (2 * self.context)
-                        score = (0.28 * loss + 0.28 * ratio_error
-                                 + 0.08 * (self.target - duration) / self.target
-                                 + 0.10 * anchor_error + 0.25 * context_error
-                                 + 0.010 * len(support))
-                        rank = (score, len(support), -retained)
-
-                        if best is None or rank < best[0]:
-                            best = (rank, prefix, base, suffix, total_voice, method, core_pos)
+            # core_pos: vị trí core trong window (samples), dùng cho layout reporting
+            # prefix hiện tại có thể có (pad trái host) nên tính đủ
+            pre_len = sum(p.end - p.start - self.fade for p in prefix)
+            core_pos_samples = pre_len + (eff_core_lo - best_a)
+            best = (None, prefix, base, suffix, total_voice, method, core_pos_samples)
 
         if best is None:
             # --- pad-less fallback: stretch base toward both edges ----------
@@ -827,6 +812,7 @@ class WindowPlanner:
 
         _, prefix, base, suffix, voice, method, core_pos = best
         result = self._assemble(prefix, base, suffix, speakers, eff_core_lo, eff_core_hi, solos)
+        base_width_s = (base.end - base.start) / self.sr
         result.layout.update({
             "policy": POLICY_VERSION,
             "host_segment": str(host.index),
@@ -835,6 +821,7 @@ class WindowPlanner:
             "estimated_voice_seconds": {s: v / self.sr for s, v in voice.items()},
             "ratio": max(voice.values()) / max(1, min(voice.values())),
             "core_position_seconds": core_pos / self.sr,
+            "base_width_seconds": base_width_s,
             "base_core_position_seconds": (core_lo - base.start) / self.sr,
             "context_seconds": [(eff_core_lo - base.start) / self.sr, (base.end - eff_core_hi) / self.sr],
             "context_shortfall_seconds": [max(0, self.context - (eff_core_lo - base.start)) / self.sr, max(0, self.context - (base.end - eff_core_hi)) / self.sr],

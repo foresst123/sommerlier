@@ -79,12 +79,12 @@ def test_the_window_carries_solo_audio_for_the_assignment_to_use():
     svc = SeparationService(fake, logger=None)
     svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
     call = fake.calls[0]
-    assert call["probe_A_sec"] >= 2.0 and call["probe_B_sec"] >= 2.0, (
+    assert call["probe_A_sec"] >= 2.0 and call["probe_B_sec"] >= 1.0, (
         "no solo audio in the window; ECAPA has nothing to assign from")
-    # Tỷ lệ gần cân bằng nhưng không ép hai probe bằng nhau, vì còn ưu tiên
-    # giữ nội dung nền và điểm cắt tự nhiên.
-    assert min(call["probe_A_sec"], call["probe_B_sec"]) / max(
-        call["probe_A_sec"], call["probe_B_sec"]) >= 0.5
+    # Layout mới (base 3-10s host + pad 10-15s non-host): host chiếm ~10s,
+    # non-host có ~2s pad. Ratio sẽ thấp hơn trước -- quan trọng là non-host
+    # có đủ voice để ECAPA phân biệt (>= 1s).
+    assert call["probe_B_sec"] >= 1.0, "non-host cần ít nhất 1s voice để ECAPA hoạt động"
 
 
 def test_low_scoring_track_does_not_discard_the_good_one():
@@ -192,10 +192,12 @@ def test_an_overlap_too_short_to_separate_is_still_recorded():
     out = svc.process_overlaps(segs, _audio(), overlap_threshold=0.1)
 
     assert fake.calls == [], "overlap dưới ngưỡng không được chạy model"
-    # below_threshold filter đã bị bỏ -- overlap ngắn giờ được đưa vào queue
-    # và xử lý với short_core_expansion. Không còn ghi vào bss_failed_spans.
-    # Chỉ kiểm tra pipeline không crash và trả đúng số segment.
+    # below_threshold filter đã bị bỏ -- overlap ngắn giờ được đưa vào queue.
+    # short_core_expansion mở rộng ±2s quanh core nhỏ để Sidon có ngữ cảnh.
+    # Model được gọi -- kiểm tra pipeline không crash và trả đúng số segment.
     assert len(out) == len(segs), "số segment đầu ra phải bằng đầu vào"
+    # Overlap ngắn vẫn được tách (không có below_threshold filter nữa)
+    assert fake.calls, "overlap ngắn giờ phải chạy model"
 
 
 def test_same_speaker_overlap_is_kept_and_not_counted_twice():
