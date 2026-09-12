@@ -101,7 +101,7 @@ BSS_ENROLL_PREFER_SINGLE = float(os.environ.get("BSS_ENROLL_PREFER_SINGLE", "4.0
 # Ngưỡng CHƯA HIỆU CHỈNH. Đối chiếu phân vị similarity trong log [TSE] và
 # nghe các đoạn thất bại trước khi kết luận. Điểm ECAPA trên giọng đã tách
 # có thể thấp hơn giọng tự nhiên nên giá trị mặc định tương đối thấp.
-BSS_QC_SIM_THRESHOLD = float(os.environ.get("BSS_QC_SIM_THRESHOLD", "0.20"))
+BSS_QC_SIM_THRESHOLD = float(os.environ.get("BSS_QC_SIM_THRESHOLD", "0.50"))
 BSS_NOT_A_MARGIN = float(os.environ.get("BSS_NOT_A_MARGIN", "0.15"))
 BSS_SILENCE_RMS = float(os.environ.get("BSS_SILENCE_RMS", "0.002"))
 
