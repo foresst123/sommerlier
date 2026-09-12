@@ -58,8 +58,8 @@ def _resolve_pool_size() -> int:
     Tôn trọng usable_cores() (utils/cpu_plan.py) thay vì hard-code: module đó
     đo được rằng trên máy ít core, mở thêm process làm CHẬM đi vì tranh CPU
     với main process và Sidon worker (SIDON_CPU_THREADS đã giữ phần của nó).
-    Trần 5 khớp với phép đo thực tế (3.36-3.76x với 5 worker trên máy 8 core);
-    quá đó lợi ích giảm dần trong khi rủi ro tranh CPU với Sidon tăng lên.
+    Số worker = usable_cores() - 2, không có trần cứng; trên máy nhiều core
+    (H100 server 8+ core) dùng toàn bộ core còn lại là đúng.
     """
     if _BSS_WINDOW_WORKERS_ENV is not None:
         try:
@@ -68,7 +68,7 @@ def _resolve_pool_size() -> int:
             pass
     # Main process + Sidon worker subprocess đã chiếm ít nhất 2 "chỗ"; phần
     # còn lại mới dành cho pool build cửa sổ.
-    return max(0, min(5, usable_cores() - 2))
+    return max(0, usable_cores() - 2)
 
 
 def _worth_pooling(n_jobs: int) -> bool:
