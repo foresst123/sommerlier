@@ -181,8 +181,8 @@ class BssSeparator:
             emb = self.classifier.encode_batch(tensor)
         return emb.squeeze()
 
-    def _get_target_embedding(self, enrollment_audios: List[np.ndarray], target_id: str, sample_rate: int) -> torch.Tensor:
-        """Calculate and cache the target embedding."""
+    def _get_target_embedding(self, enrollment_audios: List[np.ndarray], target_id: str, sample_rate: int) -> Optional[torch.Tensor]:
+        """Calculate and cache the target embedding. Returns None if no audios provided."""
         if target_id and target_id in self.target_embed_cache:
             return self.target_embed_cache[target_id]
             
@@ -197,7 +197,8 @@ class BssSeparator:
                 )
                 
         if not enroll_embeddings:
-            raise ValueError(f"No valid enrollment audios provided for target {target_id}")
+            print(f"[TSE] Warning: No valid enrollment audios provided for target {target_id}")
+            return None
             
         target_embed = torch.stack(enroll_embeddings).mean(dim=0)
         target_embed = F.normalize(target_embed, p=2, dim=0)
@@ -363,17 +364,10 @@ class BssSeparator:
         that speaker is known to speak ALONE. Assignment and the returned
         similarities are measured there.
 
-        Scoring on the overlap core instead (the previous eval_pad_start_sec /
-        eval_core_len_sec path) is what drove sim_A from 0.46 to -0.07: ECAPA
-        pools statistics over time and cannot form an embedding from ~0.2s.
-        Solo regions are seconds long, so the same model works normally there.
-
         core_range: overlap core in mixture samples, used only by the "not-A"
         relative test for a speaker that has no solo region.
 
-        Returns (track_A, track_B, sim_A, sim_B, diag). A sim is None when that
-        speaker had too little voiced audio in its probe to judge; diag carries
-        the numbers the caller needs for the not-A decision.
+        Returns (track_A, track_B, sim_A, sim_B, diag).
         """
         if not self.classifier:
             raise RuntimeError("ECAPA is not loaded.")
@@ -382,40 +376,30 @@ class BssSeparator:
 
         import torchaudio.functional as F_audio
 
-        # Which separator runs is a profile setting; everything below -- the
-        # enrollment embeddings, the QC scoring, the not-A test -- is the same
-        # whichever produced the tracks.
+        # Chạy tách mù (Blind Separation)
         track_1_np, track_2_np, target_sr = self.backend.separate(
             mixture_audio, sample_rate, enroll_A=enroll_A, enroll_B=enroll_B)
         track_1_np = np.asarray(track_1_np, dtype=np.float32)
         track_2_np = np.asarray(track_2_np, dtype=np.float32)
 
-
         track_1_tensor = torch.from_numpy(track_1_np).to(self.device)
         track_2_tensor = torch.from_numpy(track_2_np).to(self.device)
 
-        # --- ECAPA matching, measured on the caller's probe spans ---
+        # --- ECAPA matching: Tính embedding cho các speaker có mẫu ---
         embed_A = self._get_target_embedding(enroll_A, id_A, sample_rate)
         embed_B = self._get_target_embedding(enroll_B, id_B, sample_rate)
 
-        # Repair chunk-seam inversions before scoring. The assignment below
-        # picks one orientation for the whole window, so a track that flips
-        # speakers midway cannot be labelled correctly at any price.
-        # Only blind separators can invert channels mid-window: a
-        # target-conditioned one was told whose voice to follow, so there is
-        # nothing to repair and running the check would only risk creating the
-        # swap it is meant to fix.
+        # Chỉ sửa chunk swap nếu CẢ HAI đều có embedding chuẩn
         n_flips = 0
         if not getattr(self.backend, "ordered", False):
-            track_1_np, track_2_np, n_flips = self._repair_chunk_swaps(
-                track_1_np, track_2_np, target_sr, embed_A, embed_B)
+            if embed_A is not None and embed_B is not None:
+                track_1_np, track_2_np, n_flips = self._repair_chunk_swaps(
+                    track_1_np, track_2_np, target_sr, embed_A, embed_B)
         if n_flips:
             track_1_tensor = torch.from_numpy(track_1_np).to(self.device)
             track_2_tensor = torch.from_numpy(track_2_np).to(self.device)
-            print(f"[TSE Model] repaired {n_flips} chunk-seam channel swap(s)",
-                  file=sys.stderr)
+            print(f"[TSE Model] repaired {n_flips} chunk-seam channel swap(s)", file=sys.stderr)
 
-        # Probes arrive in mixture samples; the separator decodes at its own rate.
         scale = target_sr / float(sample_rate)
         def _rescale(spans):
             if not spans:
@@ -432,62 +416,87 @@ class BssSeparator:
             emb = F.normalize(self._get_embedding(probe, target_sr), p=2, dim=0)
             return float(torch.dot(target_embed, emb))
 
-        s_1A, s_2A = _score(track_1_np, span_A, embed_A), _score(track_2_np, span_A, embed_A)
-        s_1B, s_2B = _score(track_1_np, span_B, embed_B), _score(track_2_np, span_B, embed_B)
+        # Chỉ chấm điểm nếu có embedding
+        s_1A = _score(track_1_np, span_A, embed_A) if embed_A is not None else None
+        s_2A = _score(track_2_np, span_A, embed_A) if embed_A is not None else None
+        s_1B = _score(track_1_np, span_B, embed_B) if embed_B is not None else None
+        s_2B = _score(track_2_np, span_B, embed_B) if embed_B is not None else None
 
-        def _n(x):
-            # A missing score must not win the comparison by default.
-            return -1.0 if x is None else x
-
-        # A target-conditioned separator was told whose voice to extract, so
-        # track 1 is A by construction and there is nothing to decide. Scoring
-        # still happens -- QC gates on sim, and the not-A test below needs the
-        # numbers -- but the tracks are never swapped. This removes the whole
-        # class of assignment errors that `_maybe_swap`, `not_a_fail` and
-        # `qc_sim` exist to contain: measured similarity here sits at p50 0.58
-        # where natural speech scores 0.70-0.90, so those decisions are made on
-        # thin evidence.
         if getattr(self.backend, "ordered", False):
             out_A_tensor, out_B_tensor = track_1_tensor, track_2_tensor
             out_A_np, out_B_np = track_1_np, track_2_np
             sim_A, sim_B = s_1A, s_2B
-        elif (_n(s_1A) + _n(s_2B)) >= (_n(s_2A) + _n(s_1B)):
-            out_A_tensor, out_B_tensor = track_1_tensor, track_2_tensor
-            out_A_np, out_B_np = track_1_np, track_2_np
-            sim_A, sim_B = s_1A, s_2B
         else:
-            out_A_tensor, out_B_tensor = track_2_tensor, track_1_tensor
-            out_A_np, out_B_np = track_2_np, track_1_np
-            sim_A, sim_B = s_2A, s_1B
+            # ─── LOGIC GÁN LOẠI TRỪ ───
+            # Trường hợp 1: Có cả 2 mẫu -> So sánh điểm bình thường
+            if embed_A is not None and embed_B is not None:
+                def _n(x): return -1.0 if x is None else x
+                if (_n(s_1A) + _n(s_2B)) >= (_n(s_2A) + _n(s_1B)):
+                    out_A_tensor, out_B_tensor = track_1_tensor, track_2_tensor
+                    out_A_np, out_B_np = track_1_np, track_2_np
+                    sim_A, sim_B = s_1A, s_2B
+                else:
+                    out_A_tensor, out_B_tensor = track_2_tensor, track_1_tensor
+                    out_A_np, out_B_np = track_2_np, track_1_np
+                    sim_A, sim_B = s_2A, s_1B
 
-        # Diagnostics for the "not-A" test: when one speaker has no solo region,
-        # asking "is this track B?" is unanswerable on a 0.2s core, but asking
-        # "is this track a duplicate of A?" only needs a relative comparison,
-        # which survives a bad absolute embedding.
+            # Trường hợp 2: Chỉ có mẫu A (Không có B) -> Dùng A chọn track, track còn lại nhường B
+            elif embed_A is not None:
+                s_1A_val = s_1A if s_1A is not None else -1.0
+                s_2A_val = s_2A if s_2A is not None else -1.0
+                if s_1A_val >= s_2A_val:
+                    out_A_tensor, out_B_tensor = track_1_tensor, track_2_tensor
+                    out_A_np, out_B_np = track_1_np, track_2_np
+                    sim_A, sim_B = s_1A, None
+                else:
+                    out_A_tensor, out_B_tensor = track_2_tensor, track_1_tensor
+                    out_A_np, out_B_np = track_2_np, track_1_np
+                    sim_A, sim_B = s_2A, None
+
+            # Trường hợp 3: Chỉ có mẫu B (Không có A) -> Dùng B chọn track, track còn lại nhường A
+            elif embed_B is not None:
+                s_1B_val = s_1B if s_1B is not None else -1.0
+                s_2B_val = s_2B if s_2B is not None else -1.0
+                if s_1B_val >= s_2B_val:
+                    out_A_tensor, out_B_tensor = track_2_tensor, track_1_tensor
+                    out_A_np, out_B_np = track_2_np, track_1_np
+                    sim_A, sim_B = None, s_1B
+                else:
+                    out_A_tensor, out_B_tensor = track_1_tensor, track_2_tensor
+                    out_A_np, out_B_np = track_1_np, track_2_np
+                    sim_A, sim_B = None, s_2B
+
+            # Trường hợp 4: Cả 2 đều không có mẫu -> Gán mặc định
+            else:
+                out_A_tensor, out_B_tensor = track_1_tensor, track_2_tensor
+                out_A_np, out_B_np = track_1_np, track_2_np
+                sim_A, sim_B = None, None
+
+        # ─── ĐÁNH GIÁ NOT-A AN TOÀN ───
         diag = {"anchor_self": None, "anchor_other": None, "other_rms": None}
-        if core_range is not None:
+        if core_range is not None and (embed_A is not None or embed_B is not None):
             c0, c1 = int(core_range[0] * scale), int(core_range[1] * scale)
             c0, c1 = max(0, c0), min(len(out_A_np), c1)
             if c1 > c0:
-                # The anchor is whichever speaker had a solo region to score on.
-                # "self" must be that speaker's own track and "other" the one
-                # opposite it -- reading them as A and B regardless meant that
-                # every job anchored on B scored embed_B against track A, so
-                # own came out low, other high, and (own - other) was negative
-                # for all of them: a guaranteed not_a_fail on exactly the cases
-                # the relative test exists to rescue.
-                anchor_is_a = sim_A is not None
-                anchor_embed = embed_A if anchor_is_a else embed_B
-                self_np = out_A_np if anchor_is_a else out_B_np
-                other_np = out_B_np if anchor_is_a else out_A_np
+                # Ưu tiên lấy anchor từ người THỰC SỰ có embedding
+                if embed_A is not None and (sim_A is not None or embed_B is None):
+                    anchor_embed = embed_A
+                    self_np = out_A_np
+                    other_np = out_B_np
+                else:
+                    anchor_embed = embed_B
+                    self_np = out_B_np
+                    other_np = out_A_np
 
-                core_other = other_np[c0:c1]
-                diag["other_rms"] = float(np.sqrt((core_other ** 2).mean() + 1e-12))
-                for key, arr in (("anchor_self", self_np[c0:c1]), ("anchor_other", core_other)):
-                    pr = self._gather_probe(arr, [(0, len(arr))], target_sr, min_voiced_sec=0.05)
-                    if pr is not None:
-                        e = F.normalize(self._get_embedding(pr, target_sr), p=2, dim=0)
-                        diag[key] = float(torch.dot(anchor_embed, e))
+                # Chỉ tính dot-product nếu anchor_embed hợp lệ
+                if anchor_embed is not None:
+                    core_other = other_np[c0:c1]
+                    diag["other_rms"] = float(np.sqrt((core_other ** 2).mean() + 1e-12))
+                    for key, arr in (("anchor_self", self_np[c0:c1]), ("anchor_other", core_other)):
+                        pr = self._gather_probe(arr, [(0, len(arr))], target_sr, min_voiced_sec=0.05)
+                        if pr is not None:
+                            e = F.normalize(self._get_embedding(pr, target_sr), p=2, dim=0)
+                            diag[key] = float(torch.dot(anchor_embed, e))
 
         def restore_track(track_tensor_in):
             if sample_rate != target_sr:

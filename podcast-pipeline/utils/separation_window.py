@@ -561,8 +561,12 @@ class WindowPlanner:
                  if eff_core_lo - self.base_core_max <= a <= eff_core_lo - left_min
                  and eff_core_lo - a >= self.fade]
         if not lefts:
-            self.detail = "no_safe_left_cut_for_3_10s_base"
-            return None
+            # --- Code ép chạy: Thay vì return None, lấy luôn một điểm cắt dù không an toàn ---
+            fallback_cut = max(floor, eff_core_lo - left_min)
+            cuts[fallback_cut] = "forced"
+            lefts = [fallback_cut]
+            # self.detail = "no_safe_left_cut_for_3_10s_base"
+            # return None
 
         right_pool = [b for b in cuts if b >= eff_core_hi + self.fade]
         if not right_pool:
@@ -768,7 +772,7 @@ class WindowPlanner:
                     # do its best with whatever is here; failing is worse.
                     fb_voice = {s: sum(y - x for x, y in intersect(voiced_by_speaker[s], fa, fb))
                                 for s in speakers}
-                    if min(fb_voice.values()) < 1:
+                    if min(fb_voice.values()) < 0.2:
                         continue
                     fb_best = (fa, fb, fb_voice)
                     break

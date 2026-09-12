@@ -214,8 +214,8 @@ class DiarizationService:
         # that cares: it refuses an overlap whose window holds three speakers
         # and cannot enrol anyone with under 1.5s of clean audio, so a
         # three-second cluster costs far more than its length.
-        smoothed_list = merge_ghost_speakers(smoothed_list, logger=self.logger)
-        self._log_segment_stats("post-ghost-merge", smoothed_list)
+        # smoothed_list = merge_ghost_speakers(smoothed_list, logger=self.logger)
+        # self._log_segment_stats("post-ghost-merge", smoothed_list)
 
         # Split segments that are too long. Passing the waveform lets the cut
         # land on a pause instead of on the stopwatch, so a forced split stops

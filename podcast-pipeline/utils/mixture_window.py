@@ -32,7 +32,7 @@ import os
 #
 # Measured on one recording: 2s windows with empty probes gave ECAPA
 # similarity p50 0.15, which is what two unrelated speakers score.
-WINDOW_TARGET = float(os.environ.get("BSS_WINDOW_TARGET", "20.0"))
+WINDOW_TARGET = float(os.environ.get("BSS_WINDOW_TARGET", "15.0"))
 
 
 def bounds(lo, hi, seams, duration, minimum=None):

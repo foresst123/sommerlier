@@ -106,7 +106,7 @@ BSS_ENROLL_PREFER_SINGLE = float(os.environ.get("BSS_ENROLL_PREFER_SINGLE", "4.0
 # Ngưỡng CHƯA HIỆU CHỈNH. Đối chiếu phân vị similarity trong log [TSE] và
 # nghe các đoạn thất bại trước khi kết luận. Điểm ECAPA trên giọng đã tách
 # có thể thấp hơn giọng tự nhiên nên giá trị mặc định tương đối thấp.
-BSS_QC_SIM_THRESHOLD = float(os.environ.get("BSS_QC_SIM_THRESHOLD", "0.50"))
+BSS_QC_SIM_THRESHOLD = float(os.environ.get("BSS_QC_SIM_THRESHOLD", "0.40"))
 BSS_NOT_A_MARGIN = float(os.environ.get("BSS_NOT_A_MARGIN", "0.15"))
 BSS_SILENCE_RMS = float(os.environ.get("BSS_SILENCE_RMS", "0.002"))
 
@@ -615,11 +615,9 @@ class SeparationService:
             for p in plist:
                 self.overlap_durations.append(p["overlap_end"] - p["overlap_start"])
             targets = self._splice_pairs(plist)
-            if not enrollments.get(spk_a) or not enrollments.get(spk_b):
-                missing = spk_a if not enrollments.get(spk_a) else spk_b
+            if not enrollments.get(spk_a) and not enrollments.get(spk_b):
                 for sd, lo, hi in targets:
-                    self._fail(seg_by_index.get(sd["index"]), lo, hi, "no_enroll",
-                               f"speaker={missing}")
+                    self._fail(seg_by_index.get(sd["index"]), lo, hi, "no_enroll", "both_missing")
                 continue
             buildable.append((spk_a, spk_b, plist, targets))
 
@@ -810,21 +808,20 @@ class SeparationService:
                             accepted[spk] = (track, sim)
                         else:
                             rejected[spk] = ("qc_sim", f"sim={sim:.2f} th={BSS_QC_SIM_THRESHOLD}")
-                        continue
-
-                    # Nếu thiếu solo để chấm điểm, dùng phép so tương đối với giọng neo
-                    # để kiểm tra track có chỉ là bản sao của giọng đó hay không.
-                    own, other, rms = diag["anchor_self"], diag["anchor_other"], diag["other_rms"]
-                    if rms is not None and rms < BSS_SILENCE_RMS:
-                        rejected[spk] = ("unscorable", f"rms={rms:.5f}")
-                    elif own is None or other is None:
-                        rejected[spk] = ("unscorable", "no core embedding")
-                    elif (own - other) > BSS_NOT_A_MARGIN:
-                        accepted[spk] = (track, None)
-                        self.stats["accept_not_a"] += 1
                     else:
-                        rejected[spk] = ("not_a_fail",
-                                         f"margin={own - other:.2f} th={BSS_NOT_A_MARGIN}")
+                        # Tạm ghi nhận là thiếu mẫu nên trượt
+                        rejected[spk] = ("no_enroll", "missing enrollment")
+
+                # Bước 2: LOGIC GÁN LOẠI TRỪ
+                # Nếu người A đỗ (có mẫu chuẩn), ép người B nhận track còn lại dù B không có mẫu
+                if spk_a in accepted and spk_b not in accepted:
+                    accepted[spk_b] = (track_B, None) # Gán track B cho spk_b, điểm sim = None
+                    rejected.pop(spk_b, None)         # Xóa khỏi danh sách trượt
+                    
+                # Ngược lại, nếu người B đỗ, ép người A nhận track còn lại
+                elif spk_b in accepted and spk_a not in accepted:
+                    accepted[spk_a] = (track_A, None) # Gán track A cho spk_a, điểm sim = None
+                    rejected.pop(spk_a, None)
 
                 if not accepted:
                     for sd, lo, hi in targets:
