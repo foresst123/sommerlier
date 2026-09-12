@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Tuple
 from schemas.audio import AudioData
 from schemas.segment import Segment, SpeechSegment
 from algorithms.diarization.overlap import detect_overlapping_segments
-from utils.audio_normalize import match_splice_level, safe_limit
+from utils.audio_normalize import safe_limit
 from utils.separation_window import POLICY_VERSION, WindowPlanner, clean_segments, merge_ranges
 from utils.window_pool import WindowBuildPool
 from utils.cpu_plan import usable_cores
@@ -109,6 +109,15 @@ BSS_ENROLL_PREFER_SINGLE = float(os.environ.get("BSS_ENROLL_PREFER_SINGLE", "4.0
 BSS_QC_SIM_THRESHOLD = float(os.environ.get("BSS_QC_SIM_THRESHOLD", "0.40"))
 BSS_NOT_A_MARGIN = float(os.environ.get("BSS_NOT_A_MARGIN", "0.15"))
 BSS_SILENCE_RMS = float(os.environ.get("BSS_SILENCE_RMS", "0.002"))
+
+# --- Hiệu chỉnh mức âm lượng track trước khi splice -----------------------
+# Không lấy RMS của mixture overlap làm chuẩn: mixture chứa cả hai speaker nên
+# thường lớn hơn từng speaker riêng và có thể boost track tách lên quá mức.
+# Thay vào đó, so track Sidon với audio gốc ở CHÍNH các probe sạch của speaker
+# gần overlap nhất để đo gain bias do separator tạo ra, rồi áp gain đó cho patch.
+BSS_LEVEL_REF_SEC = float(os.environ.get("BSS_LEVEL_REF_SEC", "1.5"))
+BSS_LEVEL_MAX_ADJUST_DB = float(os.environ.get("BSS_LEVEL_MAX_ADJUST_DB", "6.0"))
+BSS_LEVEL_MIN_VALID_SEC = float(os.environ.get("BSS_LEVEL_MIN_VALID_SEC", "0.10"))
 
 BSS_DUMP_FAILED = os.environ.get("BSS_DUMP_FAILED", "1") not in ("0", "false", "False")
 
@@ -385,12 +394,166 @@ class SeparationService:
         alive = t >= max(t.max() * 0.15, BSS_SILENCE_RMS)
         return float(np.mean(alive[voiced])) >= 0.35
 
+    @staticmethod
+    def _probe_source_mid(probe, layout):
+        """Map tâm một probe trong window về sample trên source timeline thật.
+
+        WindowPlanner có thể ghép support ở xa overlap vào sát core trong window.
+        Vì vậy khoảng cách trong window không phản ánh khoảng cách thời gian thật.
+        Probe nằm ngoài vùng crossfade an toàn, nên một điểm giữa là đủ để xác định
+        piece chứa nó và ánh xạ tuyến tính về source_samples.
+        """
+        a, b = int(probe[0]), int(probe[1])
+        if b <= a:
+            return None
+        mid = 0.5 * (a + b)
+
+        for piece in layout.get("pieces", ()):
+            w0, w1 = piece.get("window_samples", (0, 0))
+            s0, s1 = piece.get("source_samples", (0, 0))
+            if w1 <= w0:
+                continue
+            if w0 <= mid < w1:
+                ratio = (mid - w0) / float(w1 - w0)
+                return float(s0 + ratio * (s1 - s0))
+        return None
+
+    @classmethod
+    def _speaker_level_gain(
+        cls,
+        original_window: np.ndarray,
+        separated_track: np.ndarray,
+        probes,
+        layout,
+        overlap_center_source: int,
+        sr: int,
+        max_ref_sec: float = BSS_LEVEL_REF_SEC,
+        max_adjust_db: float = BSS_LEVEL_MAX_ADJUST_DB,
+    ) -> Tuple[float, dict]:
+        """Ước lượng gain hiệu chỉnh separator từ clean probe của đúng speaker.
+
+        Ta KHÔNG ép RMS của overlap bằng RMS đoạn sạch. Thay vào đó, tại cùng
+        timestamp sạch ta so:
+
+            original clean speaker / separated clean speaker
+
+        để đo riêng gain bias do separator gây ra. Median của chênh lệch dB trên
+        frame 20 ms chống silence/peak bất thường tốt hơn RMS toàn đoạn.
+
+        Probe được ưu tiên theo source timestamp thật gần overlap nhất. Chỉ dùng
+        tối đa ``max_ref_sec`` audio và clamp gain để một probe lỗi không phá mức.
+        """
+        info = {
+            "gain": 1.0,
+            "gain_db": 0.0,
+            "used_seconds": 0.0,
+            "valid_seconds": 0.0,
+            "probe_count": 0,
+            "reason": "no_probe",
+        }
+        if not probes or sr <= 0:
+            return 1.0, info
+
+        # Xếp probe theo khoảng cách thật trên source timeline tới overlap.
+        ranked = []
+        for probe in probes:
+            source_mid = cls._probe_source_mid(probe, layout)
+            distance = (abs(source_mid - overlap_center_source)
+                        if source_mid is not None else float("inf"))
+            ranked.append((distance, probe))
+        ranked.sort(key=lambda item: item[0])
+
+        remaining = max(1, int(max_ref_sec * sr))
+        refs, seps = [], []
+        used_probes = 0
+
+        for _distance, probe in ranked:
+            if remaining <= 0:
+                break
+
+            a, b = int(probe[0]), int(probe[1])
+            a = max(0, a)
+            b = min(b, len(original_window), len(separated_track))
+            if b <= a:
+                continue
+
+            take = min(b - a, remaining)
+            if take <= 0:
+                continue
+
+            refs.append(
+                np.asarray(original_window[a:a + take], dtype=np.float64)
+            )
+            seps.append(
+                np.asarray(separated_track[a:a + take], dtype=np.float64)
+            )
+            remaining -= take
+            used_probes += 1
+
+        if not refs:
+            info["reason"] = "no_usable_probe"
+            return 1.0, info
+
+        ref = np.concatenate(refs)
+        sep = np.concatenate(seps)
+        info["used_seconds"] = float(min(len(ref), len(sep)) / sr)
+        info["probe_count"] = int(used_probes)
+
+        # So theo frame 20 ms để bỏ các frame im lặng và dùng median dB.
+        frame = max(1, int(0.020 * sr))
+        n_frames = min(len(ref), len(sep)) // frame
+        if n_frames <= 0:
+            info["reason"] = "probe_too_short"
+            return 1.0, info
+
+        ref_frames = ref[:n_frames * frame].reshape(n_frames, frame)
+        sep_frames = sep[:n_frames * frame].reshape(n_frames, frame)
+
+        ref_rms = np.sqrt(np.mean(ref_frames * ref_frames, axis=1) + 1e-12)
+        sep_rms = np.sqrt(np.mean(sep_frames * sep_frames, axis=1) + 1e-12)
+
+        # Cả original lẫn separated phải có mức đủ lớn. Điều này loại silence ở
+        # original và residual/noise-floor ở track tách khỏi phép hiệu chỉnh.
+        valid = (
+            (ref_rms >= BSS_SILENCE_RMS)
+            & (sep_rms >= BSS_SILENCE_RMS)
+        )
+        valid_samples = int(valid.sum()) * frame
+        info["valid_seconds"] = float(valid_samples / sr)
+
+        min_valid_samples = max(frame, int(BSS_LEVEL_MIN_VALID_SEC * sr))
+        if valid_samples < min_valid_samples:
+            info["reason"] = "not_enough_voiced_reference"
+            return 1.0, info
+
+        delta_db = (
+            20.0 * np.log10(ref_rms[valid] + 1e-12)
+            - 20.0 * np.log10(sep_rms[valid] + 1e-12)
+        )
+
+        gain_db = float(np.median(delta_db))
+        if not np.isfinite(gain_db):
+            info["reason"] = "non_finite_gain"
+            return 1.0, info
+
+        gain_db = float(np.clip(gain_db, -max_adjust_db, max_adjust_db))
+        gain = float(10.0 ** (gain_db / 20.0))
+
+        info.update({
+            "gain": gain,
+            "gain_db": gain_db,
+            "reason": "ok",
+        })
+        return gain, info
+
     def _cross_fade(self, orig_audio: np.ndarray, new_audio: np.ndarray, fade_samples: int) -> np.ndarray:
         """Thay vùng âm thanh gốc bằng track đã tách, làm mượt hai biên.
-        Dùng ramp sin/cos giữ công suất thay vì ramp tuyến tính làm hụt mức giữa
-        mối nối của hai tín hiệu ít tương quan. Giới hạn ramp theo độ dài vùng
-        thay thế để đoạn overlap ngắn vẫn giữ ít nhất 3/4 phần giữa ở mức đầy đủ.
-        Đây là phép ghép trả, khác crossfade chồng 20 ms khi dựng đầu vào."""
+
+        Dùng linear crossfade thay cho equal-power sin/cos. Original overlap và
+        separated track có thành phần tương quan mạnh; equal-power có tổng hệ số
+        ~1.414 ở giữa fade và có thể làm transition phồng gần +3 dB. Linear fade
+        luôn giữ tổng trọng số bằng 1, phù hợp hơn cho phép thay thế cùng nguồn.
+        """
         result = orig_audio.copy()
         limit = min(len(orig_audio), len(new_audio))
         if limit == 0:
@@ -403,8 +566,8 @@ class SeparationService:
             return result
 
         t = np.linspace(0.0, 1.0, fade_samples, endpoint=False, dtype=np.float32)
-        ramp_in = np.sin(t * (np.pi / 2.0))
-        ramp_out = np.cos(t * (np.pi / 2.0))
+        ramp_in = t
+        ramp_out = 1.0 - t
 
         # Chuyển dần từ âm thanh gốc sang track đã tách.
         result[:fade_samples] = (orig_audio[:fade_samples] * ramp_out
@@ -418,6 +581,7 @@ class SeparationService:
         result[mid_limit:limit] = (orig_audio[mid_limit:limit] * ramp_in
                                    + new_audio[mid_limit:limit] * ramp_out)
         return result
+
             # --- Công cụ khoảng thời gian và nhóm overlap ----------------------------
     @staticmethod
     def _intervals_by_speaker(segments) -> Dict[str, List[Tuple[float, float]]]:
@@ -781,6 +945,42 @@ class SeparationService:
                     self.logger.debug(
                         f"[TIMING] {job_lo:.2f}s: ← Sidon {_t_sidon_done - _t_sidon:.2f}s")
 
+                # Hiệu chỉnh level bằng clean probe của CHÍNH speaker, ưu tiên probe
+                # có source timestamp thật gần overlap. Chỉ tính gain ở đây; KHÔNG
+                # sửa track_A/B vì chúng còn được dùng cho QC và enrollment memory.
+                overlap_center_source = int(0.5 * (job_lo + job_hi) * sr)
+                gain_A, level_A = self._speaker_level_gain(
+                    window_audio, track_A, probe_a_s, layout,
+                    overlap_center_source, sr,
+                )
+                gain_B, level_B = self._speaker_level_gain(
+                    window_audio, track_B, probe_b_s, layout,
+                    overlap_center_source, sr,
+                )
+                level_gains = {spk_a: gain_A, spk_b: gain_B}
+                level_info = {spk_a: level_A, spk_b: level_B}
+
+                # layout đã được append vào self.window_layouts ở trên; mutate dict
+                # này để report lưu luôn gain đã dùng cho chính window đó.
+                layout["level_calibration"] = {
+                    str(spk): {
+                        "gain": float(info["gain"]),
+                        "gain_db": float(info["gain_db"]),
+                        "used_seconds": float(info["used_seconds"]),
+                        "valid_seconds": float(info["valid_seconds"]),
+                        "probe_count": int(info["probe_count"]),
+                        "reason": info["reason"],
+                    }
+                    for spk, info in level_info.items()
+                }
+
+                if self.logger:
+                    self.logger.info(
+                        f"[TSE:level] {job_lo:.2f}-{job_hi:.2f}s "
+                        f"{spk_a}={level_A['gain_db']:+.2f}dB({level_A['reason']}) "
+                        f"{spk_b}={level_B['gain_db']:+.2f}dB({level_B['reason']})"
+                    )
+
                 _t_qc = _time.perf_counter()
                 if _BSS_TIMING and self.logger:
                     self.logger.debug(
@@ -898,14 +1098,30 @@ class SeparationService:
                                    "silent where mixture has speech")
                         continue
 
-                    # Track đã bỏ giọng nhiễu thường nhỏ hơn mixture. Khớp mức RMS trước
-                    # khi ghép trả để tránh bước nhảy âm lượng; crossfade tiếp tục làm mượt biên.
+                    # Không match level với mixture overlap: mixture chứa cả hai
+                    # speaker nên thường lớn hơn từng track riêng và dễ làm patch bị
+                    # boost. Dùng gain bias đã đo từ clean probe cùng speaker.
+                    level_gain = float(level_gains.get(spk, 1.0))
                     if _BSS_TIMING and self.logger:
                         self.logger.debug(
-                            f"[TIMING] {job_lo:.2f}s: → match_splice_level + crossfade "
-                            f"seg={sd['index']} spk={spk}")
-                    patch = match_splice_level(
-                        enh.audio[dst:dst + limit], track[src:src + limit])
+                            f"[TIMING] {job_lo:.2f}s: → calibrated splice + crossfade "
+                            f"seg={sd['index']} spk={spk} "
+                            f"gain={20.0*np.log10(level_gain + 1e-12):+.2f}dB")
+
+                    patch = (
+                        np.asarray(track[src:src + limit], dtype=np.float32).copy()
+                        * level_gain
+                    )
+
+                    # Limiter chỉ là hàng rào chống clipping sau khi áp gain; nó
+                    # không dùng mixture làm reference và không normalize patch.
+                    patch, patch_limit_gain = safe_limit(patch)
+                    if self.logger and patch_limit_gain < 0.999:
+                        self.logger.debug(
+                            f"[TSE:level] limiter seg={sd['index']} spk={spk} "
+                            f"x{patch_limit_gain:.3f}"
+                        )
+
                     enh.audio[dst:dst + limit] = self._cross_fade(
                         enh.audio[dst:dst + limit], patch, fade_samples)
                     enh.bss = True
