@@ -337,7 +337,16 @@ class BssSeparator:
         # --- energy gate (fallback) ---
         frame = max(1, int(0.02 * sr))
         if seg.size < frame * 2:
-            return seg if seg.size else None
+            min_samples = int(min_voiced_sec * sr)
+
+            if seg.size < min_samples:
+                return None
+
+            rms = float(np.sqrt(np.mean(seg.astype(np.float64) ** 2) + 1e-12))
+            if rms < abs_floor_rms:
+                return None
+
+            return seg
         n = seg.size // frame
         frames = seg[: n * frame].reshape(n, frame)
         rms = np.sqrt((frames ** 2).mean(axis=1) + 1e-12)
