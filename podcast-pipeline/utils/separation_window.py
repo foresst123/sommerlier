@@ -566,37 +566,45 @@ class WindowPlanner:
 
         right_pool = [b for b in cuts if b >= eff_core_hi + self.fade]
         if not right_pool:
-            # Không tìm được cut phải trong base_core_max (10s). Thử thu hẹp
-            # base_core_max xuống dần (6s, 4s, 2s) để tránh blocker gần hơn.
-            for reduced_max in (
-                round(6.0 * self.sr),
-                round(4.0 * self.sr),
-                round(2.0 * self.sr),
-            ):
-                lo_r = max(floor, eff_core_lo - reduced_max)
-                hi_r = min(ceiling, eff_core_hi + reduced_max)
+            # Không tìm được cut phải. Nguyên nhân thường gặp: base bên trái
+            # quá dài (ví dụ 10s trái + 6s phải = 16s vượt cap) khiến không
+            # còn chỗ cho pad phải. Thử thu hẹp bên TRÁI trước (giữ phải
+            # rộng), rồi thu hẹp đối xứng, rồi thu hẹp cả hai.
+            #
+            # Các mức thử: (left_max, right_max)
+            # 1. Cắt trái mạnh, giữ phải đủ 2s  -> base có thể lệch phải
+            # 2. Cắt trái vừa, giữ phải đủ 2s
+            # 3. Thu hẹp đối xứng 6s/6s
+            # 4. Thu hẹp đối xứng 4s/4s
+            # 5. Thu hẹp tối thiểu 2s/2s
+            retry_ranges = [
+                (round(1.5 * self.sr), self.base_core_max),   # trái tối thiểu, phải rộng
+                (round(3.0 * self.sr), self.base_core_max),   # trái vừa, phải rộng
+                (round(6.0 * self.sr), round(6.0 * self.sr)), # đối xứng 6s
+                (round(4.0 * self.sr), round(4.0 * self.sr)), # đối xứng 4s
+                (round(2.0 * self.sr), round(2.0 * self.sr)), # đối xứng 2s tối thiểu
+            ]
+            found = False
+            for left_max, right_max in retry_ranges:
+                lo_r = max(floor, eff_core_lo - left_max)
+                hi_r = min(ceiling, eff_core_hi + right_max)
                 cuts_r, _, _ = self.cuts.analyse(lo_r, hi_r)
                 cuts_r = dict(cuts_r)
-                right_pool = [b for b in cuts_r if b >= eff_core_hi + self.fade]
-                if right_pool:
-                    # Cập nhật lại cuts và lefts với range thu hẹp
+                for edge in (host_lo, host_hi):
+                    if lo_r <= edge <= hi_r:
+                        cuts_r[edge] = "segment"
+                rp = [b for b in cuts_r if b >= eff_core_hi + self.fade]
+                lp = [a for a in cuts_r
+                      if eff_core_lo - left_max <= a <= eff_core_lo - left_min
+                      and eff_core_lo - a >= self.fade]
+                if rp and lp:
                     cuts = cuts_r
                     lo, hi = lo_r, hi_r
-                    for edge in (lo, hi):
-                        if edge not in (host_lo, host_hi, 0, len(self.waveform)):
-                            if self.cuts.quiet_edge(edge):
-                                cuts[edge] = "energy"
-                            else:
-                                cuts.pop(edge, None)
-                    for edge in (host_lo, host_hi):
-                        if lo <= edge <= hi:
-                            cuts[edge] = "segment"
-                    lefts = [a for a in cuts
-                             if eff_core_lo - reduced_max <= a <= eff_core_lo - left_min
-                             and eff_core_lo - a >= self.fade]
-                    if lefts:
-                        break
-            else:
+                    right_pool = rp
+                    lefts = lp
+                    found = True
+                    break
+            if not found:
                 self.detail = "no_safe_right_cut"
                 return None
 
