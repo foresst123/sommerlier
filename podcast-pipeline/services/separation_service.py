@@ -623,44 +623,34 @@ class SeparationService:
                 continue
             buildable.append((spk_a, spk_b, plist, targets))
 
-        # same_speaker: hai segment cùng nhãn chồng nhau. Không fail mà mở
-        # rộng vùng overlap thành job riêng nếu tìm được speaker thứ hai gần đó,
-        # nếu không thì giữ nguyên mixture (passthrough) — không ghi vào failed
-        # để bước xuất dual-channel không đọc mixture như giọng sạch.
+        # same_speaker: hai segment cùng nhãn chồng nhau — không có gì để tách.
+        # Mở rộng vùng base ra hai bên (±2s) rồi giữ nguyên mixture.
+        # Không gọi model, không cần speaker thứ hai, không thay đổi audio.
+        # Chỉ ghi vào bss_spans với sim=-2 (passthrough marker) để downstream
+        # biết vùng này đã được xem xét, không phải bỏ sót.
         by_index = {e.index: e for e in speech}
         for p in self._same_speaker_pairs:
             lo, hi = p["overlap_start"], p["overlap_end"]
-            spk = p["seg1"]["speaker"]
-            # Tìm speaker khác gần nhất trong ±5s quanh overlap
-            other_spk = None
-            for s in segments:
-                if s.speaker != spk and abs(s.start - lo) < 5.0:
-                    other_spk = s.speaker
-                    break
-            if other_spk and enrollments.get(spk) and enrollments.get(other_spk):
-                # Thêm vào queue như job bình thường với speaker kia
-                synthetic_p = dict(p)
-                synthetic_p["seg2"] = dict(p["seg2"])
-                synthetic_p["seg2"]["speaker"] = other_spk
-                buildable.append((spk, other_spk, [synthetic_p],
-                                  self._splice_pairs([synthetic_p])))
-                if self.logger:
-                    self.logger.info(
-                        f"[TSE] same_speaker {lo:.2f}-{hi:.2f}s: "
-                        f"treating as ({spk},{other_spk}) overlap")
-            else:
-                # Không có speaker khác để tách, giữ nguyên mixture
-                for side in ("seg1", "seg2"):
-                    enh = by_index.get(p[side].get("index"))
-                    if enh is not None:
-                        dst = int(lo * sr) - int(enh.start * sr)
-                        limit = int((hi - lo) * sr)
-                        if 0 <= dst and dst + limit <= len(enh.audio):
-                            enh.bss_spans.append((lo, hi, -2.0))  # -2 = passthrough
-                if self.logger:
-                    self.logger.info(
-                        f"[TSE] same_speaker {lo:.2f}-{hi:.2f}s: "
-                        f"no other speaker found, keeping mixture")
+            # Mở rộng ±2s (giống short_core_expansion) để base có ngữ cảnh
+            pad = 2.0
+            lo_ext = max(0.0, lo - pad)
+            hi_ext = min(total_dur, hi + pad)
+            for side in ("seg1", "seg2"):
+                enh = by_index.get(p[side].get("index"))
+                if enh is None:
+                    continue
+                # Kiểm tra vùng chưa bị ghi bởi job khác
+                if any(not (hi_ext <= a or lo_ext >= b) for a, b, _ in enh.bss_spans):
+                    continue
+                dst = int(lo_ext * sr) - int(enh.start * sr)
+                limit = int((hi_ext - lo_ext) * sr)
+                if dst < 0 or dst + limit > len(enh.audio):
+                    continue
+                enh.bss_spans.append((lo_ext, lo_ext + limit / sr, -2.0))
+            if self.logger:
+                self.logger.info(
+                    f"[TSE] same_speaker {lo:.2f}-{hi:.2f}s: "
+                    f"base extended ±{pad}s, mixture kept")
         if self.logger:
             self.logger.info(f"[TSE] {len(pairs)} overlap pairs -> {len(queue)} separation jobs "
                               f"({len(buildable)} with enrollment)")

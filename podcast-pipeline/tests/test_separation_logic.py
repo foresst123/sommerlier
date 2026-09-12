@@ -191,7 +191,6 @@ def test_an_overlap_too_short_to_separate_is_still_recorded():
     svc = SeparationService(fake, logger=None)
     out = svc.process_overlaps(segs, _audio(), overlap_threshold=0.1)
 
-    assert fake.calls == [], "overlap dưới ngưỡng không được chạy model"
     # below_threshold filter đã bị bỏ -- overlap ngắn giờ được đưa vào queue.
     # short_core_expansion mở rộng ±2s quanh core nhỏ để Sidon có ngữ cảnh.
     # Model được gọi -- kiểm tra pipeline không crash và trả đúng số segment.
