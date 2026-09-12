@@ -303,6 +303,10 @@ def _discard_partial(ledger, args, audio_path, logger, pipeline=None):
     stages that did finish and jumps straight to the one that broke, with the
     same state that broke it. The output directory goes too, so a half-written
     transcript is not mistaken for a finished one.
+
+    Worker subprocesses are stopped here too. A worker that crashed (OOM, bad
+    input) may be in an undefined state and still holding VRAM. The next pass
+    will restart it cleanly via _rebind_worker.
     """
     base_job = getattr(args, "job_id", "default_job")
     stem = os.path.splitext(os.path.basename(audio_path))[0]
@@ -314,6 +318,16 @@ def _discard_partial(ledger, args, audio_path, logger, pipeline=None):
         except Exception:
             pass
     ledger.discard_partial_output(*targets, logger=logger)
+
+    # Release any worker subprocess that may be holding GPU memory after the
+    # failure. _release_worker is a no-op when the worker is already gone.
+    if pipeline is not None:
+        for worker_name in ("diarizen", "sidon", "qwen3"):
+            try:
+                pipeline._release_worker(args, worker_name)
+            except Exception as exc:
+                if logger:
+                    logger.warning(f"Could not release {worker_name} worker after failure: {exc}")
 
 
 def main():
