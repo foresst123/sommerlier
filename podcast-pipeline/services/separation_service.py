@@ -48,8 +48,12 @@ _BSS_WINDOW_WORKERS_ENV = os.environ.get("BSS_WINDOW_WORKERS")
 BSS_WINDOW_POOL_MIN_JOBS = int(os.environ.get("BSS_WINDOW_POOL_MIN_JOBS", "3"))
 
 
-def _resolve_window_workers(n_jobs: int) -> int:
-    """Bao nhiêu process cho việc dựng cửa sổ song song; 0 nghĩa là tắt.
+def _resolve_pool_size() -> int:
+    """Bao nhiêu process cho pool build cửa sổ; 0 nghĩa là tắt hẳn cho cả batch.
+
+    Quyết định MỘT LẦN khi pool được tạo (lười, ở lần process_overlaps() đầu
+    tiên cần đến nó) -- không phụ thuộc số job của riêng một file, vì pool
+    (utils/window_pool.py) giờ sống suốt cả batch chứ không tạo/đóng mỗi file.
 
     Tôn trọng usable_cores() (utils/cpu_plan.py) thay vì hard-code: module đó
     đo được rằng trên máy ít core, mở thêm process làm CHẬM đi vì tranh CPU
@@ -62,11 +66,24 @@ def _resolve_window_workers(n_jobs: int) -> int:
             return max(0, int(_BSS_WINDOW_WORKERS_ENV))
         except ValueError:
             pass
-    if n_jobs < BSS_WINDOW_POOL_MIN_JOBS:
-        return 0
     # Main process + Sidon worker subprocess đã chiếm ít nhất 2 "chỗ"; phần
     # còn lại mới dành cho pool build cửa sổ.
     return max(0, min(5, usable_cores() - 2))
+
+
+def _worth_pooling(n_jobs: int) -> bool:
+    """File này có đủ job để đáng nộp vào pool không.
+
+    Tách khỏi việc quyết định KÍCH THƯỚC pool (giờ cố định cho cả batch, xem
+    _resolve_pool_size): pool tồn tại không có nghĩa MỌI file đều nên dùng
+    nó -- dựng shared_memory + pickle segments cho 1-2 job vẫn tốn hơn chạy
+    tuần tự ngay trong main process. Luôn áp dụng kể cả khi kích thước pool bị
+    ép tay qua config/env: đo trên Kaggle thật, window_workers=8 ép tay từng
+    khiến một file chỉ 2 job vẫn đi qua pool và mất 22.87s cho window đầu
+    tiên -- việc ép số worker và việc "file này có đáng dùng pool" là hai
+    quyết định độc lập, không nên để cái này ăn theo cái kia.
+    """
+    return n_jobs >= BSS_WINDOW_POOL_MIN_JOBS
 
 # --- Mẫu giọng đối chiếu --------------------------------------------------
 BSS_ENROLL_BUDGET = float(os.environ.get("BSS_ENROLL_BUDGET", "8.0"))
@@ -136,6 +153,14 @@ class SeparationService:
         # Nhãn speaker chỉ có ý nghĩa trong từng file; reset_stats() xóa bộ nhớ
         # để không gán giọng của file trước cho người cùng nhãn ở file sau.
         self.memory = EnrollmentMemory(logger=logger)
+        # Pool build cửa sổ song song (utils/window_pool.py) -- tạo lười ở lần
+        # process_overlaps() đầu tiên cần đến nó, sống suốt các lần gọi tiếp
+        # theo (nhiều file trong một batch dùng chung một SeparationService).
+        # close_window_pool() phải được PipelineService gọi ở cuối stage
+        # 'separation' của cả batch, không phải sau mỗi file -- xem
+        # utils/window_pool.py để biết lý do (chi phí spawn không chia sẻ
+        # được giữa các file nếu tạo/đóng theo từng file).
+        self._window_pool = None
 
     # Lấy model từ loader khi dùng vì model được tải theo từng giai đoạn.
     # Giữ tham chiếu lúc khởi tạo có thể giữ mãi giá trị None của model chưa tải.
@@ -167,6 +192,20 @@ class SeparationService:
         reset = getattr(self.bss_model, "reset_speakers", None)
         if reset:
             reset()
+
+    def close_window_pool(self):
+        """Đóng pool build cửa sổ song song (utils/window_pool.py), nếu có.
+
+        Phải gọi ĐÚNG MỘT LẦN ở cuối stage 'separation' của CẢ BATCH -- không
+        phải sau mỗi file. PipelineService gọi qua begin_stage_scope()/
+        end_stage_scope(), cùng cơ chế và cùng thời điểm Sidon worker được
+        giữ sống qua nhiều file rồi mới dừng. reset_stats() KHÔNG gọi hàm
+        này: reset_stats() chạy giữa các file trong cùng một stage, lúc đó
+        pool vẫn còn cần dùng tiếp cho file kế."""
+        pool = self._window_pool
+        self._window_pool = None
+        if pool is not None:
+            pool.close()
 
     # ------------------------------------------------------------------
     def _fail(self, enh_seg, start, end, reason, detail=""):
@@ -586,11 +625,19 @@ class SeparationService:
             self.logger.info(f"[TSE] {len(pairs)} overlap pairs -> {len(queue)} separation jobs "
                               f"({len(buildable)} with enrollment)")
 
-        # Dựng cửa sổ song song khi đủ job bù chi phí spawn pool; job build
-        # (CPU) không phụ thuộc lượt tách (GPU) trước nó nên chồng lấp được --
-        # xem utils/window_pool.py. Pool lỗi lúc khởi tạo (môi trường không
-        # cho fork/spawn, hết RAM cho shared_memory, ...) thì rơi về tuần tự
-        # thay vì làm hỏng cả lượt chạy.
+        # Dựng cửa sổ song song khi file này đủ job bù chi phí dùng pool; job
+        # build (CPU) không phụ thuộc lượt tách (GPU) trước nó nên chồng lấp
+        # được -- xem utils/window_pool.py. Pool bản thân SỐNG SUỐT CẢ BATCH
+        # (self._window_pool, tạo lười ở đây lần đầu, đóng bởi
+        # close_window_pool() ở cuối stage 'separation' của cả batch) -- chỉ
+        # phần shared memory của RIÊNG FILE NÀY (FileWindows) mở/đóng ở đây.
+        # Lý do tách hai tầng: pool tạo lại mỗi file từng trả chi phí spawn
+        # (~22.87s đo được trên Kaggle thật, 8 worker/4 core) N lần cho N file
+        # trong một batch, thay vì trả một lần.
+        #
+        # Lỗi lúc mở file trên pool (môi trường không cho fork/spawn, hết RAM
+        # cho shared_memory, ...) thì rơi về tuần tự cho file này thay vì làm
+        # hỏng cả lượt chạy.
         #
         # use_vad=False: nhiều worker mới spawn cùng lúc tự tải Silero VAD gây
         # crash tầng native thật (libc++abi recursive_mutex, không phải
@@ -598,25 +645,32 @@ class SeparationService:
         # window_pool.py. Cửa sổ dựng song song dùng energy-based cut thay vì
         # Silero, kém chính xác hơn một chút so với nhánh tuần tự (vốn dùng
         # Silero GPU của chính bss_model); đổi lấy không crash cả lượt chạy.
-        pool = None
-        n_workers = _resolve_window_workers(len(buildable))
-        if n_workers > 1 and buildable:
-            try:
-                pool = WindowBuildPool(
-                    segments, pairs, waveform, sr, music_map=self.music_map,
-                    seams=self.seams(), context_seconds=BSS_STITCH_EDGE_PAD,
-                    search_seconds=BSS_STITCH_SEARCH, n_workers=n_workers, use_vad=False)
-                if self.logger:
-                    self.logger.info(f"[TSE] building windows with {n_workers} worker process(es)")
-            except Exception as e:
-                if self.logger:
-                    self.logger.warning(
-                        f"[TSE] window pool failed to start ({type(e).__name__}: {e}); "
-                        "falling back to sequential build")
-                pool = None
+        file_windows = None
+        if buildable and _worth_pooling(len(buildable)):
+            pool_size = _resolve_pool_size()
+            if pool_size > 0:
+                try:
+                    if self._window_pool is None:
+                        self._window_pool = WindowBuildPool(n_workers=pool_size)
+                        if self.logger:
+                            self.logger.info(
+                                f"[TSE] window pool started with {pool_size} worker "
+                                "process(es) (persists for the rest of this batch)")
+                    file_windows = self._window_pool.open_file(
+                        segments, pairs, waveform, sr, music_map=self.music_map,
+                        seams=self.seams(), context_seconds=BSS_STITCH_EDGE_PAD,
+                        search_seconds=BSS_STITCH_SEARCH, use_vad=False)
+                    if self.logger:
+                        self.logger.info("[TSE] building windows for this file in parallel")
+                except Exception as e:
+                    if self.logger:
+                        self.logger.warning(
+                            f"[TSE] window pool failed for this file ({type(e).__name__}: {e}); "
+                            "falling back to sequential build")
+                    file_windows = None
 
-        if pool is not None:
-            window_iter = pool.build_all([plist for _a, _b, plist, _t in buildable])
+        if file_windows is not None:
+            window_iter = file_windows.build_all([plist for _a, _b, plist, _t in buildable])
         else:
             planner = WindowPlanner(
                 segments, pairs, waveform, sr, music_map=self.music_map,
@@ -793,8 +847,10 @@ class SeparationService:
 
             pbar.close()
         finally:
-            if pool is not None:
-                pool.close()
+            # Chỉ đóng shared memory của FILE NÀY -- pool process (nếu có)
+            # sống tiếp cho file kế trong batch, đóng ở close_window_pool().
+            if file_windows is not None:
+                file_windows.close()
         self._report_stats()
         return speech
 

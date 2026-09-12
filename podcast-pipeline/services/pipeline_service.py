@@ -48,6 +48,10 @@ class PipelineService:
         # Khi chạy theo giai đoạn cho cả batch, gom các yêu cầu giải phóng tại đây.
         self.defer_free = None
         self.defer_workers = None
+        # Dọn dẹp không nằm trong model_loader/worker_services (ví dụ pool
+        # build cửa sổ song song của SeparationService) đăng ký callback vào
+        # đây, chạy ở end_stage_scope() cùng lúc với defer_free/defer_workers.
+        self.defer_callbacks = None
 
     def _load(self, group: str):
         """Chỉ tải model khi bắt đầu bước cần dùng.
@@ -110,12 +114,14 @@ class PipelineService:
         """Hoãn giải phóng model đến end_stage_scope() khi chạy theo giai đoạn."""
         self.defer_free = set()
         self.defer_workers = set()
+        self.defer_callbacks = []
 
     def end_stage_scope(self):
         """Giải phóng các model/worker đã hoãn; an toàn khi không có phạm vi mở."""
-        names, workers = self.defer_free, self.defer_workers
+        names, workers, callbacks = self.defer_free, self.defer_workers, self.defer_callbacks
         self.defer_free = None
         self.defer_workers = None
+        self.defer_callbacks = None
         if names and self.model_loader:
             for name in sorted(names):
                 self.model_loader.unload(name)
@@ -130,6 +136,24 @@ class PipelineService:
             except Exception as e:
                 if self.logger:
                     self.logger.warning(f"Failed to stop {worker} worker: {e}")
+        for callback in (callbacks or ()):
+            try:
+                callback()
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f"Deferred cleanup callback failed: {e}")
+
+    def _defer_or_run(self, callback):
+        """Chạy callback ngay, hoặc hoãn tới end_stage_scope() nếu đang mở
+        phạm vi giai đoạn (chạy theo batch).
+
+        Dùng cho dọn dẹp không nằm trong model_loader/worker_services -- ví dụ
+        pool build cửa sổ song song của SeparationService, vốn phải sống suốt
+        cả batch giống Sidon worker chứ không đóng lại sau mỗi file."""
+        if self.defer_callbacks is not None:
+            self.defer_callbacks.append(callback)
+        else:
+            callback()
 
     def _release_worker(self, args, name: str):
         """Dừng worker khi xong bước, tuân theo --keep_models.
@@ -484,6 +508,14 @@ class PipelineService:
         # Worker giữ trọng số separator trên GPU mà ASR sắp cần; dừng sau bước
         # này. Backend trong cùng tiến trình không có worker nên không cần làm gì.
         self._release_worker(args, "sidon")
+        # Pool build cửa sổ song song của SeparationService (nếu có) phải sống
+        # suốt cả batch giống Sidon worker ở trên -- tạo/đóng lại mỗi file
+        # từng trả chi phí spawn process nhiều lần thay vì một lần cho cả
+        # batch. _defer_or_run hoãn việc này tới end_stage_scope() khi đang
+        # chạy theo giai đoạn (nhiều file), hoặc đóng ngay nếu chạy đơn file.
+        self._defer_or_run(
+            lambda: self.separation_svc.close_window_pool()
+            if self.separation_svc else None)
 
         if getattr(args, "stop_after", None) == "separation":
             if self.logger: self.logger.info("Stopping pipeline after separation as requested by --stop_after.")
