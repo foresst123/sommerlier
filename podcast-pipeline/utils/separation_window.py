@@ -566,8 +566,39 @@ class WindowPlanner:
 
         right_pool = [b for b in cuts if b >= eff_core_hi + self.fade]
         if not right_pool:
-            self.detail = "no_safe_right_cut"
-            return None
+            # Không tìm được cut phải trong base_core_max (10s). Thử thu hẹp
+            # base_core_max xuống dần (6s, 4s, 2s) để tránh blocker gần hơn.
+            for reduced_max in (
+                round(6.0 * self.sr),
+                round(4.0 * self.sr),
+                round(2.0 * self.sr),
+            ):
+                lo_r = max(floor, eff_core_lo - reduced_max)
+                hi_r = min(ceiling, eff_core_hi + reduced_max)
+                cuts_r, _, _ = self.cuts.analyse(lo_r, hi_r)
+                cuts_r = dict(cuts_r)
+                right_pool = [b for b in cuts_r if b >= eff_core_hi + self.fade]
+                if right_pool:
+                    # Cập nhật lại cuts và lefts với range thu hẹp
+                    cuts = cuts_r
+                    lo, hi = lo_r, hi_r
+                    for edge in (lo, hi):
+                        if edge not in (host_lo, host_hi, 0, len(self.waveform)):
+                            if self.cuts.quiet_edge(edge):
+                                cuts[edge] = "energy"
+                            else:
+                                cuts.pop(edge, None)
+                    for edge in (host_lo, host_hi):
+                        if lo <= edge <= hi:
+                            cuts[edge] = "segment"
+                    lefts = [a for a in cuts
+                             if eff_core_lo - reduced_max <= a <= eff_core_lo - left_min
+                             and eff_core_lo - a >= self.fade]
+                    if lefts:
+                        break
+            else:
+                self.detail = "no_safe_right_cut"
+                return None
 
         voice_by_speaker = {s: intersect(self.by_speaker[s], lo, hi) for s in speakers}
         voiced_by_speaker = {s: [r for a, b in voice_by_speaker[s] for r in intersect(voiced, a, b)] for s in speakers}

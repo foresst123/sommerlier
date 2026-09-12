@@ -601,18 +601,11 @@ class SeparationService:
         seg_by_index = {s.index: s for s in speech}
 
         self._same_speaker_pairs = []
-        queue, below = [], []
-        for job in self._group_jobs(pairs):
-            span = (max(p["overlap_end"] for p in job[2])
-                    - min(p["overlap_start"] for p in job[2]))
-            (queue if span >= overlap_threshold else below).append(job)
-        # Quá ngắn để chạy model vẫn là overlap. Bỏ qua mà không ghi lý do thì
-        # vùng đó vắng mặt trong cả bss_spans lẫn bss_failed_spans, và bước xuất
-        # dual-channel đọc mixture ở đó như thể là giọng sạch của một người.
-        for _a, _b, plist in below:
-            for sd, lo, hi in self._splice_pairs(plist):
-                self._fail(seg_by_index.get(sd["index"]), lo, hi, "below_threshold",
-                           f"span={hi - lo:.3f}s th={overlap_threshold}")
+        # Tách hết, không lọc theo overlap_threshold. Các overlap ngắn (jitter
+        # 0.02-0.08s) vẫn được đưa vào queue; short_core_expansion trong
+        # WindowPlanner sẽ mở rộng eff_core ±2s để Sidon có đủ ngữ cảnh.
+        queue = list(self._group_jobs(pairs))
+        below = []  # giữ để không vỡ bss_spans tracking
         # Bỏ trước những job thiếu enrollment: build cửa sổ cho chúng chỉ để
         # vứt đi ngay sau đó là lãng phí CPU (và với pool, cả RAM/IPC).
         buildable = []
@@ -630,13 +623,44 @@ class SeparationService:
                 continue
             buildable.append((spk_a, spk_b, plist, targets))
 
-        # Ghi nhận overlap cùng speaker trên cả hai segment để không mất dấu.
+        # same_speaker: hai segment cùng nhãn chồng nhau. Không fail mà mở
+        # rộng vùng overlap thành job riêng nếu tìm được speaker thứ hai gần đó,
+        # nếu không thì giữ nguyên mixture (passthrough) — không ghi vào failed
+        # để bước xuất dual-channel không đọc mixture như giọng sạch.
         by_index = {e.index: e for e in speech}
         for p in self._same_speaker_pairs:
-            for side in ("seg1", "seg2"):
-                self._fail(by_index.get(p[side].get("index")),
-                           p["overlap_start"], p["overlap_end"],
-                           "same_speaker", f"speaker={p[side].get('speaker')}")
+            lo, hi = p["overlap_start"], p["overlap_end"]
+            spk = p["seg1"]["speaker"]
+            # Tìm speaker khác gần nhất trong ±5s quanh overlap
+            other_spk = None
+            for s in segments:
+                if s.speaker != spk and abs(s.start - lo) < 5.0:
+                    other_spk = s.speaker
+                    break
+            if other_spk and enrollments.get(spk) and enrollments.get(other_spk):
+                # Thêm vào queue như job bình thường với speaker kia
+                synthetic_p = dict(p)
+                synthetic_p["seg2"] = dict(p["seg2"])
+                synthetic_p["seg2"]["speaker"] = other_spk
+                buildable.append((spk, other_spk, [synthetic_p],
+                                  self._splice_pairs([synthetic_p])))
+                if self.logger:
+                    self.logger.info(
+                        f"[TSE] same_speaker {lo:.2f}-{hi:.2f}s: "
+                        f"treating as ({spk},{other_spk}) overlap")
+            else:
+                # Không có speaker khác để tách, giữ nguyên mixture
+                for side in ("seg1", "seg2"):
+                    enh = by_index.get(p[side].get("index"))
+                    if enh is not None:
+                        dst = int(lo * sr) - int(enh.start * sr)
+                        limit = int((hi - lo) * sr)
+                        if 0 <= dst and dst + limit <= len(enh.audio):
+                            enh.bss_spans.append((lo, hi, -2.0))  # -2 = passthrough
+                if self.logger:
+                    self.logger.info(
+                        f"[TSE] same_speaker {lo:.2f}-{hi:.2f}s: "
+                        f"no other speaker found, keeping mixture")
         if self.logger:
             self.logger.info(f"[TSE] {len(pairs)} overlap pairs -> {len(queue)} separation jobs "
                               f"({len(buildable)} with enrollment)")
@@ -873,7 +897,11 @@ class SeparationService:
                     # Kiểm tra ngay vùng sắp ghép trả có lời. Điểm tốt trên solo ở xa không
                     # bảo đảm overlap có lời: từng có trường hợp sim=0.67 trên mẫu trước đó
                     # 19 giây nhưng track im lặng ở chính overlap.
-                    host = enh.audio[dst:dst + limit]
+                    # So track với mixture GỐC (waveform), không phải enh.audio
+                    # vì enh.audio có thể đã bị splice bởi job trước -> RMS bị lệch
+                    # -> _track_has_speech trả False dù track có âm thanh thật.
+                    mix_dst = int(ov_lo * sr)
+                    host = waveform[mix_dst:mix_dst + limit]
                     if _BSS_TIMING and self.logger:
                         self.logger.debug(
                             f"[TIMING] {job_lo:.2f}s: → _track_has_speech "
