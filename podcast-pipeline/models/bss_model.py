@@ -193,9 +193,9 @@ class BssSeparator:
                 # length-dependent norms, so the longest clip would otherwise
                 # dominate the centroid.
                 try:
-                    enroll_embeddings.append(
-                        F.normalize(self._get_embedding(e, sample_rate), p=2, dim=0)
-                    )
+                    embedding = F.normalize(self._get_embedding(e, sample_rate), p=2, dim=0)
+                    if torch.isfinite(embedding).all() and torch.linalg.vector_norm(embedding) > 0:
+                        enroll_embeddings.append(embedding)
                 except Exception as exc:
                     print(
                         f"[TSE] Warning: enrollment for {target_id} is not "
@@ -208,6 +208,8 @@ class BssSeparator:
             return None
             
         target_embed = torch.stack(enroll_embeddings).mean(dim=0)
+        if not torch.isfinite(target_embed).all() or torch.linalg.vector_norm(target_embed) == 0:
+            return None
         target_embed = F.normalize(target_embed, p=2, dim=0)
         
         if target_id:
@@ -249,8 +251,12 @@ class BssSeparator:
             end = min(start + block, n)
             seg_1, seg_2 = out_1[start:end], out_2[start:end]
 
-            e1 = self._block_embedding(seg_1, sr)
-            e2 = self._block_embedding(seg_2, sr)
+            try:
+                e1 = self._block_embedding(seg_1, sr)
+                e2 = self._block_embedding(seg_2, sr)
+            except Exception as exc:
+                print(f"[TSE] chunk {start}:{end} unscorable: {exc}", file=sys.stderr)
+                continue
             if e1 is None or e2 is None:
                 # One side is silent here, so this block says nothing about
                 # ordering. Leaving it alone is right: flipping on a missing
@@ -426,6 +432,7 @@ class BssSeparator:
         span_B = _rescale(probe_B)
         full_span = [(0, len(track_1_np))]
         score_sources = {}
+        scoring_errors = {}
 
         def _score(track_np, spans, target_embed, key):
             attempts = []
@@ -433,17 +440,21 @@ class BssSeparator:
                 attempts.append((spans, "clean_probe"))
             attempts.append((full_span, "full_context"))
             for candidate_spans, source in attempts:
-                probe = self._gather_probe(track_np, candidate_spans, target_sr)
-                if probe is None:
-                    continue
                 try:
+                    probe = self._gather_probe(track_np, candidate_spans, target_sr)
+                    if probe is None:
+                        continue
                     emb = F.normalize(
                         self._get_embedding(probe, target_sr), p=2, dim=0
                     )
-                except Exception:
+                    score = float(torch.dot(target_embed, emb))
+                    if not np.isfinite(score):
+                        raise ValueError("nonfinite similarity")
+                except Exception as exc:
+                    scoring_errors[f"{key}:{source}"] = f"{type(exc).__name__}: {exc}"
                     continue
                 score_sources[key] = source
-                return float(torch.dot(target_embed, emb))
+                return score
             score_sources[key] = "unscorable"
             return None
 
@@ -582,6 +593,13 @@ class BssSeparator:
             "other_rms": None,
             "assignment_mode": assignment_mode,
             "score_sources": score_sources,
+            "scoring_errors": scoring_errors,
+            "output_scores": ([[s_1A, s_1B], [s_2A, s_2B]]
+                              if out_A_np is track_1_np else
+                              [[s_2A, s_2B], [s_1A, s_1B]]),
+            "assignment_margin": abs(sum(
+                left - right for left, right in ((s_1A, s_2A), (s_2B, s_1B))
+                if left is not None and right is not None)),
             "probe_energy": probe_energy,
             "probe_log_evidence": (
                 None if probe_direct is None else float(probe_evidence)
@@ -606,10 +624,15 @@ class BssSeparator:
                     core_other = other_np[c0:c1]
                     diag["other_rms"] = float(np.sqrt((core_other ** 2).mean() + 1e-12))
                     for key, arr in (("anchor_self", self_np[c0:c1]), ("anchor_other", core_other)):
-                        pr = self._gather_probe(arr, [(0, len(arr))], target_sr, min_voiced_sec=0.05)
-                        if pr is not None:
-                            e = F.normalize(self._get_embedding(pr, target_sr), p=2, dim=0)
-                            diag[key] = float(torch.dot(anchor_embed, e))
+                        try:
+                            pr = self._gather_probe(arr, [(0, len(arr))], target_sr, min_voiced_sec=0.05)
+                            if pr is not None:
+                                e = F.normalize(self._get_embedding(pr, target_sr), p=2, dim=0)
+                                value = float(torch.dot(anchor_embed, e))
+                                diag[key] = value if np.isfinite(value) else None
+                        except Exception as exc:
+                            diag.setdefault("diagnostic_errors", {})[key] = (
+                                f"{type(exc).__name__}: {exc}")
 
         def restore_track(track_tensor_in):
             if sample_rate != target_sr:

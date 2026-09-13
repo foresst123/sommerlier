@@ -219,8 +219,12 @@ class AcousticBoundaryFinder:
         lo = max(0, int(floor), int(search_min if search_min is not None else floor))
         hi = min(len(self.waveform), int(ceiling),
                  int(search_max if search_max is not None else ceiling))
+        if direction == "left":
+            hi = min(hi, anchor)
+        elif direction == "right":
+            lo = max(lo, anchor)
         if hi < lo:
-            lo, hi = hi, lo
+            raise ValueError("no cut satisfies search range, direction, and hard bounds")
 
         cuts, _, _ = self.analyse(lo, hi)
         candidates = []
@@ -259,8 +263,13 @@ class AcousticBoundaryFinder:
         )
         chosen = candidates[0]
         floor, ceiling = hard_bounds or (0, len(self.waveform))
-        lo = max(int(floor), int(search_min if search_min is not None else floor))
-        hi = min(int(ceiling), int(search_max if search_max is not None else ceiling))
+        lo = max(0, int(floor), int(search_min if search_min is not None else floor))
+        hi = min(len(self.waveform), int(ceiling),
+                 int(search_max if search_max is not None else ceiling))
+        if direction == "left":
+            hi = min(hi, int(anchor))
+        elif direction == "right":
+            lo = max(lo, int(anchor))
         return CutDecision(
             requested_sample=int(anchor), sample=chosen.sample,
             method=chosen.method, confidence=chosen.confidence,
@@ -289,15 +298,23 @@ class ContextExpander:
         preferred = max(0, round(float(preferred_seconds) * self.sr))
         minimum = max(0, round(float(minimum_seconds) * self.sr))
         maximum = preferred if maximum_seconds is None else max(
-            minimum, round(float(maximum_seconds) * self.sr)
-        )
+            0, round(float(maximum_seconds) * self.sr))
+        minimum = min(minimum, maximum)
+        preferred = min(max(preferred, minimum), maximum)
         anchor = int(anchor)
+        if not 0 <= anchor <= len(self.finder.waveform):
+            raise ValueError("context anchor is outside the waveform")
         if direction == "left":
-            hard_bound = 0 if hard_bound is None else int(hard_bound)
+            hard_bound = 0 if hard_bound is None else max(0, int(hard_bound))
+            if hard_bound > anchor:
+                raise ValueError("left hard bound is after the context anchor")
             lo, hi = max(hard_bound, anchor - maximum), max(hard_bound, anchor - minimum)
             desired = min(max(anchor - preferred, lo), hi)
         else:
-            hard_bound = len(self.finder.waveform) if hard_bound is None else int(hard_bound)
+            hard_bound = (len(self.finder.waveform) if hard_bound is None
+                          else min(len(self.finder.waveform), int(hard_bound)))
+            if hard_bound < anchor:
+                raise ValueError("right hard bound is before the context anchor")
             lo, hi = min(hard_bound, anchor + minimum), min(hard_bound, anchor + maximum)
             desired = min(max(anchor + preferred, lo), hi)
 

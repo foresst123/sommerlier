@@ -13,8 +13,9 @@ from schemas.audio import AudioData
 from schemas.segment import Segment, SpeechSegment
 from algorithms.diarization.overlap import detect_overlapping_segments
 from utils.audio_normalize import safe_limit
-from utils.separation_window import POLICY_VERSION, WindowPlanner, clean_segments, merge_ranges
+from utils.separation_window import POLICY_VERSION, WindowPlanner, clean_segments, merge_ranges, subtract
 from utils.window_pool import WindowBuildPool
+from utils.separation_quality import track_quality, base_view, continuity_evidence
 from utils.cpu_plan import usable_cores
 from utils.music_map import MusicMap
 from utils.enrollment_memory import EnrollmentMemory, ENABLED as BSS_MEMORY
@@ -132,6 +133,9 @@ REASONS = (
     "already_spliced",  # Vùng này đã được lượt khác ghi kết quả
     "short_track",      # Model trả về thiếu mẫu âm thanh
     "empty_track",      # Track im lặng ngay tại nơi mixture có lời
+    "low_energy_coverage",
+    "insufficient_evidence",
+    "nonfinite_audio",
     "window_error",     # Planner ném exception trước khi có window
     "model_error",      # Separator/ECAPA ném exception trên window đã dựng
     "same_speaker",     # Hai segment cùng speaker, không cần tách hai giọng
@@ -405,29 +409,7 @@ class SeparationService:
         """Kiểm tra track có lời tại những nơi mixture có lời.
         So năng lượng từng khung ngắn: RMS toàn đoạn có thể bỏ sót trường hợp
         track im lặng gần hết overlap nhưng chỉ có đuôi giọng khác ở cuối."""
-        n = min(len(host), len(track))
-        if n == 0:
-            return False
-        frame = max(1, int(frame_sec * sr_hint))
-        if n < frame * 2:
-            # Đoạn quá ngắn để chia khung: kiểm tra còn năng lượng hay không.
-            return float(np.sqrt(np.mean(track[:n] ** 2) + 1e-12)) >= BSS_SILENCE_RMS
-
-        m = n // frame
-        h = np.sqrt((host[:m * frame].reshape(m, frame) ** 2).mean(axis=1) + 1e-12)
-        t = np.sqrt((track[:m * frame].reshape(m, frame) ** 2).mean(axis=1) + 1e-12)
-
-        # Xác định khung có lời theo đỉnh năng lượng của chính mixture.
-        voiced = h >= max(h.max() * 0.25, BSS_SILENCE_RMS)
-        if not voiced.any():
-            return True          # Mixture im lặng nên không có lời cần bảo toàn
-
-        # Track đã bỏ giọng nhiễu có thể nhỏ hơn; so theo thang của chính track.
-        # Sàn tuyệt đối bằng đúng ngưỡng im lặng dùng ở cổng unscorable: chỉ so
-        # theo t.max() thì một track nhiễu đều ở mức rất thấp cũng có mọi khung
-        # vượt ngưỡng, đúng kiểu lọt mà _gather_probe đã phải thêm sàn để chặn.
-        alive = t >= max(t.max() * 0.15, BSS_SILENCE_RMS)
-        return float(np.mean(alive[voiced])) >= 0.35
+        return track_quality(host, track, sr_hint, BSS_SILENCE_RMS, frame_sec)["accepted"]
 
     @staticmethod
     def _probe_source_mid(probe, layout):
@@ -581,7 +563,8 @@ class SeparationService:
         })
         return gain, info
 
-    def _cross_fade(self, orig_audio: np.ndarray, new_audio: np.ndarray, fade_samples: int) -> np.ndarray:
+    def _cross_fade(self, orig_audio: np.ndarray, new_audio: np.ndarray,
+                    fade_samples: int, fade_left=True, fade_right=True) -> np.ndarray:
         """Thay vùng âm thanh gốc bằng track đã tách, làm mượt hai biên.
 
         Dùng linear crossfade thay cho equal-power sin/cos. Original overlap và
@@ -615,6 +598,10 @@ class SeparationService:
         # Chuyển dần về âm thanh gốc ở biên cuối.
         result[mid_limit:limit] = (orig_audio[mid_limit:limit] * ramp_in
                                    + new_audio[mid_limit:limit] * ramp_out)
+        if not fade_left:
+            result[:fade_samples] = new_audio[:fade_samples]
+        if not fade_right:
+            result[mid_limit:limit] = new_audio[mid_limit:limit]
         return result
 
             # --- Công cụ khoảng thời gian và nhóm overlap ----------------------------
@@ -635,8 +622,7 @@ class SeparationService:
 
     def seams(self):
         """Trả vị trí các mối nối trong timeline mà separation đang dùng.
-        Sau khi cắt nhạc, hai vùng vốn không liền nhau có thể nằm sát nhau. Không
-        mở rộng cửa sổ xuyên mối nối đó vì sẽ kéo thêm ngữ cảnh khác vào model.
+        Seam là metadata; cửa sổ được đi qua seam nhưng không qua speaker thứ ba.
         Dịch vụ không có timeline được hiểu là bản ghi chưa cắt."""
         timeline = getattr(self, "timeline", None)
         return timeline.seams() if timeline else []
@@ -810,8 +796,8 @@ class SeparationService:
                 directory = os.path.join(self.dump_dir, "failed", name)
             os.makedirs(directory)
 
-            source_start = max(0, int(overlap_start * sr))
-            source_end = min(len(waveform), int(overlap_end * sr))
+            source_start = max(0, round(overlap_start * sr))
+            source_end = min(len(waveform), round(overlap_end * sr))
             overlap_mix = np.asarray(
                 waveform[source_start:source_end], dtype=np.float32
             )
@@ -916,6 +902,7 @@ class SeparationService:
                 "start": overlap_start,
                 "end": overlap_end,
                 "path": os.path.relpath(directory, self.dump_dir),
+                "attempt": (job or {}).get("attempt", 0),
             })
             return directory
         except Exception as exc:
@@ -926,6 +913,42 @@ class SeparationService:
                 )
             return None
 
+    def _finalize_failure_artifacts(self, speech, sr):
+        """Keep failed attempts, annotating their final sample coverage after retries."""
+        by_index = {seg.index: seg for seg in speech}
+        for artifact in self.failure_artifacts:
+            path = os.path.join(self.dump_dir, artifact["path"], "metadata.json")
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    metadata = json.load(handle)
+                failure = metadata["failure"]
+                targets = metadata.get("job", {}).get("targets", [])
+                if failure.get("segment_index") is not None:
+                    targets = [{"segment_index": failure["segment_index"],
+                                "speaker": failure["speaker"],
+                                "start": failure["overlap_seconds"][0],
+                                "end": failure["overlap_seconds"][1]}]
+                coverage = []
+                for target in targets:
+                    seg = by_index.get(target["segment_index"])
+                    lo, hi = round(target["start"] * sr), round(target["end"] * sr)
+                    completed = [(round(a * sr), round(b * sr))
+                                 for a, b, sim in (seg.bss_spans if seg else []) if sim != -2.0]
+                    missing = subtract([(lo, hi)], completed)
+                    coverage.append({**target, "recovered": not missing,
+                                     "remaining_source_samples": missing,
+                                     "separated_samples": max(0, hi - lo) - sum(b - a for a, b in missing)})
+                outcome = "recovered" if coverage and all(t["recovered"] for t in coverage) else (
+                    "partially_recovered" if any(t["separated_samples"] for t in coverage) else "failed")
+                metadata["recovery"] = {"outcome": outcome, "targets": coverage}
+                with open(path, "w", encoding="utf-8") as handle:
+                    json.dump(metadata, handle, ensure_ascii=False, indent=2, default=self._json_default)
+                artifact["final_outcome"] = outcome
+            except Exception as exc:
+                artifact["finalization_error"] = f"{type(exc).__name__}: {exc}"
+                if self.logger:
+                    self.logger.warning(f"[TSE] could not finalize failure artifact {path}: {exc}")
+
     # ------------------------------------------------------------------
     def passthrough(self, segments, audio):
         """Trả SpeechSegment chứa mixture khi cấu hình tắt separation.
@@ -933,7 +956,7 @@ class SeparationService:
         sr = audio.sample_rate
         speech = [SpeechSegment(**s.__dict__) for s in segments]
         for e in speech:
-            e.audio = audio.waveform[int(e.start * sr):int(e.end * sr)].copy()
+            e.audio = audio.waveform[round(e.start * sr):round(e.end * sr)].copy()
         return speech
 
     def process_overlaps(self, segments: List[Segment], audio: AudioData, overlap_threshold: float = 0.1) -> List[SpeechSegment]:
@@ -960,7 +983,7 @@ class SeparationService:
         waveform = audio.waveform
         total_dur = len(waveform) / sr
         for e in speech:
-            e.audio = waveform[int(e.start * sr):int(e.end * sr)].copy()
+            e.audio = waveform[round(e.start * sr):round(e.end * sr)].copy()
 
         if not pairs:
             if self.logger:
@@ -974,7 +997,7 @@ class SeparationService:
 
         self._same_speaker_pairs = []
         # Tách hết, không lọc theo overlap_threshold. WindowPlanner giữ nguyên
-        # core dù rất ngắn rồi lấy full segment envelope và context nền để bù.
+        # core dù rất ngắn rồi lấy context có giới hạn và padding sạch để bù.
         queue = list(self._group_jobs(pairs))
         below = []  # giữ để không vỡ bss_spans tracking
         buildable = []
@@ -1005,8 +1028,8 @@ class SeparationService:
                 # Kiểm tra vùng chưa bị ghi bởi job khác
                 if any(not (hi_ext <= a or lo_ext >= b) for a, b, _ in enh.bss_spans):
                     continue
-                dst = int(lo_ext * sr) - int(enh.start * sr)
-                limit = int((hi_ext - lo_ext) * sr)
+                dst = round(lo_ext * sr) - round(enh.start * sr)
+                limit = round(hi_ext * sr) - round(lo_ext * sr)
                 if dst < 0 or dst + limit > len(enh.audio):
                     continue
                 enh.bss_spans.append((lo_ext, lo_ext + limit / sr, -2.0))
@@ -1064,6 +1087,10 @@ class SeparationService:
                             "falling back to sequential build")
                     file_windows = None
 
+        recovery_planner = WindowPlanner(
+            segments, pairs, waveform, sr, music_map=self.music_map,
+            seams=self.seams(), vad=getattr(self.bss_model, "_vad", None),
+            context_seconds=BSS_STITCH_EDGE_PAD, search_seconds=BSS_STITCH_SEARCH)
         if file_windows is not None:
             window_iter = file_windows.build_all([plist for _a, _b, plist, _t in buildable])
         else:
@@ -1120,18 +1147,99 @@ class SeparationService:
                 if not emitted:
                     yield job, (None, reason, detail or "no_core_targets", actions)
 
+        pending_retries = collections.deque()
+        previous_outputs = {}
+
+        def retry_failed(failures, attempt, plist, speakers, actions):
+            if not failures:
+                return
+            if attempt >= 2:
+                for sd, lo, hi, reason, detail in failures:
+                    self._fail(seg_by_index.get(sd["index"]), lo, hi, reason, detail)
+                return
+            next_attempt = attempt + 1
+            lo = min(round(item[1] * sr) for item in failures)
+            hi = max(round(item[2] * sr) for item in failures)
+            bounds = [(lo, hi)]
+            split_actions = []
+            try:
+                if hi - lo > recovery_planner.target:
+                    recovery_planner.actions = []
+                    bounds = recovery_planner._split_core_bounds(lo, hi)
+                    split_actions.extend(recovery_planner.actions)
+                elif next_attempt == 2 and hi - lo > 5 * sr:
+                    midpoint = (lo + hi) // 2
+                    decision = recovery_planner.cuts.find_cut(
+                        midpoint, search_min=max(lo + sr, midpoint - sr),
+                        search_max=min(hi - sr, midpoint + sr), hard_bounds=(lo + 1, hi - 1))
+                    bounds = [(lo, decision.sample), (decision.sample, hi)]
+                    split_actions.append({"action": "retry_acoustic_split",
+                                          "sample": decision.sample, "method": decision.method})
+            except Exception as exc:
+                width = 5 * sr
+                bounds = [(a, min(hi, a + width)) for a in range(lo, hi, width)]
+                split_actions.append({"action": "retry_split_timestamp_fallback", "detail": str(exc)})
+            for a, b in bounds:
+                targets = [(sd, max(start, a / sr), min(end, b / sr))
+                           for sd, start, end, _reason, _detail in failures
+                           if min(end, b / sr) > max(start, a / sr)]
+                if not targets:
+                    continue
+                trace = list(actions) + split_actions + [{
+                    "action": "retry_window", "attempt": next_attempt,
+                    "core_source_samples": [a, b],
+                    "context_seconds": 1.0 if next_attempt == 1 else 3.0,
+                    "padding": next_attempt == 1,
+                    "fill_context": next_attempt != 1,
+                    "previous_failures": [{"speaker": sd["speaker"], "start": start,
+                                           "end": end, "reason": reason, "detail": detail}
+                                          for sd, start, end, reason, detail in failures],
+                }]
+                recovery_planner.context = round((1.0 if next_attempt == 1 else 3.0) * sr)
+                try:
+                    retry = recovery_planner.build(
+                        plist, core_bounds=(a, b), initial_actions=trace,
+                        padding=next_attempt == 1, fill_context=next_attempt != 1)
+                    outcome = (retry, recovery_planner.reason, recovery_planner.detail,
+                               list(recovery_planner.actions))
+                except Exception as exc:
+                    trace.append({"action": "retry_builder_error",
+                                  "detail": str(exc), "traceback": traceback.format_exc()})
+                    outcome = (None, "window_error", str(exc), trace)
+                pending_retries.append(((speakers[0], speakers[1], plist, targets),
+                                        outcome, next_attempt))
+                self.stats["retried"] += 1
+
+        def processing_iter():
+            initial = iter(expanded_window_iter())
+            while True:
+                if pending_retries:
+                    yield pending_retries.popleft()
+                else:
+                    try:
+                        job, outcome = next(initial)
+                    except StopIteration:
+                        return
+                    yield job, outcome, 0
+
         from tqdm import tqdm
         pbar = tqdm(desc="[TSE Extractor]", unit="window", leave=True)
         try:
             for (spk_a, spk_b, plist, targets), (
                 built, reason, detail, planner_actions
-            ) in expanded_window_iter():
+            ), attempt in processing_iter():
                 pbar.update(1)
                 _t_job = _time.perf_counter()
-
-                def fail_all(reason, detail="", targets=targets):
-                    for sd, lo, hi in targets:
-                        self._fail(seg_by_index.get(sd["index"]), lo, hi, reason, detail)
+                uncovered = []
+                for sd, lo, hi in targets:
+                    enh = seg_by_index.get(sd["index"])
+                    completed = [(round(a * sr), round(b * sr))
+                                 for a, b, sim in (enh.bss_spans if enh else []) if sim != -2.0]
+                    uncovered.extend((sd, a / sr, b / sr) for a, b in subtract(
+                        [(round(lo * sr), round(hi * sr))], completed))
+                targets = uncovered
+                if not targets:
+                    continue
 
                 job_lo = min((lo for _sd, lo, _hi in targets), default=min(
                     p["overlap_start"] for p in plist
@@ -1140,6 +1248,7 @@ class SeparationService:
                     p["overlap_end"] for p in plist
                 ))
                 job_info = {
+                    "attempt": attempt,
                     "speakers": [str(spk_a), str(spk_b)],
                     "overlap_seconds": [job_lo, job_hi],
                     "pairs": plist,
@@ -1162,10 +1271,12 @@ class SeparationService:
                         + (" (GPU idle!)" if _wait > 1.0 else ""))
 
                 if built is None:
-                    fail_all(reason, detail)
+                    failures = [(sd, lo, hi, reason, detail) for sd, lo, hi in targets]
+                    retry_failed(failures, 2 if reason == "multi_speaker" else attempt,
+                                 plist, (spk_a, spk_b), planner_actions)
                     self.window_layouts.append({
                         "source_overlap": [job_lo, job_hi],
-                        "status": "skipped", "reason": reason,
+                        "status": "failed_attempt", "attempt": attempt, "reason": reason,
                         "detail": detail, "actions": planner_actions})
                     self._dump_failure_artifact(
                         reason=reason, detail=detail, sr=sr, waveform=waveform,
@@ -1183,6 +1294,7 @@ class SeparationService:
                 window_audio, core = built.audio, built.core
                 probe_a_s, probe_b_s = built.probes[spk_a], built.probes[spk_b]
                 layout = built.layout
+                layout["attempt"] = attempt
                 planner_actions = layout.get("actions", planner_actions)
                 self.window_layouts.append(layout)
                 service_actions = [{
@@ -1250,13 +1362,16 @@ class SeparationService:
                     )
                 except Exception as exc:
                     error_detail = f"{type(exc).__name__}: {exc}"
-                    fail_all("model_error", error_detail)
+                    retry_failed([(sd, lo, hi, "model_error", error_detail)
+                                  for sd, lo, hi in targets], attempt, plist,
+                                 (spk_a, spk_b), planner_actions)
                     service_actions.append({
                         "action": "run_separator",
                         "status": "failed",
                         "detail": error_detail,
                         "traceback": traceback.format_exc(),
                     })
+                    layout["status"] = "failed_attempt"
                     self._dump_failure_artifact(
                         reason="model_error", detail=error_detail,
                         sr=sr, waveform=waveform,
@@ -1271,6 +1386,27 @@ class SeparationService:
                     "action": "run_separator",
                     "status": "ok",
                 })
+                previous = previous_outputs.get((spk_a, spk_b))
+                continuity = continuity_evidence(previous, built, (track_A, track_B),
+                                                 sr, BSS_SILENCE_RMS)
+                strong_identity = (
+                    diag.get("assignment_mode") == "backend_ordered"
+                    or (max((v for v in (sim_A, sim_B) if v is not None), default=-1)
+                        >= BSS_QC_SIM_THRESHOLD
+                        and diag.get("assignment_margin", 0.0) >= BSS_NOT_A_MARGIN))
+                if continuity["swap"] and not strong_identity:
+                    track_A, track_B = track_B, track_A
+                    scores = diag.get("output_scores", [[None, None], [None, None]])
+                    sim_A, sim_B = scores[1][0], scores[0][1]
+                    diag["output_scores"] = scores[::-1]
+                    diag["assignment_mode"] = "shared_context_continuity"
+                    continuity["applied"] = True
+                else:
+                    continuity["applied"] = False
+                continuity["identity_locked"] = strong_identity
+                layout["continuity"] = continuity
+                diag["continuity"] = continuity
+                service_actions.append({"action": "align_window_speakers", **continuity})
                 _t_sidon_done = _time.perf_counter()
                 if _BSS_TIMING and self.logger:
                     self.logger.debug(
@@ -1326,12 +1462,6 @@ class SeparationService:
                 for sim in (sim_A, sim_B):
                     if sim is not None:
                         self.sims.append(sim)
-
-                # Chỉ nhận vào bộ nhớ các track đạt ngưỡng cao để hạn chế học nhầm giọng.
-                if _BSS_TIMING and self.logger:
-                    self.logger.debug(f"[TIMING] {job_lo:.2f}s: → memory.offer")
-                for spk, track, sim in ((spk_a, track_A, sim_A), (spk_b, track_B, sim_B)):
-                    memory.offer(spk, track, sim, sr)
 
                 # BSS model đã ánh xạ hai output theo ECAPA nếu đo được một hoặc
                 # cả hai phía. Track không đo được nhận nhãn còn lại bằng loại
@@ -1391,17 +1521,22 @@ class SeparationService:
                         f"[TIMING] {job_lo:.2f}s: → splice loop ({len(targets)} target(s))")
                 _t_splice = _time.perf_counter()
                 fade_samples = int(0.02 * sr)
+                failed_targets = []
+                original_targets = self._splice_pairs(plist)
+                spliced_count = 0
+                spliced_speakers = set()
                 for sd, ov_lo, ov_hi in targets:
                     spk = sd["speaker"]
                     enh = seg_by_index.get(sd["index"])
                     if enh is None:
                         continue
                     track, sim = accepted[spk]
-                    src = core[0] + int(ov_lo * sr) - core_src_lo
-                    dst = int(ov_lo * sr) - int(enh.start * sr)
+                    sample_lo, sample_hi = round(ov_lo * sr), round(ov_hi * sr)
+                    src = core[0] + sample_lo - core_src_lo
+                    dst = sample_lo - round(enh.start * sr)
                     if src < 0 or dst < 0:
                         failure_detail = f"negative offset src={src} dst={dst}"
-                        self._fail(enh, ov_lo, ov_hi, "short_track", failure_detail)
+                        failed_targets.append((sd, ov_lo, ov_hi, "short_track", failure_detail))
                         self._dump_failure_artifact(
                             reason="short_track", detail=failure_detail,
                             sr=sr, waveform=waveform,
@@ -1416,11 +1551,11 @@ class SeparationService:
                             }],
                         )
                         continue
-                    limit = min(int(ov_hi * sr) - int(ov_lo * sr), len(track) - src,
+                    limit = min(sample_hi - sample_lo, len(track) - src,
                                 len(enh.audio) - dst)
-                    if limit <= 0:
+                    if limit <= 0 or limit < sample_hi - sample_lo:
                         failure_detail = f"limit={limit} src={src} dst={dst}"
-                        self._fail(enh, ov_lo, ov_hi, "short_track", failure_detail)
+                        failed_targets.append((sd, ov_lo, ov_hi, "short_track", failure_detail))
                         self._dump_failure_artifact(
                             reason="short_track", detail=failure_detail,
                             sr=sr, waveform=waveform,
@@ -1436,7 +1571,8 @@ class SeparationService:
                             }],
                         )
                         continue
-                    if any(not (ov_hi <= a or ov_lo >= b) for a, b, _ in enh.bss_spans):
+                    if any(not (sample_hi <= round(a * sr) or sample_lo >= round(b * sr))
+                           for a, b, score in enh.bss_spans if score != -2.0):
                         failure_detail = "target overlaps an existing bss_spans entry"
                         self._fail(enh, ov_lo, ov_hi, "already_spliced", failure_detail)
                         self._dump_failure_artifact(
@@ -1462,17 +1598,22 @@ class SeparationService:
                     # So track với mixture GỐC (waveform), không phải enh.audio
                     # vì enh.audio có thể đã bị splice bởi job trước -> RMS bị lệch
                     # -> _track_has_speech trả False dù track có âm thanh thật.
-                    mix_dst = int(ov_lo * sr)
+                    mix_dst = sample_lo
                     host = waveform[mix_dst:mix_dst + limit]
                     if _BSS_TIMING and self.logger:
                         self.logger.debug(
                             f"[TIMING] {job_lo:.2f}s: → _track_has_speech "
                             f"seg={sd['index']} spk={spk} limit={limit/sr:.3f}s")
-                    if not self._track_has_speech(host, track[src:src + limit], sr_hint=sr):
-                        failure_detail = "silent where mixture has speech"
-                        self._fail(enh, ov_lo, ov_hi, "empty_track", failure_detail)
+                    quality = track_quality(host, track[src:src + limit], sr, BSS_SILENCE_RMS)
+                    layout.setdefault("target_quality", []).append({
+                        "speaker": spk, "source_samples": [sample_lo, sample_hi], **quality})
+                    if not quality["accepted"]:
+                        failure_reason = (quality["status"] if quality["status"] in REASONS
+                                          else "empty_track")
+                        failure_detail = quality["status"]
+                        failed_targets.append((sd, ov_lo, ov_hi, failure_reason, failure_detail))
                         self._dump_failure_artifact(
-                            reason="empty_track", detail=failure_detail,
+                            reason=failure_reason, detail=failure_detail,
                             sr=sr, waveform=waveform,
                             overlap_start=ov_lo, overlap_end=ov_hi,
                             speaker=spk, segment_index=sd["index"], job=job_info,
@@ -1483,6 +1624,7 @@ class SeparationService:
                                 "action": "validate_overlap_track",
                                 "status": "failed", "src": src, "dst": dst,
                                 "limit": limit,
+                                "quality": quality, "attempt": attempt,
                             }],
                             window_overlap=(src, limit),
                         )
@@ -1502,6 +1644,23 @@ class SeparationService:
                         np.asarray(track[src:src + limit], dtype=np.float32).copy()
                         * level_gain
                     )
+                    spans = [(round(a * sr), round(b * sr)) for original, a, b in original_targets
+                             if original["index"] == sd["index"]]
+                    internal_left = any(a < sample_lo < b for a, b in spans)
+                    internal_right = any(a < sample_hi < b for a, b in spans)
+                    # Crossfade only separated sources at internal boundaries.
+                    # Never reintroduce the original two-speaker mixture there.
+                    if (internal_left and previous is not None
+                        and spk in previous["speakers"] and not (
+                            continuity["swap"] and strong_identity)):
+                        old_lo, old_hi = previous["bounds"]
+                        take = min(fade_samples, limit, old_hi - sample_lo)
+                        if old_lo <= sample_lo and take > 0:
+                            index = 0 if spk == spk_a else 1
+                            old = previous["tracks"][index][sample_lo - old_lo:sample_lo - old_lo + take]
+                            if len(old) == take:
+                                ramp = np.linspace(0, 1, take, dtype=np.float32)
+                                patch[:take] = old * (1 - ramp) + patch[:take] * ramp
 
                     # Limiter chỉ là hàng rào chống clipping sau khi áp gain; nó
                     # không dùng mixture làm reference và không normalize patch.
@@ -1513,11 +1672,14 @@ class SeparationService:
                         )
 
                     enh.audio[dst:dst + limit] = self._cross_fade(
-                        enh.audio[dst:dst + limit], patch, fade_samples)
+                        enh.audio[dst:dst + limit], patch, fade_samples,
+                        fade_left=not internal_left, fade_right=not internal_right)
                     enh.bss = True
-                    enh.bss_spans.append((ov_lo, ov_lo + limit / sr,
+                    enh.bss_spans.append((sample_lo / sr, (sample_lo + limit) / sr,
                                           float(sim) if sim is not None else -1.0))
                     self.stats["spliced"] += 1
+                    spliced_count += 1
+                    spliced_speakers.add(spk)
                     if self.logger:
                         self.logger.info(
                             f"[TSE:splice] seg {sd['index']} spk={spk} "
@@ -1526,7 +1688,24 @@ class SeparationService:
                             + (f"{sim:.2f}" if sim is not None else "not-A")
                         )
 
-            if _BSS_TIMING and self.logger:
+                if spliced_count:
+                    bounds, tracks = base_view(built, (track_A * gain_A, track_B * gain_B))
+                    if all(np.isfinite(t).all() for t in tracks):
+                        previous_outputs[(spk_a, spk_b)] = {
+                            "bounds": bounds, "speakers": spliced_speakers,
+                            "tracks": tuple(t if spk in spliced_speakers else np.zeros_like(t)
+                                            for spk, t in zip((spk_a, spk_b), tracks))}
+                    for spk in spliced_speakers:
+                        track, sim = accepted[spk]
+                        memory.offer(spk, track, sim, sr)
+                layout["status"] = "partial" if failed_targets and spliced_count else (
+                    "failed_attempt" if failed_targets else "spliced")
+                layout["spliced_targets"] = spliced_count
+                layout["failed_targets"] = len(failed_targets)
+                retry_failed(failed_targets, attempt, plist, (spk_a, spk_b),
+                             planner_actions)
+
+                if _BSS_TIMING and self.logger:
                     _t_end = _time.perf_counter()
                     self.logger.debug(
                         f"[TIMING] {job_lo:.2f}s: ← splice loop {_t_end - _t_splice:.3f}s")
@@ -1538,12 +1717,13 @@ class SeparationService:
                         f"qc={_t_qc-_t_sidon_done:.3f}s "
                         f"dump={_t_end-_t_dump:.3f}s "
                         f"splice={_t_end-_t_splice:.3f}s")
-            pbar.close()
         finally:
+            pbar.close()
             # Chỉ đóng shared memory của FILE NÀY -- pool process (nếu có)
             # sống tiếp cho file kế trong batch, đóng ở close_window_pool().
             if file_windows is not None:
                 file_windows.close()
+        self._finalize_failure_artifacts(speech, sr)
         self._report_stats()
         return speech
 
@@ -1553,7 +1733,7 @@ class SeparationService:
         """Dựng hai track liên tục để huấn luyện SDLM/full-duplex.
         strict=True đặt vùng tách thất bại về zero để không đưa giọng người khác
         vào track có nhãn của speaker mục tiêu."""
-        total_samples = int(audio_duration * sr)
+        total_samples = round(audio_duration * sr)
         track_0 = np.zeros(total_samples, dtype=np.float32)
         track_1 = np.zeros(total_samples, dtype=np.float32)
 
@@ -1578,7 +1758,7 @@ class SeparationService:
         for seg in speech_segments:
             if seg.speaker not in filled or seg.audio is None:
                 continue
-            start_idx = int(seg.start * sr)
+            start_idx = round(seg.start * sr)
             end_idx = min(total_samples, start_idx + len(seg.audio))
             if end_idx <= start_idx:
                 continue
@@ -1596,8 +1776,8 @@ class SeparationService:
                     # track sai; xóa nó chỉ làm mất lời nói thật.
                     if reason in SAFE_FAIL_REASONS:
                         continue
-                    i = max(start_idx, int(a * sr)) - start_idx
-                    j = min(end_idx, int(b * sr)) - start_idx
+                    i = max(start_idx, round(a * sr)) - start_idx
+                    j = min(end_idx, round(b * sr)) - start_idx
                     if j > i:
                         keep[i:j] = False
                 dropped += int((fresh & ~keep).sum())

@@ -52,7 +52,7 @@ cặp của chính mình là cặp lạ, tự chặn mọi job). Module này kh�
 """
 import pickle
 import traceback
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, wait
 from multiprocessing import shared_memory
 
 import numpy as np
@@ -149,6 +149,7 @@ class FileWindows:
             "use_vad": use_vad,
         }
         self._closed = False
+        self._futures = []
 
     def build_all(self, job_groups):
         """Nộp hết job_groups của file này theo thứ tự, trả generator
@@ -157,9 +158,36 @@ class FileWindows:
         caller còn xử lý (GPU) job trước -- chính chỗ này tạo hiệu ứng
         pipeline. Đổi sang executor.map ở đây sẽ mất tính chất này vì map lô
         theo chunksize thay vì để mọi future chạy ngay khi có worker rảnh."""
-        futures = [self._pool.submit(_build_job, self._ctx, group) for group in job_groups]
-        for f in futures:
-            yield f.result()
+        pending = []
+        for group in job_groups:
+            try:
+                future = self._pool.submit(_build_job, self._ctx, group)
+                self._futures.append(future)
+                pending.append((group, future, None))
+            except Exception as exc:
+                pending.append((group, None, f"{type(exc).__name__}: {exc}"))
+        for group, future, error in pending:
+            if future is not None:
+                try:
+                    yield future.result()
+                    continue
+                except Exception as exc:
+                    error = f"{type(exc).__name__}: {exc}"
+            action = {"action": "worker_fallback_sequential", "detail": error}
+            try:
+                built, reason, detail, actions = _build_job(self._ctx, group)
+                actions = [action, *actions]
+                for plan in built or []:
+                    plan.actions.insert(0, dict(action))
+                    if plan.window is not None:
+                        plan.window.layout["actions"].insert(0, dict(action))
+                yield built, reason, detail, actions
+            except Exception as exc:
+                detail = f"{type(exc).__name__}: {exc}"
+                yield None, "window_error", detail, [action, {
+                    "action": "sequential_fallback_exception", "detail": detail,
+                    "traceback": traceback.format_exc(),
+                }]
 
     def close(self):
         """Giải phóng shared memory của RIÊNG file này. Không shutdown pool --
@@ -167,6 +195,11 @@ class FileWindows:
         if self._closed:
             return
         self._closed = True
+        for future in self._futures:
+            future.cancel()
+        if self._futures:
+            wait(self._futures)
+        self._futures.clear()
         self._shm.close()
         self._shm.unlink()
 

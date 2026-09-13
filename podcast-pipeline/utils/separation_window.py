@@ -6,12 +6,13 @@ Silero hoặc suy luận lỗi, dùng khoảng năng lượng thấp và khe gi�
 """
 from dataclasses import dataclass
 from itertools import combinations
+import traceback
 
 import numpy as np
 
 from utils.acoustic_boundary import AcousticBoundaryFinder, ContextExpander
 
-POLICY_VERSION = "ranked-boundary-context-padding-v9"
+POLICY_VERSION = "bounded-recovery-context-padding-v10"
 
 
 def clean_segments(segments):
@@ -239,6 +240,7 @@ class WindowPlanner:
         self.target = round(15.0 * sr)
         self.fade = round(0.020 * sr)
         self.minimum = round(1.5 * sr)
+        self._support_remainder_seen = set()
         # 15s is a hard model limit. A centred core and 1-2s of continuous
         # context are preferences that may move when a file edge or SP3 blocks.
         self.cuts = AcousticBoundaryFinder(waveform, sr, vad)
@@ -369,11 +371,31 @@ class WindowPlanner:
             return []
 
         ceiling = len(self.waveform) if ceiling is None else ceiling
-        available = [
-            p for p in self._support(speaker, centre)
-            if floor <= p.start and p.end <= ceiling
-            and (p.end <= base.start or p.start >= base.end)
-        ]
+        available = []
+        for piece in self._support(speaker, centre):
+            for lo, hi in subtract(
+                intersect([(piece.start, piece.end)], floor, ceiling),
+                [(base.start, base.end)],
+            ):
+                if (lo, hi) == (piece.start, piece.end):
+                    available.append(piece)
+                    continue
+                cuts = self.cuts.analyse(lo, hi)[0]
+                points = [point for point, kind in cuts.items()
+                          if kind != "segment"]
+                left = lo if lo == piece.start else min(points, default=hi)
+                right = hi if hi == piece.end else max(points, default=lo)
+                if right - left < self.minimum:
+                    continue
+                retained = Piece(left, right, piece.speaker, piece.source,
+                                 piece.kind, cuts.get(left, piece.start_cut),
+                                 cuts.get(right, piece.end_cut))
+                available.append(retained)
+                key = (piece.source, piece.start, piece.end, left, right)
+                if key not in self._support_remainder_seen:
+                    self._support_remainder_seen.add(key)
+                    self._record("retain_clean_support_remainder",
+                                 before=[piece.start, piece.end], after=[left, right])
         empty = [()] if minimum <= 0 else []
         native = []
 
@@ -415,20 +437,32 @@ class WindowPlanner:
         maps, probes = [], {s: [] for s in speakers}
         base_offset = None
 
+        fades = [0]
+        for previous, following in zip(pieces, pieces[1:]):
+            fade = min(self.fade, previous.end - previous.start,
+                       following.end - following.start)
+            if previous.kind == "base":
+                fade = min(fade, previous.end - core_hi)
+            if following.kind == "base":
+                fade = min(fade, core_lo - following.start)
+            fades.append(max(0, fade))
+
         for k, p in enumerate(pieces):
             chunk = self.waveform[p.start:p.end].astype(np.float32, copy=True)
-            start = 0 if output is None else len(output) - self.fade
+            fade = fades[k]
+            start = 0 if output is None else len(output) - fade
 
             if output is None:
                 output = chunk
             else:
-                ramp = np.linspace(0, 1, self.fade, dtype=np.float32)
-                output[-self.fade:] = output[-self.fade:] * (1 - ramp) + chunk[:self.fade] * ramp
-                output = np.concatenate((output, chunk[self.fade:]))
+                if fade:
+                    ramp = np.linspace(0, 1, fade, dtype=np.float32)
+                    output[-fade:] = output[-fade:] * (1 - ramp) + chunk[:fade] * ramp
+                output = np.concatenate((output, chunk[fade:]))
 
             end = start + len(chunk)
-            safe_lo = p.start + (self.fade if k else 0)
-            safe_hi = p.end - (self.fade if k + 1 < len(pieces) else 0)
+            safe_lo = p.start + fade
+            safe_hi = p.end - (fades[k + 1] if k + 1 < len(pieces) else 0)
 
             for speaker in speakers:
                 ranges = solos[speaker] if p.kind == "base" else (self.cuts.analyse(p.start, p.end)[1] if p.speaker == speaker else [])
@@ -449,6 +483,7 @@ class WindowPlanner:
             "core_start_seconds": core[0] / self.sr,
             "pieces": maps,
             "crossfade_samples": self.fade,
+            "join_crossfade_samples": fades[1:],
             "probe_samples": {s: [list(r) for r in rs] for s, rs in probes.items()},
         })
     def _piece_voice_samples(self, piece):
@@ -456,18 +491,20 @@ class WindowPlanner:
         _, voiced, _ = self.cuts.analyse(piece.start, piece.end)
         return sum(b - a for a, b in intersect(voiced, piece.start, piece.end))
 
-    def _sequence_added_samples(self, seq):
+    def _sequence_added_samples(self, seq, context=None):
         """Số sample thực sự được thêm sau crossfade khi seq đứng trước/sau base."""
-        return sum(max(0, p.end - p.start - self.fade) for p in seq)
+        added = sum(max(0, p.end - p.start - self.fade) for p in seq)
+        if seq and context is not None:
+            added += self.fade - min(self.fade, max(0, context))
+        return added
 
     def _sequence_voice_samples(self, seq):
         return sum(self._piece_voice_samples(p) for p in seq)
 
-    def _window_samples(self, prefix, base, suffix):
-        pieces = list(prefix) + [base] + list(suffix)
-        if not pieces:
-            return 0
-        return sum(p.end - p.start for p in pieces) - self.fade * (len(pieces) - 1)
+    def _window_samples(self, prefix, base, suffix, core_lo, core_hi):
+        return (base.end - base.start
+                + self._sequence_added_samples(prefix, core_lo - base.start)
+                + self._sequence_added_samples(suffix, base.end - core_hi))
 
     def _safe_cut_outward(self, desired, lo, hi, side):
         """Nới timestamp ra acoustic cut gần nhất, tuyệt đối không cắt vào trong."""
@@ -609,7 +646,13 @@ class WindowPlanner:
                 "chunk_count": len(bounds),
                 "source_samples": list(bound),
             })
-            window = self.build(group, core_bounds=bound, initial_actions=initial)
+            try:
+                window = self.build(group, core_bounds=bound, initial_actions=initial)
+            except Exception as exc:
+                self.reason, self.detail = "window_error", f"{type(exc).__name__}: {exc}"
+                self._record("core_builder_exception", detail=self.detail,
+                             traceback=traceback.format_exc())
+                window = None
             plans.append(WindowPlan(
                 window=window,
                 core_source_samples=bound,
@@ -619,10 +662,12 @@ class WindowPlanner:
             ))
         return plans
 
-    def build(self, group, core_bounds=None, initial_actions=None):
+    def build(self, group, core_bounds=None, initial_actions=None, padding=True,
+              fill_context=True):
         """Dựng best-effort window; chỉ speaker thứ ba trong core mới chặn."""
         self.reason, self.detail = "no_window", "invalid_overlap_group"
         self.actions = list(initial_actions or [])
+        self._support_remainder_seen = set()
         if not group:
             self._record("reject", reason=self.detail)
             return None
@@ -815,6 +860,8 @@ class WindowPlanner:
             return solo_ranges, voice_samples
 
         def choose_padding(piece, base_voice):
+            if not padding:
+                return (), (), None, None, dict(base_voice)
             budget = max(0, self.target - (piece.end - piece.start))
             if budget <= 0:
                 return (), (), None, None, dict(base_voice)
@@ -825,13 +872,17 @@ class WindowPlanner:
             desired_right_room = (
                 self.target - (core_hi - core_lo) - desired_core_start
             )
+            # Reserve the actual seam width so short context cannot cause the
+            # assembled window to exceed the hard limit.
             prefix_budget = min(
                 budget, max(0, desired_core_start - base_core_pos)
             )
+            prefix_budget = max(0, prefix_budget - max(0, self.fade - base_core_pos))
             base_right_context = piece.end - core_hi
             suffix_budget = min(
                 budget, max(0, desired_right_room - base_right_context)
             )
+            suffix_budget = max(0, suffix_budget - max(0, self.fade - base_right_context))
             candidates = []
             for prefix_speaker, suffix_speaker in (
                 (speakers[0], speakers[1]),
@@ -843,7 +894,7 @@ class WindowPlanner:
                 ) or [()]
 
                 for prefix_seq in prefix_options:
-                    prefix_added = self._sequence_added_samples(prefix_seq)
+                    prefix_added = self._sequence_added_samples(prefix_seq, base_core_pos)
                     remaining = min(
                         max(0, budget - prefix_added), suffix_budget
                     )
@@ -853,7 +904,7 @@ class WindowPlanner:
                     ) or [()]
                     for suffix_seq in suffix_options:
                         predicted = self._window_samples(
-                            prefix_seq, piece, suffix_seq
+                            prefix_seq, piece, suffix_seq, core_lo, core_hi
                         )
                         if predicted > self.target:
                             continue
@@ -900,25 +951,25 @@ class WindowPlanner:
             suffix_speaker=None if suffix_speaker is None else str(suffix_speaker),
             prefix_source_samples=[[p.start, p.end] for p in prefix],
             suffix_source_samples=[[p.start, p.end] for p in suffix],
-            prefix_seconds=self._sequence_added_samples(prefix) / self.sr,
-            suffix_seconds=self._sequence_added_samples(suffix) / self.sr,
+            prefix_seconds=self._sequence_added_samples(prefix, core_lo - base.start) / self.sr,
+            suffix_seconds=self._sequence_added_samples(suffix, base.end - core_hi) / self.sr,
         )
 
         # Clean pad không bắt buộc. Nếu layout vẫn ngắn, lấy context nền liên
         # tục để bù, ưu tiên giữ midpoint của core tại giây 7.5.
-        # Chạy tối đa hai lượt vì context mới có thể nuốt một support piece cũ.
-        for pass_index in range(2):
-            current = self._window_samples(prefix, base, suffix)
+        # Keep selected support intact; a second pass can fill acoustic-cut slack.
+        for pass_index in range(2 if fill_context else 0):
+            current = self._window_samples(prefix, base, suffix, core_lo, core_hi)
             remaining = max(0, self.target - current)
             if remaining <= 0:
                 break
             final_core_start = (
-                self._sequence_added_samples(prefix) + core_lo - base.start
+                self._sequence_added_samples(prefix, core_lo - base.start) + core_lo - base.start
             )
             desired_core_start = max(0, (self.target - (core_hi - core_lo)) // 2)
             left_need = min(remaining, max(0, desired_core_start - final_core_start))
             final_core_end_room = (
-                self._sequence_added_samples(suffix) + base.end - core_hi
+                self._sequence_added_samples(suffix, base.end - core_hi) + base.end - core_hi
             )
             desired_right = self.target - (core_hi - core_lo) - desired_core_start
             right_need = min(
@@ -927,15 +978,21 @@ class WindowPlanner:
             )
             if left_need + right_need < remaining:
                 right_need += remaining - left_need - right_need
+            fill_floor, fill_ceiling = floor, ceiling
+            for piece in (*prefix, *suffix):
+                if piece.end <= base.start:
+                    fill_floor = max(fill_floor, piece.end)
+                elif piece.start >= base.end:
+                    fill_ceiling = min(fill_ceiling, piece.start)
             new_start, new_end, new_start_cut, new_end_cut = self._expand_context(
-                base.start, base.end, floor, ceiling, left_need, right_need
+                base.start, base.end, fill_floor, fill_ceiling, left_need, right_need
             )
             if new_start == base.start and new_end == base.end:
                 self._record(
                     "context_fallback_blocked",
                     pass_index=pass_index + 1,
                     requested_seconds=remaining / self.sr,
-                    floor_ceiling_samples=[floor, ceiling],
+                    floor_ceiling_samples=[fill_floor, fill_ceiling],
                 )
                 break
             old_base = [base.start, base.end]
@@ -950,29 +1007,34 @@ class WindowPlanner:
                 cut_methods=[new_start_cut, new_end_cut],
             )
             solos, base_voice = base_evidence(base)
-            prefix, suffix, prefix_speaker, suffix_speaker, total_voice = choose_padding(
-                base, base_voice
-            )
+            total_voice = dict(base_voice)
+            for piece in (*prefix, *suffix):
+                total_voice[piece.speaker] += self._piece_voice_samples(piece)
             self._record(
-                "reselect_clean_padding",
+                "preserve_clean_padding",
                 pass_index=pass_index + 1,
                 prefix_speaker=None if prefix_speaker is None else str(prefix_speaker),
                 suffix_speaker=None if suffix_speaker is None else str(suffix_speaker),
                 prefix_source_samples=[[p.start, p.end] for p in prefix],
                 suffix_source_samples=[[p.start, p.end] for p in suffix],
-                prefix_seconds=self._sequence_added_samples(prefix) / self.sr,
-                suffix_seconds=self._sequence_added_samples(suffix) / self.sr,
+                prefix_seconds=self._sequence_added_samples(prefix, core_lo - base.start) / self.sr,
+                suffix_seconds=self._sequence_added_samples(suffix, base.end - core_hi) / self.sr,
             )
 
         result = self._assemble(
             prefix, base, suffix, speakers, core_lo, core_hi, solos
         )
+        if len(result.audio) > self.target:
+            raise ValueError("assembled window exceeds 15-second model limit")
+        if not np.array_equal(result.audio[slice(*result.core)],
+                              self.waveform[core_lo:core_hi].astype(np.float32)):
+            raise ValueError("assembly changed overlap samples")
         final_voice_seconds = {s: total_voice[s] / self.sr for s in speakers}
         min_voice = min(total_voice.values()) if total_voice else 0
         max_voice = max(total_voice.values()) if total_voice else 0
         ratio = max_voice / max(1, min_voice) if max_voice else 1.0
-        prefix_added = self._sequence_added_samples(prefix)
-        suffix_added = self._sequence_added_samples(suffix)
+        prefix_added = self._sequence_added_samples(prefix, core_lo - base.start)
+        suffix_added = self._sequence_added_samples(suffix, base.end - core_hi)
         left_context = max(0, core_lo - base.start)
         right_context = max(0, base.end - core_hi)
         mandatory_context_preserved = (
@@ -1024,6 +1086,7 @@ class WindowPlanner:
             "core_expanded": base.start < timestamp_lo or base.end > timestamp_hi,
             "full_overlap": timestamp_lo == core_lo and timestamp_hi == core_hi,
             "target_is_soft": False,
+            "fill_missing_padding_with_context": fill_context,
             "prefix_speaker": None if prefix_speaker is None else str(prefix_speaker),
             "suffix_speaker": None if suffix_speaker is None else str(suffix_speaker),
             "pad_seconds": {
