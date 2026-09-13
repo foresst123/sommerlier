@@ -181,7 +181,7 @@
                     "clustering_method": "VBxClustering",
                     "min_speakers": 1,
                     "max_speakers": 10,
-                    "ahc_threshold": 0.5
+                    "ahc_threshold": 0.4
                 },
                 "bss": {
                     "qc_sim_threshold": 0.2,
@@ -189,7 +189,6 @@
                     "enrollment_memory": false,
                     "separator": "sidon"
                 },
-
                 "bs_roformer": {
                     "model": "model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt",
                     "chunk_duration": 600,
