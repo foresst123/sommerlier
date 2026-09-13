@@ -8,14 +8,14 @@ which is *blind*: it is never told who is in the mixture, so the tracks come
 back in whatever order it chose. Everything else in this module exists because
 of that -- ECAPA embeds each track, scores it against the enrollments mined for
 each speaker, and assigns them; `_repair_chunk_swaps` catches the separator
-changing its mind about channel order mid-file; `qc_sim` and the not-A test
-gate the result when the assignment is not confident.
+changing its mind about channel order mid-file. Similarity now reports
+confidence rather than rejecting audio that is otherwise usable.
 
 USEF-TFGridNet used to sit behind the same interface and is gone. It was
 target-conditioned, returned its tracks already ordered, and skipped the
 assignment entirely -- and while it was there the shared constants drifted to
 suit it, which left Sidon running on a 2s window with no solo audio to score
-against. The `ordered` flag it set survives on the base backend for a future
+against. The `ordered` flag survives on the base backend for a future
 conditioned model, but nothing sets it now.
 
 Sidon is also generative, which is a property of the corpus and not of this
@@ -74,9 +74,9 @@ class BssSeparator:
     """Blind source separation, then ECAPA speaker assignment.
 
     The backend named in the profile splits the mixture; ECAPA-TDNN decides
-    which of the two tracks belongs to which speaker and how much to trust
-    that decision. A target-conditioned backend short-circuits the second half
-    by declaring `ordered = True`.
+    which of the two tracks belongs to which speaker. If only one identity can
+    be scored, its track is selected and the remaining label goes to the other
+    track. A target-conditioned backend declares `ordered = True`.
     """
     
     def __init__(self, device: torch.device, process=None, checkpoint_path: str = None,
@@ -192,9 +192,16 @@ class BssSeparator:
                 # Normalize each clip before averaging: raw ECAPA embeddings have
                 # length-dependent norms, so the longest clip would otherwise
                 # dominate the centroid.
-                enroll_embeddings.append(
-                    F.normalize(self._get_embedding(e, sample_rate), p=2, dim=0)
-                )
+                try:
+                    enroll_embeddings.append(
+                        F.normalize(self._get_embedding(e, sample_rate), p=2, dim=0)
+                    )
+                except Exception as exc:
+                    print(
+                        f"[TSE] Warning: enrollment for {target_id} is not "
+                        f"embeddable ({type(exc).__name__}: {exc})",
+                        file=sys.stderr,
+                    )
                 
         if not enroll_embeddings:
             print(f"[TSE] Warning: No valid enrollment audios provided for target {target_id}")
@@ -415,23 +422,39 @@ class BssSeparator:
                 return None
             return [(int(a * scale), int(b * scale)) for a, b in spans]
 
-        span_A = _rescale(probe_A) or [(0, len(track_1_np))]
-        span_B = _rescale(probe_B) or [(0, len(track_1_np))]
+        span_A = _rescale(probe_A)
+        span_B = _rescale(probe_B)
+        full_span = [(0, len(track_1_np))]
+        score_sources = {}
 
-        def _score(track_np, spans, target_embed):
-            probe = self._gather_probe(track_np, spans, target_sr)
-            if probe is None:
-                return None
-            emb = F.normalize(self._get_embedding(probe, target_sr), p=2, dim=0)
-            return float(torch.dot(target_embed, emb))
+        def _score(track_np, spans, target_embed, key):
+            attempts = []
+            if spans:
+                attempts.append((spans, "clean_probe"))
+            attempts.append((full_span, "full_context"))
+            for candidate_spans, source in attempts:
+                probe = self._gather_probe(track_np, candidate_spans, target_sr)
+                if probe is None:
+                    continue
+                try:
+                    emb = F.normalize(
+                        self._get_embedding(probe, target_sr), p=2, dim=0
+                    )
+                except Exception:
+                    continue
+                score_sources[key] = source
+                return float(torch.dot(target_embed, emb))
+            score_sources[key] = "unscorable"
+            return None
 
         # Chỉ chấm điểm nếu có embedding
-        s_1A = _score(track_1_np, span_A, embed_A) if embed_A is not None else None
-        s_2A = _score(track_2_np, span_A, embed_A) if embed_A is not None else None
-        s_1B = _score(track_1_np, span_B, embed_B) if embed_B is not None else None
-        s_2B = _score(track_2_np, span_B, embed_B) if embed_B is not None else None
+        s_1A = _score(track_1_np, span_A, embed_A, "track1_A") if embed_A is not None else None
+        s_2A = _score(track_2_np, span_A, embed_A, "track2_A") if embed_A is not None else None
+        s_1B = _score(track_1_np, span_B, embed_B, "track1_B") if embed_B is not None else None
+        s_2B = _score(track_2_np, span_B, embed_B, "track2_B") if embed_B is not None else None
 
         if getattr(self.backend, "ordered", False):
+            assignment_mode = "backend_ordered"
             out_A_tensor, out_B_tensor = track_1_tensor, track_2_tensor
             out_A_np, out_B_np = track_1_np, track_2_np
             sim_A, sim_B = s_1A, s_2B
@@ -439,6 +462,7 @@ class BssSeparator:
             # ─── LOGIC GÁN LOẠI TRỪ ───
             # Trường hợp 1: Có cả 2 mẫu -> So sánh điểm bình thường
             if embed_A is not None and embed_B is not None:
+                assignment_mode = "dual_ecapa"
                 def _n(x): return -1.0 if x is None else x
                 if (_n(s_1A) + _n(s_2B)) >= (_n(s_2A) + _n(s_1B)):
                     out_A_tensor, out_B_tensor = track_1_tensor, track_2_tensor
@@ -451,6 +475,7 @@ class BssSeparator:
 
             # Trường hợp 2: Chỉ có mẫu A (Không có B) -> Dùng A chọn track, track còn lại nhường B
             elif embed_A is not None:
+                assignment_mode = "speaker_A_ecapa_complement_B"
                 s_1A_val = s_1A if s_1A is not None else -1.0
                 s_2A_val = s_2A if s_2A is not None else -1.0
                 if s_1A_val >= s_2A_val:
@@ -464,6 +489,7 @@ class BssSeparator:
 
             # Trường hợp 3: Chỉ có mẫu B (Không có A) -> Dùng B chọn track, track còn lại nhường A
             elif embed_B is not None:
+                assignment_mode = "speaker_B_ecapa_complement_A"
                 s_1B_val = s_1B if s_1B is not None else -1.0
                 s_2B_val = s_2B if s_2B is not None else -1.0
                 if s_1B_val >= s_2B_val:
@@ -477,12 +503,19 @@ class BssSeparator:
 
             # Trường hợp 4: Cả 2 đều không có mẫu -> Gán mặc định
             else:
+                assignment_mode = "deterministic_no_enrollment"
                 out_A_tensor, out_B_tensor = track_1_tensor, track_2_tensor
                 out_A_np, out_B_np = track_1_np, track_2_np
                 sim_A, sim_B = None, None
 
         # ─── ĐÁNH GIÁ NOT-A AN TOÀN ───
-        diag = {"anchor_self": None, "anchor_other": None, "other_rms": None}
+        diag = {
+            "anchor_self": None,
+            "anchor_other": None,
+            "other_rms": None,
+            "assignment_mode": assignment_mode,
+            "score_sources": score_sources,
+        }
         if core_range is not None and (embed_A is not None or embed_B is not None):
             c0, c1 = int(core_range[0] * scale), int(core_range[1] * scale)
             c0, c1 = max(0, c0), min(len(out_A_np), c1)

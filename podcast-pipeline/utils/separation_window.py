@@ -9,7 +9,7 @@ from itertools import combinations
 
 import numpy as np
 
-POLICY_VERSION = "priority-balanced-15s-v7"
+POLICY_VERSION = "overlap-context-padding-v8"
 
 
 def clean_segments(segments):
@@ -211,7 +211,7 @@ class Window:
 
 
 class WindowPlanner:
-    """Tìm base/support cho cửa sổ <=15s; base rộng 3-10s và core cuối ở 5-8s."""
+    """Dựng window theo thứ tự overlap, context liên tục, rồi clean padding."""
 
     def __init__(self, segments, pairs, waveform, sr, music_map=None, seams=(), vad=None, context_seconds=2.0, search_seconds=400.0):
         self.segments, self.pairs = segments, pairs
@@ -223,36 +223,9 @@ class WindowPlanner:
         self.target = round(15.0 * sr)
         self.fade = round(0.020 * sr)
         self.minimum = round(1.5 * sr)
-        # How far the base may start before the core. The floor was 3.0s, which
-        # combined with the 5-8s anchor to force every window's left context to
-        # 5-8s: with no prefix piece the core's position in the window just is
-        # its position in the base, so satisfying the anchor meant starting the
-        # base that far back. The right side then got whatever the 15s budget
-        # had left, which measured 1.39s on average against 5.58s on the left.
-        # At 1.5s the base can sit close to the core and a prefix support piece
-        # carries the core out to the anchor instead.
-        # base occupies window seconds 3-10 (7s budget).
-        # base_core_min: minimum left context before core inside base.
-        # At 1.5s this is the normal floor; the edge-case logic in build()
-        # may go as low as BASE_CORE_EDGE_MIN when the core sits near the
-        # host boundary and there is no room on that side.
+        # 15s và vị trí core 5-8s là mục tiêu mềm. Full segment envelope có
+        # quyền vượt 15s; padding bị bỏ trước khi context bắt buộc bị ảnh hưởng.
         self.base_core_min = round(1.5 * sr)
-        self.base_core_max = round(10.0 * sr)
-        # Absolute minimum base length (3s). Below this the separator has
-        # too little host context to anchor its estimate.
-        self.base_min_total = round(3.0 * sr)
-        # When the core span is shorter than this, expand ±short_core_pad
-        # on each side before searching for base cuts, so Sidon sees enough
-        # audio around the overlap itself.
-        # Only truly micro overlaps (boundary jitter, 19-60ms from the old
-        # VAD bug) need the pad. Real backchannels start at 0.24s; anything
-        # above 0.2s is genuine speech and Sidon can anchor on it without
-        # extra padding.
-        self.short_core_threshold = round(0.2 * sr)
-        self.short_core_pad = round(2.0 * sr)
-        # The base is budgeted roughly window seconds 3-10; past that, extra
-        # host is not worth having.
-        self.base_target = round(7.0 * sr)
         self.final_core_min = round(5.0 * sr)
         self.final_core_max = round(8.0 * sr)
         self.cuts = AcousticCuts(waveform, sr, vad)
@@ -291,7 +264,9 @@ class WindowPlanner:
 
             for start, end in spans:
                 lo, hi = max(0, int(start * self.sr)), min(len(self.waveform), int(end * self.sr))
-                limits = [lo] + [s for s in self.seams if lo < s < hi] + [hi]
+                # Recording seams are not speech boundaries. Keeping one
+                # continuous interval lets a clean support piece cross a seam.
+                limits = [lo, hi]
 
                 for a, b in zip(limits, limits[1:]):
                     cuts, voiced, _ = self.cuts.analyse(a, b)
@@ -368,12 +343,18 @@ class WindowPlanner:
                 buckets[bucket] = (rank, seq)
         return [item[1] for item in buckets.values()]
 
-    def _sequences(self, speaker, centre, minimum, maximum, base):
+    def _sequences(self, speaker, centre, minimum, maximum, base,
+                   floor=0, ceiling=None):
         """Ưu tiên support nguyên bản vừa budget; chỉ khi không có mới trim support dài."""
         if maximum < minimum or maximum < 0:
             return []
 
-        available = [p for p in self._support(speaker, centre) if p.end <= base.start or p.start >= base.end]
+        ceiling = len(self.waveform) if ceiling is None else ceiling
+        available = [
+            p for p in self._support(speaker, centre)
+            if floor <= p.start and p.end <= ceiling
+            and (p.end <= base.start or p.start >= base.end)
+        ]
         empty = [()] if minimum <= 0 else []
         native = []
 
@@ -469,12 +450,8 @@ class WindowPlanner:
             return 0
         return sum(p.end - p.start for p in pieces) - self.fade * (len(pieces) - 1)
 
-    def _safe_cut_near(self, desired, lo, hi, side, core_lo, core_hi):
-        """Tìm acoustic cut gần desired; timestamp chỉ là fallback.
-
-        Base được phép nới nhẹ ra ngoài timestamp để tránh cắt cụt, nhưng tuyệt
-        đối không vượt floor/ceiling do speaker thứ ba tạo ra.
-        """
+    def _safe_cut_outward(self, desired, lo, hi, side):
+        """Nới timestamp ra acoustic cut gần nhất, tuyệt đối không cắt vào trong."""
         if hi <= lo:
             return desired, "timestamp_bound"
 
@@ -484,9 +461,9 @@ class WindowPlanner:
             # Hai đầu do analyse() tự chèn không phải acoustic evidence thật.
             if kind == "segment":
                 continue
-            if side == "left" and point <= core_lo:
+            if side == "left" and point <= desired:
                 candidates.append((point, kind))
-            elif side == "right" and point >= core_hi:
+            elif side == "right" and point >= desired:
                 candidates.append((point, kind))
 
         if not candidates:
@@ -495,24 +472,49 @@ class WindowPlanner:
         point, kind = min(candidates, key=lambda item: abs(item[0] - desired))
         return point, kind
 
+    def _expand_context(self, start, end, floor, ceiling, left_need, right_need):
+        """Dùng context liên tục bù phần clean pad còn thiếu trong soft budget."""
+        room = max(0, self.target - (end - start))
+        if room <= 0:
+            return start, end, "none", "none"
+
+        left_take = min(max(0, int(left_need)), max(0, start - floor), room)
+        room -= left_take
+        right_take = min(max(0, int(right_need)), max(0, ceiling - end), room)
+        room -= right_take
+
+        # Nếu một phía bị file/SP3 chặn, dồn budget sang phía còn lại.
+        if room > 0:
+            extra_left = min(max(0, start - floor - left_take), room)
+            left_take += extra_left
+            room -= extra_left
+        if room > 0:
+            extra_right = min(max(0, ceiling - end - right_take), room)
+            right_take += extra_right
+
+        desired_start = start - left_take
+        desired_end = end + right_take
+        radius = max(self.context, round(0.5 * self.sr))
+        new_start, start_cut = self._safe_cut_outward(
+            desired_start, max(floor, desired_start - radius), desired_start, "left"
+        )
+        new_end, end_cut = self._safe_cut_outward(
+            desired_end, desired_end, min(ceiling, desired_end + radius), "right"
+        )
+
+        # Context expansion only fills the remaining 15s soft budget. The
+        # mandatory timestamp envelope may exceed it, but fallback expansion may not.
+        if new_end - new_start > self.target:
+            new_start, new_end = desired_start, desired_end
+            start_cut = end_cut = "timestamp_bound"
+        return new_start, new_end, start_cut, end_cut
+
     def build(self, group):
-        """Dựng cửa sổ <=15s theo thứ tự ưu tiên:
-
-        1) overlap core: không bao giờ cắt;
-        2) context thật theo timestamp của hai segment;
-        3) pad/support sạch để cân bằng hai speaker và đưa core về khoảng 5-8s;
-        4) phần mở rộng ngoài timestamp chỉ dùng để tránh cửa sổ quá ngắn/cắt cụt.
-
-        Speaker thứ ba là hard boundary duy nhất của phần base. Nếu speaker thứ
-        ba chồng trực tiếp vào overlap core thì window bị loại.
-        """
-        self.reason, self.detail = "no_window", "no_safe_layout"
+        """Dựng best-effort window; chỉ speaker thứ ba trong core mới chặn."""
+        self.reason, self.detail = "no_window", "invalid_overlap_group"
         if not group:
             return None
 
-        # ------------------------------------------------------------------
-        # 1. Xác định đúng hai speaker và overlap core bắt buộc phải giữ nguyên.
-        # ------------------------------------------------------------------
         first = min(group, key=lambda p: (p["overlap_start"], p["overlap_end"]))
         speaker_a = first["seg1"]["speaker"]
         speaker_b = first["seg2"]["speaker"]
@@ -522,279 +524,148 @@ class WindowPlanner:
 
         speakers = tuple(sorted((speaker_a, speaker_b), key=lambda value: str(value)))
         target_set = frozenset(speakers)
-
-        # Một group chỉ được chứa overlap của cùng một cặp speaker.
         for pair in group:
             pair_set = frozenset((pair["seg1"]["speaker"], pair["seg2"]["speaker"]))
             if pair_set != target_set:
                 self.detail = "mixed_speaker_pairs"
                 return None
 
-        raw_overlap_lo = min(float(p["overlap_start"]) for p in group)
-        raw_overlap_hi = max(float(p["overlap_end"]) for p in group)
         n_samples = len(self.waveform)
-        core_lo = max(0, int(np.floor(raw_overlap_lo * self.sr)))
-        core_hi = min(n_samples, int(np.ceil(raw_overlap_hi * self.sr)))
-
+        core_lo = max(0, int(np.floor(min(p["overlap_start"] for p in group) * self.sr)))
+        core_hi = min(n_samples, int(np.ceil(max(p["overlap_end"] for p in group) * self.sr)))
         if core_hi <= core_lo:
             self.detail = "overlap_shorter_than_one_sample"
-            return None
-        if core_hi - core_lo > self.target:
-            self.detail = "overlap_core_exceeds_15s"
             return None
 
         seg_starts = [float(p[side]["start"]) for p in group for side in ("seg1", "seg2")]
         seg_ends = [float(p[side]["end"]) for p in group for side in ("seg1", "seg2")]
         seg_indices = sorted({str(p[side]["index"]) for p in group for side in ("seg1", "seg2")})
-
         timestamp_lo_raw = max(0, int(np.floor(min(seg_starts) * self.sr)))
         timestamp_hi_raw = min(n_samples, int(np.ceil(max(seg_ends) * self.sr)))
 
-        # ------------------------------------------------------------------
-        # 2. Speaker thứ ba tạo floor / ceiling. Không dùng seam làm hard bound.
-        # ------------------------------------------------------------------
+        # SP3 là hard boundary duy nhất. Seam và overlap khác của A/B không chặn.
         floor, ceiling = 0, n_samples
         third_speaker_bounds = []
         for speaker, ranges in self.by_speaker.items():
             if speaker in target_set:
                 continue
             for a, b in ranges:
-                # Không thể dựng cửa sổ hai người sạch nếu người thứ ba nằm ngay core.
                 if a < core_hi and b > core_lo:
+                    self.reason = "multi_speaker"
                     self.detail = f"third_speaker_in_core:{speaker}"
                     return None
-                if b <= core_lo:
-                    if b > floor:
-                        floor = b
-                        third_speaker_bounds.append(("left", str(speaker), a, b))
-                elif a >= core_hi:
-                    if a < ceiling:
-                        ceiling = a
-                        third_speaker_bounds.append(("right", str(speaker), a, b))
+                if b <= core_lo and b > floor:
+                    floor = b
+                    third_speaker_bounds.append(("left", str(speaker), a, b))
+                elif a >= core_hi and a < ceiling:
+                    ceiling = a
+                    third_speaker_bounds.append(("right", str(speaker), a, b))
 
         timestamp_lo = max(floor, timestamp_lo_raw)
         timestamp_hi = min(ceiling, timestamp_hi_raw)
-
         if timestamp_lo > core_lo or timestamp_hi < core_hi:
+            self.reason = "multi_speaker"
             self.detail = "third_speaker_clips_core_context"
             return None
 
-        # Full-overlap: không có solo timestamp context ở hai bên. Theo policy,
-        # giữ nguyên toàn bộ overlap/timestamp và không ép phải có pad.
-        edge_eps = round(0.05 * self.sr)
-        full_overlap = (
-            core_lo - timestamp_lo <= edge_eps
-            and timestamp_hi - core_hi <= edge_eps
+        # Base context bắt buộc là toàn bộ envelope start->end của các segment
+        # tham gia cluster. Chỉ nới ra ngoài tới pause/word gap, không snap vào
+        # trong và không rút envelope để dành chỗ cho padding.
+        cut_radius = max(self.context, round(0.5 * self.sr))
+        base_start, start_cut = self._safe_cut_outward(
+            timestamp_lo,
+            max(floor, timestamp_lo - cut_radius),
+            timestamp_lo,
+            "left",
         )
-
-        # ------------------------------------------------------------------
-        # 3. Chọn phần timestamp context của base.
-        #    Base thường ~7s để còn budget cho pad, nhưng overlap luôn thắng.
-        # ------------------------------------------------------------------
-        core_len = core_hi - core_lo
-        left_available = max(0, core_lo - timestamp_lo)
-        right_available = max(0, timestamp_hi - core_hi)
-        timestamp_len = timestamp_hi - timestamp_lo
-
-        if timestamp_len <= 0:
-            self.detail = "empty_timestamp_union"
-            return None
-
-        if full_overlap:
-            desired_lo, desired_hi = timestamp_lo, timestamp_hi
-        else:
-            min_left = min(left_available, self.base_core_min)
-            min_right = min(right_available, self.base_core_min)
-
-            # Giữ ít nhất context gần core nếu có; base_target=7s là soft target.
-            desired_len = max(
-                core_len + min_left + min_right,
-                min(self.base_target, timestamp_len),
-            )
-            desired_len = min(timestamp_len, self.target, desired_len)
-
-            context_budget = max(0, desired_len - core_len)
-
-            # Chia context hai bên gần cân đối, rồi dồn phần thừa sang bên còn chỗ.
-            left_take = min(left_available, context_budget // 2)
-            right_take = min(right_available, context_budget - left_take)
-            remaining = context_budget - left_take - right_take
-            if remaining > 0:
-                add_left = min(left_available - left_take, remaining)
-                left_take += add_left
-                remaining -= add_left
-            if remaining > 0:
-                add_right = min(right_available - right_take, remaining)
-                right_take += add_right
-                remaining -= add_right
-
-            # Nếu chia đôi làm một bên hụt minimum context, chuyển budget từ bên kia.
-            if left_take < min_left:
-                need = min_left - left_take
-                give = min(need, max(0, right_take - min_right))
-                left_take += give
-                right_take -= give
-            if right_take < min_right:
-                need = min_right - right_take
-                give = min(need, max(0, left_take - min_left))
-                right_take += give
-                left_take -= give
-
-            desired_lo = core_lo - left_take
-            desired_hi = core_hi + right_take
-
-            # Nếu timestamp thật quá ngắn (<3s), mới cho phép mở rộng ra ngoài
-            # timestamp. Đây là ưu tiên thấp hơn pad/context và chỉ bị chặn bởi
-            # speaker thứ ba hoặc biên file.
-            current_len = desired_hi - desired_lo
-            if current_len < self.base_min_total:
-                need = min(self.base_min_total - current_len,
-                           self.target - current_len)
-                left_room = max(0, desired_lo - floor)
-                right_room = max(0, ceiling - desired_hi)
-
-                add_left = min(left_room, need // 2)
-                add_right = min(right_room, need - add_left)
-                remaining = need - add_left - add_right
-                if remaining > 0:
-                    extra = min(left_room - add_left, remaining)
-                    add_left += extra
-                    remaining -= extra
-                if remaining > 0:
-                    extra = min(right_room - add_right, remaining)
-                    add_right += extra
-                    remaining -= extra
-
-                desired_lo -= add_left
-                desired_hi += add_right
-
-        if desired_hi <= desired_lo or not (desired_lo <= core_lo < core_hi <= desired_hi):
-            self.detail = "invalid_base_before_cut"
-            return None
-
-        # ------------------------------------------------------------------
-        # 4. Nới/cắt nhẹ quanh hai mép để tránh cắt giữa từ. Không bị seam chặn.
-        # ------------------------------------------------------------------
-        if full_overlap:
-            # Full-overlap là ngoại lệ: giữ đúng union timestamp, không nới mép
-            # và cũng không cần pad chỉ để đạt anchor 5-8s.
-            best_a, best_b = desired_lo, desired_hi
+        base_end, end_cut = self._safe_cut_outward(
+            timestamp_hi,
+            timestamp_hi,
+            min(ceiling, timestamp_hi + cut_radius),
+            "right",
+        )
+        if not (floor <= base_start <= core_lo < core_hi <= base_end <= ceiling):
+            base_start, base_end = timestamp_lo, timestamp_hi
             start_cut = end_cut = "timestamp_bound"
-        else:
-            cut_radius = round(0.5 * self.sr)
-            left_search_lo = max(floor, desired_lo - cut_radius)
-            left_search_hi = min(core_lo, desired_lo + cut_radius)
-            right_search_lo = max(core_hi, desired_hi - cut_radius)
-            right_search_hi = min(ceiling, desired_hi + cut_radius)
 
-            best_a, start_cut = self._safe_cut_near(
-                desired_lo, left_search_lo, left_search_hi,
-                "left", core_lo, core_hi,
-            )
-            best_b, end_cut = self._safe_cut_near(
-                desired_hi, right_search_lo, right_search_hi,
-                "right", core_lo, core_hi,
+        def make_base(start, end, left_cut, right_cut):
+            return Piece(
+                start=start,
+                end=end,
+                speaker="+".join(map(str, speakers)),
+                source="+".join(seg_indices),
+                kind="base",
+                start_cut=left_cut,
+                end_cut=right_cut,
             )
 
-            # Acoustic cut chỉ là refinement. Nếu nó làm vỡ invariant hoặc vượt 15s,
-            # quay lại timestamp boundary đã tính ở trên.
-            if not (floor <= best_a <= core_lo < core_hi <= best_b <= ceiling):
-                best_a, best_b = desired_lo, desired_hi
-                start_cut = end_cut = "timestamp_bound"
-            if best_b - best_a > self.target:
-                best_a, best_b = desired_lo, desired_hi
-                start_cut = end_cut = "timestamp_bound"
+        def base_evidence(piece):
+            voice_by_speaker = {
+                s: intersect(self.by_speaker.get(s, []), piece.start, piece.end)
+                for s in speakers
+            }
+            voiced_by_speaker = {
+                s: [
+                    r
+                    for a, b in voice_by_speaker[s]
+                    for r in intersect(self.cuts.analyse(a, b)[1], a, b)
+                ]
+                for s in speakers
+            }
+            solo_ranges = {
+                s: self._voiced(self._solo(s, piece.start, piece.end))
+                for s in speakers
+            }
+            voice_samples = {
+                s: sum(y - x for x, y in intersect(
+                    voiced_by_speaker[s], piece.start, piece.end
+                ))
+                for s in speakers
+            }
+            return solo_ranges, voice_samples
 
-        if best_b <= best_a or best_b - best_a > self.target:
-            self.detail = "base_exceeds_budget"
-            return None
+        def choose_padding(piece, base_voice):
+            budget = max(0, self.target - (piece.end - piece.start))
+            if budget <= 0:
+                return (), (), None, None, dict(base_voice)
 
-        base = Piece(
-            start=best_a,
-            end=best_b,
-            speaker="+".join(map(str, speakers)),
-            source="+".join(seg_indices),
-            kind="base",
-            start_cut=start_cut,
-            end_cut=end_cut,
-        )
-
-        # Solo/voiced trong base dùng để biết speaker nào đang thiếu clean evidence.
-        voice_by_speaker = {
-            s: intersect(self.by_speaker.get(s, []), best_a, best_b)
-            for s in speakers
-        }
-        voiced_by_speaker = {
-            s: [
-                r
-                for a, b in voice_by_speaker[s]
-                for r in intersect(self.cuts.analyse(a, b)[1], a, b)
-            ]
-            for s in speakers
-        }
-        solos = {s: self._voiced(self._solo(s, best_a, best_b)) for s in speakers}
-        base_voice = {
-            s: sum(y - x for x, y in intersect(voiced_by_speaker[s], best_a, best_b))
-            for s in speakers
-        }
-
-        # ------------------------------------------------------------------
-        # 5. Full-overlap là ngoại lệ: overlap thắng, không bắt buộc pad.
-        # ------------------------------------------------------------------
-        if full_overlap:
-            result = self._assemble((), base, (), speakers, core_lo, core_hi, solos)
-            total_voice = dict(base_voice)
-            prefix, suffix = (), ()
-            prefix_speaker = suffix_speaker = None
-        else:
-            # --------------------------------------------------------------
-            # 6. Phân budget pad. Một speaker ở prefix, speaker kia ở suffix.
-            #    Thử cả hai orientation và chọn layout:
-            #      - core gần 5-8s nhất;
-            #      - clean voice A/B gần 1:1 nhất;
-            #      - tận dụng pad khi còn budget.
-            # --------------------------------------------------------------
             centre = (core_lo + core_hi) // 2
-            base_core_pos = core_lo - base.start
-            base_len = base.end - base.start
-            total_pad_budget = max(0, self.target - base_len)
-
+            base_core_pos = core_lo - piece.start
             candidates = []
             for prefix_speaker, suffix_speaker in (
                 (speakers[0], speakers[1]),
                 (speakers[1], speakers[0]),
             ):
-                # _sequences tính "added" đúng theo crossfade của prefix.
                 strict_min = max(0, self.final_core_min - base_core_pos)
-                strict_max = max(0, self.final_core_max - base_core_pos)
-                strict_max = min(strict_max, total_pad_budget)
-
-                prefix_options = []
-                if strict_min <= strict_max:
-                    prefix_options = self._sequences(
-                        prefix_speaker, centre, strict_min, strict_max, base
+                strict_max = min(
+                    max(0, self.final_core_max - base_core_pos), budget
+                )
+                prefix_options = (
+                    self._sequences(
+                        prefix_speaker, centre, strict_min, strict_max, piece,
+                        floor, ceiling,
                     )
-
-                # Không tìm được pad đặt core đúng 5-8s thì mới nới constraint.
+                    if strict_min <= strict_max else []
+                )
                 if not prefix_options:
                     prefix_options = self._sequences(
-                        prefix_speaker, centre, 0, total_pad_budget, base
-                    )
-                if not prefix_options:
-                    prefix_options = [()]
+                        prefix_speaker, centre, 0, budget, piece,
+                        floor, ceiling,
+                    ) or [()]
 
                 for prefix_seq in prefix_options:
                     prefix_added = self._sequence_added_samples(prefix_seq)
-                    remaining = max(0, total_pad_budget - prefix_added)
+                    remaining = max(0, budget - prefix_added)
                     suffix_options = self._sequences(
-                        suffix_speaker, centre, 0, remaining, base
+                        suffix_speaker, centre, 0, remaining, piece,
+                        floor, ceiling,
                     ) or [()]
-
                     for suffix_seq in suffix_options:
-                        predicted = self._window_samples(prefix_seq, base, suffix_seq)
+                        predicted = self._window_samples(
+                            prefix_seq, piece, suffix_seq
+                        )
                         if predicted > self.target:
                             continue
-
                         final_core_start = prefix_added + base_core_pos
                         if self.final_core_min <= final_core_start <= self.final_core_max:
                             anchor_penalty = 0
@@ -807,70 +678,93 @@ class WindowPlanner:
                         total_voice = dict(base_voice)
                         total_voice[prefix_speaker] += self._sequence_voice_samples(prefix_seq)
                         total_voice[suffix_speaker] += self._sequence_voice_samples(suffix_seq)
-
-                        va = total_voice[speakers[0]]
-                        vb = total_voice[speakers[1]]
-                        # Log-ratio đối xứng: 2:1 và 1:2 bị phạt như nhau.
+                        va, vb = total_voice[speakers[0]], total_voice[speakers[1]]
                         balance_penalty = abs(np.log((va + 1.0) / (vb + 1.0)))
-                        missing_pad = int(not prefix_seq) + int(not suffix_seq)
-
-                        # Anchor là hard preference; nếu có thể thì giữ đúng
-                        # một pad cho mỗi speaker, sau đó mới tối ưu gần 1:1.
                         rank = (
                             anchor_penalty,
-                            missing_pad,
+                            int(not prefix_seq) + int(not suffix_seq),
                             balance_penalty,
                             -predicted,
                         )
                         candidates.append((
-                            rank,
-                            tuple(prefix_seq),
-                            tuple(suffix_seq),
-                            prefix_speaker,
-                            suffix_speaker,
-                            total_voice,
+                            rank, tuple(prefix_seq), tuple(suffix_seq),
+                            prefix_speaker, suffix_speaker, total_voice,
                         ))
 
-            if candidates:
-                candidates.sort(key=lambda item: item[0])
-                _, prefix, suffix, prefix_speaker, suffix_speaker, total_voice = candidates[0]
-            else:
-                prefix = suffix = ()
-                prefix_speaker = suffix_speaker = None
-                total_voice = dict(base_voice)
+            if not candidates:
+                return (), (), None, None, dict(base_voice)
+            candidates.sort(key=lambda item: item[0])
+            _, prefix_seq, suffix_seq, prefix_speaker, suffix_speaker, total_voice = candidates[0]
+            return prefix_seq, suffix_seq, prefix_speaker, suffix_speaker, total_voice
 
-            result = self._assemble(prefix, base, suffix, speakers, core_lo, core_hi, solos)
+        base = make_base(base_start, base_end, start_cut, end_cut)
+        solos, base_voice = base_evidence(base)
+        prefix, suffix, prefix_speaker, suffix_speaker, total_voice = choose_padding(
+            base, base_voice
+        )
 
-        # ------------------------------------------------------------------
-        # 7. Metadata để đọc được vì sao planner chọn layout này.
-        # ------------------------------------------------------------------
-        base_width_s = (base.end - base.start) / self.sr
+        # Clean pad không bắt buộc. Nếu layout vẫn ngắn, lấy context nền liên
+        # tục để bù, ưu tiên đưa core_start tới giây 5 rồi dùng phía còn lại.
+        # Chạy tối đa hai lượt vì context mới có thể nuốt một support piece cũ.
+        for _ in range(2):
+            current = self._window_samples(prefix, base, suffix)
+            remaining = max(0, self.target - current)
+            if remaining <= 0:
+                break
+            final_core_start = (
+                self._sequence_added_samples(prefix) + core_lo - base.start
+            )
+            left_need = min(
+                remaining, max(0, self.final_core_min - final_core_start)
+            )
+            right_need = remaining - left_need
+            new_start, new_end, new_start_cut, new_end_cut = self._expand_context(
+                base.start, base.end, floor, ceiling, left_need, right_need
+            )
+            if new_start == base.start and new_end == base.end:
+                break
+            base = make_base(new_start, new_end, new_start_cut, new_end_cut)
+            solos, base_voice = base_evidence(base)
+            prefix, suffix, prefix_speaker, suffix_speaker, total_voice = choose_padding(
+                base, base_voice
+            )
+
+        result = self._assemble(
+            prefix, base, suffix, speakers, core_lo, core_hi, solos
+        )
         final_voice_seconds = {s: total_voice[s] / self.sr for s in speakers}
         min_voice = min(total_voice.values()) if total_voice else 0
         max_voice = max(total_voice.values()) if total_voice else 0
-        ratio = (max_voice / max(1, min_voice)) if max_voice else 1.0
-
+        ratio = max_voice / max(1, min_voice) if max_voice else 1.0
         prefix_added = self._sequence_added_samples(prefix)
         suffix_added = self._sequence_added_samples(suffix)
         left_context = max(0, core_lo - base.start)
         right_context = max(0, base.end - core_hi)
-        context_floor = min(self.base_core_min, max(left_available, right_available))
+        mandatory_context_preserved = (
+            base.start <= timestamp_lo_raw and base.end >= timestamp_hi_raw
+        )
 
         result.layout.update({
-            "policy": "overlap>timestamp>balanced-pad>extension",
+            "policy": "overlap>segment-envelope>outward-cut>clean-pad;missing-pad=>context",
             "policy_version": POLICY_VERSION,
             "involved_segments": seg_indices,
             "host_segment": "+".join(seg_indices),
             "host_source_samples": [base.start, base.end],
             "timestamp_source_samples": [timestamp_lo, timestamp_hi],
+            "timestamp_source_samples_raw": [timestamp_lo_raw, timestamp_hi_raw],
+            "mandatory_context_preserved": mandatory_context_preserved,
             "third_speaker_floor_ceiling": [floor, ceiling],
             "third_speaker_bounds_seen": third_speaker_bounds,
             "cut_method": [base.start_cut, base.end_cut],
-            "estimated_voice_seconds": {str(s): final_voice_seconds[s] for s in speakers},
-            "base_voice_seconds": {str(s): base_voice[s] / self.sr for s in speakers},
+            "estimated_voice_seconds": {
+                str(s): final_voice_seconds[s] for s in speakers
+            },
+            "base_voice_seconds": {
+                str(s): base_voice[s] / self.sr for s in speakers
+            },
             "ratio": ratio,
             "core_position_seconds": result.core[0] / self.sr,
-            "base_width_seconds": base_width_s,
+            "base_width_seconds": (base.end - base.start) / self.sr,
             "base_core_position_seconds": (core_lo - base.start) / self.sr,
             "context_seconds": [left_context / self.sr, right_context / self.sr],
             "context_shortfall_seconds": [
@@ -878,15 +772,17 @@ class WindowPlanner:
                 max(0.0, (self.base_core_min - right_context) / self.sr),
             ],
             "core_expanded": base.start < timestamp_lo or base.end > timestamp_hi,
-            "full_overlap": full_overlap,
+            "full_overlap": timestamp_lo == core_lo and timestamp_hi == core_hi,
+            "target_is_soft": True,
             "prefix_speaker": None if prefix_speaker is None else str(prefix_speaker),
             "suffix_speaker": None if suffix_speaker is None else str(suffix_speaker),
             "pad_seconds": {
                 "prefix": prefix_added / self.sr,
                 "suffix": suffix_added / self.sr,
             },
-            "overlaps": [[p["overlap_start"], p["overlap_end"]] for p in group],
+            "overlaps": [
+                [p["overlap_start"], p["overlap_end"]] for p in group
+            ],
         })
-
-        self.reason, self.detail = "ok", "balanced_window"
+        self.reason, self.detail = "ok", "best_effort_window"
         return result

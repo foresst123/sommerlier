@@ -25,7 +25,6 @@ _NO_MEMORY = EnrollmentMemory(enabled=False)
 # Ngữ cảnh thật quanh overlap; điểm cắt phải nằm trong vùng sạch.
 BSS_STITCH_EDGE_PAD = float(os.environ.get("BSS_STITCH_EDGE_PAD", "2.0"))
 BSS_STITCH_SEARCH = float(os.environ.get("BSS_STITCH_SEARCH", "400.0"))
-BSS_MIN_SOLO = 1.0
 
 # --- Song song hoá việc dựng cửa sổ ----------------------------------------
 # WindowPlanner.build() là CPU/numpy thuần và có thể tốn vài giây một job khi
@@ -285,11 +284,13 @@ class SeparationService:
             "thresholds": {
                 "qc_sim": BSS_QC_SIM_THRESHOLD, "not_a_margin": BSS_NOT_A_MARGIN,
                 "window_target": 15.0,
+                "window_target_soft": 15.0,
                 "support_min_seconds": 1.5,
-                "secondary_edge_margin_seconds": 1.0,
+                "secondary_edge_margin_seconds": 0.0,
                 "crossfade_seconds": 0.02,
-                "window_max": 15.0,
-                "min_solo": BSS_MIN_SOLO,
+                "window_max": None,
+                "min_solo": 0.0,
+                "only_hard_boundary": "third_speaker",
                 "enroll_budget": BSS_ENROLL_BUDGET,
                 "enroll_min_clip": BSS_ENROLL_MIN_CLIP,
                 "enroll_min_total": BSS_ENROLL_MIN_TOTAL,
@@ -356,13 +357,38 @@ class SeparationService:
                     self.logger.warning(
                         f"Speaker {spk}: only {total:.2f}s of clean audio "
                         f"(need >={BSS_ENROLL_MIN_TOTAL}s); enrollment would be unreliable, "
-                        "so every overlap involving this speaker is skipped."
+                        "window-local probes and complement assignment will be tried."
                     )
                 enrollments[spk] = []
             else:
                 enrollments[spk] = picked
 
         return enrollments
+
+    @staticmethod
+    def _window_probe_enrollment(window_audio, probes, sr):
+        """Ghép clean probes trong window thành enrollment best-effort."""
+        pieces = []
+        for start, end in probes or ():
+            start = max(0, int(start))
+            end = min(len(window_audio), int(end))
+            if end > start:
+                pieces.append(np.asarray(window_audio[start:end], dtype=np.float32))
+        if not pieces or sum(len(piece) for piece in pieces) < BSS_ENROLL_MIN_CLIP * sr:
+            return []
+
+        overlap = max(1, int(0.02 * sr))
+        joined = pieces[0].copy()
+        for piece in pieces[1:]:
+            if len(joined) >= overlap and len(piece) >= overlap:
+                ramp = np.linspace(0.0, 1.0, overlap, dtype=np.float32)
+                joined[-overlap:] = (
+                    joined[-overlap:] * (1.0 - ramp) + piece[:overlap] * ramp
+                )
+                joined = np.concatenate((joined, piece[overlap:]))
+            else:
+                joined = np.concatenate((joined, piece))
+        return [joined]
 
     @staticmethod
     def _track_has_speech(host: np.ndarray, track: np.ndarray,
@@ -765,13 +791,10 @@ class SeparationService:
         seg_by_index = {s.index: s for s in speech}
 
         self._same_speaker_pairs = []
-        # Tách hết, không lọc theo overlap_threshold. Các overlap ngắn (jitter
-        # 0.02-0.08s) vẫn được đưa vào queue; short_core_expansion trong
-        # WindowPlanner sẽ mở rộng eff_core ±2s để Sidon có đủ ngữ cảnh.
+        # Tách hết, không lọc theo overlap_threshold. WindowPlanner giữ nguyên
+        # core dù rất ngắn rồi lấy full segment envelope và context nền để bù.
         queue = list(self._group_jobs(pairs))
         below = []  # giữ để không vỡ bss_spans tracking
-        # Bỏ trước những job thiếu enrollment: build cửa sổ cho chúng chỉ để
-        # vứt đi ngay sau đó là lãng phí CPU (và với pool, cả RAM/IPC).
         buildable = []
         for spk_a, spk_b, plist in queue:
             self.stats["jobs"] += 1
@@ -779,10 +802,6 @@ class SeparationService:
             for p in plist:
                 self.overlap_durations.append(p["overlap_end"] - p["overlap_start"])
             targets = self._splice_pairs(plist)
-            if not enrollments.get(spk_a) and not enrollments.get(spk_b):
-                for sd, lo, hi in targets:
-                    self._fail(seg_by_index.get(sd["index"]), lo, hi, "no_enroll", "both_missing")
-                continue
             buildable.append((spk_a, spk_b, plist, targets))
 
         # same_speaker: hai segment cùng nhãn chồng nhau — không có gì để tách.
@@ -793,7 +812,7 @@ class SeparationService:
         by_index = {e.index: e for e in speech}
         for p in self._same_speaker_pairs:
             lo, hi = p["overlap_start"], p["overlap_end"]
-            # Mở rộng ±2s (giống short_core_expansion) để base có ngữ cảnh
+            # Same-speaker là passthrough; vùng đánh dấu vẫn có context nền.
             pad = 2.0
             lo_ext = max(0.0, lo - pad)
             hi_ext = min(total_dur, hi + pad)
@@ -814,8 +833,10 @@ class SeparationService:
                     f"[TSE] same_speaker {lo:.2f}-{hi:.2f}s: "
                     f"base extended ±{pad}s, mixture kept")
         if self.logger:
-            self.logger.info(f"[TSE] {len(pairs)} overlap pairs -> {len(queue)} separation jobs "
-                              f"({len(buildable)} with enrollment)")
+            self.logger.info(
+                f"[TSE] {len(pairs)} overlap pairs -> {len(queue)} separation jobs "
+                "(missing enrollment uses best-effort/complement assignment)"
+            )
 
         # Dựng cửa sổ song song khi file này đủ job bù chi phí dùng pool; job
         # build (CPU) không phụ thuộc lượt tách (GPU) trước nó nên chồng lấp
@@ -906,10 +927,8 @@ class SeparationService:
                 probe_a_s, probe_b_s = built.probes[spk_a], built.probes[spk_b]
                 layout = built.layout
                 self.window_layouts.append(layout)
-                # core[0] is where core_source_samples[0] lands in the window, and
-                # that is NOT job_lo: for an overlap under short_core_threshold the
-                # planner pads the core outward, so the two differ by up to the pad.
-                # Mapping window <-> source through job_lo read the window 2s early.
+                # Map through core_source_samples because clean support may be
+                # stitched before the continuous base and shift core in the window.
                 core_src_lo = layout["core_source_samples"][0]
                 win_lo = (core_src_lo - core[0]) / sr
                 win_hi = win_lo + len(window_audio) / sr
@@ -926,8 +945,28 @@ class SeparationService:
                 # Nếu bật bộ nhớ, bổ sung mẫu từ các kết quả tốt trước đó trong cùng file.
                 # Mẫu sạch khai thác ban đầu luôn ở đầu danh sách và không bị thay thế.
                 memory = getattr(self, "memory", None) or _NO_MEMORY
-                enroll_a = memory.extend(spk_a, enrollments[spk_a], sr)
-                enroll_b = memory.extend(spk_b, enrollments[spk_b], sr)
+                source_enroll_a = enrollments.get(spk_a, [])
+                source_enroll_b = enrollments.get(spk_b, [])
+                if not source_enroll_a:
+                    source_enroll_a = self._window_probe_enrollment(
+                        window_audio, probe_a_s, sr
+                    )
+                if not source_enroll_b:
+                    source_enroll_b = self._window_probe_enrollment(
+                        window_audio, probe_b_s, sr
+                    )
+                enroll_a = memory.extend(spk_a, source_enroll_a, sr)
+                enroll_b = memory.extend(spk_b, source_enroll_b, sr)
+                layout["enrollment_source"] = {
+                    str(spk_a): (
+                        "global" if enrollments.get(spk_a) else
+                        "window_probe" if source_enroll_a else "missing"
+                    ),
+                    str(spk_b): (
+                        "global" if enrollments.get(spk_b) else
+                        "window_probe" if source_enroll_b else "missing"
+                    ),
+                }
 
                 _t_sidon = _time.perf_counter()
                 if _BSS_TIMING and self.logger:
@@ -998,37 +1037,33 @@ class SeparationService:
                 for spk, track, sim in ((spk_a, track_A, sim_A), (spk_b, track_B, sim_B)):
                     memory.offer(spk, track, sim, sr)
 
-                # Đánh giá từng track độc lập; một track kém không làm mất track còn tốt.
+                # BSS model đã ánh xạ hai output theo ECAPA nếu đo được một hoặc
+                # cả hai phía. Track không đo được nhận nhãn còn lại bằng loại
+                # trừ; similarity là confidence metadata, không còn là hard gate.
+                # Hard gate lúc splice chỉ là output rỗng tại chính overlap.
                 if _BSS_TIMING and self.logger:
                     self.logger.debug(f"[TIMING] {job_lo:.2f}s: → sim threshold check (th={BSS_QC_SIM_THRESHOLD})")
-                accepted, rejected = {}, {}
+                accepted = {
+                    spk_a: (track_A, sim_A),
+                    spk_b: (track_B, sim_B),
+                }
+                assignment_warnings = {}
                 for spk, track, sim in ((spk_a, track_A, sim_A), (spk_b, track_B, sim_B)):
-                    if sim is not None:
-                        if sim >= BSS_QC_SIM_THRESHOLD:
-                            accepted[spk] = (track, sim)
-                        else:
-                            rejected[spk] = ("qc_sim", f"sim={sim:.2f} th={BSS_QC_SIM_THRESHOLD}")
-                    else:
-                        # Tạm ghi nhận là thiếu mẫu nên trượt
-                        rejected[spk] = ("no_enroll", "missing enrollment")
-
-                # Bước 2: LOGIC GÁN LOẠI TRỪ
-                # Nếu người A đỗ (có mẫu chuẩn), ép người B nhận track còn lại dù B không có mẫu
-                if spk_a in accepted and spk_b not in accepted:
-                    accepted[spk_b] = (track_B, None) # Gán track B cho spk_b, điểm sim = None
-                    rejected.pop(spk_b, None)         # Xóa khỏi danh sách trượt
-                    
-                # Ngược lại, nếu người B đỗ, ép người A nhận track còn lại
-                elif spk_b in accepted and spk_a not in accepted:
-                    accepted[spk_a] = (track_A, None) # Gán track A cho spk_a, điểm sim = None
-                    rejected.pop(spk_a, None)
-
-                if not accepted:
-                    for sd, lo, hi in targets:
-                        r, d = rejected.get(sd["speaker"], ("unscorable", "no verdict"))
-                        self._fail(seg_by_index.get(sd["index"]), lo, hi, r, d)
-                    self._dump_failed(f"{job_lo:.2f}_{spk_a}_{spk_b}", window_audio, track_A, track_B, sr)
-                    continue
+                    if sim is None:
+                        assignment_warnings[str(spk)] = "complement_or_unscorable"
+                    elif sim < BSS_QC_SIM_THRESHOLD:
+                        assignment_warnings[str(spk)] = (
+                            f"low_sim:{sim:.3f}<{BSS_QC_SIM_THRESHOLD:.3f}"
+                        )
+                layout["assignment"] = {
+                    "mode": diag.get("assignment_mode", "best_effort"),
+                    "score_sources": diag.get("score_sources", {}),
+                    "warnings": assignment_warnings,
+                    "sim": {
+                        str(spk_a): None if sim_A is None else float(sim_A),
+                        str(spk_b): None if sim_B is None else float(sim_B),
+                    },
+                }
 
                 # Ghi thông tin đầu vào, kết quả và điểm của các track đạt kiểm tra.
                 if self.logger:
@@ -1040,7 +1075,7 @@ class SeparationService:
                         f"[TSE:sep] {win_lo:.2f}-{win_hi:.2f}s ({win_hi - win_lo:.1f}s window) "
                         f"anchor={anchor} solo_a={sum(b - a for a, b in solo_a):.1f}s "
                         f"solo_b={sum(b - a for a, b in solo_b):.1f}s | accepted: {who}"
-                        + (f" | rejected: {sorted(rejected)}" if rejected else "")
+                        + (f" | warnings: {assignment_warnings}" if assignment_warnings else "")
                     )
                 if _BSS_TIMING and self.logger:
                     self.logger.debug(f"[TIMING] {job_lo:.2f}s: → dump_tracks (accepted={sorted(accepted)})")
@@ -1061,11 +1096,6 @@ class SeparationService:
                     enh = seg_by_index.get(sd["index"])
                     if enh is None:
                         continue
-                    if spk not in accepted:
-                        r, d = rejected.get(spk, ("unscorable", "no verdict"))
-                        self._fail(enh, ov_lo, ov_hi, r, d)
-                        continue
-
                     track, sim = accepted[spk]
                     src = core[0] + int(ov_lo * sr) - core_src_lo
                     dst = int(ov_lo * sr) - int(enh.start * sr)
