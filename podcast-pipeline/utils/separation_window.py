@@ -236,7 +236,12 @@ class WindowPlanner:
         self.clean = clean_segments(segments)
         self.reason = "no_window"
         self.detail = ""
+        self.actions = []
         self._support_cache = {}
+
+    def _record(self, action, **details):
+        self.actions.append({"step": len(self.actions) + 1,
+                             "action": action, **details})
 
     def _solo(self, speaker, lo, hi):
         others = [r for s, rs in self.by_speaker.items() if s != speaker for r in rs]
@@ -512,7 +517,9 @@ class WindowPlanner:
     def build(self, group):
         """Dựng best-effort window; chỉ speaker thứ ba trong core mới chặn."""
         self.reason, self.detail = "no_window", "invalid_overlap_group"
+        self.actions = []
         if not group:
+            self._record("reject", reason=self.detail)
             return None
 
         first = min(group, key=lambda p: (p["overlap_start"], p["overlap_end"]))
@@ -520,6 +527,7 @@ class WindowPlanner:
         speaker_b = first["seg2"]["speaker"]
         if speaker_a == speaker_b:
             self.detail = "same_speaker_overlap"
+            self._record("reject", reason=self.detail, speaker=str(speaker_a))
             return None
 
         speakers = tuple(sorted((speaker_a, speaker_b), key=lambda value: str(value)))
@@ -528,6 +536,7 @@ class WindowPlanner:
             pair_set = frozenset((pair["seg1"]["speaker"], pair["seg2"]["speaker"]))
             if pair_set != target_set:
                 self.detail = "mixed_speaker_pairs"
+                self._record("reject", reason=self.detail)
                 return None
 
         n_samples = len(self.waveform)
@@ -535,13 +544,28 @@ class WindowPlanner:
         core_hi = min(n_samples, int(np.ceil(max(p["overlap_end"] for p in group) * self.sr)))
         if core_hi <= core_lo:
             self.detail = "overlap_shorter_than_one_sample"
+            self._record("reject", reason=self.detail)
             return None
+
+        self._record(
+            "keep_overlap_core",
+            speakers=[str(s) for s in speakers],
+            pair_count=len(group),
+            source_samples=[core_lo, core_hi],
+            source_seconds=[core_lo / self.sr, core_hi / self.sr],
+        )
 
         seg_starts = [float(p[side]["start"]) for p in group for side in ("seg1", "seg2")]
         seg_ends = [float(p[side]["end"]) for p in group for side in ("seg1", "seg2")]
         seg_indices = sorted({str(p[side]["index"]) for p in group for side in ("seg1", "seg2")})
         timestamp_lo_raw = max(0, int(np.floor(min(seg_starts) * self.sr)))
         timestamp_hi_raw = min(n_samples, int(np.ceil(max(seg_ends) * self.sr)))
+        self._record(
+            "take_full_segment_envelope",
+            segment_indices=seg_indices,
+            source_samples=[timestamp_lo_raw, timestamp_hi_raw],
+            source_seconds=[timestamp_lo_raw / self.sr, timestamp_hi_raw / self.sr],
+        )
 
         # SP3 là hard boundary duy nhất. Seam và overlap khác của A/B không chặn.
         floor, ceiling = 0, n_samples
@@ -553,6 +577,12 @@ class WindowPlanner:
                 if a < core_hi and b > core_lo:
                     self.reason = "multi_speaker"
                     self.detail = f"third_speaker_in_core:{speaker}"
+                    self._record(
+                        "reject",
+                        reason=self.detail,
+                        third_speaker=str(speaker),
+                        blocker_samples=[a, b],
+                    )
                     return None
                 if b <= core_lo and b > floor:
                     floor = b
@@ -563,9 +593,20 @@ class WindowPlanner:
 
         timestamp_lo = max(floor, timestamp_lo_raw)
         timestamp_hi = min(ceiling, timestamp_hi_raw)
+        self._record(
+            "apply_third_speaker_boundaries",
+            floor_ceiling_samples=[floor, ceiling],
+            envelope_before=[timestamp_lo_raw, timestamp_hi_raw],
+            envelope_after=[timestamp_lo, timestamp_hi],
+            context_reduced=(
+                timestamp_lo != timestamp_lo_raw
+                or timestamp_hi != timestamp_hi_raw
+            ),
+        )
         if timestamp_lo > core_lo or timestamp_hi < core_hi:
             self.reason = "multi_speaker"
             self.detail = "third_speaker_clips_core_context"
+            self._record("reject", reason=self.detail)
             return None
 
         # Base context bắt buộc là toàn bộ envelope start->end của các segment
@@ -587,6 +628,14 @@ class WindowPlanner:
         if not (floor <= base_start <= core_lo < core_hi <= base_end <= ceiling):
             base_start, base_end = timestamp_lo, timestamp_hi
             start_cut = end_cut = "timestamp_bound"
+        self._record(
+            "snap_context_outward",
+            envelope_samples=[timestamp_lo, timestamp_hi],
+            base_samples=[base_start, base_end],
+            cut_methods=[start_cut, end_cut],
+            left_added_seconds=(timestamp_lo - base_start) / self.sr,
+            right_added_seconds=(base_end - timestamp_hi) / self.sr,
+        )
 
         def make_base(start, end, left_cut, right_cut):
             return Piece(
@@ -702,11 +751,27 @@ class WindowPlanner:
         prefix, suffix, prefix_speaker, suffix_speaker, total_voice = choose_padding(
             base, base_voice
         )
+        self._record(
+            "select_clean_padding",
+            phase="initial",
+            base_seconds=(base.end - base.start) / self.sr,
+            soft_target_seconds=self.target / self.sr,
+            available_budget_seconds=max(
+                0.0, (self.target - (base.end - base.start)) / self.sr
+            ),
+            padding_dropped_for_context=(base.end - base.start) >= self.target,
+            prefix_speaker=None if prefix_speaker is None else str(prefix_speaker),
+            suffix_speaker=None if suffix_speaker is None else str(suffix_speaker),
+            prefix_source_samples=[[p.start, p.end] for p in prefix],
+            suffix_source_samples=[[p.start, p.end] for p in suffix],
+            prefix_seconds=self._sequence_added_samples(prefix) / self.sr,
+            suffix_seconds=self._sequence_added_samples(suffix) / self.sr,
+        )
 
         # Clean pad không bắt buộc. Nếu layout vẫn ngắn, lấy context nền liên
         # tục để bù, ưu tiên đưa core_start tới giây 5 rồi dùng phía còn lại.
         # Chạy tối đa hai lượt vì context mới có thể nuốt một support piece cũ.
-        for _ in range(2):
+        for pass_index in range(2):
             current = self._window_samples(prefix, base, suffix)
             remaining = max(0, self.target - current)
             if remaining <= 0:
@@ -722,11 +787,37 @@ class WindowPlanner:
                 base.start, base.end, floor, ceiling, left_need, right_need
             )
             if new_start == base.start and new_end == base.end:
+                self._record(
+                    "context_fallback_blocked",
+                    pass_index=pass_index + 1,
+                    requested_seconds=remaining / self.sr,
+                    floor_ceiling_samples=[floor, ceiling],
+                )
                 break
+            old_base = [base.start, base.end]
             base = make_base(new_start, new_end, new_start_cut, new_end_cut)
+            self._record(
+                "expand_background_context",
+                pass_index=pass_index + 1,
+                requested_left_seconds=left_need / self.sr,
+                requested_right_seconds=right_need / self.sr,
+                base_before=old_base,
+                base_after=[new_start, new_end],
+                cut_methods=[new_start_cut, new_end_cut],
+            )
             solos, base_voice = base_evidence(base)
             prefix, suffix, prefix_speaker, suffix_speaker, total_voice = choose_padding(
                 base, base_voice
+            )
+            self._record(
+                "reselect_clean_padding",
+                pass_index=pass_index + 1,
+                prefix_speaker=None if prefix_speaker is None else str(prefix_speaker),
+                suffix_speaker=None if suffix_speaker is None else str(suffix_speaker),
+                prefix_source_samples=[[p.start, p.end] for p in prefix],
+                suffix_source_samples=[[p.start, p.end] for p in suffix],
+                prefix_seconds=self._sequence_added_samples(prefix) / self.sr,
+                suffix_seconds=self._sequence_added_samples(suffix) / self.sr,
             )
 
         result = self._assemble(
@@ -742,6 +833,18 @@ class WindowPlanner:
         right_context = max(0, base.end - core_hi)
         mandatory_context_preserved = (
             base.start <= timestamp_lo_raw and base.end >= timestamp_hi_raw
+        )
+        self._record(
+            "finalize_window",
+            duration_seconds=len(result.audio) / self.sr,
+            target_seconds=self.target / self.sr,
+            target_exceeded=len(result.audio) > self.target,
+            core_window_samples=list(result.core),
+            base_source_samples=[base.start, base.end],
+            mandatory_context_preserved=mandatory_context_preserved,
+            context_was_never_reduced_for_budget=True,
+            prefix_pad_seconds=prefix_added / self.sr,
+            suffix_pad_seconds=suffix_added / self.sr,
         )
 
         result.layout.update({
@@ -783,6 +886,7 @@ class WindowPlanner:
             "overlaps": [
                 [p["overlap_start"], p["overlap_end"]] for p in group
             ],
+            "actions": list(self.actions),
         })
         self.reason, self.detail = "ok", "best_effort_window"
         return result

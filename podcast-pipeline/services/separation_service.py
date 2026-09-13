@@ -2,6 +2,7 @@ import collections
 import json
 import os
 import time as _time
+import traceback
 
 # Set BSS_TIMING=1 để bật log thời gian chi tiết từng bước trong separation loop.
 # Tắt mặc định vì mỗi job log thêm ~4 dòng, với 55 job sẽ rất dài.
@@ -131,6 +132,8 @@ REASONS = (
     "already_spliced",  # Vùng này đã được lượt khác ghi kết quả
     "short_track",      # Model trả về thiếu mẫu âm thanh
     "empty_track",      # Track im lặng ngay tại nơi mixture có lời
+    "window_error",     # Planner ném exception trước khi có window
+    "model_error",      # Separator/ECAPA ném exception trên window đã dựng
     "same_speaker",     # Hai segment cùng speaker, không cần tách hai giọng
     "below_threshold",  # Overlap ngắn hơn ngưỡng chạy model
 )
@@ -160,7 +163,9 @@ class SeparationService:
         self.overlap_durations = []
         self.window_layouts = []
         self.failures = []          # (bắt đầu, kết thúc, speaker, lý do, chi tiết)
+        self.failure_artifacts = []
         self._dump_warned = False
+        self._failure_artifact_counter = 0
         # Pipeline gán bản đồ nhạc; bản đồ rỗng nghĩa là chưa có vùng cần tránh.
         self.music_map = MusicMap()
         # Nhãn speaker chỉ có ý nghĩa trong từng file; reset_stats() xóa bộ nhớ
@@ -196,6 +201,8 @@ class SeparationService:
         self.overlap_durations = []
         self.window_layouts = []
         self.failures = []
+        self.failure_artifacts = []
+        self._failure_artifact_counter = 0
         # Mẫu giọng của file trước không được dùng cho file sau dù nhãn trùng nhau.
         # getattr cho phép dịch vụ trong kiểm thử không có bộ nhớ này.
         memory = getattr(self, "memory", None)
@@ -309,6 +316,7 @@ class SeparationService:
                 {"start": a, "end": b, "speaker": spk, "reason": r, "detail": d}
                 for a, b, spk, r, d in self.failures
             ],
+            "failure_artifacts": list(getattr(self, "failure_artifacts", [])),
         }
         return payload
 
@@ -741,8 +749,181 @@ class SeparationService:
                     f"[TSE] track dumps disabled: {type(e).__name__}: {e}"
                 )
 
-    def _dump_failed(self, tag, mixture, track_1, track_2, sr):
-        self._dump_tracks("failed", tag, mixture, track_1, track_2, sr)
+    @staticmethod
+    def _json_default(value):
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, np.integer):
+            return int(value)
+        if isinstance(value, np.floating):
+            return float(value)
+        if isinstance(value, np.bool_):
+            return bool(value)
+        raise TypeError(f"not JSON serializable: {type(value).__name__}")
+
+    @staticmethod
+    def _signal_summary(signal, sr):
+        if signal is None:
+            return None
+        array = np.asarray(signal, dtype=np.float32).reshape(-1)
+        if not len(array):
+            return {"samples": 0, "duration_seconds": 0.0,
+                    "rms": 0.0, "peak": 0.0}
+        return {
+            "samples": len(array),
+            "duration_seconds": len(array) / sr,
+            "rms": float(np.sqrt(np.mean(array.astype(np.float64) ** 2))),
+            "peak": float(np.max(np.abs(array))),
+        }
+
+    def _dump_failure_artifact(
+        self, *, reason, detail, sr, waveform, overlap_start, overlap_end,
+        speaker="?", segment_index=None, job=None, planner_actions=None,
+        layout=None, window_audio=None, track_a=None, track_b=None,
+        model_diag=None, service_actions=None, window_overlap=None,
+    ):
+        """Ghi một bundle tự đủ để điều tra lại một separation failure."""
+        # Failure metadata là bắt buộc khi pipeline đã cấp dump_dir. Biến
+        # BSS_DUMP_FAILED chỉ còn quyền tắt các track dump thông thường.
+        if not self.dump_dir:
+            return None
+        try:
+            self._failure_artifact_counter += 1
+            safe_speaker = "".join(
+                c if c.isalnum() or c in ("-", "_") else "_"
+                for c in str(speaker)
+            )
+            name = (
+                f"{self._failure_artifact_counter:04d}_"
+                f"{overlap_start:.3f}-{overlap_end:.3f}_"
+                f"{safe_speaker}_{reason}"
+            )
+            directory = os.path.join(self.dump_dir, "failed", name)
+            while os.path.exists(directory):
+                self._failure_artifact_counter += 1
+                name = (
+                    f"{self._failure_artifact_counter:04d}_"
+                    f"{overlap_start:.3f}-{overlap_end:.3f}_"
+                    f"{safe_speaker}_{reason}"
+                )
+                directory = os.path.join(self.dump_dir, "failed", name)
+            os.makedirs(directory)
+
+            source_start = max(0, int(overlap_start * sr))
+            source_end = min(len(waveform), int(overlap_end * sr))
+            overlap_mix = np.asarray(
+                waveform[source_start:source_end], dtype=np.float32
+            )
+            planned_context = None
+            planned_context_samples = None
+            if window_audio is None:
+                for action in reversed(planner_actions or []):
+                    bounds = (
+                        action.get("base_after")
+                        or action.get("base_samples")
+                        or (
+                            action.get("source_samples")
+                            if action.get("action") == "take_full_segment_envelope"
+                            else None
+                        )
+                    )
+                    if bounds and len(bounds) == 2:
+                        context_start = max(0, int(bounds[0]))
+                        context_end = min(len(waveform), int(bounds[1]))
+                        if context_end > context_start:
+                            planned_context_samples = [context_start, context_end]
+                            planned_context = np.asarray(
+                                waveform[context_start:context_end], dtype=np.float32
+                            )
+                            break
+            overlap_track_a = overlap_track_b = None
+            if window_overlap is not None:
+                offset, length = map(int, window_overlap)
+                offset = max(0, offset)
+                length = max(0, length)
+                if track_a is not None and length:
+                    overlap_track_a = np.asarray(
+                        track_a[offset:offset + length], dtype=np.float32
+                    )
+                if track_b is not None and length:
+                    overlap_track_b = np.asarray(
+                        track_b[offset:offset + length], dtype=np.float32
+                    )
+
+            audio_errors = []
+            try:
+                import soundfile as sf
+
+                def write_audio(filename, signal):
+                    if signal is None or not len(signal):
+                        return
+                    sf.write(
+                        os.path.join(directory, filename),
+                        np.asarray(signal, dtype=np.float32), sr,
+                    )
+
+                write_audio("overlap_mix.wav", overlap_mix)
+                write_audio("planned_context_mix.wav", planned_context)
+                write_audio("window_mix.wav", window_audio)
+                write_audio("window_track_A.wav", track_a)
+                write_audio("window_track_B.wav", track_b)
+                write_audio("overlap_track_A.wav", overlap_track_a)
+                write_audio("overlap_track_B.wav", overlap_track_b)
+            except Exception as exc:
+                audio_errors.append(f"{type(exc).__name__}: {exc}")
+
+            metadata = {
+                "artifact_version": 1,
+                "policy_version": POLICY_VERSION,
+                "failure": {
+                    "reason": reason,
+                    "detail": detail,
+                    "speaker": str(speaker),
+                    "segment_index": segment_index,
+                    "overlap_seconds": [overlap_start, overlap_end],
+                    "overlap_source_samples": [source_start, source_end],
+                    "planned_context_source_samples": planned_context_samples,
+                },
+                "job": job or {},
+                "planner": {
+                    "actions": planner_actions or [],
+                    "layout": layout,
+                },
+                "model": model_diag,
+                "service_actions": service_actions or [],
+                "audio_write_errors": audio_errors,
+                "signals": {
+                    "overlap_mix": self._signal_summary(overlap_mix, sr),
+                    "planned_context_mix": self._signal_summary(planned_context, sr),
+                    "window_mix": self._signal_summary(window_audio, sr),
+                    "window_track_A": self._signal_summary(track_a, sr),
+                    "window_track_B": self._signal_summary(track_b, sr),
+                    "overlap_track_A": self._signal_summary(overlap_track_a, sr),
+                    "overlap_track_B": self._signal_summary(overlap_track_b, sr),
+                },
+                "files": sorted(os.listdir(directory)) + ["metadata.json"],
+            }
+            with open(os.path.join(directory, "metadata.json"), "w",
+                      encoding="utf-8") as handle:
+                json.dump(
+                    metadata, handle, ensure_ascii=False, indent=2,
+                    default=self._json_default,
+                )
+            self.failure_artifacts.append({
+                "reason": reason,
+                "speaker": str(speaker),
+                "start": overlap_start,
+                "end": overlap_end,
+                "path": os.path.relpath(directory, self.dump_dir),
+            })
+            return directory
+        except Exception as exc:
+            if self.logger and not self._dump_warned:
+                self._dump_warned = True
+                self.logger.warning(
+                    f"[TSE] failure artifact disabled: {type(exc).__name__}: {exc}"
+                )
+            return None
 
     # ------------------------------------------------------------------
     def passthrough(self, segments, audio):
@@ -892,14 +1073,26 @@ class SeparationService:
 
             def window_iter():
                 for _a, _b, plist, _t in buildable:
-                    r = planner.build(plist)
-                    yield r, planner.reason, planner.detail
+                    try:
+                        r = planner.build(plist)
+                        yield r, planner.reason, planner.detail, list(planner.actions)
+                    except Exception as exc:
+                        actions = list(getattr(planner, "actions", []))
+                        actions.append({
+                            "step": len(actions) + 1,
+                            "action": "window_builder_exception",
+                            "detail": f"{type(exc).__name__}: {exc}",
+                            "traceback": traceback.format_exc(),
+                        })
+                        yield None, "window_error", actions[-1]["detail"], actions
             window_iter = window_iter()
 
         from tqdm import tqdm
         pbar = tqdm(total=len(buildable), desc="[TSE Extractor]", leave=True)
         try:
-            for (spk_a, spk_b, plist, targets), (built, reason, detail) in zip(buildable, window_iter):
+            for (spk_a, spk_b, plist, targets), (
+                built, reason, detail, planner_actions
+            ) in zip(buildable, window_iter):
                 pbar.update(1)
                 _t_job = _time.perf_counter()
 
@@ -909,6 +1102,20 @@ class SeparationService:
 
                 job_lo = min(p["overlap_start"] for p in plist)
                 job_hi = max(p["overlap_end"] for p in plist)
+                job_info = {
+                    "speakers": [str(spk_a), str(spk_b)],
+                    "overlap_seconds": [job_lo, job_hi],
+                    "pairs": plist,
+                    "targets": [
+                        {
+                            "segment_index": sd["index"],
+                            "speaker": str(sd["speaker"]),
+                            "start": lo,
+                            "end": hi,
+                        }
+                        for sd, lo, hi in targets
+                    ],
+                }
 
                 _t_window = _time.perf_counter()
                 if _BSS_TIMING and self.logger:
@@ -921,12 +1128,32 @@ class SeparationService:
                     fail_all(reason, detail)
                     self.window_layouts.append({
                         "source_overlap": [job_lo, job_hi],
-                        "status": "skipped", "reason": detail})
+                        "status": "skipped", "reason": reason,
+                        "detail": detail, "actions": planner_actions})
+                    self._dump_failure_artifact(
+                        reason=reason, detail=detail, sr=sr, waveform=waveform,
+                        overlap_start=job_lo, overlap_end=job_hi,
+                        speaker=f"{spk_a}+{spk_b}", job=job_info,
+                        planner_actions=planner_actions,
+                        service_actions=[{
+                            "action": "build_window",
+                            "status": "failed",
+                            "reason": reason,
+                            "detail": detail,
+                        }],
+                    )
                     continue
                 window_audio, core = built.audio, built.core
                 probe_a_s, probe_b_s = built.probes[spk_a], built.probes[spk_b]
                 layout = built.layout
+                planner_actions = layout.get("actions", planner_actions)
                 self.window_layouts.append(layout)
+                service_actions = [{
+                    "action": "build_window",
+                    "status": "ok",
+                    "duration_seconds": len(window_audio) / sr,
+                    "core_window_samples": list(core),
+                }]
                 # Map through core_source_samples because clean support may be
                 # stitched before the continuous base and shift core in the window.
                 core_src_lo = layout["core_source_samples"][0]
@@ -967,18 +1194,46 @@ class SeparationService:
                         "window_probe" if source_enroll_b else "missing"
                     ),
                 }
+                service_actions.append({
+                    "action": "prepare_enrollment",
+                    "sources": dict(layout["enrollment_source"]),
+                })
 
                 _t_sidon = _time.perf_counter()
                 if _BSS_TIMING and self.logger:
                     self.logger.debug(f"[TIMING] {job_lo:.2f}s: → Sidon")
-                track_A, track_B, sim_A, sim_B, diag = self.bss_model.separate_two_speakers(
-                    window_audio,
-                    enroll_A=enroll_a, enroll_B=enroll_b,
-                    sample_rate=sr, id_A=spk_a, id_B=spk_b,
-                    probe_A=probe_a_s,
-                    probe_B=probe_b_s,
-                    core_range=core,
-                )
+                try:
+                    track_A, track_B, sim_A, sim_B, diag = self.bss_model.separate_two_speakers(
+                        window_audio,
+                        enroll_A=enroll_a, enroll_B=enroll_b,
+                        sample_rate=sr, id_A=spk_a, id_B=spk_b,
+                        probe_A=probe_a_s,
+                        probe_B=probe_b_s,
+                        core_range=core,
+                    )
+                except Exception as exc:
+                    error_detail = f"{type(exc).__name__}: {exc}"
+                    fail_all("model_error", error_detail)
+                    service_actions.append({
+                        "action": "run_separator",
+                        "status": "failed",
+                        "detail": error_detail,
+                        "traceback": traceback.format_exc(),
+                    })
+                    self._dump_failure_artifact(
+                        reason="model_error", detail=error_detail,
+                        sr=sr, waveform=waveform,
+                        overlap_start=job_lo, overlap_end=job_hi,
+                        speaker=f"{spk_a}+{spk_b}", job=job_info,
+                        planner_actions=planner_actions, layout=layout,
+                        window_audio=window_audio,
+                        service_actions=service_actions,
+                    )
+                    continue
+                service_actions.append({
+                    "action": "run_separator",
+                    "status": "ok",
+                })
                 _t_sidon_done = _time.perf_counter()
                 if _BSS_TIMING and self.logger:
                     self.logger.debug(
@@ -1012,6 +1267,10 @@ class SeparationService:
                     }
                     for spk, info in level_info.items()
                 }
+                service_actions.append({
+                    "action": "calibrate_output_level",
+                    "result": layout["level_calibration"],
+                })
 
                 if self.logger:
                     self.logger.info(
@@ -1064,6 +1323,10 @@ class SeparationService:
                         str(spk_b): None if sim_B is None else float(sim_B),
                     },
                 }
+                service_actions.append({
+                    "action": "assign_output_tracks",
+                    "result": layout["assignment"],
+                })
 
                 # Ghi thông tin đầu vào, kết quả và điểm của các track đạt kiểm tra.
                 if self.logger:
@@ -1100,15 +1363,60 @@ class SeparationService:
                     src = core[0] + int(ov_lo * sr) - core_src_lo
                     dst = int(ov_lo * sr) - int(enh.start * sr)
                     if src < 0 or dst < 0:
-                        self._fail(enh, ov_lo, ov_hi, "short_track", "negative offset")
+                        failure_detail = f"negative offset src={src} dst={dst}"
+                        self._fail(enh, ov_lo, ov_hi, "short_track", failure_detail)
+                        self._dump_failure_artifact(
+                            reason="short_track", detail=failure_detail,
+                            sr=sr, waveform=waveform,
+                            overlap_start=ov_lo, overlap_end=ov_hi,
+                            speaker=spk, segment_index=sd["index"], job=job_info,
+                            planner_actions=planner_actions, layout=layout,
+                            window_audio=window_audio, track_a=track_A,
+                            track_b=track_B, model_diag=diag,
+                            service_actions=service_actions + [{
+                                "action": "map_overlap_to_window",
+                                "status": "failed", "src": src, "dst": dst,
+                            }],
+                        )
                         continue
                     limit = min(int(ov_hi * sr) - int(ov_lo * sr), len(track) - src,
                                 len(enh.audio) - dst)
                     if limit <= 0:
-                        self._fail(enh, ov_lo, ov_hi, "short_track", f"limit={limit}")
+                        failure_detail = f"limit={limit} src={src} dst={dst}"
+                        self._fail(enh, ov_lo, ov_hi, "short_track", failure_detail)
+                        self._dump_failure_artifact(
+                            reason="short_track", detail=failure_detail,
+                            sr=sr, waveform=waveform,
+                            overlap_start=ov_lo, overlap_end=ov_hi,
+                            speaker=spk, segment_index=sd["index"], job=job_info,
+                            planner_actions=planner_actions, layout=layout,
+                            window_audio=window_audio, track_a=track_A,
+                            track_b=track_B, model_diag=diag,
+                            service_actions=service_actions + [{
+                                "action": "map_overlap_to_window",
+                                "status": "failed", "src": src, "dst": dst,
+                                "limit": limit,
+                            }],
+                        )
                         continue
                     if any(not (ov_hi <= a or ov_lo >= b) for a, b, _ in enh.bss_spans):
-                        self._fail(enh, ov_lo, ov_hi, "already_spliced", "")
+                        failure_detail = "target overlaps an existing bss_spans entry"
+                        self._fail(enh, ov_lo, ov_hi, "already_spliced", failure_detail)
+                        self._dump_failure_artifact(
+                            reason="already_spliced", detail=failure_detail,
+                            sr=sr, waveform=waveform,
+                            overlap_start=ov_lo, overlap_end=ov_hi,
+                            speaker=spk, segment_index=sd["index"], job=job_info,
+                            planner_actions=planner_actions, layout=layout,
+                            window_audio=window_audio, track_a=track_A,
+                            track_b=track_B, model_diag=diag,
+                            service_actions=service_actions + [{
+                                "action": "check_existing_splice",
+                                "status": "failed", "src": src, "dst": dst,
+                                "limit": limit,
+                            }],
+                            window_overlap=(src, limit),
+                        )
                         continue
 
                     # Kiểm tra ngay vùng sắp ghép trả có lời. Điểm tốt trên solo ở xa không
@@ -1124,8 +1432,23 @@ class SeparationService:
                             f"[TIMING] {job_lo:.2f}s: → _track_has_speech "
                             f"seg={sd['index']} spk={spk} limit={limit/sr:.3f}s")
                     if not self._track_has_speech(host, track[src:src + limit], sr_hint=sr):
-                        self._fail(enh, ov_lo, ov_hi, "empty_track",
-                                   "silent where mixture has speech")
+                        failure_detail = "silent where mixture has speech"
+                        self._fail(enh, ov_lo, ov_hi, "empty_track", failure_detail)
+                        self._dump_failure_artifact(
+                            reason="empty_track", detail=failure_detail,
+                            sr=sr, waveform=waveform,
+                            overlap_start=ov_lo, overlap_end=ov_hi,
+                            speaker=spk, segment_index=sd["index"], job=job_info,
+                            planner_actions=planner_actions, layout=layout,
+                            window_audio=window_audio, track_a=track_A,
+                            track_b=track_B, model_diag=diag,
+                            service_actions=service_actions + [{
+                                "action": "validate_overlap_track",
+                                "status": "failed", "src": src, "dst": dst,
+                                "limit": limit,
+                            }],
+                            window_overlap=(src, limit),
+                        )
                         continue
 
                     # Không match level với mixture overlap: mixture chứa cả hai

@@ -51,6 +51,7 @@ cặp của chính mình là cặp lạ, tự chặn mọi job). Module này kh�
 đúng nếu bản vá đó bị revert.
 """
 import pickle
+import traceback
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import shared_memory
 
@@ -90,15 +91,25 @@ def _build_job(file_ctx, group):
         music_map = pickle.loads(music_map_bytes) if music_map_bytes is not None else None
         vad = _load_cpu_vad() if file_ctx["use_vad"] else None
 
-        planner = WindowPlanner(
-            segments, file_ctx["pairs"], waveform, file_ctx["sr"],
-            music_map=music_map, seams=file_ctx["seams"], vad=vad,
-            context_seconds=file_ctx["context_seconds"],
-            search_seconds=file_ctx["search_seconds"])
-        result = planner.build(group)
-        # planner.reason/detail chỉ có ý nghĩa khi result is None; kèm theo để
-        # caller ghi log/lý do thất bại giống hệt nhánh tuần tự.
-        return result, planner.reason, planner.detail
+        planner = None
+        try:
+            planner = WindowPlanner(
+                segments, file_ctx["pairs"], waveform, file_ctx["sr"],
+                music_map=music_map, seams=file_ctx["seams"], vad=vad,
+                context_seconds=file_ctx["context_seconds"],
+                search_seconds=file_ctx["search_seconds"])
+            result = planner.build(group)
+            return result, planner.reason, planner.detail, list(planner.actions)
+        except Exception as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+            actions = list(getattr(planner, "actions", []))
+            actions.append({
+                "step": len(actions) + 1,
+                "action": "window_builder_exception",
+                "detail": detail,
+                "traceback": traceback.format_exc(),
+            })
+            return None, "window_error", detail, actions
     finally:
         # Chỉ đóng mapping trong worker này (unmap cục bộ); KHÔNG unlink --
         # đó là việc của FileWindows.close() ở main process, sau khi mọi job
@@ -141,7 +152,7 @@ class FileWindows:
 
     def build_all(self, job_groups):
         """Nộp hết job_groups của file này theo thứ tự, trả generator
-        (built, reason, detail) cùng thứ tự. Nộp hết một lượt (không phải
+        (built, reason, detail, actions) cùng thứ tự. Nộp hết một lượt (không phải
         theo yêu cầu từng cái) để worker rảnh build tiếp job sau trong lúc
         caller còn xử lý (GPU) job trước -- chính chỗ này tạo hiệu ứng
         pipeline. Đổi sang executor.map ở đây sẽ mất tính chất này vì map lô
@@ -175,7 +186,7 @@ class WindowBuildPool:
         pool = WindowBuildPool(n_workers=4)
         for file in batch:
             with pool.open_file(segments, pairs, waveform, sr, ...) as fw:
-                for built, reason, detail in fw.build_all(job_groups):
+                for built, reason, detail, actions in fw.build_all(job_groups):
                     ...  # chạy GPU ở đây trong lúc worker build job tiếp theo
         pool.close()   # một lần, sau khi xử lý xong cả batch
     """
