@@ -4,6 +4,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from utils.acoustic_boundary import AcousticBoundaryFinder
+
 
 GHOST_SPEAKER_SHARE = 0.005
 GHOST_SPEAKER_MAX_SEGMENT = 2.0
@@ -243,7 +245,7 @@ def _quietest_cut(
     hi: float,
     frame_sec: float = 0.02,
 ) -> Optional[float]:
-    """Return the quietest frame centre inside [lo, hi]."""
+    """Return the best shared acoustic boundary inside ``[lo, hi]``."""
     if waveform is None or sample_rate is None or sample_rate <= 0 or hi <= lo:
         return None
 
@@ -252,20 +254,18 @@ def _quietest_cut(
     if j - i < 2:
         return None
 
-    # Cast before squaring so int16/int32 waveforms cannot overflow.
-    band = np.asarray(waveform[i:j], dtype=np.float64)
     frame = max(1, int(float(frame_sec) * sample_rate))
-    if len(band) < frame * 2:
+    if j - i < frame * 2:
         return None
-
-    n = len(band) // frame
-    frames = band[: n * frame].reshape(n, frame)
-    rms = np.sqrt(np.mean(np.square(frames), axis=1) + 1e-12)
-
-    frame_index = int(np.argmin(rms))
-    # Use the CLAMPED sample coordinate i, not the original lo. This matters
-    # when a negative search boundary was clipped to the start of the waveform.
-    return (i + (frame_index + 0.5) * frame) / float(sample_rate)
+    finder = AcousticBoundaryFinder(waveform, sample_rate)
+    decision = finder.find_cut(
+        (i + j) // 2,
+        direction="both",
+        search_min=i,
+        search_max=j,
+        hard_bounds=(i, j),
+    )
+    return decision.sample / float(sample_rate)
 
 
 def split_long_segments(
@@ -275,6 +275,7 @@ def split_long_segments(
     sample_rate: int = None,
     search_sec: float = 2.0,
     min_piece: float = 0.2,
+    boundary_finder=None,
 ) -> list:
     """Split over-long segments once, preferring an acoustic pause.
 
@@ -293,6 +294,8 @@ def split_long_segments(
 
     new_segments = []
     new_index = 0
+    if boundary_finder is None and waveform is not None:
+        boundary_finder = AcousticBoundaryFinder(waveform, sample_rate)
 
     for original in segment_list or []:
         if not isinstance(original, dict):
@@ -334,12 +337,17 @@ def split_long_segments(
                     latest_allowed - search_sec,
                 )
                 if latest_allowed > earliest_allowed:
-                    quiet = _quietest_cut(
-                        waveform,
-                        sample_rate,
-                        earliest_allowed,
-                        latest_allowed,
+                    decision = boundary_finder.find_cut(
+                        int(target * sample_rate),
+                        direction="left",
+                        search_min=int(earliest_allowed * sample_rate),
+                        search_max=int(latest_allowed * sample_rate),
+                        hard_bounds=(
+                            int(earliest_allowed * sample_rate),
+                            int(latest_allowed * sample_rate),
+                        ),
                     )
+                    quiet = decision.sample / float(sample_rate)
                     if (
                         quiet is not None
                         and quiet > current_start + 1e-6

@@ -1,7 +1,7 @@
-"""Song song hoá WindowPlanner.build() qua nhiều process, pipeline với GPU,
+"""Song song hoá WindowPlanner.build_many() qua nhiều process, pipeline với GPU,
 pool sống suốt cả batch nhiều file, không phải tạo lại cho từng file.
 
-WindowPlanner.build() là CPU/numpy thuần -- không đụng GPU -- và với overlap
+WindowPlanner.build_many() là CPU/numpy thuần -- không đụng GPU -- và với overlap
 có nhiều support candidate có thể tốn vài giây một job. Trong khi đó
 self.bss_model.separate_two_speakers() chạy GPU tuần tự: không cách nào chạy
 nhiều job đó cùng lúc trên một GPU. Nhưng việc BUILD (CPU) của job N+1 không
@@ -40,7 +40,7 @@ chết với "libc++abi: recursive_mutex lock failed" -- không phải exception
 Python bắt được, ProcessPoolExecutor âm thầm thay worker chết và lượt chạy
 tiếp tục nhưng cho kết quả sai (đo được spliced=0 trên kịch bản 4 job). Rơi
 về energy-based cut trong worker (use_vad=False) tránh hẳn lớp rủi ro này --
-hành vi sẵn có của AcousticCuts khi không có VAD, không phải lối thoát tạm.
+hành vi sẵn có của AcousticBoundaryFinder khi không có VAD.
 Cái giá thật: cửa sổ dựng song song cắt kém chính xác hơn một chút so với
 nhánh tuần tự (vốn dùng Silero GPU của chính bss_model).
 
@@ -64,7 +64,7 @@ def _load_cpu_vad():
     Không dùng lại instance GPU của bss_model._vad: onnxruntime.InferenceSession
     không picklable, và chia nhiều process cùng một GPU context của một model
     đã load là nguồn lỗi/tranh chấp không đáng đánh đổi lấy vài trăm ms VAD
-    mỗi job. Trả None nếu tải lỗi -- AcousticCuts tự rơi về energy-based cut.
+    mỗi job. Trả None nếu tải lỗi -- boundary finder tự rơi về energy-based cut.
     """
     try:
         import torch
@@ -76,7 +76,7 @@ def _load_cpu_vad():
 
 def _build_job(file_ctx, group):
     """Chạy trong worker process. Tự đứng hoàn toàn: gắn shared memory theo
-    tên, dựng WindowPlanner riêng cho lần gọi này, build() job, rồi thả
+    tên, dựng WindowPlanner riêng cho lần gọi này, build_many() job, rồi thả
     shared memory trước khi trả kết quả -- không giữ gì lại giữa các job,
     vì worker này còn phục vụ job của những file khác trong suốt vòng đời
     của pool."""
@@ -98,7 +98,7 @@ def _build_job(file_ctx, group):
                 music_map=music_map, seams=file_ctx["seams"], vad=vad,
                 context_seconds=file_ctx["context_seconds"],
                 search_seconds=file_ctx["search_seconds"])
-            result = planner.build(group)
+            result = planner.build_many(group)
             return result, planner.reason, planner.detail, list(planner.actions)
         except Exception as exc:
             detail = f"{type(exc).__name__}: {exc}"

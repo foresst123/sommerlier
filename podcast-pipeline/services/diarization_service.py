@@ -19,6 +19,7 @@ from utils.segment_utils import (
 )
 from algorithms.diarization.fusion import align_speakers_across_chunks
 from algorithms.diarization.overlap import detect_overlapping_segments
+from utils.acoustic_boundary import AcousticBoundaryFinder
 
 class DiarizationService:
     """Handles audio chunking, model inference (Pyannote/Sortformer), and cross-chunk fusion."""
@@ -222,7 +223,11 @@ class DiarizationService:
         # clipping words in half.
         final_list = split_long_segments(
             smoothed_list, max_duration=max_seg,
-            waveform=audio.waveform, sample_rate=audio.sample_rate)
+            waveform=audio.waveform, sample_rate=audio.sample_rate,
+            boundary_finder=AcousticBoundaryFinder(
+                audio.waveform, audio.sample_rate,
+                vad=self.vad_model if getattr(args, "vad", False) else None,
+            ))
         self._log_segment_stats("post-split", final_list)
 
         # Build schemas

@@ -453,6 +453,62 @@ class BssSeparator:
         s_1B = _score(track_1_np, span_B, embed_B, "track1_B") if embed_B is not None else None
         s_2B = _score(track_2_np, span_B, embed_B, "track2_B") if embed_B is not None else None
 
+        def _probe_rms(track, spans):
+            pieces = [
+                np.asarray(track[max(0, int(a)):min(len(track), int(b))],
+                           dtype=np.float64)
+                for a, b in (spans or [])
+                if int(b) > int(a)
+            ]
+            pieces = [piece for piece in pieces if len(piece)]
+            if not pieces:
+                return None
+            probe = np.concatenate(pieces)
+            return float(np.sqrt(np.mean(np.square(
+                probe
+            )) + 1e-12))
+
+        # A clean diarization probe is weaker evidence than ECAPA identity, but
+        # much stronger than trusting an unordered backend. Positive evidence
+        # means track1=A, track2=B; negative evidence means swap.
+        probe_energy = {
+            "track1_A": _probe_rms(track_1_np, span_A),
+            "track2_A": _probe_rms(track_2_np, span_A),
+            "track1_B": _probe_rms(track_1_np, span_B),
+            "track2_B": _probe_rms(track_2_np, span_B),
+        }
+        probe_evidence = 0.0
+        probe_terms = 0
+        eps = 1e-6
+        if probe_energy["track1_A"] is not None and probe_energy["track2_A"] is not None:
+            probe_evidence += np.log(
+                (probe_energy["track1_A"] + eps) /
+                (probe_energy["track2_A"] + eps)
+            )
+            probe_terms += 1
+        if probe_energy["track1_B"] is not None and probe_energy["track2_B"] is not None:
+            probe_evidence += np.log(
+                (probe_energy["track2_B"] + eps) /
+                (probe_energy["track1_B"] + eps)
+            )
+            probe_terms += 1
+        probe_margin = float(np.log(1.20))
+        probe_direct = (
+            None
+            if probe_terms == 0 or abs(probe_evidence) < probe_margin
+            else probe_evidence >= 0.0
+        )
+
+        def _assign_by_probe(default_mode):
+            if probe_direct is None:
+                return (track_1_tensor, track_2_tensor, track_1_np, track_2_np,
+                        default_mode)
+            if probe_direct:
+                return (track_1_tensor, track_2_tensor, track_1_np, track_2_np,
+                        "clean_probe_energy")
+            return (track_2_tensor, track_1_tensor, track_2_np, track_1_np,
+                    "clean_probe_energy_swapped")
+
         if getattr(self.backend, "ordered", False):
             assignment_mode = "backend_ordered"
             out_A_tensor, out_B_tensor = track_1_tensor, track_2_tensor
@@ -464,7 +520,11 @@ class BssSeparator:
             if embed_A is not None and embed_B is not None:
                 assignment_mode = "dual_ecapa"
                 def _n(x): return -1.0 if x is None else x
-                if (_n(s_1A) + _n(s_2B)) >= (_n(s_2A) + _n(s_1B)):
+                if all(value is None for value in (s_1A, s_2A, s_1B, s_2B)):
+                    (out_A_tensor, out_B_tensor, out_A_np, out_B_np,
+                     assignment_mode) = _assign_by_probe("deterministic_unscorable_ecapa")
+                    sim_A = sim_B = None
+                elif (_n(s_1A) + _n(s_2B)) >= (_n(s_2A) + _n(s_1B)):
                     out_A_tensor, out_B_tensor = track_1_tensor, track_2_tensor
                     out_A_np, out_B_np = track_1_np, track_2_np
                     sim_A, sim_B = s_1A, s_2B
@@ -476,9 +536,13 @@ class BssSeparator:
             # Trường hợp 2: Chỉ có mẫu A (Không có B) -> Dùng A chọn track, track còn lại nhường B
             elif embed_A is not None:
                 assignment_mode = "speaker_A_ecapa_complement_B"
-                s_1A_val = s_1A if s_1A is not None else -1.0
-                s_2A_val = s_2A if s_2A is not None else -1.0
-                if s_1A_val >= s_2A_val:
+                if s_1A is None and s_2A is None:
+                    (out_A_tensor, out_B_tensor, out_A_np, out_B_np,
+                     assignment_mode) = _assign_by_probe("deterministic_unscorable_A")
+                    sim_A = sim_B = None
+                elif (s_1A if s_1A is not None else -1.0) >= (
+                    s_2A if s_2A is not None else -1.0
+                ):
                     out_A_tensor, out_B_tensor = track_1_tensor, track_2_tensor
                     out_A_np, out_B_np = track_1_np, track_2_np
                     sim_A, sim_B = s_1A, None
@@ -490,9 +554,13 @@ class BssSeparator:
             # Trường hợp 3: Chỉ có mẫu B (Không có A) -> Dùng B chọn track, track còn lại nhường A
             elif embed_B is not None:
                 assignment_mode = "speaker_B_ecapa_complement_A"
-                s_1B_val = s_1B if s_1B is not None else -1.0
-                s_2B_val = s_2B if s_2B is not None else -1.0
-                if s_1B_val >= s_2B_val:
+                if s_1B is None and s_2B is None:
+                    (out_A_tensor, out_B_tensor, out_A_np, out_B_np,
+                     assignment_mode) = _assign_by_probe("deterministic_unscorable_B")
+                    sim_A = sim_B = None
+                elif (s_1B if s_1B is not None else -1.0) >= (
+                    s_2B if s_2B is not None else -1.0
+                ):
                     out_A_tensor, out_B_tensor = track_2_tensor, track_1_tensor
                     out_A_np, out_B_np = track_2_np, track_1_np
                     sim_A, sim_B = None, s_1B
@@ -503,9 +571,8 @@ class BssSeparator:
 
             # Trường hợp 4: Cả 2 đều không có mẫu -> Gán mặc định
             else:
-                assignment_mode = "deterministic_no_enrollment"
-                out_A_tensor, out_B_tensor = track_1_tensor, track_2_tensor
-                out_A_np, out_B_np = track_1_np, track_2_np
+                (out_A_tensor, out_B_tensor, out_A_np, out_B_np,
+                 assignment_mode) = _assign_by_probe("deterministic_no_enrollment")
                 sim_A, sim_B = None, None
 
         # ─── ĐÁNH GIÁ NOT-A AN TOÀN ───
@@ -515,6 +582,10 @@ class BssSeparator:
             "other_rms": None,
             "assignment_mode": assignment_mode,
             "score_sources": score_sources,
+            "probe_energy": probe_energy,
+            "probe_log_evidence": (
+                None if probe_direct is None else float(probe_evidence)
+            ),
         }
         if core_range is not None and (embed_A is not None or embed_B is not None):
             c0, c1 = int(core_range[0] * scale), int(core_range[1] * scale)

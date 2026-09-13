@@ -9,7 +9,9 @@ from itertools import combinations
 
 import numpy as np
 
-POLICY_VERSION = "overlap-context-padding-v8"
+from utils.acoustic_boundary import AcousticBoundaryFinder, ContextExpander
+
+POLICY_VERSION = "ranked-boundary-context-padding-v9"
 
 
 def clean_segments(segments):
@@ -61,7 +63,7 @@ def subtract(ranges, blockers):
     return result
 
 
-class AcousticCuts:
+class _LegacyAcousticCuts:
     """Tìm điểm cắt an toàn từ VAD, pause và khe năng lượng giữa từ/âm tiết."""
 
     def __init__(self, waveform, sr, vad=None):
@@ -191,6 +193,11 @@ class AcousticCuts:
         return quiet <= max(1e-5, reference * 0.1)
 
 
+# Compatibility export for callers and old checkpoints. All active boundary
+# decisions now use the shared implementation in acoustic_boundary.py.
+AcousticCuts = AcousticBoundaryFinder
+
+
 @dataclass(frozen=True)
 class Piece:
     start: int
@@ -210,6 +217,15 @@ class Window:
     layout: dict
 
 
+@dataclass
+class WindowPlan:
+    window: object
+    core_source_samples: tuple
+    reason: str
+    detail: str
+    actions: list
+
+
 class WindowPlanner:
     """Dựng window theo thứ tự overlap, context liên tục, rồi clean padding."""
 
@@ -223,12 +239,10 @@ class WindowPlanner:
         self.target = round(15.0 * sr)
         self.fade = round(0.020 * sr)
         self.minimum = round(1.5 * sr)
-        # 15s và vị trí core 5-8s là mục tiêu mềm. Full segment envelope có
-        # quyền vượt 15s; padding bị bỏ trước khi context bắt buộc bị ảnh hưởng.
-        self.base_core_min = round(1.5 * sr)
-        self.final_core_min = round(5.0 * sr)
-        self.final_core_max = round(8.0 * sr)
-        self.cuts = AcousticCuts(waveform, sr, vad)
+        # 15s is a hard model limit. A centred core and 1-2s of continuous
+        # context are preferences that may move when a file edge or SP3 blocks.
+        self.cuts = AcousticBoundaryFinder(waveform, sr, vad)
+        self.expander = ContextExpander(self.cuts)
         self.by_speaker = {}
         for s in segments:
             self.by_speaker.setdefault(s.speaker, []).append((int(s.start * sr), int(s.end * sr)))
@@ -459,27 +473,18 @@ class WindowPlanner:
         """Nới timestamp ra acoustic cut gần nhất, tuyệt đối không cắt vào trong."""
         if hi <= lo:
             return desired, "timestamp_bound"
-
-        cuts, _, _ = self.cuts.analyse(lo, hi)
-        candidates = []
-        for point, kind in cuts.items():
-            # Hai đầu do analyse() tự chèn không phải acoustic evidence thật.
-            if kind == "segment":
-                continue
-            if side == "left" and point <= desired:
-                candidates.append((point, kind))
-            elif side == "right" and point >= desired:
-                candidates.append((point, kind))
-
-        if not candidates:
-            return desired, "timestamp_bound"
-
-        point, kind = min(candidates, key=lambda item: abs(item[0] - desired))
-        return point, kind
+        decision = self.cuts.find_cut(
+            desired, direction=side, search_min=lo, search_max=hi,
+            hard_bounds=(lo, hi),
+        )
+        return decision.sample, decision.method
 
     def _expand_context(self, start, end, floor, ceiling, left_need, right_need):
-        """Dùng context liên tục bù phần clean pad còn thiếu trong soft budget."""
-        room = max(0, self.target - (end - start))
+        """Expand both sides through the shared, budget-aware primitive."""
+        room = min(
+            max(0, self.target - (end - start)),
+            max(0, int(left_need)) + max(0, int(right_need)),
+        )
         if room <= 0:
             return start, end, "none", "none"
 
@@ -497,27 +502,127 @@ class WindowPlanner:
             extra_right = min(max(0, ceiling - end - right_take), room)
             right_take += extra_right
 
-        desired_start = start - left_take
-        desired_end = end + right_take
-        radius = max(self.context, round(0.5 * self.sr))
-        new_start, start_cut = self._safe_cut_outward(
-            desired_start, max(floor, desired_start - radius), desired_start, "left"
+        left = self.expander.expand(
+            start, "left", left_take / self.sr,
+            minimum_seconds=max(0.0, left_take / self.sr - 0.5),
+            maximum_seconds=left_take / self.sr,
+            hard_bound=floor,
         )
-        new_end, end_cut = self._safe_cut_outward(
-            desired_end, desired_end, min(ceiling, desired_end + radius), "right"
+        right = self.expander.expand(
+            end, "right", right_take / self.sr,
+            minimum_seconds=max(0.0, right_take / self.sr - 0.5),
+            maximum_seconds=right_take / self.sr,
+            hard_bound=ceiling,
         )
+        return left.boundary_sample, right.boundary_sample, left.method, right.method
 
-        # Context expansion only fills the remaining 15s soft budget. The
-        # mandatory timestamp envelope may exceed it, but fallback expansion may not.
-        if new_end - new_start > self.target:
-            new_start, new_end = desired_start, desired_end
-            start_cut = end_cut = "timestamp_bound"
-        return new_start, new_end, start_cut, end_cut
+    def _split_core_bounds(self, core_lo, core_hi):
+        """Partition an overlap into quality-sized cores using ranked cuts."""
+        hard_limit = self.target
+        quality_limit = round(12.0 * self.sr)
+        min_piece = min(round(2.5 * self.sr), max(1, (core_hi - core_lo) // 3))
+        pending = [(core_lo, core_hi)]
+        result = []
 
-    def build(self, group):
+        while pending:
+            lo, hi = pending.pop(0)
+            width = hi - lo
+            mandatory = width > hard_limit
+            optional = quality_limit < width <= hard_limit
+            if not mandatory and not optional:
+                result.append((lo, hi))
+                continue
+
+            midpoint = (lo + hi) // 2
+            radius = min(round(2.0 * self.sr), max(1, width // 3))
+            search_lo = max(lo + min_piece, midpoint - radius)
+            search_hi = min(hi - min_piece, midpoint + radius)
+            candidates = self.cuts.find_candidates(
+                midpoint, direction="both", search_min=search_lo,
+                search_max=search_hi, hard_bounds=(search_lo, search_hi),
+                include_fallback=True,
+            )
+            ranked = []
+            for candidate in candidates:
+                left, right = candidate.sample - lo, hi - candidate.sample
+                if left < min_piece or right < min_piece:
+                    continue
+                overflow = max(0, max(left, right) - hard_limit)
+                ranked.append(((
+                    overflow,
+                    candidate.method == "timestamp_bound",
+                    -candidate.confidence,
+                    abs(left - right),
+                ), candidate))
+            ranked.sort(key=lambda item: item[0])
+            chosen = ranked[0][1] if ranked else None
+
+            # A quality split below 15s is accepted only with real acoustic
+            # evidence. A mandatory split always falls back to the midpoint.
+            if optional and (
+                chosen is None
+                or chosen.method == "timestamp_bound"
+                or chosen.confidence < 0.65
+            ):
+                result.append((lo, hi))
+                continue
+            cut = chosen.sample if chosen is not None else midpoint
+            cut = min(max(cut, lo + 1), hi - 1)
+            self._record(
+                "split_overlap_core",
+                mandatory=mandatory,
+                source_samples=[lo, hi],
+                split_sample=cut,
+                split_seconds=cut / self.sr,
+                method=(chosen.method if chosen is not None else "timestamp_bound"),
+                confidence=(chosen.confidence if chosen is not None else 0.0),
+            )
+            pending[0:0] = [(lo, cut), (cut, hi)]
+
+        return sorted(result)
+
+    def build_many(self, group):
+        """Build every quality-sized core, retaining failures per core."""
+        self.actions = []
+        if not group:
+            self.reason, self.detail = "no_window", "invalid_overlap_group"
+            self._record("reject", reason=self.detail)
+            return [WindowPlan(None, (0, 0), self.reason, self.detail,
+                               list(self.actions))]
+
+        core_lo = max(0, int(np.floor(
+            min(pair["overlap_start"] for pair in group) * self.sr
+        )))
+        core_hi = min(len(self.waveform), int(np.ceil(
+            max(pair["overlap_end"] for pair in group) * self.sr
+        )))
+        split_actions = []
+        bounds = self._split_core_bounds(core_lo, core_hi)
+        split_actions.extend(self.actions)
+        plans = []
+        for index, bound in enumerate(bounds):
+            initial = list(split_actions)
+            initial.append({
+                "step": len(initial) + 1,
+                "action": "select_core_chunk",
+                "chunk_index": index,
+                "chunk_count": len(bounds),
+                "source_samples": list(bound),
+            })
+            window = self.build(group, core_bounds=bound, initial_actions=initial)
+            plans.append(WindowPlan(
+                window=window,
+                core_source_samples=bound,
+                reason=self.reason,
+                detail=self.detail,
+                actions=list(self.actions),
+            ))
+        return plans
+
+    def build(self, group, core_bounds=None, initial_actions=None):
         """Dựng best-effort window; chỉ speaker thứ ba trong core mới chặn."""
         self.reason, self.detail = "no_window", "invalid_overlap_group"
-        self.actions = []
+        self.actions = list(initial_actions or [])
         if not group:
             self._record("reject", reason=self.detail)
             return None
@@ -540,10 +645,22 @@ class WindowPlanner:
                 return None
 
         n_samples = len(self.waveform)
-        core_lo = max(0, int(np.floor(min(p["overlap_start"] for p in group) * self.sr)))
-        core_hi = min(n_samples, int(np.ceil(max(p["overlap_end"] for p in group) * self.sr)))
+        if core_bounds is None:
+            core_lo = max(0, int(np.floor(min(
+                p["overlap_start"] for p in group
+            ) * self.sr)))
+            core_hi = min(n_samples, int(np.ceil(max(
+                p["overlap_end"] for p in group
+            ) * self.sr)))
+        else:
+            core_lo = max(0, int(core_bounds[0]))
+            core_hi = min(n_samples, int(core_bounds[1]))
         if core_hi <= core_lo:
             self.detail = "overlap_shorter_than_one_sample"
+            self._record("reject", reason=self.detail)
+            return None
+        if core_hi - core_lo > self.target:
+            self.detail = "core_exceeds_15s_use_build_many"
             self._record("reject", reason=self.detail)
             return None
 
@@ -555,16 +672,23 @@ class WindowPlanner:
             source_seconds=[core_lo / self.sr, core_hi / self.sr],
         )
 
+        seg_indices = sorted({str(p[side]["index"]) for p in group for side in ("seg1", "seg2")})
         seg_starts = [float(p[side]["start"]) for p in group for side in ("seg1", "seg2")]
         seg_ends = [float(p[side]["end"]) for p in group for side in ("seg1", "seg2")]
-        seg_indices = sorted({str(p[side]["index"]) for p in group for side in ("seg1", "seg2")})
-        timestamp_lo_raw = max(0, int(np.floor(min(seg_starts) * self.sr)))
-        timestamp_hi_raw = min(n_samples, int(np.ceil(max(seg_ends) * self.sr)))
+        segment_envelope_raw = [
+            max(0, int(np.floor(min(seg_starts) * self.sr))),
+            min(n_samples, int(np.ceil(max(seg_ends) * self.sr))),
+        ]
+        # The overlap core is mandatory. The full diarization envelope is useful
+        # evidence, but it may be much wider than the model input and therefore
+        # cannot itself be a hard window boundary.
+        timestamp_lo_raw, timestamp_hi_raw = core_lo, core_hi
         self._record(
-            "take_full_segment_envelope",
+            "observe_segment_envelope",
             segment_indices=seg_indices,
-            source_samples=[timestamp_lo_raw, timestamp_hi_raw],
-            source_seconds=[timestamp_lo_raw / self.sr, timestamp_hi_raw / self.sr],
+            source_samples=segment_envelope_raw,
+            source_seconds=[value / self.sr for value in segment_envelope_raw],
+            mandatory=False,
         )
 
         # SP3 là hard boundary duy nhất. Seam và overlap khác của A/B không chặn.
@@ -609,32 +733,49 @@ class WindowPlanner:
             self._record("reject", reason=self.detail)
             return None
 
-        # Base context bắt buộc là toàn bộ envelope start->end của các segment
-        # tham gia cluster. Chỉ nới ra ngoài tới pause/word gap, không snap vào
-        # trong và không rút envelope để dành chỗ cho padding.
-        cut_radius = max(self.context, round(0.5 * self.sr))
-        base_start, start_cut = self._safe_cut_outward(
-            timestamp_lo,
-            max(floor, timestamp_lo - cut_radius),
-            timestamp_lo,
-            "left",
+        core_width = core_hi - core_lo
+        left_room = max(0, (self.target - core_width) // 2)
+        right_room = max(0, self.target - core_width - left_room)
+
+        def preferred_context(room):
+            if room < self.sr:
+                return room
+            if room <= 3 * self.sr:
+                return min(room, self.sr, self.context)
+            return min(room, self.context)
+
+        left_preferred = min(preferred_context(left_room), core_lo - floor)
+        right_preferred = min(preferred_context(right_room), ceiling - core_hi)
+        tolerance = round(0.35 * self.sr)
+        left = self.expander.expand(
+            core_lo, "left", left_preferred / self.sr,
+            minimum_seconds=max(0.0, (left_preferred - round(0.5 * self.sr)) / self.sr),
+            maximum_seconds=min(left_room, left_preferred + tolerance) / self.sr,
+            hard_bound=floor,
         )
-        base_end, end_cut = self._safe_cut_outward(
-            timestamp_hi,
-            timestamp_hi,
-            min(ceiling, timestamp_hi + cut_radius),
-            "right",
+        right = self.expander.expand(
+            core_hi, "right", right_preferred / self.sr,
+            minimum_seconds=max(0.0, (right_preferred - round(0.5 * self.sr)) / self.sr),
+            maximum_seconds=min(right_room, right_preferred + tolerance) / self.sr,
+            hard_bound=ceiling,
         )
+        base_start, start_cut = left.boundary_sample, left.method
+        base_end, end_cut = right.boundary_sample, right.method
         if not (floor <= base_start <= core_lo < core_hi <= base_end <= ceiling):
-            base_start, base_end = timestamp_lo, timestamp_hi
+            base_start, base_end = core_lo, core_hi
             start_cut = end_cut = "timestamp_bound"
         self._record(
-            "snap_context_outward",
-            envelope_samples=[timestamp_lo, timestamp_hi],
+            "expand_preferred_context",
+            core_samples=[core_lo, core_hi],
             base_samples=[base_start, base_end],
             cut_methods=[start_cut, end_cut],
-            left_added_seconds=(timestamp_lo - base_start) / self.sr,
-            right_added_seconds=(base_end - timestamp_hi) / self.sr,
+            cut_confidence=[left.confidence, right.confidence],
+            side_budget_seconds=[left_room / self.sr, right_room / self.sr],
+            preferred_seconds=[left_preferred / self.sr, right_preferred / self.sr],
+            actual_seconds=[
+                (core_lo - base_start) / self.sr,
+                (base_end - core_hi) / self.sr,
+            ],
         )
 
         def make_base(start, end, left_cut, right_cut):
@@ -680,31 +821,32 @@ class WindowPlanner:
 
             centre = (core_lo + core_hi) // 2
             base_core_pos = core_lo - piece.start
+            desired_core_start = max(0, (self.target - (core_hi - core_lo)) // 2)
+            desired_right_room = (
+                self.target - (core_hi - core_lo) - desired_core_start
+            )
+            prefix_budget = min(
+                budget, max(0, desired_core_start - base_core_pos)
+            )
+            base_right_context = piece.end - core_hi
+            suffix_budget = min(
+                budget, max(0, desired_right_room - base_right_context)
+            )
             candidates = []
             for prefix_speaker, suffix_speaker in (
                 (speakers[0], speakers[1]),
                 (speakers[1], speakers[0]),
             ):
-                strict_min = max(0, self.final_core_min - base_core_pos)
-                strict_max = min(
-                    max(0, self.final_core_max - base_core_pos), budget
-                )
-                prefix_options = (
-                    self._sequences(
-                        prefix_speaker, centre, strict_min, strict_max, piece,
-                        floor, ceiling,
-                    )
-                    if strict_min <= strict_max else []
-                )
-                if not prefix_options:
-                    prefix_options = self._sequences(
-                        prefix_speaker, centre, 0, budget, piece,
-                        floor, ceiling,
-                    ) or [()]
+                prefix_options = self._sequences(
+                    prefix_speaker, centre, 0, prefix_budget, piece,
+                    floor, ceiling,
+                ) or [()]
 
                 for prefix_seq in prefix_options:
                     prefix_added = self._sequence_added_samples(prefix_seq)
-                    remaining = max(0, budget - prefix_added)
+                    remaining = min(
+                        max(0, budget - prefix_added), suffix_budget
+                    )
                     suffix_options = self._sequences(
                         suffix_speaker, centre, 0, remaining, piece,
                         floor, ceiling,
@@ -716,13 +858,7 @@ class WindowPlanner:
                         if predicted > self.target:
                             continue
                         final_core_start = prefix_added + base_core_pos
-                        if self.final_core_min <= final_core_start <= self.final_core_max:
-                            anchor_penalty = 0
-                        else:
-                            anchor_penalty = min(
-                                abs(final_core_start - self.final_core_min),
-                                abs(final_core_start - self.final_core_max),
-                            )
+                        anchor_penalty = abs(final_core_start - desired_core_start)
 
                         total_voice = dict(base_voice)
                         total_voice[prefix_speaker] += self._sequence_voice_samples(prefix_seq)
@@ -769,7 +905,7 @@ class WindowPlanner:
         )
 
         # Clean pad không bắt buộc. Nếu layout vẫn ngắn, lấy context nền liên
-        # tục để bù, ưu tiên đưa core_start tới giây 5 rồi dùng phía còn lại.
+        # tục để bù, ưu tiên giữ midpoint của core tại giây 7.5.
         # Chạy tối đa hai lượt vì context mới có thể nuốt một support piece cũ.
         for pass_index in range(2):
             current = self._window_samples(prefix, base, suffix)
@@ -779,10 +915,18 @@ class WindowPlanner:
             final_core_start = (
                 self._sequence_added_samples(prefix) + core_lo - base.start
             )
-            left_need = min(
-                remaining, max(0, self.final_core_min - final_core_start)
+            desired_core_start = max(0, (self.target - (core_hi - core_lo)) // 2)
+            left_need = min(remaining, max(0, desired_core_start - final_core_start))
+            final_core_end_room = (
+                self._sequence_added_samples(suffix) + base.end - core_hi
             )
-            right_need = remaining - left_need
+            desired_right = self.target - (core_hi - core_lo) - desired_core_start
+            right_need = min(
+                remaining - left_need,
+                max(0, desired_right - final_core_end_room),
+            )
+            if left_need + right_need < remaining:
+                right_need += remaining - left_need - right_need
             new_start, new_end, new_start_cut, new_end_cut = self._expand_context(
                 base.start, base.end, floor, ceiling, left_need, right_need
             )
@@ -848,7 +992,7 @@ class WindowPlanner:
         )
 
         result.layout.update({
-            "policy": "overlap>segment-envelope>outward-cut>clean-pad;missing-pad=>context",
+            "policy": "overlap>ranked-context>clean-pad;missing-pad=>context;sp3-hard-bound",
             "policy_version": POLICY_VERSION,
             "involved_segments": seg_indices,
             "host_segment": "+".join(seg_indices),
@@ -867,16 +1011,19 @@ class WindowPlanner:
             },
             "ratio": ratio,
             "core_position_seconds": result.core[0] / self.sr,
+            "core_midpoint_seconds": (
+                (result.core[0] + result.core[1]) / (2.0 * self.sr)
+            ),
             "base_width_seconds": (base.end - base.start) / self.sr,
             "base_core_position_seconds": (core_lo - base.start) / self.sr,
             "context_seconds": [left_context / self.sr, right_context / self.sr],
             "context_shortfall_seconds": [
-                max(0.0, (self.base_core_min - left_context) / self.sr),
-                max(0.0, (self.base_core_min - right_context) / self.sr),
+                max(0.0, (left_preferred - left_context) / self.sr),
+                max(0.0, (right_preferred - right_context) / self.sr),
             ],
             "core_expanded": base.start < timestamp_lo or base.end > timestamp_hi,
             "full_overlap": timestamp_lo == core_lo and timestamp_hi == core_hi,
-            "target_is_soft": True,
+            "target_is_soft": False,
             "prefix_speaker": None if prefix_speaker is None else str(prefix_speaker),
             "suffix_speaker": None if suffix_speaker is None else str(suffix_speaker),
             "pad_seconds": {

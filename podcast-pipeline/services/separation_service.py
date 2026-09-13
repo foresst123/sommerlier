@@ -291,11 +291,12 @@ class SeparationService:
             "thresholds": {
                 "qc_sim": BSS_QC_SIM_THRESHOLD, "not_a_margin": BSS_NOT_A_MARGIN,
                 "window_target": 15.0,
-                "window_target_soft": 15.0,
+                "window_target_soft": None,
+                "quality_split_seconds": 12.0,
                 "support_min_seconds": 1.5,
                 "secondary_edge_margin_seconds": 0.0,
                 "crossfade_seconds": 0.02,
-                "window_max": None,
+                "window_max": 15.0,
                 "min_solo": 0.0,
                 "only_hard_boundary": "third_speaker",
                 "enroll_budget": BSS_ENROLL_BUDGET,
@@ -1074,7 +1075,7 @@ class SeparationService:
             def window_iter():
                 for _a, _b, plist, _t in buildable:
                     try:
-                        r = planner.build(plist)
+                        r = planner.build_many(plist)
                         yield r, planner.reason, planner.detail, list(planner.actions)
                     except Exception as exc:
                         actions = list(getattr(planner, "actions", []))
@@ -1087,12 +1088,44 @@ class SeparationService:
                         yield None, "window_error", actions[-1]["detail"], actions
             window_iter = window_iter()
 
+        def expanded_window_iter():
+            """Flatten one group into non-overlapping per-core model jobs."""
+            for job, outcome in zip(buildable, window_iter):
+                spk_a, spk_b, plist, targets = job
+                plans, reason, detail, actions = outcome
+                if plans is None:
+                    yield job, (None, reason, detail, actions)
+                    continue
+
+                emitted = False
+                for plan in plans:
+                    core_lo, core_hi = plan.core_source_samples
+                    if core_hi <= core_lo:
+                        clipped_targets = list(targets)
+                    else:
+                        lo_seconds, hi_seconds = core_lo / sr, core_hi / sr
+                        clipped_targets = [
+                            (sd, max(lo, lo_seconds), min(hi, hi_seconds))
+                            for sd, lo, hi in targets
+                            if min(hi, hi_seconds) > max(lo, lo_seconds)
+                        ]
+                    if not clipped_targets:
+                        continue
+                    emitted = True
+                    subjob = (spk_a, spk_b, plist, clipped_targets)
+                    yield subjob, (
+                        plan.window, plan.reason, plan.detail, plan.actions
+                    )
+
+                if not emitted:
+                    yield job, (None, reason, detail or "no_core_targets", actions)
+
         from tqdm import tqdm
-        pbar = tqdm(total=len(buildable), desc="[TSE Extractor]", leave=True)
+        pbar = tqdm(desc="[TSE Extractor]", unit="window", leave=True)
         try:
             for (spk_a, spk_b, plist, targets), (
                 built, reason, detail, planner_actions
-            ) in zip(buildable, window_iter):
+            ) in expanded_window_iter():
                 pbar.update(1)
                 _t_job = _time.perf_counter()
 
@@ -1100,8 +1133,12 @@ class SeparationService:
                     for sd, lo, hi in targets:
                         self._fail(seg_by_index.get(sd["index"]), lo, hi, reason, detail)
 
-                job_lo = min(p["overlap_start"] for p in plist)
-                job_hi = max(p["overlap_end"] for p in plist)
+                job_lo = min((lo for _sd, lo, _hi in targets), default=min(
+                    p["overlap_start"] for p in plist
+                ))
+                job_hi = max((hi for _sd, _lo, hi in targets), default=max(
+                    p["overlap_end"] for p in plist
+                ))
                 job_info = {
                     "speakers": [str(spk_a), str(spk_b)],
                     "overlap_seconds": [job_lo, job_hi],
