@@ -52,7 +52,7 @@ BSS_STITCH_SEARCH = float(os.environ.get("BSS_STITCH_SEARCH", "400.0"))
 # usable_cores() khi có đủ job (xem BSS_WINDOW_POOL_MIN_JOBS); 0 = tắt hẳn.
 _BSS_WINDOW_WORKERS_ENV = os.environ.get("BSS_WINDOW_WORKERS")
 BSS_WINDOW_POOL_MIN_JOBS = int(os.environ.get("BSS_WINDOW_POOL_MIN_JOBS", "3"))
-
+MIN_OVERLAP_SECONDS = 0.05
 
 def _resolve_pool_size() -> int:
     """Bao nhiêu process cho pool build cửa sổ; 0 nghĩa là tắt hẳn cho cả batch.
@@ -979,7 +979,7 @@ class SeparationService:
 
         # Bỏ qua micro-overlap (< 60ms): thường là khoảng lặng ở ranh giới
         # segment, không đáng tách và dễ gây insufficient_evidence khi retry.
-        MIN_OVERLAP_SECONDS = 0.06
+       
         micro = [p for p in pairs if p["overlap_end"] - p["overlap_start"] < MIN_OVERLAP_SECONDS]
         if micro and self.logger:
             self.logger.info(
