@@ -977,6 +977,15 @@ class SeparationService:
         # Phát hiện mọi giao dương; ngưỡng chạy model chỉ áp dụng sau khi nhóm.
         pairs = detect_overlapping_segments(seg_dicts, overlap_threshold=0.0, logger=self.logger)
 
+        # Bỏ qua micro-overlap (< 60ms): thường là khoảng lặng ở ranh giới
+        # segment, không đáng tách và dễ gây insufficient_evidence khi retry.
+        MIN_OVERLAP_SECONDS = 0.06
+        micro = [p for p in pairs if p["overlap_end"] - p["overlap_start"] < MIN_OVERLAP_SECONDS]
+        if micro and self.logger:
+            self.logger.info(
+                f"[TSE] skipping {len(micro)} micro-overlap(s) < {MIN_OVERLAP_SECONDS*1000:.0f}ms")
+        pairs = [p for p in pairs if p["overlap_end"] - p["overlap_start"] >= MIN_OVERLAP_SECONDS]
+
         # Tạo danh sách các SpeechSegment từ danh sách segments
         speech = [SpeechSegment(**s.__dict__) for s in segments]
         sr = audio.sample_rate
