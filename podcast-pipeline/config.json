@@ -32,9 +32,9 @@
                 "cut_music": true,
                 "diarization": true,
                 "separation": true,
-                "asr": false,
+                "asr": true,
                 "captioning": false,
-                "refinement": false,
+                "refinement": true,
                 "export": true
             },
             "pipeline": {
