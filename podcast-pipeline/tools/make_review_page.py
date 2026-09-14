@@ -110,6 +110,8 @@ def _rows(segments, original, processed, budget):
             # regenerated page without losing the marks already made.
             "mark_music": bool(seg.get("mark_music")),
             "mark_multi": bool(seg.get("mark_multi")),
+            "mark_spk": bool(seg.get("mark_spk")),
+            "spk_correct": seg.get("spk_correct") or "",
         })
     return out
 
@@ -454,7 +456,7 @@ textarea.note::placeholder{color:var(--fg-dim);font-size:11px;}
       <option value="2">2.0x</option>
     </select>
   </label>
-  <kbd class="hint" title="j/k hoặc ↑/↓ chuyển dòng · Space nghe · M đánh dấu còn nhạc · V đánh dấu nhiều giọng · E sửa text">? phím tắt</kbd>
+  <kbd class="hint" title="j/k hoặc ↑/↓ chuyển dòng · Space nghe · N đánh dấu còn nhạc · G đánh dấu nhiều giọng · S đánh dấu sai speaker · E sửa text">? phím tắt</kbd>
   <span class="spacer"></span>
   <span id="status"></span>
   <button id="playall">▶ Phát toàn bộ</button>
@@ -723,7 +725,13 @@ function setCur(i) {
 function toggleMark(field) {
   if (cur < 0) return;
   const card = tbody.children[cur];
-  card.querySelector(field === "mark_music" ? ".mk-music" : ".mk-multi").click();
+  const selector = {
+    mark_music: ".mk-music",
+    mark_multi: ".mk-multi",
+    mark_spk: ".mk-spk",
+  }[field];
+  const checkbox = selector && card.querySelector(selector);
+  if (checkbox) checkbox.click();
 }
 
 addEventListener("keydown", e => {
@@ -737,8 +745,9 @@ addEventListener("keydown", e => {
   const k = e.key.toLowerCase();
   if (k === "j" || e.key === "ArrowDown") { e.preventDefault(); setCur(nextVisible(cur < 0 ? 0 : cur + 1, 1)); }
   else if (k === "k" || e.key === "ArrowUp") { e.preventDefault(); setCur(nextVisible(cur <= 0 ? 0 : cur - 1, -1)); }
-  else if (k === "m") { e.preventDefault(); toggleMark("mark_music"); }
-  else if (k === "v") { e.preventDefault(); toggleMark("mark_multi"); }
+  else if (k === "n") { e.preventDefault(); toggleMark("mark_music"); }
+  else if (k === "g") { e.preventDefault(); toggleMark("mark_multi"); }
+  else if (k === "s") { e.preventDefault(); toggleMark("mark_spk"); }
   else if (k === "e") {
     e.preventDefault();
     if (cur >= 0) tbody.children[cur].querySelector("textarea.edit").focus();
@@ -921,6 +930,7 @@ document.getElementById("export").onclick = () => {
     index: r.index, speaker: r.speaker, start: r.start, end: r.end,
     text: r.final, text_edited: r.edited, note: r.note,
     mark_music: r.mark_music, mark_multi: r.mark_multi,
+    mark_spk: r.mark_spk, spk_correct: r.spk_correct,
   }));
   download(NAME + "_edited.json", JSON.stringify(rows, null, 2),
            "application/json");
