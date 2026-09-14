@@ -140,6 +140,9 @@ PAGE = """<!doctype html>
   --blue: #2563eb;
   --blue-bg: rgba(37, 99, 235, 0.08);
   --blue-fg: #1d4ed8;
+  --green: #16a34a;
+  --green-bg: rgba(22, 163, 74, 0.10);
+  --green-fg: #15803d;
   --amber: #eab308;
   --amber-bg: rgba(234, 179, 8, 0.15);
   --amber-fg: #854d0e;
@@ -152,7 +155,7 @@ PAGE = """<!doctype html>
   --note-bg: #f9fafb;
   --shadow-card: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px -1px rgba(0, 0, 0, 0.1);
   --shadow-hover: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
-  --radius: 10px; --radius-sm: 6px; --ok: var(--blue); --hh: 62px;
+  --radius: 10px; --radius-sm: 6px; --ok: var(--green); --hh: 62px;
 }
 
 *{box-sizing:border-box;margin:0;}
@@ -302,7 +305,7 @@ button.play.on{background:var(--accent);border-color:var(--accent);color:#fff;}
   box-shadow: 0 4px 12px rgba(0,0,0,0.15);
 }
 .badge-muted{color:var(--fg-dim);border-color:transparent;}
-.badge-ok{color:var(--blue-fg);background:var(--blue-bg);border-color:var(--blue);}
+.badge-ok{color:var(--green-fg);background:var(--green-bg);border-color:var(--green);}
 .badge-warn{color:var(--amber-fg);background:var(--amber-bg);border-color:var(--amber);}
 .badge-bad{color:var(--red-fg);background:var(--red-bg);border-color:var(--red);}
 .badge-icon{font-size:14px;line-height:1;}
