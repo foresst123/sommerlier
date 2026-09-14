@@ -32,10 +32,10 @@
                 "cut_music": true,
                 "diarization": true,
                 "separation": true,
-                "asr": true,
-                "captioning": true,
-                "refinement": true,
-                "export": true
+                "asr": false,
+                "captioning": false,
+                "refinement": false,
+                "export": false
             },
             "pipeline": {
                 "vad": true,
@@ -53,7 +53,7 @@
                 "initprompt": true,
                 "lang": "vi",
                 "LLM": "case_0",
-                "merge_gap": 0.5,
+                "merge_gap": 0.8,
                 "bridge_gap": 3.0,
                 "max_segment_length": 20.0,
                 "seg_th": 0.11,
@@ -149,7 +149,7 @@
                 "initprompt": true,
                 "lang": "vi",
                 "LLM": "case_0",
-                "merge_gap": 0.5,
+                "merge_gap": 0.8,
                 "bridge_gap": 3.0,
                 "max_segment_length": 20.0,
                 "seg_th": 0.11,
