@@ -12,7 +12,7 @@ import numpy as np
 
 from utils.acoustic_boundary import AcousticBoundaryFinder, ContextExpander
 
-POLICY_VERSION = "bounded-recovery-context-padding-v10"
+POLICY_VERSION = "bounded-recovery-context-padding-v11"
 
 
 def clean_segments(segments):
@@ -230,7 +230,7 @@ class WindowPlan:
 class WindowPlanner:
     """Dựng window theo thứ tự overlap, context liên tục, rồi clean padding."""
 
-    def __init__(self, segments, pairs, waveform, sr, music_map=None, seams=(), vad=None, context_seconds=2.0, search_seconds=400.0):
+    def __init__(self, segments, pairs, waveform, sr, music_map=None, seams=(), vad=None, context_seconds=3.0, search_seconds=400.0):
         self.segments, self.pairs = segments, pairs
         self.waveform, self.sr = waveform, sr
         self.music_map = music_map

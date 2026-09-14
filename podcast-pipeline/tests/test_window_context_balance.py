@@ -46,7 +46,7 @@ def test_the_right_of_the_core_gets_real_context():
     planner, result = plan(BACKCHANNEL)
     assert result is not None, planner.detail
     left, right = result.layout["context_seconds"]
-    assert right >= 2.0, f"only {right:.2f}s after the core; the host's resumption is the evidence"
+    assert right >= 3.0, f"only {right:.2f}s after the core; the host's resumption is the evidence"
     assert left / right <= 3.0, f"context leans {left/right:.1f}:1 left ({left:.2f}s vs {right:.2f}s)"
 
 

@@ -257,6 +257,8 @@ from utils.worker_env import resolve_worker_python
 # hand still wins, which keeps a quick sweep possible without editing config.
 for _cfg_key, _env_key in (("qc_sim_threshold", "BSS_QC_SIM_THRESHOLD"),
                            ("min_voiced_sec", "BSS_MIN_VOICED_SEC"),
+                           ("context_per_side_seconds", "BSS_STITCH_EDGE_PAD"),
+                           ("boundary_search_seconds", "BSS_STITCH_SEARCH"),
                            # 0 = tắt hẳn pool build cửa sổ song song; số dương
                            # ép cứng số worker; để trống trong config thì
                            # separation_service tự tính theo usable_cores().

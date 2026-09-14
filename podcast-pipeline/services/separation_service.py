@@ -25,7 +25,9 @@ _NO_MEMORY = EnrollmentMemory(enabled=False)
 
 
 # Ngữ cảnh thật quanh overlap; điểm cắt phải nằm trong vùng sạch.
-BSS_STITCH_EDGE_PAD = float(os.environ.get("BSS_STITCH_EDGE_PAD", "2.0"))
+# Ba giây mỗi phía giúp separator có đủ mẫu nền của cả hai người nói trước
+# khi dùng clean padding để lấp phần thời lượng còn lại của cửa sổ 15 giây.
+BSS_STITCH_EDGE_PAD = float(os.environ.get("BSS_STITCH_EDGE_PAD", "3.0"))
 BSS_STITCH_SEARCH = float(os.environ.get("BSS_STITCH_SEARCH", "400.0"))
 
 # --- Song song hoá việc dựng cửa sổ ----------------------------------------
@@ -301,6 +303,7 @@ class SeparationService:
                 "secondary_edge_margin_seconds": 0.0,
                 "crossfade_seconds": 0.02,
                 "window_max": 15.0,
+                "context_per_side_seconds": BSS_STITCH_EDGE_PAD,
                 "min_solo": 0.0,
                 "only_hard_boundary": "third_speaker",
                 "enroll_budget": BSS_ENROLL_BUDGET,

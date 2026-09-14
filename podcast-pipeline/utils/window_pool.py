@@ -125,7 +125,7 @@ class FileWindows:
     này -- không đụng tới pool process (pool sống tiếp cho file kế)."""
 
     def __init__(self, pool_executor, segments, pairs, waveform, sr,
-                 music_map=None, seams=(), context_seconds=2.0,
+                 music_map=None, seams=(), context_seconds=3.0,
                  search_seconds=400.0, use_vad=False):
         self._pool = pool_executor
 
@@ -233,7 +233,7 @@ class WindowBuildPool:
         self._closed = False
 
     def open_file(self, segments, pairs, waveform, sr, music_map=None, seams=(),
-                  context_seconds=2.0, search_seconds=400.0, use_vad=False):
+                  context_seconds=3.0, search_seconds=400.0, use_vad=False):
         return FileWindows(
             self._pool, segments, pairs, waveform, sr, music_map=music_map,
             seams=seams, context_seconds=context_seconds,
