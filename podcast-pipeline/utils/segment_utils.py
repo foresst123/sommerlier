@@ -216,12 +216,131 @@ def cut_by_speaker_label(
 
     merged_list.sort(key=lambda x: (x["start"], x["end"], str(x["speaker"])))
 
-    # Filter only after merge. Long-segment splitting is intentionally deferred
-    # to split_long_segments(), where an acoustic cut can be used.
+    # Filter only after merge.  A tiny isolated blip is usually diarizer
+    # jitter, but a tiny cross-speaker overlap is evidence the separator needs
+    # to see.  Preserve the latter until overlap recovery has had its chance.
+    def has_foreign_overlap(item):
+        return any(
+            other.get("speaker") != item["speaker"]
+            and _overlap_duration(
+                item["start"], item["end"], other["start"], other["end"]
+            ) > eps
+            for other in merged_list
+        )
+
+    # Long-segment splitting is intentionally deferred to
+    # split_long_segments(), where an acoustic cut can be used.
     return [
         vad for vad in merged_list
-        if vad["end"] - vad["start"] >= min_segment_length
+        if (
+            vad["end"] - vad["start"] >= min_segment_length
+            or has_foreign_overlap(vad)
+        )
     ]
+
+
+def bridge_interrupted_speaker_turns(
+    segment_list: list,
+    bridge_gap: float = 3.0,
+    logger=None,
+    seams=None,
+) -> list:
+    """Join A fragments when one continuous B turn overlaps both exposed ends.
+
+    A regular merge must not bridge ``A ... B ... A`` because B may be an
+    ordinary turn.  This pass handles the narrower interrupted-turn shape:
+    B is already present at the end of the left A fragment and remains present
+    when the right A fragment begins.  The resulting A envelope gives the
+    separator one meaningful A/B overlap instead of two unreliable slivers.
+
+    The bridge is forbidden across an excision seam or when a third speaker is
+    active in the gap.  Long bridged segments are deliberately left intact
+    here; ``split_long_segments`` owns the later acoustic, overlap-aware split.
+    """
+    if not segment_list:
+        return []
+    if bridge_gap < 0:
+        raise ValueError("bridge_gap must be >= 0")
+
+    eps = 1e-9
+    joins = sorted(float(s) for s in (seams or ()) if _is_finite_number(s))
+    clean = []
+    for segment in segment_list:
+        if not isinstance(segment, dict):
+            continue
+        if ("speaker" not in segment
+                or not _is_finite_number(segment.get("start"))
+                or not _is_finite_number(segment.get("end"))):
+            continue
+        item = dict(segment)
+        item["start"], item["end"] = float(item["start"]), float(item["end"])
+        if item["end"] > item["start"]:
+            clean.append(item)
+    if not clean:
+        return []
+
+    by_speaker = {}
+    for segment in clean:
+        by_speaker.setdefault(segment["speaker"], []).append(segment)
+    speaker_ranges = {
+        speaker: _merge_time_ranges((item["start"], item["end"]) for item in items)
+        for speaker, items in by_speaker.items()
+    }
+
+    bridged, bridge_count = [], 0
+    for speaker, items in by_speaker.items():
+        items.sort(key=lambda item: (item["start"], item["end"]))
+        merged = []
+        for item in items:
+            if not merged:
+                merged.append(dict(item))
+                continue
+
+            left = merged[-1]
+            gap = item["start"] - left["end"]
+            if gap <= eps or gap > bridge_gap:
+                merged.append(dict(item))
+                continue
+
+            envelope_start, envelope_end = left["start"], item["end"]
+            crosses_seam = any(
+                envelope_start - eps <= join <= envelope_end + eps
+                for join in joins
+            )
+            bridge_speakers = {
+                other
+                for other, ranges in speaker_ranges.items()
+                if other != speaker and any(
+                    start < left["end"] - eps and end > item["start"] + eps
+                    for start, end in ranges
+                )
+            }
+            if len(bridge_speakers) != 1 or crosses_seam:
+                merged.append(dict(item))
+                continue
+
+            bridge_speaker = next(iter(bridge_speakers))
+            third_speaker_in_gap = any(
+                other not in (speaker, bridge_speaker)
+                and any(_overlap_duration(left["end"], item["start"], start, end) > eps
+                        for start, end in ranges)
+                for other, ranges in speaker_ranges.items()
+            )
+            if third_speaker_in_gap:
+                merged.append(dict(item))
+                continue
+
+            left["end"] = item["end"]
+            bridge_count += 1
+        bridged.extend(merged)
+
+    bridged.sort(key=lambda item: (item["start"], item["end"], str(item["speaker"])))
+    if logger and bridge_count:
+        logger.info(
+            f"Bridged {bridge_count} interrupted speaker turn(s) "
+            f"(max gap={bridge_gap:.2f}s)"
+        )
+    return bridged
 
 
 def deduplicate_segments_by_index(segments: list, logger=None) -> list:
@@ -277,11 +396,11 @@ def split_long_segments(
     min_piece: float = 0.2,
     boundary_finder=None,
 ) -> list:
-    """Split over-long segments once, preferring an acoustic pause.
+    """Split over-long segments, preserving cross-speaker overlap boundaries.
 
-    Metadata is preserved on every produced piece. If a strict 30-second split
-    would leave a tiny final tail, the remaining span is rebalanced so the tail
-    is not silently lost later by a minimum-duration filter.
+    A cut normally lands outside every cross-speaker overlap. If an overlap
+    consumes every legal cut position, the segment is deliberately left
+    overlong rather than cutting through speech that belongs to two speakers.
     """
     if max_duration <= 0:
         raise ValueError("max_duration must be > 0")
@@ -292,92 +411,145 @@ def split_long_segments(
     if waveform is not None and (sample_rate is None or sample_rate <= 0):
         raise ValueError("sample_rate must be > 0 when waveform is provided")
 
-    new_segments = []
-    new_index = 0
-    if boundary_finder is None and waveform is not None:
-        boundary_finder = AcousticBoundaryFinder(waveform, sample_rate)
-
+    source_segments = []
     for original in segment_list or []:
         if not isinstance(original, dict):
             continue
         if not _is_finite_number(original.get("start")) or not _is_finite_number(original.get("end")):
             continue
-
-        start_time = float(original["start"])
-        end_time = float(original["end"])
+        start_time, end_time = float(original["start"]), float(original["end"])
         if end_time <= start_time:
             continue
+        item = dict(original)
+        item["start"], item["end"] = start_time, end_time
+        source_segments.append(item)
+    source_segments.sort(key=lambda item: (
+        item["start"], item["end"], str(item.get("speaker", ""))
+    ))
 
-        current_start = start_time
+    if boundary_finder is None and waveform is not None:
+        boundary_finder = AcousticBoundaryFinder(waveform, sample_rate)
 
-        while end_time - current_start > max_duration:
-            remaining = end_time - current_start
-            deadline = current_start + max_duration
+    protected = [[] for _ in source_segments]
+    for i, segment in enumerate(source_segments):
+        for other in source_segments:
+            if other["speaker"] == segment.get("speaker"):
+                continue
+            lo = max(segment["start"], other["start"])
+            hi = min(segment["end"], other["end"])
+            if hi > lo:
+                protected[i].append((lo, hi))
+        protected[i] = _merge_time_ranges(protected[i])
 
-            # If cutting at the deadline would leave a tiny tail, split the
-            # remaining span into two reasonable pieces instead of producing
-            # e.g. 30.0s + 0.1s and then losing the 0.1s downstream.
-            tail_after_deadline = end_time - deadline
-            if 0 < tail_after_deadline < min_piece:
-                desired = current_start + remaining / 2.0
-                max_cut = deadline
-                min_cut = current_start + min_piece
-                target = min(max(desired, min_cut), max_cut)
-            else:
-                target = deadline
+    eps = 1e-9
 
-            chunk_end = target
+    def containing_overlap(ranges, point):
+        return next((span for span in ranges if span[0] + eps < point < span[1] - eps), None)
 
-            if waveform is not None and search_sec > 0:
-                # Search before the chosen target so max_duration is never
-                # exceeded. Also do not leave a sub-min_piece tail.
-                latest_allowed = min(target, end_time - min_piece) if min_piece > 0 else target
-                earliest_allowed = max(
-                    current_start + min_piece,
-                    latest_allowed - search_sec,
+    def acoustic_cut(lo, hi, anchor, blocked=()):
+        """Best ranked acoustic cut inside bounds that is not in ``blocked``."""
+        if hi <= lo + eps:
+            return None, "no_safe_range"
+        if boundary_finder is not None:
+            try:
+                blocked_samples = [
+                    (int(round(start * sample_rate)), int(round(end * sample_rate)))
+                    for start, end in blocked
+                ]
+                candidates = boundary_finder.find_candidates(
+                    int(round(anchor * sample_rate)), direction="both",
+                    search_min=int(round(lo * sample_rate)),
+                    search_max=int(round(hi * sample_rate)),
+                    hard_bounds=(int(round(lo * sample_rate)), int(round(hi * sample_rate))),
+                    include_fallback=True,
+                    forbidden_ranges=blocked_samples,
                 )
-                if latest_allowed > earliest_allowed:
-                    decision = boundary_finder.find_cut(
-                        int(target * sample_rate),
-                        direction="left",
-                        search_min=int(earliest_allowed * sample_rate),
-                        search_max=int(latest_allowed * sample_rate),
-                        hard_bounds=(
-                            int(earliest_allowed * sample_rate),
-                            int(latest_allowed * sample_rate),
-                        ),
-                    )
-                    quiet = decision.sample / float(sample_rate)
-                    if (
-                        quiet is not None
-                        and quiet > current_start + 1e-6
-                        and quiet - current_start <= max_duration + 1e-9
-                        and end_time - quiet >= min_piece - 1e-9
-                    ):
-                        chunk_end = quiet
+                for candidate in candidates:
+                    point = candidate.sample / float(sample_rate)
+                    if lo + eps < point < hi - eps and containing_overlap(blocked, point) is None:
+                        return point, candidate.method
+            except Exception:
+                pass
+        fallback = min(max(anchor, lo), hi)
+        if lo + eps < fallback < hi - eps and containing_overlap(blocked, fallback) is None:
+            return fallback, "timestamp_bound"
+        return None, "no_safe_range"
 
-            # Absolute progress guard.
-            if chunk_end <= current_start + 1e-9:
-                chunk_end = min(current_start + max_duration, end_time)
-                if chunk_end <= current_start + 1e-9:
+    # First plan the cuts owned by segments exceeding max_duration.  A
+    # post-diarization boundary must never land inside cross-speaker overlap:
+    # keeping one overlong segment is safer than turning one overlap into two
+    # semantically unrelated turns.
+    planned_cuts = [[] for _ in source_segments]
+    for i, original in enumerate(source_segments):
+        current_start, end_time = original["start"], original["end"]
+        while end_time - current_start > max_duration + eps:
+            deadline = current_start + max_duration
+            tail = end_time - deadline
+            if 0 < tail < min_piece:
+                deadline = min(
+                    current_start + max_duration,
+                    max(current_start + min_piece, current_start + (end_time - current_start) / 2.0),
+                )
+
+            minimum_cut = current_start + min_piece
+            maximum_cut = min(deadline, end_time - min_piece)
+            if maximum_cut <= minimum_cut + eps:
+                break
+
+            blocker = containing_overlap(protected[i], deadline)
+            if blocker is None:
+                search_lo = max(minimum_cut, maximum_cut - search_sec)
+                cut, _method = acoustic_cut(
+                    search_lo, maximum_cut, maximum_cut, protected[i])
+                if cut is None:
+                    if containing_overlap(protected[i], maximum_cut) is None:
+                        cut, _method = maximum_cut, "timestamp_bound"
+            else:
+                # Prefer ending before the overlap, even if that makes this
+                # chunk shorter than max_duration.  It keeps the whole overlap
+                # in one later segment.
+                safe_hi = min(maximum_cut, blocker[0])
+                search_lo = max(minimum_cut, safe_hi - search_sec)
+                cut, _method = acoustic_cut(search_lo, safe_hi, safe_hi, protected[i])
+                if cut is None and safe_hi > minimum_cut + eps:
+                    cut, _method = safe_hi, "overlap_boundary"
+                if cut is None:
+                    # Overlap fills the entire legal chunk. Do not manufacture
+                    # a boundary through it; this tail is intentionally left
+                    # overlong for the window planner to handle separately.
                     break
 
-            piece = dict(original)
-            piece["index"] = str(new_index).zfill(5)
-            piece["start"] = round(current_start, 3)
-            piece["end"] = round(chunk_end, 3)
-            new_segments.append(piece)
+            if cut is None:
+                break
+            cut = min(max(cut, minimum_cut), maximum_cut)
+            if containing_overlap(protected[i], cut) is not None:
+                break
+            if cut <= current_start + eps:
+                break
+            planned_cuts[i].append(cut)
+            current_start = cut
 
-            new_index += 1
-            current_start = chunk_end
-
-        if end_time > current_start + 1e-9:
+    new_segments = []
+    for original, cuts in zip(source_segments, planned_cuts):
+        points = [original["start"]]
+        points.extend(sorted({round(cut, 9) for cut in cuts
+                              if original["start"] + eps < cut < original["end"] - eps}))
+        points.append(original["end"])
+        for start_time, end_time in zip(points, points[1:]):
+            if end_time <= start_time + eps:
+                continue
             piece = dict(original)
-            piece["index"] = str(new_index).zfill(5)
-            piece["start"] = round(current_start, 3)
+            piece["start"] = round(start_time, 3)
             piece["end"] = round(end_time, 3)
             new_segments.append(piece)
-            new_index += 1
+
+    # Splitting a long A turn can emit several A pieces around a shorter B
+    # turn.  Restore timeline order before assigning public indices.
+    new_segments.sort(key=lambda item: (
+        item["start"], item["end"], str(item.get("speaker", ""))
+    ))
+    for new_index, piece in enumerate(new_segments):
+        piece["index"] = str(new_index).zfill(5)
 
     return new_segments
 
@@ -604,7 +776,7 @@ def merge_ghost_speakers(
     logger=None,
     neighbour_gap: float = 0.5,
     one_sided_gap: float = 0.15,
-    require_all_fragments_supported: bool = True,
+    require_all_fragments_supported: bool = False,
 ) -> list:
     """Conservatively dissolve clustering-artifact speakers.
 
@@ -614,8 +786,9 @@ def merge_ghost_speakers(
       2. bracketed by the same real speaker on both sides;
       3. or extremely close to one real neighbour.
 
-    Crucially, there is NO "nearest centre always wins" fallback. If evidence is
-    weak, the speaker is kept unchanged.
+    Crucially, there is NO "nearest centre always wins" fallback. A fragment
+    with weak evidence remains unchanged, but it no longer prevents other
+    strongly evidenced fragments of the same ghost label from being repaired.
     """
     if not segment_list:
         return segment_list

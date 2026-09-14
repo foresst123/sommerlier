@@ -15,7 +15,8 @@ from utils.segment_utils import (
     split_long_segments,
     split_at_seams,
     cut_by_speaker_label,
-    merge_ghost_speakers
+    merge_ghost_speakers,
+    bridge_interrupted_speaker_turns,
 )
 from algorithms.diarization.fusion import align_speakers_across_chunks
 from algorithms.diarization.overlap import detect_overlapping_segments
@@ -217,6 +218,15 @@ class DiarizationService:
         # three-second cluster costs far more than its length.
         smoothed_list = merge_ghost_speakers(smoothed_list, logger=self.logger)
         self._log_segment_stats("post-ghost-merge", smoothed_list)
+
+        # A ... B ... A is normally kept as three turns.  When B overlaps both
+        # exposed A edges, it is an interrupted A turn instead: bridge A so
+        # separation sees one meaningful A/B overlap rather than two slivers.
+        bridge_gap = getattr(args, "bridge_gap", None)
+        bridge_gap = 3.0 if bridge_gap is None else bridge_gap
+        smoothed_list = bridge_interrupted_speaker_turns(
+            smoothed_list, bridge_gap=bridge_gap, logger=self.logger, seams=seams)
+        self._log_segment_stats(f"post-interrupted-bridge(gap={bridge_gap})", smoothed_list)
 
         # Split segments that are too long. Passing the waveform lets the cut
         # land on a pause instead of on the stopwatch, so a forced split stops

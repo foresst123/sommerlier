@@ -556,7 +556,6 @@ class WindowPlanner:
     def _split_core_bounds(self, core_lo, core_hi):
         """Partition an overlap into quality-sized cores using ranked cuts."""
         hard_limit = self.target
-        quality_limit = round(12.0 * self.sr)
         min_piece = min(round(2.5 * self.sr), max(1, (core_hi - core_lo) // 3))
         pending = [(core_lo, core_hi)]
         result = []
@@ -565,8 +564,7 @@ class WindowPlanner:
             lo, hi = pending.pop(0)
             width = hi - lo
             mandatory = width > hard_limit
-            optional = quality_limit < width <= hard_limit
-            if not mandatory and not optional:
+            if not mandatory:
                 result.append((lo, hi))
                 continue
 
@@ -594,15 +592,6 @@ class WindowPlanner:
             ranked.sort(key=lambda item: item[0])
             chosen = ranked[0][1] if ranked else None
 
-            # A quality split below 15s is accepted only with real acoustic
-            # evidence. A mandatory split always falls back to the midpoint.
-            if optional and (
-                chosen is None
-                or chosen.method == "timestamp_bound"
-                or chosen.confidence < 0.65
-            ):
-                result.append((lo, hi))
-                continue
             cut = chosen.sample if chosen is not None else midpoint
             cut = min(max(cut, lo + 1), hi - 1)
             self._record(
@@ -823,6 +812,32 @@ class WindowPlanner:
             ],
         )
 
+        # Context is higher priority than clean padding.  The first acoustic
+        # search may stop early at a local valley; make one bounded recovery
+        # attempt before any support clips reserve room around the base.
+        initial_left = max(0, core_lo - base_start)
+        initial_right = max(0, base_end - core_hi)
+        left_missing = max(0, left_preferred - initial_left)
+        right_missing = max(0, right_preferred - initial_right)
+        if left_missing or right_missing:
+            recovered_start, recovered_end, recovered_start_cut, recovered_end_cut = (
+                self._expand_context(
+                    base_start, base_end, floor, ceiling,
+                    left_missing, right_missing,
+                )
+            )
+            if recovered_start != base_start or recovered_end != base_end:
+                self._record(
+                    "recover_preferred_context_before_padding",
+                    requested_left_seconds=left_missing / self.sr,
+                    requested_right_seconds=right_missing / self.sr,
+                    base_before=[base_start, base_end],
+                    base_after=[recovered_start, recovered_end],
+                    cut_methods=[recovered_start_cut, recovered_end_cut],
+                )
+                base_start, base_end = recovered_start, recovered_end
+                start_cut, end_cut = recovered_start_cut, recovered_end_cut
+
         def make_base(start, end, left_cut, right_cut):
             return Piece(
                 start=start,
@@ -947,6 +962,7 @@ class WindowPlanner:
                 0.0, (self.target - (base.end - base.start)) / self.sr
             ),
             padding_dropped_for_context=(base.end - base.start) >= self.target,
+            padding_deferred_until_context=True,
             prefix_speaker=None if prefix_speaker is None else str(prefix_speaker),
             suffix_speaker=None if suffix_speaker is None else str(suffix_speaker),
             prefix_source_samples=[[p.start, p.end] for p in prefix],
@@ -1037,9 +1053,22 @@ class WindowPlanner:
         suffix_added = self._sequence_added_samples(suffix, base.end - core_hi)
         left_context = max(0, core_lo - base.start)
         right_context = max(0, base.end - core_hi)
-        mandatory_context_preserved = (
+        overlap_core_preserved = (
             base.start <= timestamp_lo_raw and base.end >= timestamp_hi_raw
         )
+        left_shortfall = max(0.0, (left_preferred - left_context) / self.sr)
+        right_shortfall = max(0.0, (right_preferred - right_context) / self.sr)
+        context_target_met = left_shortfall <= 1e-6 and right_shortfall <= 1e-6
+        constrained_by_sp3 = (
+            (left_shortfall > 1e-6 and floor > 0)
+            or (right_shortfall > 1e-6 and ceiling < n_samples)
+        )
+        context_status = (
+            "ok" if context_target_met
+            else "sp3_constrained" if constrained_by_sp3
+            else "shortfall"
+        )
+        mandatory_context_preserved = overlap_core_preserved and context_target_met
         self._record(
             "finalize_window",
             duration_seconds=len(result.audio) / self.sr,
@@ -1047,8 +1076,11 @@ class WindowPlanner:
             target_exceeded=len(result.audio) > self.target,
             core_window_samples=list(result.core),
             base_source_samples=[base.start, base.end],
+            overlap_core_preserved=overlap_core_preserved,
+            context_target_met=context_target_met,
+            context_status=context_status,
             mandatory_context_preserved=mandatory_context_preserved,
-            context_was_never_reduced_for_budget=True,
+            context_priority_verified=context_target_met,
             prefix_pad_seconds=prefix_added / self.sr,
             suffix_pad_seconds=suffix_added / self.sr,
         )
@@ -1061,7 +1093,10 @@ class WindowPlanner:
             "host_source_samples": [base.start, base.end],
             "timestamp_source_samples": [timestamp_lo, timestamp_hi],
             "timestamp_source_samples_raw": [timestamp_lo_raw, timestamp_hi_raw],
+            "overlap_core_preserved": overlap_core_preserved,
             "mandatory_context_preserved": mandatory_context_preserved,
+            "context_target_met": context_target_met,
+            "context_status": context_status,
             "third_speaker_floor_ceiling": [floor, ceiling],
             "third_speaker_bounds_seen": third_speaker_bounds,
             "cut_method": [base.start_cut, base.end_cut],
@@ -1080,8 +1115,8 @@ class WindowPlanner:
             "base_core_position_seconds": (core_lo - base.start) / self.sr,
             "context_seconds": [left_context / self.sr, right_context / self.sr],
             "context_shortfall_seconds": [
-                max(0.0, (left_preferred - left_context) / self.sr),
-                max(0.0, (right_preferred - right_context) / self.sr),
+                left_shortfall,
+                right_shortfall,
             ],
             "core_expanded": base.start < timestamp_lo or base.end > timestamp_hi,
             "full_overlap": timestamp_lo == core_lo and timestamp_hi == core_hi,

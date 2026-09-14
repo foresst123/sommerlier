@@ -226,6 +226,7 @@ class PipelineService:
                 f"-vad-{getattr(args, 'vad', False)}"
                 f"-diaModel-{suffix}-initPrompt-True"
                 f"-merge_gap-{getattr(args, 'merge_gap', 2.0)}"
+                f"-bridge_gap-{getattr(args, 'bridge_gap', 3.0)}"
                 f"-seg_th-{getattr(args, 'seg_th', 0.11)}"
                 f"-cl_min-{getattr(args, 'min_cluster_size', 11)}"
                 f"-cl-th-{getattr(args, 'clust_th', 0.5)}"

@@ -97,6 +97,11 @@ def test_the_core_sits_inside_the_modules_own_anchor_band():
     assert 5.0 <= result.layout["core_position_seconds"] <= 8.0
 
 
+def test_an_overlap_at_or_below_15_seconds_is_not_split_for_quality():
+    planner, _ = plan(BACKCHANNEL)
+    assert planner._split_core_bounds(0, 13 * SR) == [(0, 13 * SR)]
+
+
 def test_the_base_never_outgrows_its_budget():
     """Host retention was scored against the full 15s target, so on a long host
     the score kept rewarding a wider base up to swallowing the window. The cap
@@ -107,3 +112,12 @@ def test_the_base_never_outgrows_its_budget():
     base = next(p for p in result.layout["pieces"] if p["kind"] == "base")
     width = (base["source_samples"][1] - base["source_samples"][0]) / SR
     assert width <= 10.0, f"base grew to {width:.2f}s and left nothing for the other speaker"
+
+
+def test_context_audit_distinguishes_core_from_context_quality():
+    planner, result = plan(BACKCHANNEL)
+    assert result is not None, planner.detail
+    assert result.layout["overlap_core_preserved"] is True
+    assert result.layout["context_target_met"] is True
+    assert result.layout["context_status"] == "ok"
+    assert result.layout["mandatory_context_preserved"] is True

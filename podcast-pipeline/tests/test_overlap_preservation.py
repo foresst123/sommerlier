@@ -12,7 +12,12 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.segment_utils import cut_by_speaker_label, merge_ghost_speakers
+from utils.segment_utils import (
+    bridge_interrupted_speaker_turns,
+    cut_by_speaker_label,
+    merge_ghost_speakers,
+    split_long_segments,
+)
 
 
 def overlaps(segments):
@@ -55,26 +60,93 @@ def test_merging_keeps_a_backchannel_that_overlaps_a_turn():
     assert found[0][2] == pytest.approx(0.6, abs=1e-6)
 
 
-def test_merging_recovers_an_overlap_the_diarizer_split_away():
-    """Two halves of one turn hide the overlap between them.
+def test_merging_keeps_a_micro_fragment_when_it_carries_an_overlap():
+    """Sub-100ms diarizer output is only jitter when it overlaps nobody."""
+    segments = [
+        {"index": "00000", "start": 10.0, "end": 12.0, "speaker": "A"},
+        {"index": "00001", "start": 10.5, "end": 10.54, "speaker": "B"},
+    ]
+    merged = cut_by_speaker_label(
+        segments, merge_gap=0.3, min_segment_length=0.1, max_segment_length=20.0
+    )
+    assert any(segment["speaker"] == "B" for segment in merged)
+    assert overlaps(merged) == [("A", "B", 0.04)]
 
-    Before merging, A=[10,14] and A=[14.5,18] leave B=[14.1,14.4] touching
-    neither, so no overlap is detected at all. Joining A's halves puts B back
-    inside a turn where it belongs. Merging adds overlaps here; it never
-    removes them.
-    """
+
+def test_bridge_requires_the_interrupter_to_overlap_both_a_edges():
+    """An ordinary B turn in A's silent gap must not invent an A overlap."""
     segments = [
         {"index": "00000", "start": 10.0, "end": 14.0, "speaker": "A"},
         {"index": "00001", "start": 14.1, "end": 14.4, "speaker": "B"},
         {"index": "00002", "start": 14.5, "end": 18.0, "speaker": "A"},
     ]
     assert overlaps(segments) == [], "precondition: the split hides the overlap"
+    assert bridge_interrupted_speaker_turns(segments, bridge_gap=3.0) == segments
 
-    merged = cut_by_speaker_label(segments, merge_gap=2.0, min_segment_length=0.1,
-                                  max_segment_length=30.0)
-    recovered = overlaps(merged)
-    assert recovered, "merging should expose the backchannel inside A's turn"
-    assert recovered[0][2] == pytest.approx(0.3, abs=1e-6)
+
+def test_bridge_rebuilds_one_meaningful_overlap_from_two_edge_slivers():
+    segments = [
+        {"index": "00000", "start": 10.0, "end": 10.25, "speaker": "A"},
+        {"index": "00001", "start": 10.2, "end": 12.28, "speaker": "B"},
+        {"index": "00002", "start": 12.26, "end": 14.0, "speaker": "A"},
+    ]
+    bridged = bridge_interrupted_speaker_turns(segments, bridge_gap=3.0)
+    a = next(segment for segment in bridged if segment["speaker"] == "A")
+    assert (a["start"], a["end"]) == (10.0, 14.0)
+    assert overlaps(bridged) == [("A", "B", 2.08)]
+
+
+def test_bridge_stops_at_a_seam_or_a_third_speaker():
+    segments = [
+        {"index": "00000", "start": 10.0, "end": 10.25, "speaker": "A"},
+        {"index": "00001", "start": 10.2, "end": 12.28, "speaker": "B"},
+        {"index": "00002", "start": 12.26, "end": 14.0, "speaker": "A"},
+        {"index": "00003", "start": 11.0, "end": 11.2, "speaker": "C"},
+    ]
+    assert len(bridge_interrupted_speaker_turns(segments, bridge_gap=3.0)) == 4
+    assert len(bridge_interrupted_speaker_turns(segments[:3], bridge_gap=3.0,
+                                                seams=[11.0])) == 3
+
+
+def test_split_keeps_an_overlap_in_one_segment_when_space_exists():
+    segments = [
+        {"index": "00000", "start": 0.0, "end": 70.0, "speaker": "A"},
+        {"index": "00001", "start": 25.0, "end": 35.0, "speaker": "B"},
+    ]
+    out = split_long_segments(segments, max_duration=30.0, min_piece=0.2)
+    a = [segment for segment in out if segment["speaker"] == "A"]
+    assert [(segment["start"], segment["end"]) for segment in a] == [
+        (0.0, 25.0), (25.0, 55.0), (55.0, 70.0)]
+    assert overlaps(out) == [("A", "B", 10.0)]
+
+
+def test_overlong_full_overlap_is_not_cut_through_post_diarization():
+    segments = [
+        {"index": "00000", "start": 0.0, "end": 70.0, "speaker": "A"},
+        {"index": "00001", "start": 0.0, "end": 70.0, "speaker": "B"},
+    ]
+    out = split_long_segments(segments, max_duration=30.0, min_piece=0.2)
+    by_speaker = {
+        speaker: [(segment["start"], segment["end"]) for segment in out
+                  if segment["speaker"] == speaker]
+        for speaker in ("A", "B")
+    }
+    assert by_speaker["A"] == by_speaker["B"] == [(0.0, 70.0)]
+
+
+def test_split_output_is_time_ordered_before_indices_are_assigned():
+    segments = [
+        {"index": "00000", "start": 0.0, "end": 70.0, "speaker": "A"},
+        {"index": "00001", "start": 25.0, "end": 35.0, "speaker": "B"},
+    ]
+    out = split_long_segments(segments, max_duration=30.0, min_piece=0.2)
+    assert [(segment["start"], segment["end"], segment["speaker"]) for segment in out] == [
+        (0.0, 25.0, "A"),
+        (25.0, 35.0, "B"),
+        (25.0, 55.0, "A"),
+        (55.0, 70.0, "A"),
+    ]
+    assert [segment["index"] for segment in out] == ["00000", "00001", "00002", "00003"]
 
 
 def test_merging_never_bridges_a_seam():
@@ -116,6 +188,24 @@ def test_ghost_dissolution_removes_the_third_speaker_but_keeps_the_overlap():
     spans = sorted(s["end"] - s["start"] for s in after)
     assert spans == sorted(s["end"] - s["start"] for s in segments), \
         "ghost dissolution changed segment timing; it must only relabel"
+
+
+def test_ghost_with_one_uncertain_fragment_still_repairs_supported_fragments():
+    segments = [
+        {"index": "00000", "start": 0.0, "end": 300.0, "speaker": "A"},
+        {"index": "00001", "start": 400.0, "end": 500.0, "speaker": "B"},
+        {"index": "00002", "start": 100.0, "end": 100.4, "speaker": "G"},
+        {"index": "00003", "start": 350.0, "end": 350.4, "speaker": "G"},
+    ]
+    out = merge_ghost_speakers(segments)
+    assert not any(
+        segment["speaker"] == "G" and segment["start"] < 300.0
+        for segment in out
+    )
+    assert any(
+        segment["speaker"] == "G" and segment["start"] == 350.0
+        for segment in out
+    )
 
 
 def test_vad_cursor_is_per_speaker_so_cross_speaker_overlap_survives():

@@ -211,7 +211,16 @@ class AcousticBoundaryFinder:
         return min(0.89, base + 0.25 * quietness)
 
     def find_candidates(self, anchor, direction="both", search_min=None,
-                        search_max=None, hard_bounds=None, include_fallback=True):
+                        search_max=None, hard_bounds=None, include_fallback=True,
+                        forbidden_ranges=()):
+        """Return ranked boundaries, optionally excluding source-time ranges.
+
+        ``forbidden_ranges`` is expressed in sample coordinates.  It is a
+        caller policy, not an acoustic property: post-diarization splitting
+        uses it to protect overlaps, while padding intentionally leaves it
+        empty.  Touching an edge is allowed; only a point strictly inside a
+        forbidden interval is rejected.
+        """
         if direction not in {"left", "right", "both"}:
             raise ValueError("direction must be left, right, or both")
         anchor = int(anchor)
@@ -226,6 +235,15 @@ class AcousticBoundaryFinder:
         if hi < lo:
             raise ValueError("no cut satisfies search range, direction, and hard bounds")
 
+        forbidden = _merge_ranges(
+            (max(lo, int(start)), min(hi, int(end)))
+            for start, end in (forbidden_ranges or ())
+            if int(end) > int(start)
+        )
+
+        def allowed(point):
+            return not any(start < point < end for start, end in forbidden)
+
         cuts, _, _ = self.analyse(lo, hi)
         candidates = []
         for point, method in cuts.items():
@@ -234,6 +252,8 @@ class AcousticBoundaryFinder:
             if direction == "left" and point > anchor:
                 continue
             if direction == "right" and point < anchor:
+                continue
+            if not allowed(point):
                 continue
             candidates.append(BoundaryCandidate(
                 sample=int(point), method=method,
@@ -248,19 +268,22 @@ class AcousticBoundaryFinder:
         ))
         if include_fallback:
             fallback = min(max(anchor, lo), hi)
-            candidates.append(BoundaryCandidate(
-                sample=fallback, method="timestamp_bound", confidence=0.0,
-                distance_samples=abs(fallback - anchor),
-            ))
+            if allowed(fallback):
+                candidates.append(BoundaryCandidate(
+                    sample=fallback, method="timestamp_bound", confidence=0.0,
+                    distance_samples=abs(fallback - anchor),
+                ))
         return candidates
 
     def find_cut(self, anchor, direction="both", search_min=None,
-                 search_max=None, hard_bounds=None):
+                 search_max=None, hard_bounds=None, forbidden_ranges=()):
         candidates = self.find_candidates(
             anchor, direction=direction, search_min=search_min,
             search_max=search_max, hard_bounds=hard_bounds,
-            include_fallback=True,
+            include_fallback=True, forbidden_ranges=forbidden_ranges,
         )
+        if not candidates:
+            return None
         chosen = candidates[0]
         floor, ceiling = hard_bounds or (0, len(self.waveform))
         lo = max(0, int(floor), int(search_min if search_min is not None else floor))

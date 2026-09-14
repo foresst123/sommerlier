@@ -103,6 +103,8 @@ def _build_parser():
     # not passed falls back to the profile.
     parser.add_argument("--merge_gap", type=float,
                         help="Override pipeline.merge_gap from the profile")
+    parser.add_argument("--bridge_gap", type=float,
+                        help="Override pipeline.bridge_gap for interrupted speaker turns")
     parser.add_argument("--max_segment_length", type=float,
                         help="Override pipeline.max_segment_length from the profile")
     parser.add_argument("--no_review_page", dest="review_page", action="store_false",
