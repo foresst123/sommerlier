@@ -225,7 +225,7 @@ class PipelineService:
                 f"-bs_roformer-{getattr(args, 'music', False)}"
                 f"-vad-{getattr(args, 'vad', False)}"
                 f"-diaModel-{suffix}-initPrompt-True"
-                f"-merge_gap-{getattr(args, 'merge_gap', 2.0)}"
+                f"-merge_gap-{getattr(args, 'merge_gap', 0.5)}"
                 f"-bridge_gap-{getattr(args, 'bridge_gap', 3.0)}"
                 f"-seg_th-{getattr(args, 'seg_th', 0.11)}"
                 f"-cl_min-{getattr(args, 'min_cluster_size', 11)}"

@@ -189,7 +189,7 @@ class DiarizationService:
             raw_list = df_to_list(combined_df)
             
         # Apply merge and smooth logic
-        merge_gap = getattr(args, "merge_gap", 2.0)
+        merge_gap = getattr(args, "merge_gap", 0.5)
         # The merge loop keeps absorbing same-speaker turns until it hits this
         # ceiling, so the ceiling is what actually decides turn length -- a run
         # of it produced 47 segments piled against a 30s limit, none of them a

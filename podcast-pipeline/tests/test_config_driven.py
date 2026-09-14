@@ -84,7 +84,7 @@ def test_a_threshold_can_be_overridden_without_editing_config():
     base = _resolve(["--audio", "x.mp3", "--env", "a100"])
     over = _resolve(["--audio", "x.mp3", "--env", "a100", "--merge_gap", "1.0",
                      "--bridge_gap", "2.5"])
-    assert base["merge_gap"] == 0.3
+    assert base["merge_gap"] == 0.5
     assert base["bridge_gap"] == 3.0
     assert over["merge_gap"] == 1.0
     assert over["bridge_gap"] == 2.5
