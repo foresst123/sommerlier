@@ -4,7 +4,12 @@ torchaudio==2.8.0
 torchvision==0.23.0
 lightning==2.4.0
 torchmetrics==1.6.2
-onnxruntime-gpu==1.19.2
+# Keep the GPU wheel on CUDA 12 / cuDNN 9 for Kaggle's Python 3.12 runtime.
+# The Kaggle notebook reapplies this wheel after dependency resolution because
+# some optional audio dependencies also request the CPU `onnxruntime` package,
+# and both distributions install the same Python module tree.
+onnxruntime-gpu==1.23.2
+wrapt==2.3.0
 # nemo-toolkit[asr]==2.2.0
 # Removed: it is imported by models/sortformer.py alone, and that module's
 # import in services/model_loader.py is commented out -- nothing loads it. It
