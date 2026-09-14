@@ -6,7 +6,7 @@ model-specific.
 The separator produces two tracks. The one the profiles name is DialogueSidon,
 which is *blind*: it is never told who is in the mixture, so the tracks come
 back in whatever order it chose. Everything else in this module exists because
-of that -- ECAPA embeds each track, scores it against the enrollments mined for
+of that -- WeSpeaker embeds each track, scores it against the enrollments mined for
 each speaker, and assigns them; `_repair_chunk_swaps` catches the separator
 changing its mind about channel order mid-file. Similarity now reports
 confidence rather than rejecting audio that is otherwise usable.
@@ -57,7 +57,7 @@ def _corr(x: np.ndarray, y: np.ndarray) -> float:
 # speaker sat at 1.2e-1, four orders of magnitude apart.
 ABS_SILENCE_RMS = 1e-3
 
-# Voiced audio ECAPA needs before its embedding is worth comparing. It pools
+# Voiced audio WeSpeaker needs before its embedding is worth comparing. It pools
 # statistics over time, so a shorter probe gives a noisier vector -- and a noisy
 # vector competes in the A/B assignment, where being wrong flips which speaker a
 # track is labelled as.
@@ -71,23 +71,25 @@ BSS_MIN_VOICED_SEC = float(os.environ.get("BSS_MIN_VOICED_SEC", "1.0"))
 
 
 class BssSeparator:
-    """Blind source separation, then ECAPA speaker assignment.
+    """Blind source separation, then WeSpeaker speaker assignment.
 
-    The backend named in the profile splits the mixture; ECAPA-TDNN decides
+    The backend named in the profile splits the mixture; WeSpeaker decides
     which of the two tracks belongs to which speaker. If only one identity can
     be scored, its track is selected and the remaining label goes to the other
     track. A target-conditioned backend declares `ordered = True`.
     """
     
     def __init__(self, device: torch.device, process=None, checkpoint_path: str = None,
-                 separator: str = None, logger=None):
+                 separator: str = None, embedding_repository: str = None,
+                 embedding_filename: str = None, embedding_revision: str = None,
+                 logger=None):
         import tempfile
 
         from models.separation_backends import make_backend
 
         self.device = device
         self._process = process
-        self.classifier = None
+        self.speaker_embedder = None
         self.target_embed_cache: Dict[str, torch.Tensor] = {}
         self._temp_dir = tempfile.mkdtemp(prefix="bss_exchange_")
         self._req_counter = 0
@@ -99,7 +101,7 @@ class BssSeparator:
         self.backend = make_backend(name, process=process, temp_dir=self._temp_dir,
                                     device=device, logger=logger)
 
-        self._load_model()
+        self._load_model(embedding_repository, embedding_filename, embedding_revision)
 
         # Silero VAD to keep only real speech in each probe before scoring.
         # Energy alone cannot tell a separator's residual noise from voice, so
@@ -153,33 +155,31 @@ class BssSeparator:
         import shutil
         shutil.rmtree(self._temp_dir, ignore_errors=True)
         
-    def _load_model(self):
-        print(f"[TSE Model] Initializing ECAPA-TDNN on {self.device}...")
-        
-        # Load ECAPA-TDNN for Speaker Verification
+    def _load_model(self, repository=None, filename=None, revision=None):
+        print(f"[TSE Model] Initializing WeSpeaker on {self.device}...")
+
         try:
-            from speechbrain.inference.speaker import EncoderClassifier
-            bss_path = os.environ.get("BSS_PATH", os.path.join(os.path.dirname(__file__), "..", "bss_model"))
-            cls_dir = os.path.join(bss_path, "ecapa")
-            
-            self.classifier = EncoderClassifier.from_hparams(
-                source="speechbrain/spkrec-ecapa-voxceleb", 
-                savedir=cls_dir,
-                run_opts={"device": str(self.device)}
-            )
-            print("[TSE Model] ECAPA-TDNN loaded successfully.")
+            from models.wespeaker_embedding import WeSpeakerONNXEmbedder
+            kwargs = {"device": self.device}
+            if repository:
+                kwargs["repository"] = repository
+            if filename:
+                kwargs["filename"] = filename
+            if revision:
+                kwargs["revision"] = revision
+            self.speaker_embedder = WeSpeakerONNXEmbedder(**kwargs)
+            print("[TSE Model] WeSpeaker ResNet293-LM is ready.")
         except Exception as e:
-            raise RuntimeError(f"Failed to load ECAPA-TDNN: {e}")
+            raise RuntimeError(f"Failed to initialize WeSpeaker: {e}")
             
     def _get_embedding(self, audio_array: np.ndarray, sample_rate: int = 16000) -> torch.Tensor:
         """Helper to get speaker embedding from 1D numpy array."""
         if sample_rate != 16000:
             audio_array = librosa.resample(audio_array, orig_sr=sample_rate, target_sr=16000)
             
-        tensor = torch.from_numpy(audio_array).float().unsqueeze(0).to(self.device)
-        with torch.no_grad():
-            emb = self.classifier.encode_batch(tensor)
-        return emb.squeeze()
+        if self.speaker_embedder is None:
+            raise RuntimeError("WeSpeaker is not loaded.")
+        return self.speaker_embedder.embed(audio_array, sample_rate)
 
     def _get_target_embedding(self, enrollment_audios: List[np.ndarray], target_id: str, sample_rate: int) -> Optional[torch.Tensor]:
         """Calculate and cache the target embedding. Returns None if no audios provided."""
@@ -189,7 +189,7 @@ class BssSeparator:
         enroll_embeddings = []
         for e in enrollment_audios:
             if len(e) > 0:
-                # Normalize each clip before averaging: raw ECAPA embeddings have
+                # Normalize each clip before averaging: raw speaker embeddings have
                 # length-dependent norms, so the longest clip would otherwise
                 # dominate the centroid.
                 try:
@@ -273,7 +273,7 @@ class BssSeparator:
         return out_1, out_2, flips
 
     def _block_embedding(self, block: np.ndarray, sr: int):
-        """Normalized ECAPA embedding for one block, or None if it holds no speech."""
+        """Normalized WeSpeaker embedding for one block, or None if it holds no speech."""
         probe = self._gather_probe(block, [(0, len(block))], sr)
         if probe is None:
             return None
@@ -284,7 +284,7 @@ class BssSeparator:
         """Concatenate voiced pieces with a short cross-fade at each join.
 
         A butt-join between two separately-cut speech pieces leaves a step
-        discontinuity -- an edge ECAPA reads as a transient. Overlap-adding a
+        discontinuity -- an edge speaker embedding reads as a transient. Overlap-adding a
         few ms with a raised-cosine ramp smooths it. The overlap is only at the
         seam, so at most a few ms of one piece's tail blends into the next
         piece's head; it never swallows a whole word. Pieces shorter than the
@@ -314,7 +314,7 @@ class BssSeparator:
         separator's residual noise from speech, so a track that should be silent
         here would otherwise pass and its noise embedding could invert the A/B
         assignment. Voiced runs are cross-faded at the join, not butted, so no
-        step discontinuity reaches ECAPA. Falls back to the energy gate when
+        step discontinuity reaches WeSpeaker. Falls back to the energy gate when
         Silero is unavailable or errors.
 
         Returns None when there is too little voiced audio to trust, which means
@@ -391,8 +391,8 @@ class BssSeparator:
 
         Returns (track_A, track_B, sim_A, sim_B, diag).
         """
-        if not self.classifier:
-            raise RuntimeError("ECAPA is not loaded.")
+        if not self.speaker_embedder:
+            raise RuntimeError("WeSpeaker is not loaded.")
         if len(mixture_audio) == 0:
             raise ValueError("Input mixture_audio is empty.")
 
@@ -407,7 +407,7 @@ class BssSeparator:
         track_1_tensor = torch.from_numpy(track_1_np).to(self.device)
         track_2_tensor = torch.from_numpy(track_2_np).to(self.device)
 
-        # --- ECAPA matching: Tính embedding cho các speaker có mẫu ---
+        # --- WeSpeaker matching: Tính embedding cho các speaker có mẫu ---
         embed_A = self._get_target_embedding(enroll_A, id_A, sample_rate)
         embed_B = self._get_target_embedding(enroll_B, id_B, sample_rate)
 
@@ -479,7 +479,7 @@ class BssSeparator:
                 probe
             )) + 1e-12))
 
-        # A clean diarization probe is weaker evidence than ECAPA identity, but
+        # A clean diarization probe is weaker evidence than speaker identity, but
         # much stronger than trusting an unordered backend. Positive evidence
         # means track1=A, track2=B; negative evidence means swap.
         probe_energy = {
@@ -529,11 +529,11 @@ class BssSeparator:
             # ─── LOGIC GÁN LOẠI TRỪ ───
             # Trường hợp 1: Có cả 2 mẫu -> So sánh điểm bình thường
             if embed_A is not None and embed_B is not None:
-                assignment_mode = "dual_ecapa"
+                assignment_mode = "dual_wespeaker"
                 def _n(x): return -1.0 if x is None else x
                 if all(value is None for value in (s_1A, s_2A, s_1B, s_2B)):
                     (out_A_tensor, out_B_tensor, out_A_np, out_B_np,
-                     assignment_mode) = _assign_by_probe("deterministic_unscorable_ecapa")
+                     assignment_mode) = _assign_by_probe("deterministic_unscorable_wespeaker")
                     sim_A = sim_B = None
                 elif (_n(s_1A) + _n(s_2B)) >= (_n(s_2A) + _n(s_1B)):
                     out_A_tensor, out_B_tensor = track_1_tensor, track_2_tensor
@@ -546,7 +546,7 @@ class BssSeparator:
 
             # Trường hợp 2: Chỉ có mẫu A (Không có B) -> Dùng A chọn track, track còn lại nhường B
             elif embed_A is not None:
-                assignment_mode = "speaker_A_ecapa_complement_B"
+                assignment_mode = "speaker_A_wespeaker_complement_B"
                 if s_1A is None and s_2A is None:
                     (out_A_tensor, out_B_tensor, out_A_np, out_B_np,
                      assignment_mode) = _assign_by_probe("deterministic_unscorable_A")
@@ -564,7 +564,7 @@ class BssSeparator:
 
             # Trường hợp 3: Chỉ có mẫu B (Không có A) -> Dùng B chọn track, track còn lại nhường A
             elif embed_B is not None:
-                assignment_mode = "speaker_B_ecapa_complement_A"
+                assignment_mode = "speaker_B_wespeaker_complement_A"
                 if s_1B is None and s_2B is None:
                     (out_A_tensor, out_B_tensor, out_A_np, out_B_np,
                      assignment_mode) = _assign_by_probe("deterministic_unscorable_B")

@@ -70,7 +70,7 @@ class ModelLoader:
         )
             
     def load_separation_models(self, sidon_service=None):
-        """Load the separator and its ECAPA assignment, if enabled.
+        """Load the separator and its WeSpeaker assignment, if enabled.
 
         `sidon_service` is only consulted by the out-of-process backend; the
         in-process one never looks at it, so passing it unconditionally keeps
@@ -79,17 +79,22 @@ class ModelLoader:
         if "separator" in self.models:
             return
         if getattr(self.args, "bss", False):
-            if self.logger: self.logger.info(f"Loading separator + ECAPA on {self.device_1}")
+            if self.logger: self.logger.info(f"Loading separator + WeSpeaker on {self.device_1}")
             # Same resolution order the extractor uses: an explicit flag wins,
             # then the profile (published as BSS_SEPARATOR in main.py), then the
             # default. Resolved here too so the log line names what actually ran.
             separator = (getattr(self.args, "separator", None)
                          or os.environ.get("BSS_SEPARATOR") or "sidon")
+            bss_cfg = self.config.get("environments", {}).get(
+                self.args.env, {}).get("models", {}).get("bss", {})
             if self.logger: self.logger.info(f"  separator backend: {separator}")
             self.models["separator"] = BssSeparator(
                 device=self.device_1,
                 process=sidon_service.process if sidon_service else None,
                 separator=separator,
+                embedding_repository=bss_cfg.get("embedding_repository"),
+                embedding_filename=bss_cfg.get("embedding_filename"),
+                embedding_revision=bss_cfg.get("embedding_revision"),
                 logger=self.logger,
             )
             

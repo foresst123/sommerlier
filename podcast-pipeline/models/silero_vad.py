@@ -78,9 +78,8 @@ class SileroVAD:
                 vad_model, utils = torch.hub.load(
                     # Pinned: an unpinned master can change the hub entrypoint
                     # signature and break the pipeline with no local change.
-                    # Keep SILERO_VAD_REV in sync with download_offline_weights.py.
                     repo_or_dir=(
-                        os.environ.get("SILERO_VAD_REV", "snakers4/silero-vad:v5.1")
+                        os.environ.get("SILERO_VAD_REV", "snakers4/silero-vad:v6.2")
                         if not local else "vad/silero-vad"
                     ),
                     model=model,

@@ -13,7 +13,6 @@ onnxruntime-gpu==1.19.2
 # Re-enabling Sortformer means installing nemo alongside, and pinning numba to
 # whatever that build of nemo wants.
 pyannote.audio==4.0.7
-speechbrain==1.0.2
 faster-whisper==1.2.0
 whisperx==3.8.6
 ctranslate2==4.5.0
