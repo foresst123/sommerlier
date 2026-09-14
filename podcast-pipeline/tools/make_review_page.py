@@ -124,23 +124,35 @@ PAGE = """<!doctype html>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
-/* === Warm beige / sand theme === */
+/* === Modern SaaS Light Theme === */
 :root {
-  --bg: #f5eedc; /* Light yellow-brown/sand */
-  --bg-elevated: #fdfbf7; --bg-card: #fdfbf7;
-  --bg-card-hover: #fcf6e8; --fg: #332d27; /* Dark brown grey */
-  --fg-secondary: #5c544d;
-  --fg-dim: #a69c91; --accent: #92400e; /* Deep amber/brown accent */
-  --accent-hover: #713f12;
-  --accent-bg: rgba(146,64,14,.08); --accent-border: rgba(146,64,14,.25);
-  --green: #065f46; --green-bg: rgba(6,95,70,.07); --green-fg: #064e3b;
-  --amber: #b45309; --amber-bg: rgba(180,83,9,.08); --amber-fg: #78350f;
-  --red: #b91c1c; --red-bg: rgba(185,28,28,.07); --red-fg: #7f1d1d;
-  --border: rgba(120,110,100,.18); --border-strong: rgba(120,110,100,.28);
-  --edit-bg: #fffcf5; --note-bg: #f3efe6;
-  --shadow-card: 0 1px 3px rgba(100,90,80,.1), 0 1px 2px rgba(100,90,80,.06);
-  --shadow-hover: 0 4px 14px rgba(100,90,80,.15);
-  --radius: 10px; --radius-sm: 6px; --ok: #065f46; --hh: 62px;
+  --bg: #f3f4f6;
+  --bg-elevated: #ffffff;
+  --bg-card: #ffffff;
+  --bg-card-hover: #f9fafb;
+  --fg: #111827;
+  --fg-secondary: #4b5563;
+  --fg-dim: #9ca3af;
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
+  --accent-bg: rgba(79, 70, 229, 0.08);
+  --accent-border: rgba(79, 70, 229, 0.25);
+  --blue: #2563eb;
+  --blue-bg: rgba(37, 99, 235, 0.08);
+  --blue-fg: #1d4ed8;
+  --amber: #eab308;
+  --amber-bg: rgba(234, 179, 8, 0.15);
+  --amber-fg: #854d0e;
+  --red: #ef4444;
+  --red-bg: rgba(239, 68, 68, 0.1);
+  --red-fg: #b91c1c;
+  --border: #e5e7eb;
+  --border-strong: #d1d5db;
+  --edit-bg: #f9fafb;
+  --note-bg: #f9fafb;
+  --shadow-card: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px -1px rgba(0, 0, 0, 0.1);
+  --shadow-hover: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+  --radius: 10px; --radius-sm: 6px; --ok: var(--blue); --hh: 62px;
 }
 
 *{box-sizing:border-box;margin:0;}
@@ -290,7 +302,7 @@ button.play.on{background:var(--accent);border-color:var(--accent);color:#fff;}
   box-shadow: 0 4px 12px rgba(0,0,0,0.15);
 }
 .badge-muted{color:var(--fg-dim);border-color:transparent;}
-.badge-ok{color:var(--green-fg);background:var(--green-bg);border-color:var(--green);}
+.badge-ok{color:var(--blue-fg);background:var(--blue-bg);border-color:var(--blue);}
 .badge-warn{color:var(--amber-fg);background:var(--amber-bg);border-color:var(--amber);}
 .badge-bad{color:var(--red-fg);background:var(--red-bg);border-color:var(--red);}
 .badge-icon{font-size:14px;line-height:1;}
@@ -497,9 +509,29 @@ const SEP_LABEL = {
 function sepCell(r) {
   const u = r.unseparated || [];
   if (!u.length) {
-    return r.bss
-      ? '<span class="badge badge-ok" title="Thành công: Đã tách chồng tiếng"><span class="badge-icon">👥</span></span>'
-      : '<span class="badge badge-muted" title="Không có chồng tiếng">·</span>';
+    if (!r.bss) {
+      return '<span class="badge badge-muted" title="Không có chồng tiếng">·</span>';
+    }
+
+    // Trích xuất chính xác nguyên nhân dựa trên chỉ số sim
+    let warnings = [];
+    if (r.bss_spans && r.bss_spans.length > 0) {
+      for (let span of r.bss_spans) {
+        let sim = span[2];
+        if (sim === -1.0) {
+          warnings.push("Thiếu mẫu giọng gốc (sim=-1.0)");
+        } else if (sim < 0.3 && sim !== -2.0) {
+          warnings.push(`Độ khớp giọng thấp (sim=${sim.toFixed(2)})`);
+        }
+      }
+    }
+
+    if (warnings.length > 0) {
+      let uniqueWarnings = [...new Set(warnings)].join(" | ");
+      return `<span class="badge badge-warn" title="Cảnh báo: ${uniqueWarnings}"><span class="badge-icon">👥</span></span>`;
+    }
+
+    return '<span class="badge badge-ok" title="Thành công: Đã tách chồng tiếng"><span class="badge-icon">👥</span></span>';
   }
   const total = u.reduce((a, x) => a + (x.end - x.start), 0);
   const reasons = [...new Set(u.map(x => SEP_LABEL[x.reason] || x.reason))].join(", ");
