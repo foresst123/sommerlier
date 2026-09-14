@@ -97,6 +97,8 @@ def _build_job(file_ctx, group):
                 segments, file_ctx["pairs"], waveform, file_ctx["sr"],
                 music_map=music_map, seams=file_ctx["seams"], vad=vad,
                 context_seconds=file_ctx["context_seconds"],
+                max_context_seconds=file_ctx["max_context_seconds"],
+                padding_min_seconds=file_ctx["padding_min_seconds"],
                 search_seconds=file_ctx["search_seconds"])
             result = planner.build_many(group)
             return result, planner.reason, planner.detail, list(planner.actions)
@@ -125,7 +127,8 @@ class FileWindows:
     này -- không đụng tới pool process (pool sống tiếp cho file kế)."""
 
     def __init__(self, pool_executor, segments, pairs, waveform, sr,
-                 music_map=None, seams=(), context_seconds=3.0,
+                 music_map=None, seams=(), context_seconds=2.0,
+                 max_context_seconds=2.2, padding_min_seconds=1.0,
                  search_seconds=400.0, use_vad=False):
         self._pool = pool_executor
 
@@ -145,6 +148,8 @@ class FileWindows:
             "seams": tuple(seams),
             "sr": sr,
             "context_seconds": context_seconds,
+            "max_context_seconds": max_context_seconds,
+            "padding_min_seconds": padding_min_seconds,
             "search_seconds": search_seconds,
             "use_vad": use_vad,
         }
@@ -233,10 +238,13 @@ class WindowBuildPool:
         self._closed = False
 
     def open_file(self, segments, pairs, waveform, sr, music_map=None, seams=(),
-                  context_seconds=3.0, search_seconds=400.0, use_vad=False):
+                  context_seconds=2.0, max_context_seconds=2.2,
+                  padding_min_seconds=1.0, search_seconds=400.0, use_vad=False):
         return FileWindows(
             self._pool, segments, pairs, waveform, sr, music_map=music_map,
             seams=seams, context_seconds=context_seconds,
+            max_context_seconds=max_context_seconds,
+            padding_min_seconds=padding_min_seconds,
             search_seconds=search_seconds, use_vad=use_vad)
 
     def close(self):

@@ -238,6 +238,19 @@ class DiarizationService:
                 audio.waveform, audio.sample_rate,
                 vad=self.vad_model if getattr(args, "vad", False) else None,
             ))
+        # split_long_segments rounds public timestamps to milliseconds. A tiny
+        # preserved overlap can therefore collapse to start == end only after
+        # that rounding, so validate once more at the final export boundary.
+        before_final_filter = len(final_list)
+        final_list = [
+            segment for segment in final_list
+            if segment["end"] > segment["start"]
+        ]
+        if self.logger and len(final_list) != before_final_filter:
+            self.logger.info(
+                f"Dropped {before_final_filter - len(final_list)} zero-duration "
+                "segment(s) after timestamp rounding"
+            )
         self._log_segment_stats("post-split", final_list)
 
         # Build schemas

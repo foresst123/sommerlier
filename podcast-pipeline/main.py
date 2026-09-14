@@ -258,6 +258,8 @@ from utils.worker_env import resolve_worker_python
 for _cfg_key, _env_key in (("qc_sim_threshold", "BSS_QC_SIM_THRESHOLD"),
                            ("min_voiced_sec", "BSS_MIN_VOICED_SEC"),
                            ("context_per_side_seconds", "BSS_STITCH_EDGE_PAD"),
+                           ("context_max_per_side_seconds", "BSS_STITCH_EDGE_MAX"),
+                           ("padding_min_per_speaker_seconds", "BSS_PADDING_MIN_PER_SPEAKER"),
                            ("boundary_search_seconds", "BSS_STITCH_SEARCH"),
                            # 0 = tắt hẳn pool build cửa sổ song song; số dương
                            # ép cứng số worker; để trống trong config thì

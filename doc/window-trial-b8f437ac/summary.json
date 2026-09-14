@@ -1,0 +1,98 @@
+{
+  "input_path": "/Users/lam/.codex/attachments/b8f437ac-2f9b-48b8-a649-986213b7dbb6/pasted-text.txt",
+  "input_sha256": "30436d3ea39c47cc892dfa5a365222b559eb9672992c24d1be3ce5d3ad692ae9",
+  "policy": "padding-reserved-context-capped-v13",
+  "settings": {
+    "context_seconds": 2.0,
+    "max_context_seconds": 2.2,
+    "padding_min_seconds": 1.5,
+    "search_seconds": 400.0
+  },
+  "sample_rate": 1000,
+  "audio": "synthetic_energy_only",
+  "duration_assumed_from_last_segment": 2966.952,
+  "limitations": "No real audio, VAD model, separator, or speaker embeddings. Cuts/probe duration are scenario-dependent.",
+  "segment_count": 341,
+  "speakers": {
+    "1": 89,
+    "2": 231,
+    "3": 15,
+    "0": 6
+  },
+  "overlap_pairs": 44,
+  "job_groups": 44,
+  "clean_segment_counts": {
+    "2": 198,
+    "1": 56,
+    "3": 8,
+    "0": 1
+  },
+  "sub_100ms_segments": [
+    {
+      "index": "00018",
+      "start": 160.873,
+      "end": 160.913,
+      "speaker": "3"
+    },
+    {
+      "index": "00100",
+      "start": 834.092,
+      "end": 834.112,
+      "speaker": "3"
+    },
+    {
+      "index": "00102",
+      "start": 834.453,
+      "end": 834.473,
+      "speaker": "3"
+    },
+    {
+      "index": "00116",
+      "start": 863.672,
+      "end": 863.693,
+      "speaker": "0"
+    },
+    {
+      "index": "00149",
+      "start": 1153.832,
+      "end": 1153.852,
+      "speaker": "3"
+    }
+  ],
+  "runs": [
+    {
+      "mode": "continuous",
+      "jobs": 44,
+      "windows": 44,
+      "built": 44,
+      "failed": 0,
+      "context_cap_violations": 12,
+      "context_target_shortfall": 5,
+      "any_zero_probe": 13,
+      "any_probe_below_1_5s": 28,
+      "zero_padding": 28,
+      "one_sided_padding": 7,
+      "both_sided_padding": 9,
+      "midpoint_outside_7_5_plus_minus_0_5": 41,
+      "max_context_seconds": 6.6,
+      "sample_mapping_or_15s_failures": 0
+    },
+    {
+      "mode": "periodic_pauses",
+      "jobs": 44,
+      "windows": 44,
+      "built": 44,
+      "failed": 0,
+      "context_cap_violations": 12,
+      "context_target_shortfall": 3,
+      "any_zero_probe": 12,
+      "any_probe_below_1_5s": 20,
+      "zero_padding": 20,
+      "one_sided_padding": 1,
+      "both_sided_padding": 23,
+      "midpoint_outside_7_5_plus_minus_0_5": 30,
+      "max_context_seconds": 6.5,
+      "sample_mapping_or_15s_failures": 0
+    }
+  ]
+}

@@ -62,7 +62,7 @@ def test_window_anchor_support_crossfade_and_exact_core_mapping():
     # a second the right side cannot have.
     assert 5 <= result.core[0]/SR <= 8
     left, right = result.layout["context_seconds"]
-    assert right >= 3.0, f"right context starved: {left:.2f}s left vs {right:.2f}s right"
+    assert right >= 2.0, f"right context starved: {left:.2f}s left vs {right:.2f}s right"
     assert len(result.audio) <= 15*SR
     assert np.array_equal(result.audio[slice(*result.core)],before[20*SR:21*SR])
     assert np.array_equal(planner.waveform,before)

@@ -12,7 +12,7 @@ import numpy as np
 
 from utils.acoustic_boundary import AcousticBoundaryFinder, ContextExpander
 
-POLICY_VERSION = "bounded-recovery-context-padding-v11"
+POLICY_VERSION = "padding-reserved-context-capped-v13"
 
 
 def clean_segments(segments):
@@ -230,16 +230,24 @@ class WindowPlan:
 class WindowPlanner:
     """Dựng window theo thứ tự overlap, context liên tục, rồi clean padding."""
 
-    def __init__(self, segments, pairs, waveform, sr, music_map=None, seams=(), vad=None, context_seconds=3.0, search_seconds=400.0):
+    def __init__(self, segments, pairs, waveform, sr, music_map=None, seams=(),
+                 vad=None, context_seconds=2.0, max_context_seconds=2.2,
+                 padding_min_seconds=1.0, search_seconds=400.0):
         self.segments, self.pairs = segments, pairs
         self.waveform, self.sr = waveform, sr
         self.music_map = music_map
         self.seams = [int(t * sr) for t in seams]
         self.context = round(context_seconds * sr)
+        self.max_context = max(self.context, round(max_context_seconds * sr))
+        self.padding_min = max(0, round(padding_min_seconds * sr))
         self.search = search_seconds * sr
         self.target = round(15.0 * sr)
         self.fade = round(0.020 * sr)
-        self.minimum = round(1.5 * sr)
+        # Sàn độ dài một mảnh padding phải đạt để được coi là hợp lệ -- dùng
+        # chung ngưỡng với padding_min_seconds thay vì hardcode riêng 1.5s
+        # (trước đây 2 hằng số trùng giá trị nên che mất việc chúng độc lập:
+        # đổi padding_min_seconds không hề đổi ngưỡng chấp nhận piece).
+        self.minimum = self.padding_min
         self._support_remainder_seen = set()
         # 15s is a hard model limit. A centred core and 1-2s of continuous
         # context are preferences that may move when a file edge or SP3 blocks.
@@ -530,14 +538,12 @@ class WindowPlanner:
         right_take = min(max(0, int(right_need)), max(0, ceiling - end), room)
         room -= right_take
 
-        # Nếu một phía bị file/SP3 chặn, dồn budget sang phía còn lại.
-        if room > 0:
-            extra_left = min(max(0, start - floor - left_take), room)
-            left_take += extra_left
-            room -= extra_left
-        if room > 0:
-            extra_right = min(max(0, ceiling - end - right_take), room)
-            right_take += extra_right
+        # Không dồn phần room còn lại (một phía bị SP3/mép file chặn) sang
+        # phía kia ở đây. Cả 2 phía luôn trần ở max_context (xem build(),
+        # vòng pass_index) -- không có phần "vượt trần" nào để dồn nữa; bù
+        # cho phía bị chặn giờ là việc của padding (anchor_penalty trong
+        # choose_padding), không phải context. Hàm này chỉ lấy đúng
+        # left_need/right_need caller yêu cầu, giới hạn bởi floor/ceiling.
 
         left = self.expander.expand(
             start, "left", left_take / self.sr,
@@ -784,13 +790,17 @@ class WindowPlanner:
         left = self.expander.expand(
             core_lo, "left", left_preferred / self.sr,
             minimum_seconds=max(0.0, (left_preferred - round(0.5 * self.sr)) / self.sr),
-            maximum_seconds=min(left_room, left_preferred + tolerance) / self.sr,
+            maximum_seconds=min(
+                left_room, self.max_context, left_preferred + tolerance
+            ) / self.sr,
             hard_bound=floor,
         )
         right = self.expander.expand(
             core_hi, "right", right_preferred / self.sr,
             minimum_seconds=max(0.0, (right_preferred - round(0.5 * self.sr)) / self.sr),
-            maximum_seconds=min(right_room, right_preferred + tolerance) / self.sr,
+            maximum_seconds=min(
+                right_room, self.max_context, right_preferred + tolerance
+            ) / self.sr,
             hard_bound=ceiling,
         )
         base_start, start_cut = left.boundary_sample, left.method
@@ -903,9 +913,14 @@ class WindowPlanner:
                 (speakers[0], speakers[1]),
                 (speakers[1], speakers[0]),
             ):
+                # Padding is a spliced-in, non-contiguous clip, not an
+                # extension of the base -- unlike context it does not need to
+                # stay within the SP3/file-edge floor/ceiling, so that bound
+                # is intentionally not passed here (it previously discarded
+                # valid same-speaker padding lying just past a nearby SP3
+                # boundary, defeating the point of a wide search radius).
                 prefix_options = self._sequences(
                     prefix_speaker, centre, 0, prefix_budget, piece,
-                    floor, ceiling,
                 ) or [()]
 
                 for prefix_seq in prefix_options:
@@ -915,7 +930,6 @@ class WindowPlanner:
                     )
                     suffix_options = self._sequences(
                         suffix_speaker, centre, 0, remaining, piece,
-                        floor, ceiling,
                     ) or [()]
                     for suffix_seq in suffix_options:
                         predicted = self._window_samples(
@@ -924,18 +938,57 @@ class WindowPlanner:
                         if predicted > self.target:
                             continue
                         final_core_start = prefix_added + base_core_pos
-                        anchor_penalty = abs(final_core_start - desired_core_start)
+                        suffix_added = self._sequence_added_samples(suffix_seq, base_right_context)
+                        final_core_end_room = suffix_added + base_right_context
+                        # Center on the ACTUAL achievable left/right extent,
+                        # not a fixed desired_core_start sized for the full
+                        # 15s target. When one side is hard-blocked (SP3 /
+                        # file edge) it can never reach that target no matter
+                        # how much padding piles onto the free side -- doing
+                        # so only pushes the core further off-centre (proven
+                        # by tracing job 34: forcing the free side to use its
+                        # full context_overflow moved the core from 80.6% to
+                        # 83.4% of the window instead of towards 50%).
+                        # Symmetry between the two realised sides is what
+                        # actually keeps the overlap centred, and it steers
+                        # padding onto whichever side is shorter -- typically
+                        # the blocked one -- instead of onto the side that is
+                        # already longer.
+                        anchor_penalty = abs(final_core_start - final_core_end_room)
+                        # Một phía context=0 (chạm SP3/mép file đúng tại core)
+                        # mà padding cũng =0 nghĩa là overlap nằm sát mép cửa
+                        # sổ tuyệt đối, không còn 1 sample đệm nào. Ưu tiên
+                        # lấp phía đó bằng BẤT KỲ candidate nào (không cần
+                        # đúng speaker đang thiếu padding_min) trước khi so
+                        # balance_penalty -- ví dụ job 3: speaker đối diện
+                        # (majority) thừa hàng trăm candidate >=1s cho đúng
+                        # phía này nhưng bị loại vì đã đủ padding_min, khiến
+                        # overlap kẹt ở 99% cửa sổ dù thừa vật liệu để đệm.
+                        edge_exposed = (
+                            int(final_core_start == 0)
+                            + int(final_core_end_room == 0)
+                        )
 
                         total_voice = dict(base_voice)
                         total_voice[prefix_speaker] += self._sequence_voice_samples(prefix_seq)
                         total_voice[suffix_speaker] += self._sequence_voice_samples(suffix_seq)
                         va, vb = total_voice[speakers[0]], total_voice[speakers[1]]
                         balance_penalty = abs(np.log((va + 1.0) / (vb + 1.0)))
+                        padding_shortfall = sum(
+                            max(0, self.padding_min - total_voice[s])
+                            for s in speakers
+                        )
+                        speakers_missing_padding = sum(
+                            total_voice[s] < self.padding_min
+                            for s in speakers
+                        )
                         rank = (
-                            anchor_penalty,
-                            int(not prefix_seq) + int(not suffix_seq),
+                            speakers_missing_padding,
+                            padding_shortfall,
+                            edge_exposed,
                             balance_penalty,
                             -predicted,
+                            anchor_penalty,
                         )
                         candidates.append((
                             rank, tuple(prefix_seq), tuple(suffix_seq),
@@ -971,9 +1024,9 @@ class WindowPlanner:
             suffix_seconds=self._sequence_added_samples(suffix, base.end - core_hi) / self.sr,
         )
 
-        # Clean pad không bắt buộc. Nếu layout vẫn ngắn, lấy context nền liên
-        # tục để bù, ưu tiên giữ midpoint của core tại giây 7.5.
-        # Keep selected support intact; a second pass can fill acoustic-cut slack.
+        # Clean padding đã được chọn trước. Chỉ dùng context để bù phần còn
+        # lại khi chưa chạm trần context mỗi phía; không cho một host turn dài
+        # ăn hết cửa sổ và làm mất evidence gán speaker.
         for pass_index in range(2 if fill_context else 0):
             current = self._window_samples(prefix, base, suffix, core_lo, core_hi)
             remaining = max(0, self.target - current)
@@ -983,17 +1036,48 @@ class WindowPlanner:
                 self._sequence_added_samples(prefix, core_lo - base.start) + core_lo - base.start
             )
             desired_core_start = max(0, (self.target - (core_hi - core_lo)) // 2)
-            left_need = min(remaining, max(0, desired_core_start - final_core_start))
+            # Context luôn trần ở max_context mỗi phía, kể cả khi phía đối
+            # diện bị SP3/mép file chặn cứng -- KHÔNG nới trần bù cho phía
+            # này nữa. Từng thử nới (context_overflow) nhưng dựng lại job 34
+            # cho thấy nó chỉ kéo phía đang dài sẵn dài thêm, đẩy core lệch
+            # tâm hơn (80.6% -> 83.4%), không giúp gì. Việc bù cho phía bị
+            # chặn giờ thuộc về padding (xem anchor_penalty trong
+            # choose_padding, ưu tiên đối xứng theo phần trăm đã đạt được
+            # thay vì một mốc cố định theo target 15s).
+            left_cap = right_cap = self.max_context
+            left_capacity = max(0, left_cap - (core_lo - base.start))
+            left_need = min(
+                remaining, left_capacity,
+                max(0, desired_core_start - final_core_start),
+            )
             final_core_end_room = (
                 self._sequence_added_samples(suffix, base.end - core_hi) + base.end - core_hi
             )
             desired_right = self.target - (core_hi - core_lo) - desired_core_start
+            right_capacity = max(0, right_cap - (base.end - core_hi))
             right_need = min(
                 remaining - left_need,
+                right_capacity,
                 max(0, desired_right - final_core_end_room),
             )
             if left_need + right_need < remaining:
-                right_need += remaining - left_need - right_need
+                right_need += min(
+                    right_capacity - right_need,
+                    remaining - left_need - right_need,
+                )
+            if left_need + right_need < remaining:
+                left_need += min(
+                    left_capacity - left_need,
+                    remaining - left_need - right_need,
+                )
+            if left_need + right_need <= 0:
+                self._record(
+                    "context_cap_reached",
+                    pass_index=pass_index + 1,
+                    max_per_side_seconds=self.max_context / self.sr,
+                    remaining_seconds=remaining / self.sr,
+                )
+                break
             fill_floor, fill_ceiling = floor, ceiling
             for piece in (*prefix, *suffix):
                 if piece.end <= base.start:
@@ -1086,7 +1170,7 @@ class WindowPlanner:
         )
 
         result.layout.update({
-            "policy": "overlap>ranked-context>clean-pad;missing-pad=>context;sp3-hard-bound",
+            "policy": "overlap>target-context>speaker-padding>capped-context;sp3-hard-bound",
             "policy_version": POLICY_VERSION,
             "involved_segments": seg_indices,
             "host_segment": "+".join(seg_indices),

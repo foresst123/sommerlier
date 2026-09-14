@@ -25,10 +25,26 @@ _NO_MEMORY = EnrollmentMemory(enabled=False)
 
 
 # Ngữ cảnh thật quanh overlap; điểm cắt phải nằm trong vùng sạch.
-# Ba giây mỗi phía giúp separator có đủ mẫu nền của cả hai người nói trước
-# khi dùng clean padding để lấp phần thời lượng còn lại của cửa sổ 15 giây.
-BSS_STITCH_EDGE_PAD = float(os.environ.get("BSS_STITCH_EDGE_PAD", "3.0"))
-BSS_STITCH_SEARCH = float(os.environ.get("BSS_STITCH_SEARCH", "400.0"))
+# Context chỉ cần đủ để giữ continuity quanh overlap. Phần còn lại của cửa
+# sổ ưu tiên clean padding vì đó là bằng chứng trực tiếp để gán hai track.
+BSS_STITCH_EDGE_PAD = float(os.environ.get("BSS_STITCH_EDGE_PAD", "2.0"))
+BSS_STITCH_EDGE_MAX = float(os.environ.get("BSS_STITCH_EDGE_MAX", "2.2"))
+BSS_PADDING_MIN_PER_SPEAKER = float(
+    os.environ.get("BSS_PADDING_MIN_PER_SPEAKER", "1.0")
+)
+# 1800s (30 phút mỗi hướng): trên corpus thật, nhiều speaker chỉ xuất hiện vài
+# lần cách nhau hàng trăm-nghìn giây (một speaker phụ/hiếm nói vài câu rải
+# suốt file). 400s từng bỏ sót các đoạn sạch xa hơn -- speaker gần như không
+# có nguồn nào trong bán kính đó phải nhận ZERO_PROBE dù nguồn thật sự tồn
+# tại, chỉ là ở xa. Xem doc/window-policy-v13-audit.md, phần "Nguyên nhân A".
+BSS_STITCH_SEARCH = float(os.environ.get("BSS_STITCH_SEARCH", "1800.0"))
+# Context luôn trần ở BSS_STITCH_EDGE_MAX mỗi phía, kể cả khi phía đối diện
+# bị SP3/mép file chặn hẳn -- từng thử nới trần bù (BSS_STITCH_EDGE_OVERFLOW)
+# nhưng dựng lại bằng chứng thật (job 34, doc/window-policy-v13-audit.md)
+# cho thấy nới context chỉ kéo dài thêm phía vốn đã dài, đẩy overlap LỆCH
+# TÂM hơn chứ không giúp gì. Bù cho phía bị chặn giờ là việc của padding
+# (anchor_penalty trong choose_padding, utils/separation_window.py), không
+# phải context.
 
 # --- Song song hoá việc dựng cửa sổ ----------------------------------------
 # WindowPlanner.build() là CPU/numpy thuần và có thể tốn vài giây một job khi
@@ -304,6 +320,8 @@ class SeparationService:
                 "crossfade_seconds": 0.02,
                 "window_max": 15.0,
                 "context_per_side_seconds": BSS_STITCH_EDGE_PAD,
+                "context_max_per_side_seconds": BSS_STITCH_EDGE_MAX,
+                "padding_min_per_speaker_seconds": BSS_PADDING_MIN_PER_SPEAKER,
                 "min_solo": 0.0,
                 "only_hard_boundary": "third_speaker",
                 "enroll_budget": BSS_ENROLL_BUDGET,
@@ -1089,6 +1107,8 @@ class SeparationService:
                     file_windows = self._window_pool.open_file(
                         segments, pairs, waveform, sr, music_map=self.music_map,
                         seams=self.seams(), context_seconds=BSS_STITCH_EDGE_PAD,
+                        max_context_seconds=BSS_STITCH_EDGE_MAX,
+                        padding_min_seconds=BSS_PADDING_MIN_PER_SPEAKER,
                         search_seconds=BSS_STITCH_SEARCH, use_vad=False)
                     if self.logger:
                         self.logger.info("[TSE] building windows for this file in parallel")
@@ -1102,14 +1122,20 @@ class SeparationService:
         recovery_planner = WindowPlanner(
             segments, pairs, waveform, sr, music_map=self.music_map,
             seams=self.seams(), vad=getattr(self.bss_model, "_vad", None),
-            context_seconds=BSS_STITCH_EDGE_PAD, search_seconds=BSS_STITCH_SEARCH)
+            context_seconds=BSS_STITCH_EDGE_PAD,
+            max_context_seconds=BSS_STITCH_EDGE_MAX,
+            padding_min_seconds=BSS_PADDING_MIN_PER_SPEAKER,
+            search_seconds=BSS_STITCH_SEARCH)
         if file_windows is not None:
             window_iter = file_windows.build_all([plist for _a, _b, plist, _t in buildable])
         else:
             planner = WindowPlanner(
                 segments, pairs, waveform, sr, music_map=self.music_map,
                 seams=self.seams(), vad=getattr(self.bss_model, "_vad", None),
-                context_seconds=BSS_STITCH_EDGE_PAD, search_seconds=BSS_STITCH_SEARCH)
+                context_seconds=BSS_STITCH_EDGE_PAD,
+                max_context_seconds=BSS_STITCH_EDGE_MAX,
+                padding_min_seconds=BSS_PADDING_MIN_PER_SPEAKER,
+                search_seconds=BSS_STITCH_SEARCH)
 
             def window_iter():
                 for _a, _b, plist, _t in buildable:
@@ -1200,14 +1226,16 @@ class SeparationService:
                 trace = list(actions) + split_actions + [{
                     "action": "retry_window", "attempt": next_attempt,
                     "core_source_samples": [a, b],
-                    "context_seconds": 1.0 if next_attempt == 1 else 3.0,
+                    "context_seconds": 1.0 if next_attempt == 1 else BSS_STITCH_EDGE_MAX,
                     "padding": next_attempt == 1,
                     "fill_context": next_attempt != 1,
                     "previous_failures": [{"speaker": sd["speaker"], "start": start,
                                            "end": end, "reason": reason, "detail": detail}
                                           for sd, start, end, reason, detail in failures],
                 }]
-                recovery_planner.context = round((1.0 if next_attempt == 1 else 3.0) * sr)
+                recovery_planner.context = round(
+                    (1.0 if next_attempt == 1 else BSS_STITCH_EDGE_MAX) * sr
+                )
                 try:
                     retry = recovery_planner.build(
                         plist, core_bounds=(a, b), initial_actions=trace,
