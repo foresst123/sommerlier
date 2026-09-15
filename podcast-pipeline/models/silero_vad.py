@@ -64,12 +64,20 @@ class SileroVAD:
                 providers = ['CPUExecutionProvider']
 
             # Monkey-patch onnxruntime.InferenceSession to use providers by default
+            from utils.cpu_plan import onnx_session_options
             original_init = onnxruntime.InferenceSession.__init__
 
             def patched_init(self, path_or_bytes, sess_options=None, **kwargs):
                 # setdefault, not an override: a caller that passes its own
                 # providers should keep them.
                 kwargs.setdefault("providers", providers)
+                # Cap ORT thread pool to this process's CPU budget. Without
+                # this, torch.hub.load builds an ORT session that spawns a
+                # thread per visible core and pthread_setaffinity fails on
+                # every core outside our affinity mask (22 TSE workers × ~128
+                # threads each = the wall of "Invalid argument" in the logs).
+                if sess_options is None:
+                    sess_options = onnx_session_options()
                 original_init(self, path_or_bytes, sess_options=sess_options, **kwargs)
 
             onnxruntime.InferenceSession.__init__ = patched_init

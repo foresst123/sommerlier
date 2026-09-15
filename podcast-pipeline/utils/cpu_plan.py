@@ -93,3 +93,26 @@ def configure_process(n_workers: int = 3, logger=None) -> int:
             f"across {plan['processes']} process(es)"
         )
     return plan["per_process"]
+
+
+def onnx_session_options(per_process: int | None = None):
+    """SessionOptions khớp với thread budget của process đang gọi.
+
+    onnxruntime có thread pool riêng, không đọc OMP_NUM_THREADS: mặc định nó
+    spawn intra_op_num_threads = số core máy nhìn thấy rồi cố pthread_setaffinity
+    từng thread vào 1 core. Trên máy có affinity mask hẹp hơn số core vật lý
+    (SLURM / cgroup / container), setaffinity fail hàng loạt với EINVAL và log
+    ngập lệnh error, tệ hơn nữa là 22 worker của TSE window pool cùng dựng
+    Silero VAD sẽ nhân số thread lên gấp đôi ba, làm 24 core usable phải gánh
+    hàng ngàn thread tranh nhau.
+
+    Hàm này đọc OMP_NUM_THREADS mà configure_process() đã set (được thừa kế
+    qua fork/spawn) nên không phải truyền tham số qua nhiều tầng khởi tạo.
+    """
+    import onnxruntime as ort
+    if per_process is None:
+        per_process = int(os.environ.get("OMP_NUM_THREADS", "1"))
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = max(1, per_process)
+    opts.inter_op_num_threads = 1
+    return opts
