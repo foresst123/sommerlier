@@ -1227,7 +1227,7 @@ class SeparationService:
                     "action": "retry_window", "attempt": next_attempt,
                     "core_source_samples": [a, b],
                     "context_seconds": 1.0 if next_attempt == 1 else BSS_STITCH_EDGE_MAX,
-                    "padding": true,    
+                    "padding": True,    
                     "fill_context": next_attempt != 1,
                     "previous_failures": [{"speaker": sd["speaker"], "start": start,
                                            "end": end, "reason": reason, "detail": detail}
@@ -1239,7 +1239,7 @@ class SeparationService:
                 try:
                     retry = recovery_planner.build(
                         plist, core_bounds=(a, b), initial_actions=trace,
-                        padding=true, fill_context=next_attempt != 1)
+                        padding=True, fill_context=next_attempt != 1)
                     outcome = (retry, recovery_planner.reason, recovery_planner.detail,
                                list(recovery_planner.actions))
                 except Exception as exc:
