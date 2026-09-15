@@ -24,10 +24,10 @@ def track_quality(host, track, sr, floor=0.002, frame_sec=0.02):
                   frame_lengths=counts.tolist(), voiced_frames=voiced.tolist())
     if not voiced.any():
         return dict(result, accepted=True, status="quiet_mixture")
-    alive = t >= max(float(t.max()) * 0.15, floor)
+    alive = t >= max(float(t.max()) * 0.05, floor)
     coverage = float(np.sum(counts[voiced & alive]) / np.sum(counts[voiced]))
     result["coverage"] = coverage
-    if coverage >= 0.20:
+    if coverage >= 0.10:
         return dict(result, accepted=True, status="energy_present")
     status = "insufficient_evidence" if n < round(0.1 * sr) else "low_energy_coverage"
     return dict(result, accepted=False, status=status)

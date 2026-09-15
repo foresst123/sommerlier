@@ -127,7 +127,7 @@ BSS_ENROLL_PREFER_SINGLE = float(os.environ.get("BSS_ENROLL_PREFER_SINGLE", "4.0
 # có thể thấp hơn giọng tự nhiên nên giá trị mặc định tương đối thấp.
 BSS_QC_SIM_THRESHOLD = float(os.environ.get("BSS_QC_SIM_THRESHOLD", "0.40"))
 BSS_NOT_A_MARGIN = float(os.environ.get("BSS_NOT_A_MARGIN", "0.15"))
-BSS_SILENCE_RMS = float(os.environ.get("BSS_SILENCE_RMS", "0.002"))
+BSS_SILENCE_RMS = float(os.environ.get("BSS_SILENCE_RMS", "0.001"))
 
 # --- Hiệu chỉnh mức âm lượng track trước khi splice -----------------------
 # Không lấy RMS của mixture overlap làm chuẩn: mixture chứa cả hai speaker nên
@@ -1227,7 +1227,7 @@ class SeparationService:
                     "action": "retry_window", "attempt": next_attempt,
                     "core_source_samples": [a, b],
                     "context_seconds": 1.0 if next_attempt == 1 else BSS_STITCH_EDGE_MAX,
-                    "padding": next_attempt == 1,
+                    "padding": true,    
                     "fill_context": next_attempt != 1,
                     "previous_failures": [{"speaker": sd["speaker"], "start": start,
                                            "end": end, "reason": reason, "detail": detail}
@@ -1239,7 +1239,7 @@ class SeparationService:
                 try:
                     retry = recovery_planner.build(
                         plist, core_bounds=(a, b), initial_actions=trace,
-                        padding=next_attempt == 1, fill_context=next_attempt != 1)
+                        padding=true, fill_context=next_attempt != 1)
                     outcome = (retry, recovery_planner.reason, recovery_planner.detail,
                                list(recovery_planner.actions))
                 except Exception as exc:
