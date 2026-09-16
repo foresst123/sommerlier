@@ -768,6 +768,79 @@ def _ghost_target_for_segment(
     return None, "no_strong_timeline_evidence"
 
 
+GHOST_MERGE_MIN_SIMILARITY = 0.5
+GHOST_MERGE_EMBED_MAX_SECONDS = 8.0
+GHOST_MERGE_EMBED_MIN_SECONDS = 0.2
+
+
+def _to_numpy_vector(embedding) -> np.ndarray:
+    """Accept a torch tensor or array-like and return a flat float32 numpy vector."""
+    to_numpy = getattr(embedding, "detach", None)
+    if callable(to_numpy):
+        embedding = embedding.detach()
+    to_cpu = getattr(embedding, "cpu", None)
+    if callable(to_cpu):
+        embedding = embedding.cpu()
+    to_arr = getattr(embedding, "numpy", None)
+    array = embedding.numpy() if callable(to_arr) else np.asarray(embedding)
+    return np.asarray(array, dtype=np.float32).reshape(-1)
+
+
+def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    """L2-normalize then dot -- same convention as the WeSpeaker QC step in
+    models/bss_model.py (F.normalize(..., p=2, dim=0) then torch.dot)."""
+    denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+    if denom < 1e-12:
+        return 0.0
+    return float(np.dot(a, b) / denom)
+
+
+def _speaker_audio_for_embedding(speaker, segments, waveform, sr, max_seconds):
+    """Concatenate up to max_seconds of a speaker's own audio, longest
+    fragments first, for a single representative embedding."""
+    own = sorted(
+        (seg for seg in segments if seg["speaker"] == speaker),
+        key=lambda s: s["end"] - s["start"],
+        reverse=True,
+    )
+    n_samples = len(waveform)
+    budget = int(round(max_seconds * sr))
+    chunks = []
+    collected = 0
+    for seg in own:
+        if collected >= budget:
+            break
+        lo = max(0, int(round(seg["start"] * sr)))
+        hi = min(n_samples, int(round(seg["end"] * sr)))
+        if hi <= lo:
+            continue
+        take = min(hi - lo, budget - collected)
+        chunks.append(waveform[lo:lo + take])
+        collected += take
+    if not chunks or collected / sr < GHOST_MERGE_EMBED_MIN_SECONDS:
+        return None
+    return np.concatenate(chunks)
+
+
+def _embed_speaker(speaker, segments, waveform, sr, embedder, cache, logger):
+    """Cache a speaker's representative WeSpeaker embedding across fragments."""
+    if speaker in cache:
+        return cache[speaker]
+    embedding = None
+    try:
+        audio = _speaker_audio_for_embedding(
+            speaker, segments, waveform, sr, GHOST_MERGE_EMBED_MAX_SECONDS
+        )
+        if audio is not None:
+            embedding = _to_numpy_vector(embedder.embed(audio, sample_rate=sr))
+    except Exception as exc:
+        if logger:
+            logger.warning(f"Ghost-merge: embedding failed for speaker {speaker}: {exc}")
+        embedding = None
+    cache[speaker] = embedding
+    return embedding
+
+
 def merge_ghost_speakers(
     segment_list: list,
     share=GHOST_SPEAKER_SHARE,
@@ -776,11 +849,15 @@ def merge_ghost_speakers(
     neighbour_gap: float = 0.5,
     one_sided_gap: float = 0.15,
     require_all_fragments_supported: bool = False,
+    waveform=None,
+    sr: Optional[int] = None,
+    embedder=None,
+    min_merge_similarity: float = GHOST_MERGE_MIN_SIMILARITY,
 ) -> list:
     """Conservatively dissolve clustering-artifact speakers.
 
-    A low-share speaker is only a *candidate* ghost. It is relabelled only when
-    its own fragments have strong timeline evidence:
+    A low-share speaker is only a *candidate* ghost. WITHOUT audio, timeline
+    evidence alone proposes a target speaker per fragment:
       1. direct overlap with a real speaker;
       2. bracketed by the same real speaker on both sides;
       3. or extremely close to one real neighbour.
@@ -788,6 +865,22 @@ def merge_ghost_speakers(
     Crucially, there is NO "nearest centre always wins" fallback. A fragment
     with weak evidence remains unchanged, but it no longer prevents other
     strongly evidenced fragments of the same ghost label from being repaired.
+
+    When ``waveform``/``sr`` are given (an ``embedder`` -- anything exposing
+    ``.embed(audio, sample_rate) -> vector``, e.g.
+    ``models.wespeaker_embedding.WeSpeakerONNXEmbedder`` -- is created lazily
+    if not supplied), timeline position is IGNORED for the merge decision.
+    Instead, one representative embedding is built for the ghost and for
+    EVERY real speaker in the file, the ghost is scored against all of them,
+    and it is merged into whichever real speaker scores highest -- but only
+    when that best score is ``>= min_merge_similarity`` on WeSpeaker cosine
+    similarity (the same model/convention the BSS QC step already uses).
+    Timeline-adjacent is not the same question as same-voice: the nearest
+    neighbour in time can be the wrong real speaker when two of them sit
+    close together, so this always searches every real speaker rather than
+    only confirming whichever one happened to be nearby. Without audio, the function
+    falls back to timeline evidence alone -- unchanged from before, so
+    existing (audio-less, synthetic-timeline) callers keep their old result.
     """
     if not segment_list:
         return segment_list
@@ -866,6 +959,23 @@ def merge_ghost_speakers(
         if seg["speaker"] in real_speakers
     ]
 
+    # Voice similarity is the only thing that can tell "two people who happen
+    # to sit next to each other in time" apart from "one person clustering
+    # split in two" -- timeline evidence proposes a target, this confirms it.
+    use_similarity = waveform is not None and sr
+    if use_similarity and embedder is None:
+        try:
+            from models.wespeaker_embedding import WeSpeakerONNXEmbedder
+            embedder = WeSpeakerONNXEmbedder(device="cpu")
+        except Exception as exc:
+            if logger:
+                logger.warning(
+                    f"Ghost-merge: WeSpeaker unavailable ({exc}); "
+                    "falling back to timeline evidence only"
+                )
+            use_similarity = False
+    embed_cache = {}
+
     # Build an evidence plan per candidate speaker FIRST. If conservative mode
     # is on and even one fragment lacks evidence, keep that entire speaker.
     plans = {}
@@ -880,16 +990,50 @@ def merge_ghost_speakers(
         ghost_plan = []
         unsupported = 0
 
-        for seg in ghost_segments:
-            target, evidence = _ghost_target_for_segment(
-                seg,
-                real_segments,
-                neighbour_gap=neighbour_gap,
-                one_sided_gap=one_sided_gap,
+        if use_similarity:
+            # Voice identity, not timeline position, decides who a ghost
+            # really is: score against EVERY real speaker and take the best
+            # match, rather than only confirming whichever one the timeline
+            # heuristic happened to propose (which can itself be the wrong
+            # neighbour when two real speakers sit close together in time).
+            best_target, best_sim = None, -1.0
+            ghost_embed = _embed_speaker(
+                ghost, ordered, waveform, sr, embedder, embed_cache, logger
             )
-            ghost_plan.append((seg, target, evidence))
-            if target is None:
-                unsupported += 1
+            if ghost_embed is not None:
+                for candidate_speaker in real_speakers:
+                    candidate_embed = _embed_speaker(
+                        candidate_speaker, ordered, waveform, sr, embedder,
+                        embed_cache, logger,
+                    )
+                    if candidate_embed is None:
+                        continue
+                    sim = _cosine_similarity(ghost_embed, candidate_embed)
+                    if sim > best_sim:
+                        best_target, best_sim = candidate_speaker, sim
+
+            if ghost_embed is None or best_target is None:
+                target, evidence = None, "insufficient_audio_for_similarity"
+            elif best_sim < min_merge_similarity:
+                target, evidence = None, f"low_similarity:{best_sim:.3f}<{min_merge_similarity:.3f}"
+            else:
+                target, evidence = best_target, f"similarity:{best_sim:.3f}"
+
+            for seg in ghost_segments:
+                ghost_plan.append((seg, target, evidence))
+                if target is None:
+                    unsupported += 1
+        else:
+            for seg in ghost_segments:
+                target, evidence = _ghost_target_for_segment(
+                    seg,
+                    real_segments,
+                    neighbour_gap=neighbour_gap,
+                    one_sided_gap=one_sided_gap,
+                )
+                ghost_plan.append((seg, target, evidence))
+                if target is None:
+                    unsupported += 1
 
         if require_all_fragments_supported and unsupported:
             if logger:

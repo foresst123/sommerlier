@@ -216,7 +216,16 @@ class DiarizationService:
         # that cares: it refuses an overlap whose window holds three speakers
         # and cannot enrol anyone with under 1.5s of clean audio, so a
         # three-second cluster costs far more than its length.
-        smoothed_list = merge_ghost_speakers(smoothed_list, logger=self.logger)
+        # waveform/sr let the merge gate on WeSpeaker voice similarity
+        # instead of timeline position alone -- see utils/segment_utils.py.
+        # A lazily-built WeSpeaker embedder is deliberately used here rather
+        # than self.embedder (PyannoteEmbedder, a different model already
+        # loaded for diarization) so the merge decision matches the same
+        # model/threshold convention as the BSS QC similarity step.
+        smoothed_list = merge_ghost_speakers(
+            smoothed_list, logger=self.logger,
+            waveform=audio.waveform, sr=audio.sample_rate,
+        )
         self._log_segment_stats("post-ghost-merge", smoothed_list)
 
         # A ... B ... A is normally kept as three turns.  When B overlaps both
