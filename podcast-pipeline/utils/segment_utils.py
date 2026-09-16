@@ -234,7 +234,6 @@ def cut_by_speaker_label(
         vad for vad in merged_list
         if (
             vad["end"] - vad["start"] >= min_segment_length
-            or has_foreign_overlap(vad)
         )
     ]
 
