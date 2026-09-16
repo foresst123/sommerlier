@@ -207,7 +207,7 @@ class DiarizationService:
         # 0.24s, so a backchannel must survive this filter. Only the 19-60ms
         # boundary jitter is meant to go.
         smoothed_list = cut_by_speaker_label(
-            raw_list, merge_gap=merge_gap, min_segment_length=0.1,
+            raw_list, merge_gap=merge_gap, min_segment_length=0.15,
             max_segment_length=max_seg, logger=self.logger, seams=seams)
         self._log_segment_stats(f"post-merge(gap={merge_gap} max={max_seg})", smoothed_list)
 

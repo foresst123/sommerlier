@@ -95,7 +95,7 @@ def apply_sortformer_segment_padding(
 def cut_by_speaker_label(
     vad_list: list,
     merge_gap: float = 0.5,
-    min_segment_length: float = 0.2,
+    min_segment_length: float = 0.15,
     max_segment_length: float = 30.0,
     logger=None,
     seams=None,
