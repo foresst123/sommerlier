@@ -87,7 +87,7 @@
                     "clustering_method": "VBxClustering",
                     "min_speakers": 1,
                     "max_speakers": 10,
-                    "ahc_threshold": 0.5
+                    "ahc_threshold": 0.62
                 },
                 "bss": {
                     "qc_sim_threshold": 0.2,
@@ -189,7 +189,7 @@
                     "clustering_method": "VBxClustering",
                     "min_speakers": 1,
                     "max_speakers": 10,
-                    "ahc_threshold": 0.4
+                    "ahc_threshold": 0.62
                 },
                 "bss": {
                     "qc_sim_threshold": 0.2,
