@@ -1045,12 +1045,31 @@ def merge_ghost_speakers(
             continue
 
         if all(target is None for _, target, _ in ghost_plan):
+            if logger:
+                # Otherwise a rejected low-share speaker leaves NO trace at
+                # all -- "nothing merged" then reads identically whether the
+                # similarity gate correctly said no, or WeSpeaker silently
+                # failed to load/embed. Real case that motivated this: a
+                # Kaggle run showed post-ghost-merge == post-merge (0 change)
+                # right next to a "speaker share is 0.2%" warning, with no
+                # way to tell which of the two it was.
+                reasons = sorted({evidence for _, _, evidence in ghost_plan})
+                logger.info(
+                    f"Ghost-merge: kept low-share speaker {ghost} unmerged "
+                    f"({len(ghost_segments)} fragment(s)): {', '.join(reasons)}"
+                )
             continue
 
         accepted_ghosts.add(ghost)
         plans[ghost] = ghost_plan
 
     if not accepted_ghosts:
+        if logger and candidates:
+            logger.info(
+                f"Ghost-merge: {len(candidates)} low-share candidate(s) found "
+                f"({', '.join(sorted(map(str, candidates)))}) but none merged "
+                "-- see per-speaker reasons above"
+            )
         return [dict(seg) for seg in ordered]
 
     # Relabel only fragments with actual evidence. In conservative mode every
