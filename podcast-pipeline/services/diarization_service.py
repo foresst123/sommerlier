@@ -14,6 +14,7 @@ from utils.segment_utils import (
     deduplicate_segments_by_index,
     split_long_segments,
     split_at_seams,
+    filter_diarizer_noise,
     cut_by_speaker_label,
     merge_ghost_speakers,
     bridge_interrupted_speaker_turns,
@@ -155,6 +156,29 @@ class DiarizationService:
         # diarizer or from cut_by_speaker_label. Log both ends.
         self._log_segment_stats("raw", df_to_list(combined_df))
 
+        # Drop clustering-jitter blips before anything else touches the list.
+        # Must run first, on the RAW diarizer output: filtering after merging
+        # (the old approach, inside cut_by_speaker_label) judged a short
+        # fragment by whether it happened to sit next to something it could
+        # merge into, and silently dropped genuine short overlap evidence
+        # otherwise. This keeps any fragment with a foreign-speaker overlap
+        # regardless of length, and only drops isolated sub-200ms noise.
+        #
+        # 200ms is still below the shortest real overlap measured on this
+        # corpus (0.24s), so a genuine backchannel survives this filter
+        # either way (via the foreign-overlap exemption or simply being long
+        # enough) -- raised from the original 150ms for a wider noise margin.
+        raw_for_filter = df_to_list(combined_df)
+        filtered_list = filter_diarizer_noise(raw_for_filter)
+        dropped = len(raw_for_filter) - len(filtered_list)
+        if self.logger and dropped:
+            self.logger.info(
+                f"Dropped {dropped} segment(s) under 200ms as diarizer noise "
+                "(any with a foreign-speaker overlap was kept regardless of length)"
+            )
+        combined_df = pd.DataFrame(filtered_list)
+        self._log_segment_stats("post-noise-filter", filtered_list)
+
         # Cut at the joins first, before anything else looks at these segments.
         #
         # Excising the sung and standalone-music stretches leaves points where
@@ -202,12 +226,8 @@ class DiarizationService:
         raw_snapshot = [Segment(index=str(d.get("index", "00000")).zfill(5),
                                 start=d["start"], end=d["end"], speaker=d["speaker"])
                         for d in raw_list]
-        # min_segment_length is deliberately below the 0.1s overlap threshold
-        # used downstream: the shortest real overlap measured on this corpus is
-        # 0.24s, so a backchannel must survive this filter. Only the 19-60ms
-        # boundary jitter is meant to go.
         smoothed_list = cut_by_speaker_label(
-            raw_list, merge_gap=merge_gap, min_segment_length=0.15,
+            raw_list, merge_gap=merge_gap,
             max_segment_length=max_seg, logger=self.logger, seams=seams)
         self._log_segment_stats(f"post-merge(gap={merge_gap} max={max_seg})", smoothed_list)
 

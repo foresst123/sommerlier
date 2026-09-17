@@ -92,10 +92,58 @@ def apply_sortformer_segment_padding(
     return df
 
 
+def filter_diarizer_noise(segment_list: list, min_segment_length: float = 0.2) -> list:
+    """Drop isolated sub-min_segment_length blips that are pure diarizer jitter.
+
+    Runs FIRST, before seam-split/VAD/merge -- filtering after merging (the
+    previous approach) let a genuine short overlap fragment survive only by
+    chance of being adjacent to something it could merge into, and silently
+    dropped it otherwise. This checks the raw segment against every other RAW
+    segment directly: a tiny cross-speaker overlap is evidence the separator
+    needs to see, never noise, so it is kept regardless of length. Only a
+    tiny fragment with NO foreign overlap -- ordinary diarizer jitter -- is
+    dropped.
+    """
+    if not segment_list:
+        return []
+    if min_segment_length < 0:
+        raise ValueError("min_segment_length must be >= 0")
+
+    clean = []
+    for seg in segment_list:
+        if not isinstance(seg, dict):
+            continue
+        if ("speaker" not in seg
+                or not _is_finite_number(seg.get("start"))
+                or not _is_finite_number(seg.get("end"))):
+            continue
+        item = dict(seg)
+        item["start"] = float(item["start"])
+        item["end"] = float(item["end"])
+        if item["end"] > item["start"]:
+            clean.append(item)
+    clean.sort(key=lambda s: (s["start"], s["end"], str(s["speaker"])))
+
+    eps = 1e-9
+
+    def has_foreign_overlap(item):
+        return any(
+            other.get("speaker") != item["speaker"]
+            and _overlap_duration(
+                item["start"], item["end"], other["start"], other["end"]
+            ) > eps
+            for other in clean
+        )
+
+    return [
+        seg for seg in clean
+        if seg["end"] - seg["start"] >= min_segment_length or has_foreign_overlap(seg)
+    ]
+
+
 def cut_by_speaker_label(
     vad_list: list,
     merge_gap: float = 0.5,
-    min_segment_length: float = 0.15,
     max_segment_length: float = 30.0,
     logger=None,
     seams=None,
@@ -104,7 +152,10 @@ def cut_by_speaker_label(
 
     This function intentionally does NOT split over-long segments anymore.
     `split_long_segments()` owns that job so it can use the waveform to place a
-    quiet cut instead of cutting twice with conflicting policies.
+    quiet cut instead of cutting twice with conflicting policies. It also does
+    NOT drop short segments anymore -- `filter_diarizer_noise()` owns that,
+    and must run BEFORE this so a genuine short overlap is judged against the
+    raw diarizer output, not against whatever survived merging.
 
     `max_segment_length` is still used as a merge guard: merging two pieces is
     refused if their union would already exceed it.
@@ -113,8 +164,6 @@ def cut_by_speaker_label(
         return []
     if merge_gap < 0:
         raise ValueError("merge_gap must be >= 0")
-    if min_segment_length < 0:
-        raise ValueError("min_segment_length must be >= 0")
     if max_segment_length <= 0:
         raise ValueError("max_segment_length must be > 0")
 
@@ -216,26 +265,11 @@ def cut_by_speaker_label(
 
     merged_list.sort(key=lambda x: (x["start"], x["end"], str(x["speaker"])))
 
-    # Filter only after merge.  A tiny isolated blip is usually diarizer
-    # jitter, but a tiny cross-speaker overlap is evidence the separator needs
-    # to see.  Preserve the latter until overlap recovery has had its chance.
-    def has_foreign_overlap(item):
-        return any(
-            other.get("speaker") != item["speaker"]
-            and _overlap_duration(
-                item["start"], item["end"], other["start"], other["end"]
-            ) > eps
-            for other in merged_list
-        )
-
     # Long-segment splitting is intentionally deferred to
-    # split_long_segments(), where an acoustic cut can be used.
-    return [
-        vad for vad in merged_list
-        if (
-            vad["end"] - vad["start"] >= min_segment_length
-        )
-    ]
+    # split_long_segments(), where an acoustic cut can be used. Short-segment
+    # dropping is deferred to filter_diarizer_noise(), which must run BEFORE
+    # this on the raw diarizer output instead.
+    return merged_list
 
 
 def bridge_interrupted_speaker_turns(
@@ -1110,7 +1144,6 @@ def merge_ghost_speakers(
     out = cut_by_speaker_label(
         out,
         merge_gap=0.0,
-        min_segment_length=0.0,
         max_segment_length=float("inf"),
         logger=logger,
         seams=None,
