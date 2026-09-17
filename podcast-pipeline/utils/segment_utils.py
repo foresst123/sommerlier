@@ -137,7 +137,7 @@ def filter_diarizer_noise(segment_list: list, min_segment_length: float = 0.2) -
 
     return [
         seg for seg in clean
-        if seg["end"] - seg["start"] >= min_segment_length or has_foreign_overlap(seg)
+        if seg["end"] - seg["start"] >= min_segment_length 
     ]
 
 
