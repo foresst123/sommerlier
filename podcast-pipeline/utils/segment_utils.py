@@ -126,15 +126,6 @@ def filter_diarizer_noise(segment_list: list, min_segment_length: float = 0.2) -
 
     eps = 1e-9
 
-    def has_foreign_overlap(item):
-        return any(
-            other.get("speaker") != item["speaker"]
-            and _overlap_duration(
-                item["start"], item["end"], other["start"], other["end"]
-            ) > eps
-            for other in clean
-        )
-
     return [
         seg for seg in clean
         if seg["end"] - seg["start"] >= min_segment_length 
