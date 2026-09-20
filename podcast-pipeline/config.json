@@ -120,6 +120,33 @@
                 }
             },
             "allow_tf32": true,
+            "performance": {
+                "enabled": false,
+                "max_gpus": 2,
+                "gpu_reserve_gib": 2.0,
+                "cpu_reserve_for_coordinator": 1,
+                "ram_soft_fraction": 0.75,
+                "ram_hard_fraction": 0.85,
+                "max_pending_jobs": 32,
+                "telemetry_interval_seconds": 1.0,
+                "stages": {
+                    "asr": {
+                        "true_batching": true,
+                        "dynamic_replicas": true,
+                        "max_replicas_per_model": 2,
+                        "replica_min_pending_jobs": 12
+                    },
+                    "refinement": {
+                        "workers": 1,
+                        "placement": "sharded",
+                        "gpu_memory_utilization": 0.82,
+                        "max_batch_tokens": 8192
+                    },
+                    "diarization": {"workers": 1, "placement": "split_components"},
+                    "separation": {"max_workers": 1, "ordered_postprocess": true},
+                    "music": {"tagger_workers": 1, "max_separator_workers": 2}
+                }
+            },
             "batch": {
                 "max_hours_per_run": 5.0
             }
@@ -127,7 +154,7 @@
         "a100": {
             "offline_mode": false,
             "gpu_1": 0,
-            "gpu_2": 0,
+            "gpu_2": 1,
             "steps": {
                 "music_analysis": true,
                 "music_removal": true,
@@ -222,6 +249,33 @@
                 }
             },
             "allow_tf32": false,
+            "performance": {
+                "enabled": false,
+                "max_gpus": 2,
+                "gpu_reserve_gib": 4.0,
+                "cpu_reserve_for_coordinator": 1,
+                "ram_soft_fraction": 0.75,
+                "ram_hard_fraction": 0.85,
+                "max_pending_jobs": 64,
+                "telemetry_interval_seconds": 1.0,
+                "stages": {
+                    "asr": {
+                        "true_batching": true,
+                        "dynamic_replicas": true,
+                        "max_replicas_per_model": 2,
+                        "replica_min_pending_jobs": 32
+                    },
+                    "refinement": {
+                        "workers": 1,
+                        "placement": "sharded",
+                        "gpu_memory_utilization": 0.85,
+                        "max_batch_tokens": 32768
+                    },
+                    "diarization": {"workers": 1, "placement": "split_components"},
+                    "separation": {"max_workers": 1, "ordered_postprocess": true},
+                    "music": {"tagger_workers": 1, "max_separator_workers": 2}
+                }
+            },
             "batch": {
                 "max_hours_per_run": 20.0
             }

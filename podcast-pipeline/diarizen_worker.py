@@ -58,6 +58,50 @@ def _load_diarizen_config(config_path, env_name):
         return {}
 
 
+def _load_performance_config(config_path, env_name):
+    if not (config_path and os.path.exists(config_path)):
+        return {}
+    try:
+        with open(config_path, encoding="utf-8") as handle:
+            profile = json.load(handle).get("environments", {}).get(env_name, {})
+        return profile.get("performance", {}).get("stages", {}).get(
+            "diarization", {})
+    except Exception:
+        return {}
+
+
+def _place_components(pipeline, performance_cfg):
+    """Keep segmentation on cuda:0 and move embedding inference to cuda:1."""
+    requested = performance_cfg.get("placement") == "split_components"
+    if not requested or torch.cuda.device_count() < 2:
+        return {"segmentation": "cuda:0", "embedding": "cuda:0",
+                "split": False}
+    target = torch.device("cuda:1")
+    embedding = next((getattr(pipeline, name, None)
+                      for name in ("_embedding", "embedding", "_speaker_embedding")
+                      if getattr(pipeline, name, None) is not None), None)
+    if embedding is None:
+        print(json.dumps({
+            "warning": "split_components requested but DiariZen exposes no embedding component; using cuda:0"
+        }), flush=True)
+        return {"segmentation": "cuda:0", "embedding": "cuda:0",
+                "split": False}
+    mover = getattr(embedding, "to", None)
+    if callable(mover):
+        mover(target)
+    elif callable(getattr(getattr(embedding, "model", None), "to", None)):
+        embedding.model.to(target)
+    else:
+        print(json.dumps({
+            "warning": "DiariZen embedding component cannot be moved; using cuda:0"
+        }), flush=True)
+        return {"segmentation": "cuda:0", "embedding": "cuda:0",
+                "split": False}
+    if hasattr(embedding, "device"):
+        embedding.device = target
+    return {"segmentation": "cuda:0", "embedding": "cuda:1", "split": True}
+
+
 def _apply_diarizen_config(pipeline, diar_cfg):
     """Apply the config keys DiariZen actually honours, reporting the rest.
 
@@ -179,6 +223,8 @@ def load_model(config_path=None, env_name="kaggle"):
             print(json.dumps({"error": f"Failed to apply config overrides: {str(e)}"}), flush=True)
 
     pipeline.to(device)
+    placement = _place_components(
+        pipeline, _load_performance_config(config_path, env_name))
 
     # Monkey-patch get_segmentations to emit JSON progress updates
     import types
@@ -193,7 +239,8 @@ def load_model(config_path=None, env_name="kaggle"):
     
     pipeline.get_segmentations = types.MethodType(patched_get_segmentations, pipeline)
 
-    print(json.dumps({"status": "ready", "device": str(device)}), flush=True)
+    print(json.dumps({"status": "ready", "device": str(device),
+                      "placement": placement}), flush=True)
     return pipeline, device
 
 

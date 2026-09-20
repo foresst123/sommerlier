@@ -1,3 +1,5 @@
+import queue
+
 import numpy as np
 from schemas.audio import AudioData
 
@@ -81,28 +83,62 @@ class MusicService:
         total = len(waveform)
         patches = []
         hi_res = 0
-        for start, end, kind in music_map.spans:
-            if kind != MUSIC:
-                continue
+        jobs = [(start, end) for start, end, kind in music_map.spans
+                if kind == MUSIC]
+        pool_models = getattr(self.bs_roformer, "models", None)
+
+        # A separator owns one work directory and writes a fixed in.wav into it,
+        # so an instance may serve only one job at a time. Checking out the
+        # instance is what guarantees that; picking it by job index does not,
+        # because the pool's threads take whichever job is next rather than
+        # every other one.
+        available = queue.Queue()
+        for model in (pool_models or [self.bs_roformer]):
+            available.put(model)
+
+        def separate_job(item):
+            ordinal, (start, end) = item
             i, j = max(0, int(start * sr)), min(total, int(end * sr))
             if j - i < sr // 2:
                 # Under half a second there is not enough for the separator to
                 # work with, and the seams would cost more than the bed does.
-                continue
-            reference = waveform[i:j]
-            vocals = None
-            if source_path is not None:
-                separate_span = getattr(self.bs_roformer, "separate_span", None)
-                if separate_span is not None:
-                    vocals = separate_span(source_path, start, end, sr, reference)
-                    if vocals is not None:
-                        hi_res += 1
-            if vocals is None:
-                vocals = self.bs_roformer.separate_segment(reference, sr)
+                return ordinal, i, None, False
+            reference = np.asarray(waveform[i:j], dtype=np.float32).copy()
+            model = available.get()
+            try:
+                vocals = None
+                if source_path is not None:
+                    separate_span = getattr(model, "separate_span", None)
+                    if separate_span is not None:
+                        vocals = separate_span(source_path, start, end, sr, reference)
+                        used_hi_res = vocals is not None
+                    else:
+                        used_hi_res = False
+                else:
+                    used_hi_res = False
+                if vocals is None:
+                    vocals = model.separate_segment(reference, sr)
+            finally:
+                available.put(model)
             if vocals is None or len(vocals) != j - i:
+                return ordinal, i, None, used_hi_res
+            return ordinal, i, np.asarray(vocals, dtype=np.float32), used_hi_res
+
+        indexed_jobs = list(enumerate(jobs))
+        if pool_models and len(indexed_jobs) > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=min(len(pool_models), len(indexed_jobs))) as executor:
+                separated = list(executor.map(separate_job, indexed_jobs))
+        else:
+            separated = [separate_job(item) for item in indexed_jobs]
+
+        # Only this thread mutates the shared waveform, in source order.
+        for _ordinal, start_sample, vocals, used_hi_res in sorted(separated):
+            if vocals is None:
                 continue
-            waveform[i:j] = vocals
-            patches.append((i, np.asarray(vocals, dtype=np.float32)))
+            waveform[start_sample:start_sample + len(vocals)] = vocals
+            patches.append((start_sample, vocals))
+            hi_res += int(used_hi_res)
 
         if logger and patches:
             seconds = sum(len(p) for _, p in patches) / sr

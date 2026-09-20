@@ -52,7 +52,10 @@ class WeSpeakerONNXEmbedder:
             from utils.cpu_plan import onnx_session_options
             providers = ["CPUExecutionProvider"]
             if self.device.type == "cuda":
-                providers.insert(0, "CUDAExecutionProvider")
+                providers.insert(0, (
+                    "CUDAExecutionProvider",
+                    {"device_id": int(self.device.index or 0)},
+                ))
             # sess_options caps ORT's intra-op thread pool; see cpu_plan.
             self._session = ort.InferenceSession(
                 self._model_path(),

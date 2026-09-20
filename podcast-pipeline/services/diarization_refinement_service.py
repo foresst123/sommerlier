@@ -153,13 +153,19 @@ class DiarizationRefinementService:
     # The ~1200-token system prompt dominates each sequence, so even a modest
     # batch builds a large KV cache; 2 fits alongside the ASR models on a T4.
     def __init__(self, logger=None, batch_size: int = 4, model_name: str = None,
-                 torch_dtype: str = "bfloat16", prefix_cache: bool = False):
+                 torch_dtype: str = "bfloat16", prefix_cache: bool = False,
+                 placement: str = "auto", gpu_memory_utilization: float = 0.82,
+                 max_batch_tokens: int = 0):
         self.logger = logger
         self.model = None
         self.tokenizer = None
         self.batch_size = batch_size
         self.rejected = 0
         self.torch_dtype = torch_dtype
+        self.placement = placement
+        self.gpu_memory_utilization = min(
+            0.95, max(0.50, float(gpu_memory_utilization)))
+        self.max_batch_tokens = max(0, int(max_batch_tokens))
         # Every request repeats the same ~1200-token system prompt, and without
         # this each batch re-runs the attention over it from scratch. Caching
         # its keys and values once per stage cuts the prefill by 43% at batch 2
@@ -198,13 +204,30 @@ class DiarizationRefinementService:
             # Ampere onwards -- Turing emulates it -- so the profile picks.
             dtype = getattr(torch, self.torch_dtype, torch.bfloat16)
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            device_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+            placement = self.placement
+            if placement in ("sharded", "balanced") and device_count > 1:
+                device_map = "balanced"
+            else:
+                device_map = "auto"
+            max_memory = None
+            if device_count:
+                max_memory = {}
+                for index in range(device_count):
+                    total = torch.cuda.get_device_properties(index).total_memory
+                    usable = int(total * self.gpu_memory_utilization)
+                    max_memory[index] = usable
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
                 torch_dtype=dtype,
-                device_map="auto"
+                device_map=device_map,
+                max_memory=max_memory,
             )
             self.model.eval()
-            if self.logger: self.logger.info("LLM loaded successfully.")
+            if self.logger:
+                self.logger.info(
+                    f"LLM loaded successfully (device_map={device_map}, "
+                    f"devices={getattr(self.model, 'hf_device_map', None)}).")
         except Exception as e:
             # Do not swallow this. refine() treats a missing model as "nothing
             # to do" and hands the transcripts straight back, so a failed load
@@ -222,6 +245,13 @@ class DiarizationRefinementService:
     def reset_stats(self):
         """Clear per-file counters; the instance is reused across a batch."""
         self.rejected = 0
+
+    def _input_device(self):
+        """Entry device for both single-GPU and Accelerate-sharded models."""
+        try:
+            return self.model.get_input_embeddings().weight.device
+        except Exception:
+            return self.model.device
 
     def unload(self):
         """Release the refinement model and its VRAM.
@@ -525,7 +555,8 @@ class DiarizationRefinementService:
         prefix_text, _ = split
         try:
             ids = self.tokenizer(prefix_text, return_tensors="pt",
-                                 add_special_tokens=False).input_ids.to(self.model.device)
+                                 add_special_tokens=False).input_ids.to(
+                                     self._input_device())
             if ids.shape[1] == 0:
                 raise ValueError("shared prefix tokenised to nothing")
             with torch.no_grad():
@@ -619,7 +650,7 @@ class DiarizationRefinementService:
                 tails.append(split[1])
 
             enc = tok(tails, return_tensors="pt", padding=True,
-                      add_special_tokens=False).to(self.model.device)
+                      add_special_tokens=False).to(self._input_device())
 
             past = self._expand_prefix(len(batch))
             if past is None:
@@ -668,7 +699,11 @@ class DiarizationRefinementService:
         ]
 
         try:
-            inputs = tokenizer(texts, return_tensors="pt", padding=True).to(self.model.device)
+            inputs = tokenizer(texts, return_tensors="pt", padding=True)
+            if (self.max_batch_tokens and
+                    int(inputs.attention_mask.sum()) > self.max_batch_tokens):
+                return False, 0
+            inputs = inputs.to(self._input_device())
             gen_kwargs = dict(
                 max_new_tokens=512,
                 do_sample=False,

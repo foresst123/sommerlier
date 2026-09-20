@@ -18,13 +18,19 @@ class ASRService:
     
     def __init__(self, whisper=None, phowhisper=None, qwen3=None, logger=None,
                  model_loader=None, qwen3_service=None,
-                 language: str = "vi", batch_size: int = 4, keep_models: bool = False, edge_pad: float = EDGE_PAD_SECONDS):
+                 qwen3_replica_service=None, performance_config=None,
+                 performance_monitor=None,
+                 language: str = "vi", batch_size: int = 4,
+                 keep_models: bool = False, edge_pad: float = EDGE_PAD_SECONDS):
         self._whisper = whisper
         self._phowhisper = phowhisper
         self._qwen3 = qwen3
         self.logger = logger
         self.model_loader = model_loader
         self.qwen3_service = qwen3_service
+        self.qwen3_replica_service = qwen3_replica_service
+        self.performance_config = performance_config or {}
+        self.performance_monitor = performance_monitor
         self.language = language
         self.batch_size = batch_size
         self.keep_models = keep_models
@@ -151,18 +157,41 @@ class ASRService:
                 except OSError:
                     pass
 
-    def _run_whisper_batch(self, audios_16k: list, dummy_vads: list, callback=None) -> list:
+    def _run_whisper_batch(self, audios_16k: list, dummy_vads: list, callback=None,
+                           released_event=None) -> list:
+        """Transcribe every clip, then signal whether this card was freed.
+
+        `released_event` is what lets a replica claim Whisper's GPU, so it is
+        set only once the weights are actually gone. Under --keep_models they
+        stay resident for the next file, and a replica loading onto the same
+        card would be competing with them for VRAM rather than inheriting it.
+        """
         if not self.whisper:
             if callback:
                 for _ in audios_16k: callback()
+            if released_event is not None:
+                released_event.set()
             return [("", None, [])] * len(audios_16k)
 
-        results = []
-        for a, v in zip(audios_16k, dummy_vads):
-            results.append(self._run_whisper(a, v))
-            if callback: callback()
+        try:
+            batch = self.whisper.transcribe_batch(
+                audios_16k, dummy_vads, language=self.language,
+                callback=callback)
+            results = [(item.get("text", ""),
+                        item.get("language", self.language),
+                        item.get("words", [])) for item in batch]
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Whisper batch error: {e}; retrying individually")
+            results = []
+            for a, v in zip(audios_16k, dummy_vads):
+                results.append(self._run_whisper(a, v))
+                if callback:
+                    callback()
         if getattr(self, "model_loader", None) and not self.keep_models:
             self.model_loader.unload("whisper")
+            if released_event is not None:
+                released_event.set()
         return results
 
     def _run_phowhisper_batch(self, audios_16k: list, callback=None) -> list:
@@ -185,16 +214,126 @@ class ASRService:
             if self.logger: self.logger.error(f"PhoWhisper batch error: {e}")
             return [""] * len(audios_16k)
 
-    def _run_qwen3_batch(self, audios_16k: list, chunk_indices: list, tmp_dir: str, callback=None) -> list:
+    def _run_qwen3_batch(self, audios_16k: list, chunk_indices: list,
+                         tmp_dir: str, callback=None, replica_event=None) -> list:
         if not self.qwen3:
             if callback:
                 for _ in audios_16k: callback()
             return [""] * len(audios_16k)
 
-        results = []
-        for a, idx in zip(audios_16k, chunk_indices):
-            results.append(self._run_qwen3(a, idx, tmp_dir))
-            if callback: callback()
+        import os
+        import queue
+        import threading
+        import time
+        paths = []
+        replica_service = self.qwen3_replica_service
+        try:
+            jobs = []
+            for audio, index in zip(audios_16k, chunk_indices):
+                path = os.path.join(tmp_dir, f"qwen3_{index}.npy")
+                np.save(path, np.ascontiguousarray(audio, dtype=np.float32))
+                paths.append(path)
+                jobs.append((str(index), path))
+            work = queue.Queue()
+            for position, job in enumerate(jobs):
+                work.put((position, job))
+            results = [""] * len(jobs)
+            result_lock = threading.Lock()
+            batch_size = max(1, self.batch_size)
+
+            def consume(client):
+                while True:
+                    picked = []
+                    try:
+                        picked.append(work.get_nowait())
+                    except queue.Empty:
+                        return
+                    while len(picked) < batch_size:
+                        try:
+                            picked.append(work.get_nowait())
+                        except queue.Empty:
+                            break
+                    values = client.transcribe_batch(
+                        [job for _position, job in picked], language=self.language)
+                    if len(values) < len(picked):
+                        values.extend([""] * (len(picked) - len(values)))
+                    with result_lock:
+                        for (position, _job), value in zip(picked, values):
+                            results[position] = value
+                            if callback:
+                                callback()
+                    for _ in picked:
+                        work.task_done()
+
+            min_jobs = int(self.performance_config.get(
+                "replica_min_pending_jobs", batch_size * 2))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                primary = pool.submit(consume, self.qwen3)
+                replica = None
+                replica_decision_recorded = False
+                while not primary.done():
+                    if (replica is None and replica_service is not None
+                            and replica_event is not None
+                            and replica_event.is_set()
+                            and work.qsize() >= min_jobs):
+                        if self.logger:
+                            self.logger.info(
+                                f"[ASR scheduler] Whisper released its GPU; "
+                                f"starting Qwen replica for {work.qsize()} pending job(s)")
+                        if self.performance_monitor:
+                            self.performance_monitor.record(
+                                "asr_replica_loading", model="qwen3",
+                                pending_jobs=work.qsize())
+                        try:
+                            replica_service.spawn()
+                            replica_service.wait_ready()
+                            from models.qwen3_asr import Qwen3ASRClient
+                            replica = pool.submit(
+                                consume, Qwen3ASRClient(replica_service.process))
+                            if self.performance_monitor:
+                                self.performance_monitor.record(
+                                    "asr_replica_started", model="qwen3",
+                                    pending_jobs=work.qsize())
+                        except Exception as exc:
+                            if self.logger:
+                                self.logger.warning(
+                                    f"Qwen replica could not start: {type(exc).__name__}: {exc}")
+                            try:
+                                replica_service.stop()
+                            except Exception:
+                                pass
+                            replica_service = None
+                            if self.performance_monitor:
+                                self.performance_monitor.record(
+                                    "asr_replica_failed", model="qwen3",
+                                    error=f"{type(exc).__name__}: {exc}")
+                    elif (not replica_decision_recorded
+                          and replica is None and replica_service is not None
+                          and replica_event is not None
+                          and replica_event.is_set()
+                          and work.qsize() < min_jobs):
+                        replica_decision_recorded = True
+                        if self.performance_monitor:
+                            self.performance_monitor.record(
+                                "asr_replica_skipped", model="qwen3",
+                                reason="backlog_below_threshold",
+                                pending_jobs=work.qsize(), threshold=min_jobs)
+                    time.sleep(0.05)
+                primary.result()
+                if replica is not None:
+                    replica.result()
+        finally:
+            if (replica_service is not None
+                    and replica_service.process is not None):
+                replica_service.stop()
+                if self.performance_monitor:
+                    self.performance_monitor.record(
+                        "asr_replica_stopped", model="qwen3")
+            for path in paths:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
         # The worker is owned by main.py's finally block; stopping it here would
         # leave a dead Popen behind that a second process() call would write to.
         return results
@@ -322,6 +461,7 @@ class ASRService:
         progress = {"whisper": 0, "pho": 0, "qwen": 0}
         total = len(audios_16k)
         stop_event = threading.Event()
+        whisper_released = threading.Event()
         
         def monitor_progress():
             while not stop_event.is_set():
@@ -341,11 +481,21 @@ class ASRService:
         def cb_qwen(): progress["qwen"] += 1
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-            fw = executor.submit(self._run_whisper_batch, audios_16k, dummy_vads, cb_whisper)
+            fw = executor.submit(self._run_whisper_batch, audios_16k, dummy_vads,
+                                 cb_whisper, whisper_released)
             fp = executor.submit(self._run_phowhisper_batch, core_audios_16k, cb_pho)
-            fq = executor.submit(self._run_qwen3_batch, core_audios_16k, chunk_indices, tmp_dir, cb_qwen)
+            fq = executor.submit(
+                self._run_qwen3_batch, core_audios_16k, chunk_indices,
+                tmp_dir, cb_qwen, whisper_released)
 
-            whisper_results = fw.result()
+            try:
+                whisper_results = fw.result()
+            finally:
+                # A Whisper that died still holds nothing, but the flag is what
+                # the Qwen replica waits on; leaving it clear on the failure
+                # path would just deny the card to the model still working.
+                if not self.keep_models:
+                    whisper_released.set()
             pho_results = fp.result()
             qwen_results = fq.result()
             
@@ -429,4 +579,3 @@ class ASRService:
         import shutil
         shutil.rmtree(tmp_dir, ignore_errors=True)
         return results
-

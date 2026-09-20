@@ -70,6 +70,7 @@ BSS_STITCH_SEARCH = float(os.environ.get("BSS_STITCH_SEARCH", "1800.0"))
 # usable_cores() khi có đủ job (xem BSS_WINDOW_POOL_MIN_JOBS); 0 = tắt hẳn.
 _BSS_WINDOW_WORKERS_ENV = os.environ.get("BSS_WINDOW_WORKERS")
 BSS_WINDOW_POOL_MIN_JOBS = int(os.environ.get("BSS_WINDOW_POOL_MIN_JOBS", "3"))
+BSS_WINDOW_MAX_PENDING = int(os.environ.get("BSS_WINDOW_MAX_PENDING", "32"))
 MIN_OVERLAP_SECONDS = 0.05
 
 def _resolve_pool_size() -> int:
@@ -1099,7 +1100,10 @@ class SeparationService:
             if pool_size > 0:
                 try:
                     if self._window_pool is None:
-                        self._window_pool = WindowBuildPool(n_workers=pool_size)
+                        self._window_pool = WindowBuildPool(
+                            n_workers=pool_size,
+                            max_pending=min(BSS_WINDOW_MAX_PENDING,
+                                            max(1, pool_size * 2)))
                         if self.logger:
                             self.logger.info(
                                 f"[TSE] window pool started with {pool_size} worker "

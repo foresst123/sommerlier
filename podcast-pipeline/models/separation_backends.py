@@ -118,28 +118,31 @@ class SidonBackend(SeparationBackend):
 
         produced = [mix_path]
         try:
-            self._process.stdin.write(json.dumps(
-                {"id": req_id, "audio_path": mix_path,
-                 "sample_rate": int(sample_rate)}) + "\n")
-            self._process.stdin.flush()
+            request = {"id": req_id, "audio_path": mix_path,
+                       "sample_rate": int(sample_rate)}
 
-            # Read until this request's id comes back. The worker also prints
-            # progress and warnings on stdout, so anything that is not the
-            # answer is skipped rather than treated as a protocol error.
-            resp = None
-            while resp is None:
-                line = self._process.stdout.readline()
-                if not line:
-                    raise RuntimeError("Sidon worker closed stdout")
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    parsed = json.loads(line)
-                except Exception:
-                    continue
-                if parsed.get("id") == req_id:
-                    resp = parsed
+            if hasattr(self._process, "request"):
+                resp = self._process.request(request, response_id=req_id)
+            else:
+                self._process.stdin.write(json.dumps(request) + "\n")
+                self._process.stdin.flush()
+
+                # Read until this request's id comes back. The worker also
+                # prints progress on stdout, so non-answers are skipped.
+                resp = None
+                while resp is None:
+                    line = self._process.stdout.readline()
+                    if not line:
+                        raise RuntimeError("Sidon worker closed stdout")
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        parsed = json.loads(line)
+                    except Exception:
+                        continue
+                    if parsed.get("id") == req_id:
+                        resp = parsed
 
             for key in ("track_1_path", "track_2_path"):
                 if resp.get(key):

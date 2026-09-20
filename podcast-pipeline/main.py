@@ -93,6 +93,11 @@ def _build_parser():
                         help="Keep models in VRAM between stages instead of unloading them. "
                              "Saves reload time when processing many files, at the cost of a "
                              "higher peak: only use it when the GPU has room for every model at once.")
+    parser.add_argument("--performance", action="store_true",
+                        help="Turn on the performance scheduling path (true ASR batching, "
+                             "sharded refinement, split diarization placement, telemetry). "
+                             "The profiles ship it off because it has not passed the "
+                             "benchmark gates yet; this flag is how a trial run enables it.")
     parser.add_argument("--no_stage_output", action="store_true",
                         help="Skip the per-stage artifact directories (01_diarization/, "
                              "02_separation/, ...). They are written by default so a run "
@@ -280,6 +285,10 @@ _memory = env_profile.get("models", {}).get("bss", {}).get("enrollment_memory")
 if _memory is not None and "BSS_MEMORY" not in os.environ:
     os.environ["BSS_MEMORY"] = "1" if _memory else "0"
 
+_max_pending = env_profile.get("performance", {}).get("max_pending_jobs")
+if _max_pending is not None and "BSS_WINDOW_MAX_PENDING" not in os.environ:
+    os.environ["BSS_WINDOW_MAX_PENDING"] = str(_max_pending)
+
 # The separator is read at BssSeparator construction, not at import,
 # but it is published here with the other separation settings so one profile switch
 # controls it like everything else.
@@ -300,6 +309,7 @@ from services.pipeline_service import PipelineService
 from services.qwen3_worker_service import Qwen3WorkerService
 from services.diarizen_worker_service import DiarizenWorkerService
 from services.sidon_worker_service import SidonWorkerService
+from services.worker_pool_service import WorkerPoolService
 
 
 def _discard_partial(ledger, args, audio_path, logger, pipeline=None):
@@ -347,6 +357,19 @@ def main():
                 f"{_CPU_THREADS} thread(s) per process")
 
     import torch
+    from utils.performance_monitor import PerformanceMonitor
+    from utils import performance_config
+    # Resolved and logged once, here, so every later read is a plain lookup and
+    # a mistyped key is a warning at startup rather than a silent baseline run.
+    perf_cfg = performance_config.resolve(
+        env_profile, logger=logger,
+        enabled_override=True if getattr(args, "performance", False) else None)
+    args.performance_config = perf_cfg
+    performance_monitor = PerformanceMonitor(
+        os.path.join(args.cache_dir, args.job_id, "performance"),
+        interval_seconds=perf_cfg["telemetry_interval_seconds"],
+        enabled=perf_cfg["enabled"], logger=logger)
+    performance_monitor.start()
 
     # TF32 on the fp32 paths: DiariZen, BS-RoFormer, SSLAM and ECAPA all run in
     # fp32, and on Ampere and later their matmuls and convolutions can use
@@ -411,6 +434,7 @@ def main():
         return service
 
     qwen3_service = None
+    qwen3_replica_service = None
     if args.ASRMoE and will_run(args, "asr"):
         qwen3_worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qwen3_worker.py")
         qwen3_service = _prefetch(Qwen3WorkerService(
@@ -418,6 +442,16 @@ def main():
                                           env_profile=env_profile, logger=logger),
             qwen3_worker_script, device_id=args.gpu_2, logger=logger,
             env_name=args.env, config_path=args.config))
+        asr_perf = perf_cfg["stages"]["asr"]
+        if (perf_cfg["enabled"]
+                and asr_perf["dynamic_replicas"]
+                and args.gpu_1 != args.gpu_2):
+            qwen3_replica_service = Qwen3WorkerService(
+                lambda: resolve_worker_python(
+                    "qwen3", config=config, env_profile=env_profile,
+                    logger=logger),
+                qwen3_worker_script, device_id=args.gpu_1, logger=logger,
+                env_name=args.env, config_path=args.config)
 
     # 1b. Start DiariZen Worker (if dia3 is not used)
     #
@@ -430,10 +464,16 @@ def main():
     diarizen_service = None
     if not args.dia3 and will_run(args, "diarization"):
         diarizen_worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diarizen_worker.py")
+        diar_perf = perf_cfg["stages"]["diarization"]
+        diar_devices = args.gpu_1
+        if (perf_cfg["enabled"]
+                and diar_perf["placement"] == "split_components"
+                and args.gpu_1 != args.gpu_2):
+            diar_devices = [args.gpu_1, args.gpu_2]
         diarizen_service = _prefetch(DiarizenWorkerService(
             lambda: resolve_worker_python("diarizen", config=config,
                                           env_profile=env_profile, logger=logger),
-            diarizen_worker_script, device_id=args.gpu_1, logger=logger,
+            diarizen_worker_script, device_id=diar_devices, logger=logger,
             env_name=args.env, config_path=args.config))
         
 
@@ -450,11 +490,30 @@ def main():
     if (str(_separator).strip().lower() == "sidon" and getattr(args, "bss", False)
             and will_run(args, "separation")):
         sidon_worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sidon_worker.py")
-        sidon_service = _prefetch(SidonWorkerService(
+        sep_perf = perf_cfg["stages"]["separation"]
+        max_sidon_workers = int(sep_perf["max_workers"])
+        sidon_devices = [args.gpu_1]
+        # A second worker is held back until separation can actually feed it.
+        # SeparationService walks its windows one at a time and extends the
+        # enrollment memory between them, so the pool would still have a single
+        # request in flight -- a whole extra copy of the weights resident on the
+        # other card, bought for no throughput. Splitting Sidon's blind
+        # inference from the stateful speaker assignment is what unlocks this.
+        if (perf_cfg["enabled"]
+                and max_sidon_workers > 1 and args.gpu_2 != args.gpu_1):
+            logger.warning(
+                f"[performance] separation.max_workers={max_sidon_workers} ignored: "
+                "the window loop is sequential, so a second Sidon worker would "
+                "hold VRAM without taking work. Using 1.")
+        sidon_workers = [SidonWorkerService(
             resolve_worker_python("sidon", config=config,
                                   env_profile=env_profile, logger=logger),
-            sidon_worker_script, device_id=args.gpu_1, logger=logger,
-            env_name=args.env, config_path=args.config))
+            sidon_worker_script, device_id=device_id, logger=logger,
+            env_name=args.env, config_path=args.config)
+            for device_id in sidon_devices]
+        sidon_service = _prefetch(
+            WorkerPoolService(sidon_workers, name="Sidon")
+            if len(sidon_workers) > 1 else sidon_workers[0])
 
     # 1d. Join whichever actually started. They were launched without blocking,
     # so startup is bounded by the slowest rather than the sum -- that is the
@@ -502,6 +561,9 @@ def main():
             logger=logger,
             model_loader=model_loader,
             qwen3_service=qwen3_service,
+            qwen3_replica_service=qwen3_replica_service,
+            performance_config=perf_cfg["stages"]["asr"],
+            performance_monitor=performance_monitor,
             language=args.lang,
             batch_size=env_profile.get("models", {}).get("qwen3", {}).get("batch_size", 4),
             keep_models=args.keep_models
@@ -510,7 +572,14 @@ def main():
             model_loader=model_loader,
             logger=logger
         )
-        refinement_cfg = env_profile.get("models", {}).get("refinement", {})
+        refinement_cfg = dict(
+            env_profile.get("models", {}).get("refinement", {}))
+        # Only when the feature is on: otherwise the refinement service keeps
+        # the device_map and batch rules the baseline was measured with.
+        if perf_cfg["enabled"]:
+            refinement_perf = perf_cfg["stages"]["refinement"]
+            for key in ("placement", "gpu_memory_utilization", "max_batch_tokens"):
+                refinement_cfg[key] = refinement_perf[key]
         refinement_svc = DiarizationRefinementService(logger=logger, **refinement_cfg)
         export_svc = ExportService(logger=logger)
 
@@ -523,7 +592,8 @@ def main():
                 "diarizen": diarizen_service,
                 "qwen3": qwen3_service,
                 "sidon": sidon_service,
-            }
+            },
+            performance_monitor=performance_monitor,
         )
         
         # One worker set serves the whole batch: loading models per file cost
@@ -640,6 +710,7 @@ def main():
             diarizen_service.stop()
         if sidon_service:
             sidon_service.stop()
+        performance_monitor.stop()
 
         logger.info("Pipeline execution finished.")
 

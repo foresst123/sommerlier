@@ -27,7 +27,8 @@ class PipelineService:
                  export_svc,
                  logger=None,
                  model_loader=None,
-                 worker_services=None):
+                 worker_services=None,
+                 performance_monitor=None):
         self.audio_svc = audio_svc
         self.diarization_svc = diarization_svc
         self.separation_svc = separation_svc
@@ -38,6 +39,7 @@ class PipelineService:
         self.export_svc = export_svc
         self.logger = logger
         self.model_loader = model_loader
+        self.performance_monitor = performance_monitor
         # Ánh xạ tên sang dịch vụ worker để giải phóng VRAM ngay khi xong bước.
         self.worker_services = worker_services or {}
         # Timeline sau cắt nhạc. Rỗng nghĩa là chưa cắt phần nào của bản ghi.
@@ -118,7 +120,9 @@ class PipelineService:
 
     def end_stage_scope(self):
         """Giải phóng các model/worker đã hoãn; an toàn khi không có phạm vi mở."""
-        names, workers, callbacks = self.defer_free, self.defer_workers, self.defer_callbacks
+        names = getattr(self, "defer_free", None)
+        workers = getattr(self, "defer_workers", None)
+        callbacks = getattr(self, "defer_callbacks", None)
         self.defer_free = None
         self.defer_workers = None
         self.defer_callbacks = None
@@ -169,6 +173,9 @@ class PipelineService:
             return
         if self.logger:
             self.logger.info(f"Releasing {name} worker (stage complete, freeing VRAM)")
+        monitor = getattr(self, "performance_monitor", None)
+        if monitor:
+            monitor.record("worker_stopping", worker=name)
         try:
             service.stop()
         except Exception as e:
@@ -184,8 +191,13 @@ class PipelineService:
         if client is None:
             return
         process = self._ensure_worker(worker_name)
-        if process is not None and getattr(client, "process", None) is not process:
-            client.process = process
+        worker_service = self.worker_services.get(worker_name)
+        endpoint = (worker_service
+                    if worker_service is not None
+                    and hasattr(worker_service, "processes")
+                    else process)
+        if endpoint is not None and getattr(client, "process", None) is not endpoint:
+            client.process = endpoint
 
     def _ensure_worker(self, name: str):
         """Khởi động worker chưa chạy và trả tiến trình của nó.
@@ -198,9 +210,14 @@ class PipelineService:
             return service.process
         if self.logger:
             self.logger.info(f"Starting {name} worker for this stage")
+        monitor = getattr(self, "performance_monitor", None)
+        if monitor:
+            monitor.record("worker_loading", worker=name)
         try:
             service.spawn()
             service.wait_ready()
+            if monitor:
+                monitor.record("worker_ready", worker=name)
         except Exception as e:
             # Báo lỗi thay vì trả None: bước sắp chạy không thể dùng client thiếu
             # worker. Nuốt lỗi ở đây từng dẫn đến đầu ra rỗng ở bước phía sau.
@@ -219,9 +236,19 @@ class PipelineService:
 
         if save_path == "./output":
             suffix = "pyannote" if getattr(args, "dia3", False) else "diarizen"
+            # The performance path changes what is computed -- ASR batching,
+            # refinement placement and token ceiling, diarization component
+            # placement -- so its results must not land in, or be resumed from,
+            # the directory the baseline owns. "off" reproduces the old path
+            # exactly, which is what keeps existing caches readable.
+            from utils import performance_config
+            perf = getattr(args, "performance_config", None)
+            perf_token = (performance_config.fingerprint(perf)
+                          if isinstance(perf, dict) else "off")
             root = os.path.join(
                 os.path.dirname(audio_path), "_final",
-                f"-bss-{getattr(args, 'bss', False)}"
+                (f"-perf-{perf_token}" if perf_token != "off" else "")
+                + f"-bss-{getattr(args, 'bss', False)}"
                 f"-bs_roformer-{getattr(args, 'music', False)}"
                 f"-vad-{getattr(args, 'vad', False)}"
                 f"-diaModel-{suffix}-initPrompt-True"
@@ -395,6 +422,7 @@ class PipelineService:
                                          else music_map)
         # Separation không được mở rộng cửa sổ xuyên các mối nối do cắt.
         self.separation_svc.timeline = timeline
+        # 3. Diarization
         # Diarization cũng cần mối nối để không tạo segment vượt qua chúng.
         self.diarization_svc.timeline = timeline
 
@@ -601,7 +629,7 @@ class PipelineService:
 
         if self.step_enabled(args, "refinement"):
             if not getattr(args, "keep_models", False):
-                self.refinement_svc.unload()
+                self._defer_or_run(self.refinement_svc.unload)
 
         
         # 8. Xuất kết quả

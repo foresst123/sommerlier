@@ -1,5 +1,6 @@
 import os
 import torch
+import numpy as np
 from models.whisper import load_asr_model
 
 class PhoWhisperASR:
@@ -72,8 +73,24 @@ class PhoWhisperASR:
         batch_size = int(batch_size or self.batch_size)
             
         texts = []
-        for arr in audio_16k_arrays:
-            texts.append(self.transcribe(arr))
-            if callback: callback()
+        for start in range(0, len(audio_16k_arrays), batch_size):
+            arrays = [np.ascontiguousarray(arr, dtype=np.float32)
+                      for arr in audio_16k_arrays[start:start + batch_size]]
+            spans = []
+            offset = 0
+            for array in arrays:
+                spans.append({"start": offset / 16000.0,
+                              "end": (offset + len(array)) / 16000.0})
+                offset += len(array)
+            carrier = np.concatenate(arrays) if arrays else np.empty(0, np.float32)
+            result = self.model.transcribe(
+                carrier, spans, batch_size=batch_size, language="vi",
+                print_progress=False)
+            segments = list((result or {}).get("segments", []))
+            for index in range(len(arrays)):
+                segment = segments[index] if index < len(segments) else {}
+                texts.append(str(segment.get("text", "")).strip())
+                if callback:
+                    callback()
                 
         return texts

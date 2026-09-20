@@ -130,6 +130,57 @@ def transcribe(model, processor, device, audio_path, language="vi"):
         return f"[ERROR] {e}"
 
 
+def transcribe_batch(model, processor, device, jobs, language="vi"):
+    """Run one padded generation batch, with a compatibility fallback."""
+    if not jobs:
+        return []
+    try:
+        audio_arrays = []
+        prompts = []
+        for job in jobs:
+            audio_data, sr = _read_audio(job["audio_path"])
+            if sr != 16000:
+                import librosa
+                audio_data = librosa.resample(
+                    audio_data, orig_sr=sr, target_sr=16000)
+            audio_arrays.append(audio_data)
+            conversation = [
+                {"role": "system", "content": "You are a highly accurate Vietnamese ASR system. Transcribe the audio precisely. Maintain natural punctuation and capitalization. Ignore background noise, music, and do not hallucinate content if the audio is silent or unintelligible."},
+                {"role": "user", "content": [
+                    {"type": "audio", "audio_url": "dummy"},
+                    {"type": "text", "text": "Transcription in Vietnamese."},
+                ]},
+            ]
+            prompts.append(processor.apply_chat_template(
+                conversation, add_generation_prompt=True, tokenize=False))
+        inputs = processor(text=prompts, audio=audio_arrays, padding=True,
+                           return_tensors="pt", sampling_rate=16000).to(
+                               device, model.dtype)
+        with torch.inference_mode():
+            generated = model.generate(
+                **inputs, max_new_tokens=256, do_sample=False, temperature=0.0,
+                repetition_penalty=1.2, no_repeat_ngram_size=3)
+        generated = generated[:, inputs.input_ids.size(1):]
+        decoded = processor.batch_decode(
+            generated, skip_special_tokens=True,
+            clean_up_tokenization_spaces=False)
+        results = []
+        for job, response in zip(jobs, decoded):
+            if "<asr_text>" in response:
+                response = response.split("<asr_text>")[-1]
+            results.append({"id": str(job["id"]), "text": response.strip()})
+        return results
+    except Exception as exc:
+        # Transformers/Qwen processor APIs have changed between releases.
+        # Keep correctness and report the fallback rather than losing a batch.
+        print(f"[Qwen3Worker] batch fallback: {type(exc).__name__}: {exc}",
+              file=sys.stderr, flush=True)
+        return [{"id": str(job["id"]),
+                 "text": transcribe(model, processor, device,
+                                    job["audio_path"], language)}
+                for job in jobs]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config.json")
@@ -157,6 +208,20 @@ def main():
             break
         elif cmd == "ping":
             print(json.dumps({"status": "ok"}), flush=True)
+            continue
+
+        if cmd == "transcribe_batch":
+            jobs = request.get("jobs") or []
+            missing = [job.get("audio_path", "") for job in jobs
+                       if not job.get("audio_path")
+                       or not os.path.exists(job.get("audio_path", ""))]
+            if missing:
+                print(json.dumps({"error": f"audio file not found: {missing[0]}"}),
+                      flush=True)
+            else:
+                print(json.dumps({"results": transcribe_batch(
+                    model, processor, device, jobs,
+                    request.get("language", "vi"))}), flush=True)
             continue
 
         # Transcribe

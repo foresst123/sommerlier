@@ -177,6 +177,10 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
             break
         if logger:
             logger.info(f"=== Stage '{label}': {len(pending)} file(s) ===")
+        monitor = getattr(pipeline, "performance_monitor", None)
+        stage_started = __import__("time").time()
+        if monitor:
+            monitor.record("stage_started", stage=label, files=len(pending))
 
         stage_args = copy.copy(args)
         stage_args.stop_after = stage
@@ -208,6 +212,10 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
         finally:
             if end:
                 end()
+            if monitor:
+                monitor.stage_finished(
+                    label, __import__("time").time() - stage_started,
+                    len(pending), sum(1 for path in pending if path in failures))
 
         if stage is not None and original_stop == stage:
             break

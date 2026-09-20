@@ -126,11 +126,17 @@ class FileWindows:
     NÀY vào pool dùng chung, close() chỉ giải phóng shared memory của file
     này -- không đụng tới pool process (pool sống tiếp cho file kế)."""
 
+    # Mức nộp trước mặc định: nộp lần lượt. Đặt ở cấp lớp để một thể hiện dựng
+    # bằng object.__new__ (test dựng trần để khỏi cấp shared memory) vẫn chạy
+    # build_all được; __init__ ghi đè bằng giá trị của pool.
+    _max_pending = 1
+
     def __init__(self, pool_executor, segments, pairs, waveform, sr,
                  music_map=None, seams=(), context_seconds=2.0,
                  max_context_seconds=2.2, padding_min_seconds=1.0,
-                 search_seconds=400.0, use_vad=False):
+                 search_seconds=400.0, use_vad=False, max_pending=None):
         self._pool = pool_executor
+        self._max_pending = max(1, int(max_pending or 1))
 
         # shared_memory yêu cầu size > 0; một waveform rỗng (đường hiếm gặp,
         # test đơn vị) vẫn phải cấp phát được.
@@ -163,21 +169,36 @@ class FileWindows:
         caller còn xử lý (GPU) job trước -- chính chỗ này tạo hiệu ứng
         pipeline. Đổi sang executor.map ở đây sẽ mất tính chất này vì map lô
         theo chunksize thay vì để mọi future chạy ngay khi có worker rảnh."""
+        groups = iter(job_groups)
         pending = []
-        for group in job_groups:
+
+        def submit_next():
+            try:
+                group = next(groups)
+            except StopIteration:
+                return False
             try:
                 future = self._pool.submit(_build_job, self._ctx, group)
                 self._futures.append(future)
                 pending.append((group, future, None))
             except Exception as exc:
                 pending.append((group, None, f"{type(exc).__name__}: {exc}"))
-        for group, future, error in pending:
+            return True
+
+        for _ in range(self._max_pending):
+            if not submit_next():
+                break
+        while pending:
+            group, future, error = pending.pop(0)
             if future is not None:
                 try:
-                    yield future.result()
+                    result = future.result()
+                    submit_next()
+                    yield result
                     continue
                 except Exception as exc:
                     error = f"{type(exc).__name__}: {exc}"
+            submit_next()
             action = {"action": "worker_fallback_sequential", "detail": error}
             try:
                 built, reason, detail, actions = _build_job(self._ctx, group)
@@ -229,8 +250,9 @@ class WindowBuildPool:
         pool.close()   # một lần, sau khi xử lý xong cả batch
     """
 
-    def __init__(self, n_workers=4):
+    def __init__(self, n_workers=4, max_pending=None):
         self.n_workers = max(1, int(n_workers))
+        self.max_pending = max(1, int(max_pending or self.n_workers * 2))
         # Không cần initializer: mỗi job tự đứng hoàn toàn (_build_job nhận
         # đủ ngữ cảnh qua file_ctx), nên không có state nào phải dựng trước
         # lúc worker khởi động.
@@ -245,7 +267,8 @@ class WindowBuildPool:
             seams=seams, context_seconds=context_seconds,
             max_context_seconds=max_context_seconds,
             padding_min_seconds=padding_min_seconds,
-            search_seconds=search_seconds, use_vad=use_vad)
+            search_seconds=search_seconds, use_vad=use_vad,
+            max_pending=self.max_pending)
 
     def close(self):
         if self._closed:

@@ -18,7 +18,10 @@ class SidonWorkerService(WorkerProcessService):
             name="Sidon",
             python_bin=python_env_path,
             worker_script=worker_script_path,
-            extra_args=["--device", f"cuda:{device_id}",
+            # CUDA_VISIBLE_DEVICES maps this physical device to local cuda:0.
+            # Passing the host index here breaks worker 2 (only cuda:0 exists
+            # inside a process masked to physical GPU 1).
+            extra_args=["--device", "cuda:0",
                         "--config", config_path, "--env", env_name],
             device_id=device_id,
             logger=logger,

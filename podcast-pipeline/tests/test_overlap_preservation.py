@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.segment_utils import (
     bridge_interrupted_speaker_turns,
     cut_by_speaker_label,
+    filter_diarizer_noise,
     merge_ghost_speakers,
     split_long_segments,
 )
@@ -39,8 +40,10 @@ def overlaps(segments):
 def test_merging_keeps_a_backchannel_that_overlaps_a_turn():
     """A 0.4s backchannel inside a turn is the shortest thing we must keep.
 
-    Measured floor on this corpus is 0.24s, so min_segment_length has to sit
-    below it -- the default 0.2 is too close to be safe.
+    Measured floor on this corpus is 0.24s, so the noise filter's floor has to
+    sit below it -- the default 0.2 is too close to be safe. Filtering runs on
+    the raw diarizer output, before merging, exactly as DiarizationService
+    orders it.
     """
     segments = [
         {"index": "00000", "start": 10.0, "end": 14.0, "speaker": "A"},
@@ -49,8 +52,8 @@ def test_merging_keeps_a_backchannel_that_overlaps_a_turn():
     ]
     assert overlaps(segments) == [("A", "B", 0.4)]
 
-    merged = cut_by_speaker_label(segments, merge_gap=2.0, min_segment_length=0.1,
-                                  max_segment_length=30.0)
+    merged = cut_by_speaker_label(filter_diarizer_noise(segments, 0.1),
+                                  merge_gap=2.0, max_segment_length=30.0)
     found = overlaps(merged)
     assert found, "the backchannel was lost in merging"
     assert any(s["speaker"] == "B" for s in merged), "speaker B disappeared entirely"
@@ -67,7 +70,7 @@ def test_merging_keeps_a_micro_fragment_when_it_carries_an_overlap():
         {"index": "00001", "start": 10.5, "end": 10.54, "speaker": "B"},
     ]
     merged = cut_by_speaker_label(
-        segments, merge_gap=0.3, min_segment_length=0.1, max_segment_length=20.0
+        filter_diarizer_noise(segments, 0.1), merge_gap=0.3, max_segment_length=20.0
     )
     assert any(segment["speaker"] == "B" for segment in merged)
     assert overlaps(merged) == [("A", "B", 0.04)]
@@ -155,8 +158,9 @@ def test_merging_never_bridges_a_seam():
         {"index": "00000", "start": 10.0, "end": 14.0, "speaker": "A"},
         {"index": "00001", "start": 14.2, "end": 18.0, "speaker": "A"},
     ]
-    merged = cut_by_speaker_label(segments, merge_gap=2.0, min_segment_length=0.1,
-                                  max_segment_length=30.0, seams=[14.1])
+    merged = cut_by_speaker_label(filter_diarizer_noise(segments, 0.1),
+                                  merge_gap=2.0, max_segment_length=30.0,
+                                  seams=[14.1])
     assert len(merged) == 2, "a seam must stop the merge"
 
 

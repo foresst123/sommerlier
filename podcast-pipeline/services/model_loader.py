@@ -1,4 +1,5 @@
 import os
+import gc
 import torch
 from typing import Dict, Any
 
@@ -88,9 +89,13 @@ class ModelLoader:
             bss_cfg = self.config.get("environments", {}).get(
                 self.args.env, {}).get("models", {}).get("bss", {})
             if self.logger: self.logger.info(f"  separator backend: {separator}")
+            endpoint = None
+            if sidon_service is not None:
+                endpoint = (sidon_service if hasattr(sidon_service, "request")
+                            else sidon_service.process)
             self.models["separator"] = BssSeparator(
                 device=self.device_1,
-                process=sidon_service.process if sidon_service else None,
+                process=endpoint,
                 separator=separator,
                 embedding_repository=bss_cfg.get("embedding_repository"),
                 embedding_filename=bss_cfg.get("embedding_filename"),
@@ -140,10 +145,24 @@ class ModelLoader:
             if checkpoint:
                 bs_roformer_cfg["model_filename"] = checkpoint
 
-            from models.bs_roformer import BSRoformerRemover
-            if self.logger: self.logger.info(f"Loading BS-RoFormer on {self.device_1}")
-            self.models["bs_roformer"] = BSRoformerRemover(
-                device=str(self.device_1), logger=self.logger, **bs_roformer_cfg)
+            from models.bs_roformer import BSRoformerPool, BSRoformerRemover
+            perf = (self.config.get("environments", {}).get(self.args.env, {})
+                    .get("performance", {}))
+            music_perf = perf.get("stages", {}).get("music", {})
+            devices = [self.device_1]
+            if (perf.get("enabled", False)
+                    and int(music_perf.get("max_separator_workers", 1)) > 1
+                    and self.device_2 != self.device_1):
+                devices.append(self.device_2)
+            if self.logger:
+                self.logger.info(
+                    f"Loading {len(devices)} BS-RoFormer worker(s) on "
+                    f"{', '.join(map(str, devices))}")
+            models = [BSRoformerRemover(
+                device=str(device), logger=self.logger, **bs_roformer_cfg)
+                for device in devices]
+            self.models["bs_roformer"] = (
+                BSRoformerPool(models) if len(models) > 1 else models[0])
             
     def load_asr_models(self, qwen3_service: Qwen3WorkerService = None):
         """Load ASR models (Whisper, PhoWhisper, Qwen3)."""
@@ -197,6 +216,17 @@ class ModelLoader:
     def unload(self, model_name: str):
         """Unload model to free VRAM."""
         if model_name in self.models:
-            del self.models[model_name]
-            torch.cuda.empty_cache()
+            model = self.models.pop(model_name)
+            cleanup = getattr(model, "unload", None) or getattr(model, "close", None)
+            if callable(cleanup):
+                try:
+                    cleanup()
+                except Exception as exc:
+                    if self.logger:
+                        self.logger.warning(
+                            f"Cleanup for {model_name} failed before unload: {exc}")
+            del model
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             if self.logger: self.logger.info(f"Unloaded {model_name} from VRAM")

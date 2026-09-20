@@ -4,7 +4,7 @@ import os
 import subprocess
 import threading
 import time
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Sequence, Union
 
 
 class WorkerProcessService:
@@ -25,7 +25,7 @@ class WorkerProcessService:
         python_bin: str,
         worker_script: str,
         extra_args: Optional[List[str]] = None,
-        device_id: Optional[int] = None,
+        device_id: Optional[Union[int, Sequence[int]]] = None,
         ready_timeout: float = 900.0,
         logger=None,
     ):
@@ -40,6 +40,16 @@ class WorkerProcessService:
         self.process = None
         self._stderr_tail = collections.deque(maxlen=self.STDERR_TAIL_LINES)
         self._stderr_thread = None
+        self._io_lock = threading.Lock()
+
+    @property
+    def cuda_visible_devices(self) -> Optional[str]:
+        """Physical CUDA devices exposed to the child, in local-index order."""
+        if self.device_id is None:
+            return None
+        if isinstance(self.device_id, (list, tuple)):
+            return ",".join(str(value) for value in self.device_id)
+        return str(self.device_id)
 
     # ------------------------------------------------------------------
     # stderr draining
@@ -122,15 +132,17 @@ class WorkerProcessService:
             )
 
         env = os.environ.copy()
-        if self.device_id is not None:
-            env["CUDA_VISIBLE_DEVICES"] = str(self.device_id)
+        visible_devices = self.cuda_visible_devices
+        if visible_devices is not None:
+            env["CUDA_VISIBLE_DEVICES"] = visible_devices
         # tqdm progress from hf_hub_download would otherwise flood stderr before
         # the ready handshake, on top of being useless in a captured pipe.
         env.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
         cmd = self.build_command()
         if self.logger:
-            target = f" on CUDA_VISIBLE_DEVICES={self.device_id}" if self.device_id is not None else ""
+            target = (f" on CUDA_VISIBLE_DEVICES={visible_devices}"
+                      if visible_devices is not None else "")
             self.logger.info(f"Starting {self.name} worker subprocess{target}")
 
         self.process = subprocess.Popen(
@@ -240,3 +252,26 @@ class WorkerProcessService:
         self.process = None
         if self.logger:
             self.logger.info(f"{self.name} worker terminated.")
+
+    def request(self, payload: dict, *, response_id=None) -> dict:
+        """Send one JSON request without allowing concurrent pipe corruption.
+
+        A worker owns one stdin/stdout pair.  Multiple scheduler threads may
+        share the service, but exactly one request is in flight on that pair.
+        A pool obtains parallelism by owning several services/processes.
+        """
+        with self._io_lock:
+            if self.process is None or self.process.poll() is not None:
+                raise RuntimeError(f"{self.name} worker is not running")
+            self.process.stdin.write(json.dumps(payload) + "\n")
+            self.process.stdin.flush()
+            while True:
+                line = self.process.stdout.readline()
+                if not line:
+                    raise RuntimeError(f"{self.name} worker closed stdout")
+                try:
+                    response = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if response_id is None or response.get("id") == response_id:
+                    return response

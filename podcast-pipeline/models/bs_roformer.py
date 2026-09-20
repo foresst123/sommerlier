@@ -41,8 +41,10 @@ Two things this module is careful about, both learned the hard way:
 import inspect
 import os
 import tempfile
+from contextlib import nullcontext
 
 import numpy as np
+import torch
 
 # The best-scoring vocal checkpoint in audio-separator's bundled
 # models-scores.json: ep_368 averages 11.63 dB vocal SDR against ep_317's
@@ -179,10 +181,15 @@ class BSRoformerRemover:
         from audio_separator.separator import Separator
 
         self._work_dir = tempfile.mkdtemp(prefix="bsroformer_")
-        self._separator = Separator(**self._separator_kwargs())
-        if self.logger:
-            self.logger.info(f"Loading BS-RoFormer {self.model_filename}")
-        self._separator.load_model(model_filename=self.model_filename)
+        context = (torch.cuda.device(self.device)
+                   if torch.cuda.is_available() and "cuda" in str(self.device)
+                   else nullcontext())
+        with context:
+            self._separator = Separator(**self._separator_kwargs())
+            if self.logger:
+                self.logger.info(
+                    f"Loading BS-RoFormer {self.model_filename} on {self.device}")
+            self._separator.load_model(model_filename=self.model_filename)
         return self._separator
 
     # ------------------------------------------------------------------
@@ -206,7 +213,11 @@ class BSRoformerRemover:
 
         produced = [in_path]
         try:
-            outputs = separator.separate(in_path)
+            context = (torch.cuda.device(self.device)
+                       if torch.cuda.is_available() and "cuda" in str(self.device)
+                       else nullcontext())
+            with context:
+                outputs = separator.separate(in_path)
             # The library returns names relative to output_dir.
             paths = [p if os.path.isabs(p) else os.path.join(self._work_dir, p)
                      for p in outputs]
@@ -326,6 +337,19 @@ class BSRoformerRemover:
                 torch.cuda.empty_cache()
         except Exception:
             pass
+
+
+class BSRoformerPool:
+    """Independent separator instances, one work directory and GPU each."""
+
+    def __init__(self, models):
+        self.models = list(models)
+        if not self.models:
+            raise ValueError("BS-RoFormer pool requires at least one model")
+
+    def unload(self):
+        for model in self.models:
+            model.unload()
 
 
 # --- array helpers, kept out of the class so the tests can reach them --------
