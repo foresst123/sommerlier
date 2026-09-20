@@ -154,11 +154,13 @@ class DiarizationRefinementService:
     # batch builds a large KV cache; 2 fits alongside the ASR models on a T4.
     def __init__(self, logger=None, batch_size: int = 4, model_name: str = None,
                  torch_dtype: str = "bfloat16", prefix_cache: bool = False,
+                 device: str = "cuda:0",
                  placement: str = "auto", gpu_memory_utilization: float = 0.82,
                  max_batch_tokens: int = 0):
         self.logger = logger
         self.model = None
         self.tokenizer = None
+        self.device = device
         self.batch_size = batch_size
         self.rejected = 0
         self.torch_dtype = torch_dtype
@@ -205,29 +207,37 @@ class DiarizationRefinementService:
             dtype = getattr(torch, self.torch_dtype, torch.bfloat16)
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
             device_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
-            placement = self.placement
-            if placement in ("sharded", "balanced") and device_count > 1:
-                device_map = "balanced"
+            # Sharding is the performance path and stays opt-in. The default
+            # pins the whole model to one card, which is what the baseline was
+            # measured with and what a single-GPU box needs; asking for a
+            # shard without a second card would just be the same placement by
+            # a slower route.
+            shard = self.placement in ("sharded", "balanced") and device_count > 1
+            if shard:
+                max_memory = {
+                    index: int(torch.cuda.get_device_properties(index).total_memory
+                               * self.gpu_memory_utilization)
+                    for index in range(device_count)
+                }
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    self.model_name,
+                    torch_dtype=dtype,
+                    device_map="balanced",
+                    max_memory=max_memory,
+                    low_cpu_mem_usage=True,
+                )
             else:
-                device_map = "auto"
-            max_memory = None
-            if device_count:
-                max_memory = {}
-                for index in range(device_count):
-                    total = torch.cuda.get_device_properties(index).total_memory
-                    usable = int(total * self.gpu_memory_utilization)
-                    max_memory[index] = usable
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_name,
-                torch_dtype=dtype,
-                device_map=device_map,
-                max_memory=max_memory,
-            )
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    self.model_name,
+                    torch_dtype=dtype,
+                    low_cpu_mem_usage=True,
+                ).to(self.device)
             self.model.eval()
             if self.logger:
-                self.logger.info(
-                    f"LLM loaded successfully (device_map={device_map}, "
-                    f"devices={getattr(self.model, 'hf_device_map', None)}).")
+                placed = ("balanced across "
+                          f"{device_count} GPU(s): {getattr(self.model, 'hf_device_map', None)}"
+                          if shard else f"pinned to {self.device}")
+                self.logger.info(f"LLM loaded successfully ({placed}).")
         except Exception as e:
             # Do not swallow this. refine() treats a missing model as "nothing
             # to do" and hands the transcripts straight back, so a failed load
