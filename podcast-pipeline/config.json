@@ -117,6 +117,7 @@
                 },
                 "sidon": {
                     "num_steps": 100
+
                 }
             },
             "allow_tf32": true,
@@ -215,10 +216,12 @@
                     "model_name": "Qwen/Qwen3-8B",
                     "batch_size": 96,
                     "torch_dtype": "bfloat16",
+
                     "prefix_cache": false
                 },
                 "sidon": {
                     "num_steps": 100
+
                 }
             },
             "allow_tf32": false,
