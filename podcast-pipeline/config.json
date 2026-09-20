@@ -122,7 +122,7 @@
             },
             "allow_tf32": true,
             "performance": {
-                "enabled": false,
+                "enabled": true,
                 "max_gpus": 2,
                 "gpu_reserve_gib": 2.0,
                 "cpu_reserve_for_coordinator": 1,
@@ -253,7 +253,7 @@
             },
             "allow_tf32": false,
             "performance": {
-                "enabled": false,
+                "enabled": true,
                 "max_gpus": 2,
                 "gpu_reserve_gib": 4.0,
                 "cpu_reserve_for_coordinator": 1,
