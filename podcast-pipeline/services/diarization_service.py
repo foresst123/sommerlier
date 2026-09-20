@@ -23,6 +23,8 @@ from algorithms.diarization.fusion import align_speakers_across_chunks
 from algorithms.diarization.overlap import detect_overlapping_segments
 from utils.acoustic_boundary import AcousticBoundaryFinder
 
+ENABLE_GHOST_MERGE = False
+
 class DiarizationService:
     """Handles audio chunking, model inference (Pyannote/Sortformer), and cross-chunk fusion."""
     
@@ -242,11 +244,14 @@ class DiarizationService:
         # than self.embedder (PyannoteEmbedder, a different model already
         # loaded for diarization) so the merge decision matches the same
         # model/threshold convention as the BSS QC similarity step.
-        smoothed_list = merge_ghost_speakers(
-            smoothed_list, logger=self.logger,
-            waveform=audio.waveform, sr=audio.sample_rate,
-        )
-        self._log_segment_stats("post-ghost-merge", smoothed_list)
+        # DISABLED: ghost-speaker merge is turned off; speakers stay as diarized.
+        # Set ENABLE_GHOST_MERGE = True at module level to restore it.
+        if ENABLE_GHOST_MERGE:
+            smoothed_list = merge_ghost_speakers(
+                smoothed_list, logger=self.logger,
+                waveform=audio.waveform, sr=audio.sample_rate,
+            )
+            self._log_segment_stats("post-ghost-merge", smoothed_list)
 
         # A ... B ... A is normally kept as three turns.  When B overlaps both
         # exposed A edges, it is an interrupted A turn instead: bridge A so
