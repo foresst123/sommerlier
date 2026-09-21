@@ -79,14 +79,25 @@ class RefinementPipelinePool:
 
     @staticmethod
     def build_device_map(layer_count: int, devices: Sequence[int],
-                         split_layer: int) -> Dict[str, int]:
-        """Return a complete device map without duplicating any model weights."""
+                         split_layer: int,
+                         tie_word_embeddings: bool = False) -> Dict[str, int]:
+        """Return a complete device map without duplicating any model weights.
+
+        With `tie_word_embeddings` the output head IS the embedding table -- one
+        tensor under two names (Qwen2.5-0.5B/1.5B/3B; Qwen3-8B does not tie). A
+        map that puts `embed_tokens` on one card and `lm_head` on the other then
+        cannot be honoured: the tensor lands wherever it was placed last, and
+        every lookup on the other card fails with "index is on cuda:0, ... other
+        tensors on cuda:1". Both must share a device, and the head goes with the
+        embedding because that is where the token ids already are. The last
+        hidden state is a single position, so carrying it back costs nothing.
+        """
         first, second = (int(devices[0]), int(devices[1]))
         mapping = {
             "model.embed_tokens": first,
             "model.rotary_emb": first,
             "model.norm": second,
-            "lm_head": second,
+            "lm_head": first if tie_word_embeddings else second,
         }
         for index in range(layer_count):
             mapping[f"model.layers.{index}"] = (
@@ -176,6 +187,10 @@ class RefinementPipelinePool:
         # Generation only needs the final position. Avoid materialising logits
         # for every prompt token during the expensive prefill pass.
         hidden_states = self.base.norm(hidden_states[:, -1:, :])
+        # The head is not always on this stage's card (it is not when the
+        # embeddings are tied), so say where the input goes rather than rely on
+        # a dispatch hook happening to move it.
+        hidden_states = hidden_states.to(self.model.lm_head.weight.device)
         logits = self.model.lm_head(hidden_states)[:, -1, :]
         next_tokens = torch.argmax(logits, dim=-1).to("cpu")
 

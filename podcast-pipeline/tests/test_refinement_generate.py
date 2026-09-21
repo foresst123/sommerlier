@@ -1,5 +1,5 @@
 """`generate_texts` is the model-facing half of refinement, shared with the passes
-that reuse the same resident LLM (speaker relabel, dialogue-clip judging).
+that reuse the same resident LLM (speaker relabel, conversation-export judging).
 
 It was split out of `_refine_batch`, so what is pinned here is that the split
 changed nothing for fusion -- same acceptance, same OOM and fallback behaviour --
@@ -239,7 +239,7 @@ def test_the_relabel_pass_runs_on_the_real_service():
 
 def test_the_clip_judge_runs_on_the_real_service():
     import numpy as np
-    from services.dialogue_clip_service import DialogueClipService
+    from services.conversation_export_service import ConversationExportService
     from utils.excise import TimelineMap
     from utils.noise_map import KINDS, NoiseTrack
 
@@ -254,9 +254,83 @@ def test_the_clip_judge_runs_on_the_real_service():
 
     import tempfile
     with tempfile.TemporaryDirectory() as out:
-        result = DialogueClipService(llm, max_candidates=3).run(
+        result = ConversationExportService(llm, max_candidates=3).run(
             segs, timeline=TimelineMap(), noise=noise, music_map=None,
             waveform=np.zeros(300 * 8000, dtype=np.float32), sample_rate=8000,
             out_dir=out, base_name="ep")
     assert result.report["shortlisted"] >= 1 and result.report["unanswered"] == 0
-    assert result.clips and result.clips[0]["semantic_score"] == 5
+    assert result.exports and result.exports[0]["semantic_score"] == 5
+
+
+# --- the two-GPU load and what a total failure says ---------------------------
+
+def _load_pipelined(monkeypatch, tie):
+    """Run the real _load_model with the model libraries replaced, and return the
+    device_map it asked transformers for."""
+    import transformers
+
+    captured = {}
+
+    class _Cfg:
+        num_hidden_layers = 36
+        tie_word_embeddings = tie
+
+    class _FakeModel:
+        def eval(self):
+            return self
+
+    def _from_pretrained(name, **kwargs):
+        captured.update(kwargs)
+        return _FakeModel()
+
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained",
+                        staticmethod(lambda name, **kw: _Cfg()))
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained",
+                        staticmethod(lambda name, **kw: object()))
+    monkeypatch.setattr(transformers.AutoModelForCausalLM, "from_pretrained",
+                        staticmethod(_from_pretrained))
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(torch.cuda, "get_device_properties",
+                        lambda index: SimpleNamespace(total_memory=15 * 2 ** 30))
+    import services.refinement_pipeline_pool as pool_module
+    monkeypatch.setattr(pool_module.RefinementPipelinePool, "__init__",
+                        lambda self, *a, **k: None)
+
+    svc = refinement.DiarizationRefinementService(
+        logger=None, placement="pipelined", pipeline_devices=[0, 1])
+    svc._activate_cpu_threads = lambda: 0
+    svc._load_model()
+    return captured["device_map"]
+
+
+def test_the_two_gpu_load_keeps_a_tied_head_with_its_embedding(monkeypatch):
+    device_map = _load_pipelined(monkeypatch, tie=True)
+    assert device_map["lm_head"] == device_map["model.embed_tokens"] == 0
+
+
+def test_the_two_gpu_load_leaves_an_untied_model_split_as_before(monkeypatch):
+    device_map = _load_pipelined(monkeypatch, tie=False)
+    assert device_map["model.embed_tokens"] == 0 and device_map["lm_head"] == 1
+
+
+def _refine_everything_failing(error):
+    svc = _svc(["x"] * 4, model=_Model(fail=error), batch_size=2)
+    segs = [_seg(str(i), "xin chào các bạn") for i in range(4)]
+    with pytest.raises(RuntimeError) as caught:
+        svc.refine(segs)
+    return str(caught.value)
+
+
+def test_a_total_failure_names_a_device_error_instead_of_blaming_memory():
+    message = _refine_everything_failing(RuntimeError(
+        "Expected all tensors to be on the same device, but got index is on cuda:0"))
+    assert "same device" in message
+    assert "not an out-of-memory failure" in message
+    assert "too little free VRAM" not in message
+
+
+def test_a_total_failure_from_memory_still_gives_the_memory_advice():
+    message = _refine_everything_failing(torch.cuda.OutOfMemoryError("CUDA out of memory"))
+    assert "too little free VRAM" in message
+    assert "not an out-of-memory" not in message

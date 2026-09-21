@@ -54,3 +54,24 @@ def test_shipped_profiles_enable_one_pipelined_model_not_two_replicas():
         assert refinement["micro_batch_size"] >= 1
         assert 0.2 <= refinement["pipeline_split_ratio"] <= 0.8
         assert refinement["cpu_threads"] >= 2
+
+
+def test_tied_embeddings_keep_the_head_on_the_same_card_as_the_embedding():
+    """Qwen2.5-3B (the kaggle profile) stores one tensor under both names. A map
+    that splits `embed_tokens` and `lm_head` across two cards cannot be honoured,
+    and every embedding lookup then fails with 'index is on cuda:0, ... other
+    tensors on cuda:1' -- which took refinement down on 100% of segments."""
+    cls = _pipeline_class()
+    mapping = cls.build_device_map(36, devices=(0, 1), split_layer=20,
+                                   tie_word_embeddings=True)
+
+    assert mapping["lm_head"] == mapping["model.embed_tokens"] == 0
+    assert mapping["model.norm"] == 1
+    assert [mapping[f"model.layers.{i}"] for i in range(36)] == [0] * 20 + [1] * 16
+
+
+def test_untied_models_still_put_the_head_after_the_last_layer():
+    """Qwen3-8B (the a100 profile) does not tie, and must not change."""
+    cls = _pipeline_class()
+    assert cls.build_device_map(36, (0, 1), 20)["lm_head"] == 1
+    assert cls.build_device_map(36, (0, 1), 20, tie_word_embeddings=False)["lm_head"] == 1

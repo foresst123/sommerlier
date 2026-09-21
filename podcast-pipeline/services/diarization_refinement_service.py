@@ -179,6 +179,9 @@ class DiarizationRefinementService:
         self.device = device
         self.batch_size = batch_size
         self.rejected = 0
+        # What the most recent failed batch died of, so a total failure can say
+        # so instead of guessing at memory.
+        self.last_failure = None
         self.torch_dtype = torch_dtype
         self.placement = placement
         self.gpu_memory_utilization = min(
@@ -277,7 +280,9 @@ class DiarizationRefinementService:
                         round(layer_count * self.pipeline_split_ratio),
                     ))
                     device_map = RefinementPipelinePool.build_device_map(
-                        layer_count, self.pipeline_devices, split_layer)
+                        layer_count, self.pipeline_devices, split_layer,
+                        tie_word_embeddings=bool(
+                            getattr(config, "tie_word_embeddings", False)))
                     max_memory = {
                         int(index): int(torch.cuda.get_device_properties(int(index)).total_memory
                                         * self.gpu_memory_utilization)
@@ -539,6 +544,7 @@ class DiarizationRefinementService:
         self._load_model()
         if not self.model:
             return segments
+        self.last_failure = None
 
         if self.logger: self.logger.info("Running LLM Refinement on all segments...")
 
@@ -635,12 +641,20 @@ class DiarizationRefinementService:
         # failed and retried, instead of silently landing in the dataset with a
         # stage missing.
         if pending and failed_count / len(pending) > REFINE_FAILURE_LIMIT:
+            # Name what actually failed. This message used to say "too little
+            # free VRAM" whatever the cause, and a device-placement error read as
+            # a memory problem until someone read the warnings above it.
+            if self.last_failure and "out of memory" not in self.last_failure:
+                cause = (f"The last error was not an out-of-memory failure: "
+                         f"{self.last_failure}")
+            else:
+                cause = (f"The usual cause is too little free VRAM for "
+                         f"{self.model_name}: check the out-of-memory warnings "
+                         "above, lower models.refinement.batch_size, or use a "
+                         "smaller model.")
             raise RuntimeError(
                 f"LLM refinement failed on {failed_count} of {len(pending)} "
-                f"segments ({100.0 * failed_count / len(pending):.0f}%). The "
-                "usual cause is too little free VRAM for "
-                f"{self.model_name}: check the out-of-memory warnings above, "
-                "lower models.refinement.batch_size, or use a smaller model.")
+                f"segments ({100.0 * failed_count / len(pending):.0f}%). {cause}")
 
         return segments
 
@@ -829,7 +843,7 @@ class DiarizationRefinementService:
     def ensure_loaded(self) -> bool:
         """Load the LLM if it is not resident yet. False when it cannot be used.
 
-        For passes other than `refine()` (speaker relabel, dialogue-clip
+        For passes other than `refine()` (speaker relabel, conversation-export
         judging) that run on the same model: `refine()` loads it itself, but
         those passes must work with refinement switched off too.
         """
@@ -841,7 +855,7 @@ class DiarizationRefinementService:
         """Run one batch of chat requests. Returns (succeeded, decoded_texts).
 
         The model-facing half of `_refine_batch`, split out so other passes over
-        the same resident LLM (speaker relabel, dialogue-clip judging) share its
+        the same resident LLM (speaker relabel, conversation-export judging) share its
         OOM handling, `max_batch_tokens` guard and pipelined-GPU path instead of
         loading a second copy. `succeeded` is False when the batch did not fit
         or generation failed; the caller decides whether to halve and retry.
@@ -943,6 +957,7 @@ class DiarizationRefinementService:
 
         except torch.cuda.OutOfMemoryError as e:
             torch.cuda.empty_cache()
+            self.last_failure = f"out of memory: {e}"
             if self.logger:
                 self.logger.warning(
                     f"LLM out of memory on [{tag}] (batch {len(user_messages)}): {e}")
@@ -961,6 +976,7 @@ class DiarizationRefinementService:
                         "later batches with serial sharded generation")
                 return self._generate_batch(
                     system_prompt, user_messages, max_new_tokens, use_prefix, tag)
+            self.last_failure = f"{type(e).__name__}: {e}"
             if self.logger:
                 self.logger.warning(f"LLM failed on [{tag}]: {e}")
             return False, []
