@@ -851,7 +851,7 @@ class DiarizationRefinementService:
         return self.model is not None
 
     def generate_texts(self, system_prompt, user_messages, max_new_tokens=512,
-                       use_prefix=False, labels=None):
+                       use_prefix=False, labels=None, thinking=False):
         """Run one batch of chat requests. Returns (succeeded, decoded_texts).
 
         The model-facing half of `_refine_batch`, split out so other passes over
@@ -864,6 +864,13 @@ class DiarizationRefinementService:
         the requests in log lines. `use_prefix` is for the fusion prompt only:
         the cached prefix is keyed on that one system prompt, and a different
         prompt must not reuse it.
+
+        `thinking` lets a model that has a thinking mode (Qwen3) reason before it
+        answers. Fusion never asks for it: it runs once per segment, must answer
+        in a fixed shape and gets a few hundred tokens. The passes that read a
+        whole transcript run a handful of times and can afford it, but the reply
+        then starts with a `<think>` block, so `max_new_tokens` has to cover the
+        reasoning as well as the answer. A model with no thinking mode ignores it.
         """
         if not self.model:
             return False, []
@@ -879,19 +886,20 @@ class DiarizationRefinementService:
         tokenizer.padding_side = "left"
         try:
             return self._generate_batch(
-                system_prompt, user_messages, max_new_tokens, use_prefix, tag)
+                system_prompt, user_messages, max_new_tokens, use_prefix, tag,
+                thinking)
         finally:
             tokenizer.padding_side = original_padding_side
 
     def _generate_batch(self, system_prompt, user_messages, max_new_tokens,
-                        use_prefix, tag):
+                        use_prefix, tag, thinking=False):
         tokenizer = self.tokenizer
         texts = [
             tokenizer.apply_chat_template(
                 [{"role": "system", "content": system_prompt},
                  {"role": "user", "content": user_msg}],
                 tokenize=False, add_generation_prompt=True,
-                 enable_thinking=False,
+                enable_thinking=bool(thinking),
             )
             for user_msg in user_messages
         ]
@@ -975,7 +983,8 @@ class DiarizationRefinementService:
                         f"LLM pipeline scheduler failed ({e}); retrying this and "
                         "later batches with serial sharded generation")
                 return self._generate_batch(
-                    system_prompt, user_messages, max_new_tokens, use_prefix, tag)
+                    system_prompt, user_messages, max_new_tokens, use_prefix, tag,
+                    thinking)
             self.last_failure = f"{type(e).__name__}: {e}"
             if self.logger:
                 self.logger.warning(f"LLM failed on [{tag}]: {e}")

@@ -66,6 +66,8 @@ class FakeLLM:
         self.reply, self.loaded = reply, loaded
         self.messages = []
         self.system_prompts = []
+        self.thinking_seen = []
+        self.budgets = []
 
     def ensure_loaded(self):
         return self.loaded
@@ -74,9 +76,11 @@ class FakeLLM:
         return len(text.split())
 
     def generate_texts(self, system_prompt, user_messages, max_new_tokens=512,
-                       use_prefix=False, labels=None):
+                       use_prefix=False, labels=None, **extra):
         self.messages.extend(user_messages)
         self.system_prompts.append(system_prompt)
+        self.thinking_seen.append(extra.get("thinking", False))
+        self.budgets.append(max_new_tokens)
         return True, [self.reply(m) if callable(self.reply) else self.reply
                       for m in user_messages]
 
@@ -676,3 +680,42 @@ def test_an_unavailable_model_leaves_rows_with_no_reply(tmp_path):
     assert all(r["raw"] is None and r["answered"] is False
                for r in result.report["replies"])
     assert result.report["unreadable"] == 0
+
+
+# --- thinking ---------------------------------------------------------------------
+
+def test_thinking_is_off_by_default_and_the_model_is_called_as_before(tmp_path):
+    llm = FakeLLM(_good())
+    _, result, _ = _run(tmp_path, llm, max_candidates=1)
+    assert llm.thinking_seen == [False] and llm.budgets == [256]
+    assert result.report["thinking"] is False
+
+
+def test_thinking_is_passed_on_and_the_budget_covers_the_reasoning(tmp_path):
+    llm = FakeLLM(_good())
+    _, result, _ = _run(tmp_path, llm, max_candidates=1, thinking=True)
+    assert llm.thinking_seen == [True] and llm.budgets == [2048]
+    assert result.report["thinking"] is True
+
+
+def test_a_larger_configured_budget_is_kept_when_thinking(tmp_path):
+    llm = FakeLLM(_good())
+    _run(tmp_path, llm, max_candidates=1, thinking=True, max_new_tokens=3072)
+    assert llm.budgets == [3072]
+
+
+def test_the_reasoning_is_stripped_and_the_verdict_after_it_is_read(tmp_path):
+    reply = ('<think>Dòng đầu là câu hỏi, dòng cuối khép ý. Có thể {"self_contained": 1}.'
+             '</think>\n' + _good(score=5, topic="chuyện đổi nghề"))
+    _, result, _ = _run(tmp_path, FakeLLM(reply), max_candidates=1, thinking=True)
+    assert result.exports and result.exports[0]["semantic_score"] == 5
+    assert result.report["cut_in_thought"] == 0
+
+
+def test_a_reply_that_ends_inside_its_reasoning_is_counted_and_marked(tmp_path):
+    reply = "<think>Đoạn này bắt đầu giữa chừng một câu chuyện, nhưng"
+    _, result, _ = _run(tmp_path, FakeLLM(reply), max_candidates=1, thinking=True)
+    row = result.report["replies"][0]
+    assert result.exports == [] and row["cut_in_thought"] is True and row["readable"] is False
+    assert row["outcome"] == "no_verdict"
+    assert result.report["cut_in_thought"] == 1 and result.report["unreadable"] == 1

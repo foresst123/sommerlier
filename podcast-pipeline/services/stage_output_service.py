@@ -452,7 +452,8 @@ class StageOutputService:
         the only way to tell "found nothing wrong" from "did not answer in JSON".
         """
         stats = {k: report.get(k) for k in (
-            "segments", "windows", "failed_windows", "unreadable_windows", "proposed",
+            "segments", "windows", "failed_windows", "unreadable_windows",
+            "cut_in_thought_windows", "proposed", "thinking",
             "changed", "changed_fraction", "skipped", "discarded")}
         warnings = []
         if report.get("discarded"):
@@ -463,6 +464,11 @@ class StageOutputService:
             warnings.append(
                 f"{report['failed_windows']} of {report.get('windows', 0)} "
                 "window(s) got no answer; those labels were left as they were")
+        if report.get("cut_in_thought_windows"):
+            warnings.append(
+                f"{report['cut_in_thought_windows']} window(s) ran out of tokens while the "
+                "model was still thinking, so they have no answer; raise "
+                "models.relabel.max_new_tokens")
         if report.get("unreadable_windows"):
             warnings.append(
                 f"{report['unreadable_windows']} of {report.get('windows', 0)} "
@@ -531,6 +537,11 @@ class StageOutputService:
             warnings.append("the LLM was not available for the semantic check")
         if report.get("unanswered"):
             warnings.append(f"{report['unanswered']} candidate(s) got no answer")
+        if report.get("cut_in_thought"):
+            warnings.append(
+                f"{report['cut_in_thought']} candidate(s) ran out of tokens while the "
+                "model was still thinking, so they have no verdict; raise "
+                "models.conversation_selection.max_new_tokens")
         if report.get("unreadable"):
             warnings.append(
                 f"{report['unreadable']} candidate(s) were answered without any JSON; "

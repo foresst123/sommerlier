@@ -49,8 +49,8 @@ import numpy as np
 
 from utils.conversation_selection import (
     Candidate, ConversationSelectionConfig, ConversationSelectionFinder, pick_non_overlapping, shortlist)
-from utils.llm_batches import ask_in_batches
-from utils.llm_json import is_readable, objects_in
+from utils.llm_batches import ask_in_batches, reply_budget
+from utils.llm_json import clean_reply, is_cut_in_thought, is_readable, objects_in
 from utils.transcript_windows import line_number
 
 # Bump when the prompt or the acceptance rules change.
@@ -354,6 +354,7 @@ class ConversationExportService:
         self.llm = llm
         self.logger = logger
         self.cfg = ConversationSelectionConfig.from_settings(settings)
+        self.max_new_tokens = reply_budget(self.cfg.max_new_tokens, self.cfg.thinking)
 
     # -- judging -----------------------------------------------------------------
     @staticmethod
@@ -437,8 +438,9 @@ class ConversationExportService:
             messages = [self._message(finder, c) for c in shortlisted]
             replies, unanswered = ask_in_batches(
                 self.llm, self._system_prompt(), messages,
-                per_call=self._per_call(messages), max_new_tokens=256,
-                label="conversation export candidate", logger=self.logger)
+                per_call=self._per_call(messages), max_new_tokens=self.max_new_tokens,
+                label="conversation export candidate", logger=self.logger,
+                thinking=self.cfg.thinking)
             report["unanswered"] = unanswered
             verdicts = [parse_verdict(r) if r is not None else None for r in replies]
         else:
@@ -466,18 +468,25 @@ class ConversationExportService:
                    "start": round(cand.start, 3), "end": round(cand.end, 3),
                    "score": cand.score, "answered": raw is not None,
                    "readable": raw is not None and is_readable(raw),
+                   "cut_in_thought": raw is not None and is_cut_in_thought(raw),
                    "raw": raw, "verdict": verdict,
                    "outcome": item.reason or "accepted", "trimmed": item.trimmed,
                    "trim_ignored": item.trim_ignored}
             rows.append(row)
             if self.logger:
-                shown = " ".join((raw or "").split())[:160]
+                if raw is None:
+                    note = "no answer"
+                elif row["cut_in_thought"]:
+                    note = (f"cut off while thinking (max_new_tokens {self.max_new_tokens}); "
+                            "raise it")
+                else:
+                    note = f"reply {' '.join(clean_reply(raw).split())[:160]!r}"
                 self.logger.info(
                     f"[conversation-exports] candidate #{first}-#{last} "
-                    f"({row['start']:.0f}-{row['end']:.0f}s): {row['outcome']}; "
-                    + ("no answer" if raw is None else f"reply {shown!r}"))
+                    f"({row['start']:.0f}-{row['end']:.0f}s): {row['outcome']}; {note}")
         report["replies"] = rows
         report["unreadable"] = sum(1 for r in rows if r["answered"] and not r["readable"])
+        report["cut_in_thought"] = sum(1 for r in rows if r["cut_in_thought"])
         ignored: Dict[str, int] = {}
         for item in judged:
             if item.trim_ignored:
@@ -590,7 +599,8 @@ class ConversationExportService:
         cfg = self.cfg
         finder = ConversationSelectionFinder(transcripts, timeline, noise, music_map, cfg)
         result = ConversationExportRun()
-        report = {"prompt_version": CONVERSATION_EXPORT_PROMPT_VERSION, "skipped": None,
+        report = {"prompt_version": CONVERSATION_EXPORT_PROMPT_VERSION,
+                  "thinking": cfg.thinking, "skipped": None,
                   "candidates": 0, "shortlisted": 0, "judged_rejected": {},
                   "accepted": 0, "exported": 0}
         result.report = report

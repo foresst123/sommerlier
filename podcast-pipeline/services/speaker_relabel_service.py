@@ -34,8 +34,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from utils.llm_batches import ask_in_batches
-from utils.llm_json import is_readable, objects_in
+from utils.llm_batches import ask_in_batches, reply_budget
+from utils.llm_json import clean_reply, is_cut_in_thought, is_readable, objects_in
 from utils.transcript_windows import build_windows, format_line, line_number
 
 # Bump when the prompt or the acceptance rules change: it is part of the
@@ -168,10 +168,12 @@ def parse_proposals(raw: str) -> List[dict]:
 class RelabelResult:
     segments: int = 0
     labels: List[str] = field(default_factory=list)
+    thinking: bool = False              # whether the model was asked to reason first
     names: Dict[str, str] = field(default_factory=dict)  # the model's letter -> diarizer label
     windows: int = 0
     failed_windows: int = 0             # windows the model could not be run on
     unreadable_windows: int = 0         # answered, but with no JSON in the reply
+    cut_in_thought_windows: int = 0     # of those, ended inside <think>: the budget was too small
     proposed: int = 0                   # proposals read, before any guard
     replies: List[dict] = field(default_factory=list)   # one row per window, raw reply included
     skipped: Optional[str] = None       # why nothing was attempted
@@ -190,10 +192,12 @@ class RelabelResult:
             "prompt_version": RELABEL_PROMPT_VERSION,
             "segments": self.segments,
             "labels": self.labels,
+            "thinking": self.thinking,
             "names": self.names,
             "windows": self.windows,
             "failed_windows": self.failed_windows,
             "unreadable_windows": self.unreadable_windows,
+            "cut_in_thought_windows": self.cut_in_thought_windows,
             "proposed": self.proposed,
             "skipped": self.skipped,
             "discarded": self.discarded,
@@ -249,7 +253,7 @@ class SpeakerRelabelService:
     def __init__(self, llm, logger=None, window_tokens: int = 3500,
                  overlap_segments: int = 12, min_confidence: float = 0.7,
                  max_change_fraction: float = 0.15, min_change_allowance: int = 2,
-                 max_new_tokens: int = 768):
+                 max_new_tokens: int = 768, thinking: bool = False):
         self.llm = llm
         self.logger = logger
         self.window_tokens = max(1, int(window_tokens))
@@ -259,13 +263,19 @@ class SpeakerRelabelService:
         # A small file can still have one or two honest corrections; without a
         # floor, a 15% cap on twelve segments would forbid all of them.
         self.min_change_allowance = max(0, int(min_change_allowance))
-        self.max_new_tokens = max(1, int(max_new_tokens))
+        self.thinking = bool(thinking)
+        self.max_new_tokens = reply_budget(max_new_tokens, self.thinking)
 
     @property
     def checkpoint_namespace(self) -> str:
-        """Prompt and model, as a path-safe name for CheckpointManager."""
+        """Prompt, thinking and model, as a path-safe name for CheckpointManager.
+
+        A decision made with the model reasoning first is not the one it makes
+        without, so the two do not share a checkpoint.
+        """
         model = getattr(self.llm, "model_name", None) or "unknown"
-        return re.sub(r"[^A-Za-z0-9._-]+", "_", f"{RELABEL_PROMPT_VERSION}-{model}")
+        mode = "-think" if self.thinking else ""
+        return re.sub(r"[^A-Za-z0-9._-]+", "_", f"{RELABEL_PROMPT_VERSION}{mode}-{model}")
 
     # -- prompt ------------------------------------------------------------
     @staticmethod
@@ -305,7 +315,7 @@ class SpeakerRelabelService:
 
     # -- the pass ----------------------------------------------------------
     def relabel(self, segments) -> RelabelResult:
-        result = RelabelResult(segments=len(segments))
+        result = RelabelResult(segments=len(segments), thinking=self.thinking)
         if not segments:
             result.skipped = "no_segments"
             return result
@@ -427,19 +437,29 @@ class SpeakerRelabelService:
         a clean transcript produce the same report.
         """
         readable = reply is not None and is_readable(reply)
+        cut = reply is not None and is_cut_in_thought(reply)
         result.proposed += proposals
         if reply is not None and not readable:
             result.unreadable_windows += 1
+        if cut:
+            result.cut_in_thought_windows += 1
         first, last = str(segments[window.start].index), str(segments[window.stop - 1].index)
         result.replies.append({
             "window": w_no, "first_index": first, "last_index": last,
             "lines": window.stop - window.start, "answered": reply is not None,
-            "readable": readable, "proposals": proposals, "raw": reply})
+            "readable": readable, "cut_in_thought": cut, "proposals": proposals,
+            "raw": reply})
         if self.logger:
-            shown = " ".join((reply or "").split())[:200]
+            if reply is None:
+                note = "no answer"
+            elif cut:
+                note = (f"cut off while thinking (max_new_tokens {self.max_new_tokens}); "
+                        "raise it")
+            else:
+                shown = " ".join(clean_reply(reply).split())[:200]
+                note = f"{proposals} proposal(s), reply {shown!r}"
             say = self.logger.warning if reply is not None and not readable else self.logger.info
-            say(f"[relabel] window {w_no} (#{first}-#{last}): "
-                + ("no answer" if reply is None else f"{proposals} proposal(s), reply {shown!r}"))
+            say(f"[relabel] window {w_no} (#{first}-#{last}): {note}")
 
     def _ask(self, messages: List[str], result: RelabelResult) -> List[Optional[str]]:
         """One reply per window, None where the model could not answer it.
@@ -450,6 +470,6 @@ class SpeakerRelabelService:
         replies, unanswered = ask_in_batches(
             self.llm, self._system_prompt(), messages,
             per_call=self._windows_per_call(), max_new_tokens=self.max_new_tokens,
-            label="relabel window", logger=self.logger)
+            label="relabel window", logger=self.logger, thinking=self.thinking)
         result.failed_windows += unanswered
         return replies

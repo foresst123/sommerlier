@@ -125,7 +125,8 @@
                     "window_tokens": 6000,
                     "overlap_segments": 30,
                     "min_confidence": 0.7,
-                    "max_change_fraction": 0.15
+                    "max_change_fraction": 0.15,
+                    "thinking": true
                 },
                 "word_alignment": {
                     "model_name": "nguyenvulebinh/wav2vec2-base-vi-vlsp2020",
@@ -153,7 +154,8 @@
                     "noise_room_max": 0.10,
                     "noise_max": 0.15,
                     "music_patched_max": 0.15,
-                    "require_word_alignment": true
+                    "require_word_alignment": true,
+                    "thinking": true
                 },
                 "sidon": {
                     "num_steps": 100
@@ -308,7 +310,9 @@
                     "window_tokens": 8000,
                     "overlap_segments": 30,
                     "min_confidence": 0.7,
-                    "max_change_fraction": 0.15
+                    "max_change_fraction": 0.15,
+                    "thinking": true,
+                    "max_new_tokens": 4096
                 },
                 "word_alignment": {
                     "model_name": "nguyenvulebinh/wav2vec2-base-vi-vlsp2020",
@@ -336,7 +340,9 @@
                     "noise_room_max": 0.10,
                     "noise_max": 0.15,
                     "music_patched_max": 0.15,
-                    "require_word_alignment": true
+                    "require_word_alignment": true,
+                    "thinking": true,
+                    "max_new_tokens": 3072
                 },
                 "sidon": {
                     "num_steps": 100

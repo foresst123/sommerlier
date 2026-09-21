@@ -89,6 +89,11 @@ class ConversationSelectionConfig:
     require_word_alignment: bool = False
     max_candidates: int = 24             # sent to the model per file
     shortlist_overlap: float = 0.5
+    # How the model is asked. With thinking on a model that has the mode (Qwen3)
+    # reasons before it answers, and the reasoning comes out of max_new_tokens;
+    # the service never lets the budget fall below what reasoning needs.
+    thinking: bool = False
+    max_new_tokens: int = 256
 
     # -- the SSLAM signals. Provisional: the levels below come from
     # noise_map.NOTICEABLE, measured on three indoor recordings, and have not

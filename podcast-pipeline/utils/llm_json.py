@@ -68,6 +68,17 @@ def loads_loose(text: str):
     return None
 
 
+def is_cut_in_thought(raw: Optional[str]) -> bool:
+    """Whether a reply stopped inside its `<think>` block, before any answer.
+
+    With thinking on, the token limit covers the reasoning too. A reply that ends
+    mid-thought holds no answer, and the fix is a larger limit, not a better
+    prompt -- which is why it is told apart from a reply that answered in prose.
+    """
+    text = raw or ""
+    return text.rfind("<think>") > text.rfind("</think>")
+
+
 def is_readable(raw: Optional[str]) -> bool:
     """Whether a reply held any JSON at all.
 

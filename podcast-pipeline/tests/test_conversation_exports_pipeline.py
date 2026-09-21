@@ -223,3 +223,17 @@ def test_relabel_replies_go_to_their_own_file_and_unreadable_windows_warn(tmp_pa
     stats = json.loads((folder / "stats.json").read_text(encoding="utf-8"))
     assert stats["unreadable_windows"] == 1
     assert any("without any JSON" in w for w in stats["warnings"])
+
+
+def test_running_out_of_tokens_while_thinking_warns_and_names_the_setting(tmp_path):
+    out = StageOutputService(str(tmp_path))
+    out.write_conversation_exports({"finder": {}, "cut_in_thought": 3, "unreadable": 3}, [])
+    stats = json.loads((tmp_path / "09_conversation_exports" / "stats.json").read_text(encoding="utf-8"))
+    assert any("max_new_tokens" in w and "conversation_selection" in w for w in stats["warnings"])
+
+    out.write_relabel({"segments": 10, "windows": 2, "failed_windows": 0, "unreadable_windows": 2,
+                       "cut_in_thought_windows": 2, "proposed": 0, "changed": 0, "thinking": True,
+                       "replies": [], "applied": [], "rejected": []})
+    stats = json.loads((tmp_path / "07_relabel" / "stats.json").read_text(encoding="utf-8"))
+    assert any("models.relabel.max_new_tokens" in w for w in stats["warnings"])
+    assert stats["thinking"] is True

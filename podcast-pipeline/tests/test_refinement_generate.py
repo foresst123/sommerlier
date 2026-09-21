@@ -57,9 +57,11 @@ class _Tok:
         self.padding_side = "right"
         self.padding_seen = []
         self.answers = []
+        self.thinking_seen = []
 
     def apply_chat_template(self, msgs, tokenize=False, add_generation_prompt=False,
                             enable_thinking=False):
+        self.thinking_seen.append(enable_thinking)
         return msgs[-1]["content"]
 
     def __call__(self, texts, return_tensors=None, padding=False, **_):
@@ -172,6 +174,13 @@ def test_refine_batch_writes_an_accepted_text_and_counts_it():
     ok, count = svc._refine_batch([(seg, "user msg one two")], "sys")
     assert (ok, count) == (True, 1)
     assert seg.text == "xin chào các bạn."
+
+
+def test_fusion_never_asks_the_model_to_think():
+    """One call per segment, a fixed answer shape and a few hundred tokens."""
+    svc = _svc(["văn bản mới một hai"])
+    svc._refine_batch([(_seg("00001", "văn bản cũ"), "user msg one two")], "sys")
+    assert svc.tokenizer.thinking_seen and not any(svc.tokenizer.thinking_seen)
 
 
 def test_refine_batch_keeps_the_original_text_when_the_output_is_rejected():
@@ -335,3 +344,25 @@ def test_a_total_failure_from_memory_still_gives_the_memory_advice():
     message = _refine_everything_failing(torch.cuda.OutOfMemoryError("CUDA out of memory"))
     assert "too little free VRAM" in message
     assert "not an out-of-memory" not in message
+
+
+def test_thinking_is_off_for_the_model_unless_a_pass_asks_for_it():
+    svc = _svc(["một", "hai"])
+    svc.generate_texts("sys", ["a", "b"])
+    assert svc.tokenizer.thinking_seen == [False, False]
+
+
+def test_a_pass_that_asks_for_thinking_gets_it_in_the_chat_template():
+    svc = _svc(["một", "hai"])
+    ok, texts = svc.generate_texts("sys", ["a", "b"], thinking=True)
+    assert ok and texts == ["một", "hai"]
+    assert svc.tokenizer.thinking_seen == [True, True]
+
+
+def test_thinking_survives_the_serial_fallback_retry():
+    svc = _svc(["một"])
+    svc.pipeline_pool = SimpleNamespace(
+        generate=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("scheduler broke")))
+    ok, texts = svc.generate_texts("sys", ["a"], thinking=True)
+    assert ok and svc.pipeline_pool is None
+    assert svc.tokenizer.thinking_seen == [True, True]

@@ -76,6 +76,8 @@ class FakeLLM:
         self.fail_all = fail_all
         self.calls = []
         self.system_prompts = []
+        self.thinking_seen = []
+        self.budgets = []
 
     def ensure_loaded(self):
         return self.loaded
@@ -84,9 +86,11 @@ class FakeLLM:
         return len(text.split())
 
     def generate_texts(self, system_prompt, user_messages, max_new_tokens=512,
-                       use_prefix=False, labels=None):
+                       use_prefix=False, labels=None, **extra):
         self.calls.append(list(user_messages))
         self.system_prompts.append(system_prompt)
+        self.thinking_seen.append(extra.get("thinking", False))
+        self.budgets.append(max_new_tokens)
         if self.fail_all or (self.fail_multi and len(user_messages) > 1):
             return False, []
         out = [self.reply(m) if callable(self.reply) else self.reply
@@ -514,3 +518,53 @@ def test_every_window_is_numbered_from_one_and_a_line_maps_to_its_own_segment():
     # Every applied change names the segment whose own line it was, in its window.
     assert all(a["index"] == f"{a['index']}" and a["line"] >= 1 for a in result.applied)
     assert sorted(a["index"] for a in result.applied) == [s.index for s in segs]
+
+
+# --- thinking ---------------------------------------------------------------------
+
+def test_thinking_is_off_unless_asked_and_the_model_is_then_called_as_before():
+    llm = FakeLLM("[]")
+    _relabel(_conversation(), llm)
+    assert llm.thinking_seen == [False] and llm.budgets == [768]
+
+
+def test_thinking_is_passed_to_the_model_and_the_budget_covers_the_reasoning():
+    llm = FakeLLM("[]")
+    result = _relabel(_conversation(), llm, thinking=True)
+    assert llm.thinking_seen == [True] and llm.budgets == [2048]
+    assert result.thinking is True and result.to_report()["thinking"] is True
+
+
+def test_a_larger_configured_budget_is_kept_when_thinking():
+    llm = FakeLLM("[]")
+    _relabel(_conversation(), llm, thinking=True, max_new_tokens=4096)
+    assert llm.budgets == [4096]
+
+
+def test_a_decision_made_while_thinking_does_not_share_a_checkpoint_with_one_made_without():
+    plain = SpeakerRelabelService(FakeLLM()).checkpoint_namespace
+    thought = SpeakerRelabelService(FakeLLM(), thinking=True).checkpoint_namespace
+    assert plain != thought and "think" in thought and "/" not in thought
+
+
+def test_the_reasoning_is_not_read_as_an_answer():
+    """Line numbers and braces in the reasoning must not leak into the proposals."""
+    reply = ('<think>Dòng [5] có vẻ sai, có lẽ là {"i": 3, "speaker": "B", "conf": 0.99}. '
+             'Nhưng dòng 3 thì ổn.</think>\n' + _json(_proposal(4, A)))
+    result = _relabel(_conversation(wrong={4}), FakeLLM(reply), thinking=True)
+    assert result.mapping == {"00004": A} and result.proposed == 1
+    assert result.unreadable_windows == 0 and result.cut_in_thought_windows == 0
+
+
+def test_a_reply_that_ends_inside_its_reasoning_is_counted_as_out_of_budget():
+    reply = "<think>Dòng 5 hỏi anh làm nghề gì, vậy dòng 6 phải là của người kia, nhưng mà"
+    result = _relabel(_conversation(wrong={4}), FakeLLM(reply), thinking=True)
+    assert result.mapping == {}
+    assert result.unreadable_windows == 1 and result.cut_in_thought_windows == 1
+    assert result.replies[0]["cut_in_thought"] is True
+    assert result.to_report()["cut_in_thought_windows"] == 1
+
+
+def test_a_reply_in_prose_is_unreadable_but_not_out_of_budget():
+    result = _relabel(_conversation(wrong={4}), FakeLLM("Không có gì sai."), thinking=True)
+    assert result.unreadable_windows == 1 and result.cut_in_thought_windows == 0
