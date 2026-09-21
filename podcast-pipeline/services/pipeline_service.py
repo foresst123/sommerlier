@@ -1,4 +1,5 @@
 import os
+import re
 import copy
 import contextlib
 import threading
@@ -452,6 +453,107 @@ class PipelineService:
                     f"[clean-2ch] optional dataset export failed: {exc}")
             return {"enabled": True, "skipped": "export_error", "error": str(exc)}
 
+    # -- music stage: taking the music out, and measuring what is left --------------
+    @staticmethod
+    def _music_scope(args) -> str:
+        """`spans`: strip only the stretches the tagger called a bed (the old way).
+        `full`: run the separator over the whole recording."""
+        scope = str(getattr(args, "music_scope", None) or "spans").strip().lower()
+        if scope not in ("full", "spans"):
+            raise ValueError(
+                f"pipeline.music_scope must be 'full' or 'spans', got {scope!r}")
+        return scope
+
+    @staticmethod
+    def _music_checkpoint_name(args, config) -> str:
+        """The separator checkpoint in use, so what it produced is filed under it."""
+        name = getattr(args, "music_separator", None)
+        if not name:
+            profile = ((config or {}).get("environments") or {}).get(
+                getattr(args, "env", ""), {})
+            name = ((profile.get("models") or {}).get("bs_roformer") or {}).get("model")
+        return str(name or "default")
+
+    def _strip_music(self, args, config, checkpoint, audio_data, audio_path,
+                     music_map) -> bool:
+        """Take the music out of the waveform. True when the waveform was changed.
+
+        What was cached is filed under the scope and the checkpoint that made it:
+        a recording separated by one model, or over other stretches, must not be
+        reused when the profile has moved to another -- run() reloads the
+        original audio on every entry and re-applies whatever is cached.
+        """
+        from utils.music_map import MUSIC
+        if not self.step_enabled(args, "music_removal"):
+            return False
+        scope = self._music_scope(args)
+        if scope == "spans" and music_map.total_of(MUSIC) <= 0:
+            return False
+
+        stem = os.path.splitext(self._music_checkpoint_name(args, config))[0]
+        namespace = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{scope}-{stem}")
+        checkpoint.namespaces["music_patches"] = namespace
+        checkpoint.namespaces["noise_track_processed"] = namespace
+
+        patches = checkpoint.load("music_patches")
+        if patches is None:
+            # Only load the separator once there is something for it to do.
+            self._load("music")
+            self.music_svc.bs_roformer = (self.model_loader.get("bs_roformer")
+                                          if self.model_loader else None)
+            if scope == "full":
+                patches = self.music_svc.strip_full_recording(
+                    audio_data, logger=self.logger, source_path=audio_path)
+            else:
+                patches = self.music_svc.strip_music_spans(
+                    audio_data, music_map, logger=self.logger,
+                    source_path=audio_path)
+            checkpoint.save("music_patches", patches)
+            self._free(args, "bs_roformer")
+        else:
+            self.music_svc.apply_music_patches(audio_data, patches)
+            if self.logger:
+                self.logger.info(f"Re-applied {len(patches)} cached music "
+                                 f"patch(es) ({scope}) to the waveform")
+        return bool(patches)
+
+    def _measure_processed_noise(self, args, checkpoint, audio_data) -> None:
+        """Measure the noise of the waveform as it is now.
+
+        The first sweep listens to the recording as it was made, and that is what
+        decides what music there is to strip or cut. Once the music is out, the
+        audio the dataset is cut from is a different signal, and the noise a
+        conversation excerpt is judged by should be that signal's. So the noise
+        track is replaced by a second sweep over the stripped waveform; the
+        first is kept in the checkpoints as `noise_track` for comparison.
+        """
+        if not self.step_enabled(args, "music_analysis"):
+            return
+        if checkpoint.exists("noise_track_processed", fmt="json"):
+            self.noise_track = NoiseTrack.from_json(
+                checkpoint.load("noise_track_processed", fmt="json"))
+            return
+        self._load("tagger")
+        detector = self.model_loader.get("tagger") if self.model_loader else None
+        tagger_lock = getattr(self, "_tagger_lock", None)
+        with (tagger_lock if tagger_lock is not None else contextlib.nullcontext()):
+            _, noise = build_maps(audio_data.waveform, audio_data.sample_rate,
+                                  detector, logger=self.logger)
+        if not noise:
+            if self.logger:
+                self.logger.warning("Noise sweep over the stripped audio gave nothing; "
+                                    "keeping the measurement made before stripping")
+            return
+        before = self.noise_track
+        self.noise_track = noise
+        checkpoint.save("noise_track_processed", noise.to_json(), fmt="json")
+        if self.logger and before:
+            import numpy as np
+            self.logger.info(
+                "Noise p90 of the recording: "
+                f"{float(np.percentile(before.combined, 90)):.3f} as recorded, "
+                f"{float(np.percentile(noise.combined, 90)):.3f} after music removal")
+
     def _relabel_speakers(self, checkpoint, stage_out, transcripts, speech_segments):
         """Reassign speaker labels from the whole transcript. Only `speaker` changes.
 
@@ -633,24 +735,11 @@ class PipelineService:
         # Tách nhạc nền trước diarization. Cache các lát được thay thế thay vì
         # cả waveform dài. Mỗi lần run() đọc lại audio gốc phải áp các lát cache
         # để mọi bước đều nhìn thấy cùng âm thanh đã bỏ nhạc.
-        from utils.music_map import MUSIC
-        if music_map.total_of(MUSIC) > 0 and self.step_enabled(args, "music_removal"):
-            patches = checkpoint.load("music_patches")
-            if patches is None:
-                # Chỉ tải model tách khi bản đồ đã tìm thấy vùng cần xử lý.
-                self._load("music")
-                self.music_svc.bs_roformer = (self.model_loader.get("bs_roformer")
-                                         if self.model_loader else None)
-                patches = self.music_svc.strip_music_spans(
-                    audio_data, music_map, logger=self.logger,
-                    source_path=audio_path)
-                checkpoint.save("music_patches", patches)
-                self._free(args, "bs_roformer")
-            else:
-                self.music_svc.apply_music_patches(audio_data, patches)
-                if self.logger:
-                    self.logger.info(f"Re-applied {len(patches)} cached music "
-                                     "patch(es) to the waveform")
+        # pipeline.music_scope: "spans" chỉ tách các khoảng có nhạc nền dưới lời;
+        # "full" chạy model tách trên toàn bộ file. Sau khi audio đã đổi, độ nhiễu
+        # được đo lại trên chính audio đó (xem _measure_processed_noise).
+        if self._strip_music(args, config, checkpoint, audio_data, audio_path, music_map):
+            self._measure_processed_noise(args, checkpoint, audio_data)
 
         # Cắt phần hát/nhạc độc lập trước diarization và ASR để lời bài hát không
         # lọt vào hội thoại. Timeline bị rút ngắn nên lưu ánh xạ để đổi về thời

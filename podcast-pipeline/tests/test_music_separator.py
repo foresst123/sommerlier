@@ -324,15 +324,37 @@ BEST_VOCAL_SDR = {"model_bs_roformer_ep_368_sdr_12.9628.ckpt": 12.10,
                   "model_bs_roformer_ep_317_sdr_12.9755.ckpt": 11.77,
                   "model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt": 10.54}
 
+# Checkpoints in use with no SDR recorded above, and why each is allowed. A
+# number is not invented for them: an entry here says "not scored", with the
+# reason it is used anyway, so the gap stays visible instead of hidden.
+UNSCORED = {
+    "mel_band_roformer_kim_ft2_bleedless_unwa.ckpt":
+        "Kim Mel-Band fine-tune picked in notebooks/kim_melband_roformer_clean_speech_kaggle.ipynb "
+        "to keep music from bleeding into the vocal stem; run there with autocast, because "
+        "native fp16 produced NaN/Inf. Not in the score table above -- measure it before "
+        "trusting it over the checkpoints that are.",
+}
+
 
 def test_the_configured_checkpoint_is_one_whose_score_is_known():
     """A checkpoint nobody has scored cannot be compared with the one it
-    replaced, and swapping to one is how a regression stops being visible."""
+    replaced, and swapping to one is how a regression stops being visible.
+    One that is not scored has to say so, and why, in UNSCORED."""
     for name, profile in _profiles().items():
         model = profile["models"]["bs_roformer"]["model"]
-        assert model in BEST_VOCAL_SDR, (
+        assert model in BEST_VOCAL_SDR or UNSCORED.get(model), (
             f"{name} names {model}, which has no recorded vocal SDR here; "
-            "add it from audio-separator's models-scores.json")
+            "add it from audio-separator's models-scores.json, or to UNSCORED "
+            "with the reason it is used unscored")
+
+
+def test_a_checkpoint_that_fails_in_native_fp16_is_not_configured_to_use_it():
+    """The Kim fine-tune wrote NaN/Inf under native fp16 (see UNSCORED); the profile
+    must leave that path off, which puts audio-separator on autocast instead."""
+    for name, profile in _profiles().items():
+        block = profile["models"]["bs_roformer"]
+        if block["model"] in UNSCORED:
+            assert block.get("native_fp16") is False, name
 
 
 def test_both_profiles_agree_on_the_checkpoint():

@@ -47,6 +47,7 @@
                 "vad": true,
                 "bss": true,
                 "music": true,
+                "music_scope": "full",
                 "ASRMoE": true,
                 "llm_refinement": true,
                 "qwen3omni": false,
@@ -108,10 +109,10 @@
                     "embedding_filename": "voxceleb_resnet293_LM.onnx"
                 },
                 "bs_roformer": {
-                    "model": "model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt",
+                    "model": "mel_band_roformer_kim_ft2_bleedless_unwa.ckpt",
                     "chunk_duration": 300,
                     "normalization_threshold": 1.0,
-                    "native_fp16": true,
+                    "native_fp16": false,
                     "torch_compile": false,
                     "hi_res": true
                 },
@@ -231,6 +232,7 @@
                 "vad": true,
                 "bss": true,
                 "music": true,
+                "music_scope": "full",
                 "ASRMoE": true,
                 "llm_refinement": true,
                 "qwen3omni": false,
@@ -292,10 +294,10 @@
                     "embedding_filename": "voxceleb_resnet293_LM.onnx"
                 },
                 "bs_roformer": {
-                    "model": "model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt",
+                    "model": "mel_band_roformer_kim_ft2_bleedless_unwa.ckpt",
                     "chunk_duration": 600,
                     "normalization_threshold": 1.0,
-                    "native_fp16": true,
+                    "native_fp16": false,
                     "torch_compile": false,
                     "hi_res": true
                 },

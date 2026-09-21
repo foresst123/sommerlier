@@ -181,6 +181,81 @@ class MusicService:
                         f"{hi_res} at 44.1kHz)")
         return patches
 
+    def strip_full_recording(self, audio: AudioData, logger=None,
+                             source_path: str = None):
+        """Replace the whole waveform with its vocals, wherever music was or was not.
+
+        The other way to use the separator: `strip_music_spans` touches only the
+        stretches the map calls a bed and leaves everything else as recorded,
+        while this runs the model over the entire recording. What it buys is that
+        what remains is no longer a question of whether the tagger noticed a quiet
+        bed, and the noise measured afterwards describes the audio the dataset
+        is cut from. What it costs is that every second is now the model's
+        output, so a failure has to leave the recording as it was -- a NaN
+        written over the waveform would poison everything after it.
+
+        Returns [(0, vocals)], the same shape `strip_music_spans` returns, so the
+        result is cached and re-applied by the same code. An empty list means the
+        recording is unchanged.
+
+        Decoded from `source_path` at the checkpoint's own 44.1kHz when it can be
+        (see `BSRoformerRemover.separate_span`); otherwise the 16kHz waveform held
+        here is separated, which works but discards what that rate gives up.
+        """
+        if not self.bs_roformer:
+            return []
+        sr = audio.sample_rate
+        waveform = self._writable_waveform(audio)
+        if len(waveform) < sr:
+            return []
+        reference = waveform.copy()
+        pool_models = getattr(self.bs_roformer, "models", None)
+        available = self._checkout_queue(pool_models or [self.bs_roformer])
+
+        model = available.get()
+        try:
+            vocals, hi_res = None, False
+            separate_span = getattr(model, "separate_span", None) if source_path else None
+            if separate_span is not None:
+                vocals = separate_span(source_path, 0.0, len(reference) / float(sr),
+                                       sr, reference)
+                hi_res = vocals is not None
+            if vocals is None:
+                separate_full = getattr(model, "separate_full", None)
+                vocals = separate_full(reference, sr) if separate_full else None
+        finally:
+            available.put(model)
+
+        problem = self._unusable_vocals(vocals, reference)
+        if problem:
+            if logger:
+                logger.error(f"Full-recording vocal separation {problem}; keeping the "
+                             "recording as it was")
+            return []
+        vocals = np.asarray(vocals, dtype=np.float32)
+        waveform[:] = vocals
+        if logger:
+            logger.info(f"Stripped music from the whole recording "
+                        f"({len(vocals) / float(sr):.1f}s, "
+                        f"{'44.1kHz' if hi_res else f'{sr}Hz'} separation)")
+        return [(0, vocals)]
+
+    @staticmethod
+    def _unusable_vocals(vocals, reference):
+        """Why a whole-recording separation cannot replace the recording, or None."""
+        if vocals is None:
+            return "produced nothing"
+        vocals = np.asarray(vocals)
+        if len(vocals) != len(reference):
+            return f"came back {len(vocals)} samples long, expected {len(reference)}"
+        if not np.isfinite(vocals).all():
+            return "contains NaN or Inf (try autocast instead of native fp16 for this checkpoint)"
+        rms = float(np.sqrt(np.mean(np.square(vocals, dtype=np.float64))))
+        ref_rms = float(np.sqrt(np.mean(np.square(reference, dtype=np.float64))))
+        if ref_rms > 1e-6 and rms < 0.01 * ref_rms:
+            return "is almost silent next to the recording"
+        return None
+
     @staticmethod
     def apply_music_patches(audio: AudioData, patches):
         """Write cached vocal stretches back over the waveform."""
