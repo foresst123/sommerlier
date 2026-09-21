@@ -230,7 +230,7 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
                 from concurrent.futures import ThreadPoolExecutor
                 with ThreadPoolExecutor(
                         max_workers=min(parallelism, len(pending)),
-                        thread_name_prefix="diarization") as executor:
+                        thread_name_prefix=f"stage-{stage}") as executor:
                     submitted = [
                         (path, executor.submit(run_one, i, path))
                         for i, path in enumerate(pending, start=1)
@@ -286,6 +286,12 @@ def _stage_parallelism(args, stage) -> int:
         if str(separator).strip().lower() == "sidon":
             return max(1, min(2, int(
                 stages.get("separation", {}).get("max_workers", 1))))
+    if stage == "music" and stages.get("music", {}).get("cross_file_overlap", False):
+        # SSLAM and BS-RoFormer are two model TYPES on two GPUs, not multiple
+        # instances of one -- a third file gains nothing further, since the
+        # first two already keep both cards busy (file N removing music while
+        # file N+1 is classified).
+        return 2
     return 1
 
 

@@ -1,4 +1,5 @@
 import queue
+import threading
 
 import numpy as np
 from schemas.audio import AudioData
@@ -10,11 +11,44 @@ class MusicService:
     one; that pass is gone. The sweep runs at the front of the run now, so by
     the time segments exist the beds are already out of the waveform.
     """
-    
+
     def __init__(self, bs_roformer_model=None, logger=None, model_loader=None):
         self._bs_roformer = bs_roformer_model
         self.model_loader = model_loader
         self.logger = logger
+        # BS-RoFormer owns a fixed work directory and can serve only one job
+        # at a time (see _checkout_queue). Built lazily, once, and reused for
+        # the life of this service -- not per call -- so two files running the
+        # music stage at once share ONE checkout point instead of each
+        # believing it holds an instance exclusively.
+        #
+        # A dict, not two attributes: parallel_stage_view hands each file a
+        # copy.copy() of this service, and a shallow copy shares the dict
+        # object but not a rebound attribute. With a plain `self._state = X`
+        # every copy would assign its own and the queues would diverge again.
+        self._checkout = {"lock": threading.Lock(), "key": None, "queue": None}
+
+    def _checkout_queue(self, models) -> "queue.Queue":
+        """The one checkout queue for this exact set of model instances.
+
+        Keyed by identity rather than cached unconditionally: model_loader can
+        unload and reload bs_roformer between batch passes, and a queue built
+        for instances that no longer exist must not be handed to a caller
+        holding the new ones. Within one set of instances, every caller --
+        two threads inside one file's own multi-span removal, or two
+        different files running the music stage concurrently -- shares this
+        same queue, which is what makes "checked out" mean something across
+        callers instead of only within one strip_music_spans() call.
+        """
+        key = tuple(id(model) for model in models)
+        state = self._checkout
+        with state["lock"]:
+            if state["queue"] is None or state["key"] != key:
+                built = queue.Queue()
+                for model in models:
+                    built.put(model)
+                state["key"], state["queue"] = key, built
+            return state["queue"]
 
     # Models are fetched from the loader on use, not captured at construction.
     # PipelineService loads each stage's models when that stage runs, so a
@@ -91,10 +125,10 @@ class MusicService:
         # so an instance may serve only one job at a time. Checking out the
         # instance is what guarantees that; picking it by job index does not,
         # because the pool's threads take whichever job is next rather than
-        # every other one.
-        available = queue.Queue()
-        for model in (pool_models or [self.bs_roformer]):
-            available.put(model)
+        # every other one. The queue itself is shared across calls -- see
+        # _checkout_queue -- so this also holds when a second file's own
+        # strip_music_spans() call is running at the same time.
+        available = self._checkout_queue(pool_models or [self.bs_roformer])
 
         def separate_job(item):
             ordinal, (start, end) = item

@@ -64,6 +64,13 @@ _STAGES = {
     "music": {
         "tagger_workers": (INT, 1, 1, 2),
         "max_separator_workers": (INT, 1, 1, 2),
+        # SSLAM (tagger) always stays on device_1. When this is on, the sole
+        # BS-RoFormer instance moves to device_2 instead, so file N's removal
+        # and file N+1's classification land on different cards when the
+        # music-stage batch pass overlaps them. Mutually exclusive with
+        # max_separator_workers>1 -- both ask for the same second GPU in
+        # different ways; ModelLoader picks this one and warns if both are set.
+        "cross_file_overlap": (BOOL, False, None, None),
     },
 }
 
@@ -209,3 +216,38 @@ def fingerprint(resolved):
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
     return f"on-{digest[:8]}"
+
+
+def resolve_music_devices(device_1, device_2, *, perf_enabled: bool,
+                          max_separator_workers: int = 1,
+                          cross_file_overlap: bool = False,
+                          logger=None) -> list:
+    """Which device(s) BS-RoFormer loads onto.
+
+    SSLAM (the tagger) is not a parameter here -- it always stays on
+    device_1, since it is the fast, small model and the one every file's
+    music stage starts with.
+
+    Two different reasons ask for a second GPU, and they conflict: splitting
+    ONE file's own music spans across two BS-RoFormer instances
+    (`max_separator_workers>1`), versus moving the SOLE instance to device_2
+    so file N's removal and file N+1's classification land on different
+    cards when the batch overlaps them (`cross_file_overlap`). Both want the
+    same card for a different job; `cross_file_overlap` wins, because
+    without it nothing overlaps files at all, while a lone file with several
+    music spans still gets removal done -- just serialized on one card.
+    """
+    if not perf_enabled or device_2 == device_1:
+        return [device_1]
+    if cross_file_overlap:
+        if max_separator_workers > 1 and logger:
+            logger.warning(
+                "[performance] music.cross_file_overlap and "
+                "music.max_separator_workers>1 both ask for the second GPU "
+                "in different ways; using cross_file_overlap (one BS-RoFormer "
+                "instance on device_2, off SSLAM's card) and ignoring "
+                "max_separator_workers")
+        return [device_2]
+    if max_separator_workers > 1:
+        return [device_1, device_2]
+    return [device_1]

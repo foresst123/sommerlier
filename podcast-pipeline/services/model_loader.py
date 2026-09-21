@@ -1,9 +1,12 @@
+import functools
 import os
 import gc
+import threading
 import torch
 from typing import Dict, Any
 
 from utils.steps import step_enabled
+from utils.performance_config import resolve_music_devices
 
 from models.whisper_wrapper import WhisperASR
 from models.phowhisper import PhoWhisperASR
@@ -16,6 +19,28 @@ from models.sslam import SSLAMDetector
 from models.qwen3_omni import Qwen3OmniCaptioner
 from models.qwen3_asr import Qwen3ASRClient
 from services.qwen3_worker_service import Qwen3WorkerService
+
+
+def _serialized(method):
+    """Run a loader method under the loader's lock.
+
+    Every loader is idempotent, which is not the same as safe to call twice at
+    once: with two files in flight, both can see `"tagger" not in self.models`
+    and both build one. The second overwrites the first in the dict, so the
+    first is never unloaded and keeps its VRAM until the process exits. An
+    RLock, because load_music_models calls load_tagger.
+    """
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        # __init__ creates the lock, but tests build a loader through __new__
+        # to skip device probing. setdefault is a single atomic dict operation,
+        # so two callers racing to create it still end up with the same one.
+        lock = (self.__dict__.get("_load_lock")
+                or self.__dict__.setdefault("_load_lock", threading.RLock()))
+        with lock:
+            return method(self, *args, **kwargs)
+    return wrapper
+
 
 class ModelLoader:
     """Orchestrates loading and unloading of models onto GPU/CPU.
@@ -32,10 +57,12 @@ class ModelLoader:
         self.args = args
         self.logger = logger
         self.models = {}
+        self._load_lock = threading.RLock()
         
         self.device_1 = torch.device(f"cuda:{args.gpu_1}" if torch.cuda.is_available() else "cpu")
         self.device_2 = torch.device(f"cuda:{args.gpu_2}" if torch.cuda.is_available() else "cpu")
         
+    @_serialized
     def load_base_models(self):
         """Load essential models (VAD, DNSMOS)."""
         if "vad" in self.models:
@@ -45,6 +72,7 @@ class ModelLoader:
             self.args.env, {}).get("models", {}).get("vad", {})
         self.models["vad"] = SileroVAD(device=self.device_1, **vad_cfg)
         
+    @_serialized
     def load_diarization_models(self, diarizen_service=None):
         """Load Pyannote/DiariZen based on args."""
         if "diarizer" in self.models:
@@ -65,6 +93,7 @@ class ModelLoader:
                             else diarizen_service.process)
             self.models["diarizer"] = DiariZenDiarizer(process=endpoint)
             
+    @_serialized
     def load_separation_models(self, sidon_service=None):
         """Load the separator and its WeSpeaker assignment, if enabled.
 
@@ -107,6 +136,7 @@ class ModelLoader:
                 logger=self.logger,
             )
             
+    @_serialized
     def load_tagger(self):
         """Load just the frame-level tagger.
 
@@ -121,6 +151,7 @@ class ModelLoader:
             if self.logger: self.logger.info("Loading SSLAM tagger")
             self.models["tagger"] = SSLAMDetector(device=str(self.device_1))
 
+    @_serialized
     def load_music_models(self):
         """Load the tagger and BS-RoFormer if music removal is enabled."""
         if "bs_roformer" in self.models:
@@ -128,12 +159,15 @@ class ModelLoader:
         if step_enabled(self.args, "music_removal"):
             self.load_tagger()
 
-            # Loaded onto device_1, the same card as the DiariZen worker.
-            # An earlier note here claimed it ran on GPU 2 alongside Qwen3;
-            # it never did, and the placement below is what actually happens.
-            # What keeps the two from colliding is time rather than space: the
-            # music stage releases both PANNs and this before diarization
-            # starts, so they are not resident together.
+            # By default loaded onto device_1, the same card as SSLAM and the
+            # DiariZen worker. What keeps them from colliding is time rather
+            # than space: the music stage releases both before diarization
+            # starts, so they are not resident together, and within one file
+            # SSLAM must finish first anyway (it produces the music map that
+            # is this model's job list).
+            # With music.cross_file_overlap on, the sole instance moves to
+            # device_2 instead (see resolve_music_devices), so file N's removal
+            # and file N+1's SSLAM classification run on different cards.
             # Copied before popping: self.config is the live profile, and
             # load_music_models runs once per file in a batch.
             bs_roformer_cfg = dict(self.config.get("environments", {}).get(self.args.env, {})
@@ -153,11 +187,12 @@ class ModelLoader:
             perf = (self.config.get("environments", {}).get(self.args.env, {})
                     .get("performance", {}))
             music_perf = perf.get("stages", {}).get("music", {})
-            devices = [self.device_1]
-            if (perf.get("enabled", False)
-                    and int(music_perf.get("max_separator_workers", 1)) > 1
-                    and self.device_2 != self.device_1):
-                devices.append(self.device_2)
+            devices = resolve_music_devices(
+                self.device_1, self.device_2,
+                perf_enabled=perf.get("enabled", False),
+                max_separator_workers=int(music_perf.get("max_separator_workers", 1)),
+                cross_file_overlap=bool(music_perf.get("cross_file_overlap", False)),
+                logger=self.logger)
             if self.logger:
                 self.logger.info(
                     f"Loading {len(devices)} BS-RoFormer worker(s) on "
@@ -168,6 +203,7 @@ class ModelLoader:
             self.models["bs_roformer"] = (
                 BSRoformerPool(models) if len(models) > 1 else models[0])
             
+    @_serialized
     def load_asr_models(self, qwen3_service: Qwen3WorkerService = None):
         """Load ASR models (Whisper, PhoWhisper, Qwen3)."""
         if "phowhisper" in self.models:
@@ -206,6 +242,7 @@ class ModelLoader:
                 if self.logger: self.logger.info("Connecting to Qwen3 worker")
                 self.models["qwen3"] = Qwen3ASRClient(qwen3_service.process)
                 
+    @_serialized
     def load_caption_model(self):
         """Load Omni caption client if enabled."""
         if "captioner" in self.models:
@@ -217,6 +254,7 @@ class ModelLoader:
     def get(self, model_name: str):
         return self.models.get(model_name)
         
+    @_serialized
     def unload(self, model_name: str):
         """Unload model to free VRAM."""
         if model_name in self.models:
