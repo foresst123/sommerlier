@@ -148,7 +148,15 @@ def too_short_to_refine(seg) -> bool:
 
 
 class DiarizationRefinementService:
-    """Uses a local LLM (Qwen) to refine speaker labels and text based on dialogue context."""
+    """Fuses the ASR transcripts of one segment into its final text.
+
+    Despite the name, speaker labels are not touched: nothing here writes to a
+    segment's speaker, and no pass downstream moves one speaker's audio under
+    another's label. Diarization decides who spoke, and its clustering is the
+    only place two voices become one. This stage takes the text the voters
+    produced for a segment and returns better text for that same segment, or
+    keeps the ROVER text when the guards reject what the model returned.
+    """
 
     # The ~1200-token system prompt dominates each sequence, so even a modest
     # batch builds a large KV cache; 2 fits alongside the ASR models on a T4.
