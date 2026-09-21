@@ -1956,24 +1956,52 @@ class SeparationService:
 
     # ------------------------------------------------------------------
     def export_sdlm_dual_channel(self, speech_segments: List[SpeechSegment], audio_duration: float, sr: int,
-                                 strict: bool = True) -> Tuple[np.ndarray, np.ndarray]:
+                                 strict: bool = True,
+                                 speakers: Optional[Tuple[str, str]] = None,
+                                 time_range: Optional[Tuple[float, float]] = None,
+                                 log_stats: bool = True,
+                                 ) -> Tuple[np.ndarray, np.ndarray]:
         """Dựng hai track liên tục để huấn luyện SDLM/full-duplex.
         strict=True đặt vùng tách thất bại về zero để không đưa giọng người khác
-        vào track có nhãn của speaker mục tiêu."""
-        total_samples = round(audio_duration * sr)
+        vào track có nhãn của speaker mục tiêu.
+
+        ``speakers`` cố định thứ tự (trái, phải) cho một item dữ liệu. Khi bỏ
+        trống, giữ nguyên hành vi cũ: chọn hai nhãn đầu tiên theo thứ tự sort.
+        Tham số này quan trọng với bản ghi có hơn hai người, vì mỗi item chỉ
+        được phép lấy đúng cặp speaker mà finder đã chọn.
+
+        ``time_range`` giới hạn track vào [start, end). Không truyền vẫn dựng
+        toàn bộ file như trước; exporter theo item dùng giới hạn này để không
+        cấp phát hàng GB RAM cho một podcast dài.
+        """
+        if time_range is None:
+            range_start, range_end = 0.0, float(audio_duration)
+        else:
+            range_start = max(0.0, float(time_range[0]))
+            range_end = min(float(audio_duration), float(time_range[1]))
+            if range_end < range_start:
+                range_end = range_start
+        range_start_sample = round(range_start * sr)
+        range_end_sample = round(range_end * sr)
+        total_samples = max(0, range_end_sample - range_start_sample)
         track_0 = np.zeros(total_samples, dtype=np.float32)
         track_1 = np.zeros(total_samples, dtype=np.float32)
 
-        speakers = sorted({s.speaker for s in speech_segments})
-        if not speakers:
+        available = sorted({s.speaker for s in speech_segments})
+        if not available:
             return track_0, track_1
-        if len(speakers) > 2 and self.logger:
+        if speakers is not None:
+            if len(speakers) != 2 or speakers[0] == speakers[1]:
+                raise ValueError("speakers must contain two distinct speaker ids")
+            spk_0, spk_1 = speakers
+        else:
+            spk_0 = available[0]
+            spk_1 = available[1] if len(available) > 1 else None
+        if speakers is None and len(available) > 2 and self.logger:
             self.logger.warning(
-                f"export_sdlm_dual_channel: expected 2 speakers, found {len(speakers)}; "
+                f"export_sdlm_dual_channel: expected 2 speakers, found {len(available)}; "
                 "the rest are ignored."
             )
-        spk_0 = speakers[0]
-        spk_1 = speakers[1] if len(speakers) > 1 else None
 
         # Hai segment cùng speaker chồng nhau chứa cùng một đoạn ghi âm. Cộng cả
         # hai vào track làm biên độ vùng đó gấp đôi rồi safe_limit kéo cả track
@@ -1985,11 +2013,16 @@ class SeparationService:
         for seg in speech_segments:
             if seg.speaker not in filled or seg.audio is None:
                 continue
-            start_idx = round(seg.start * sr)
-            end_idx = min(total_samples, start_idx + len(seg.audio))
-            if end_idx <= start_idx:
+            seg_start = round(seg.start * sr)
+            seg_end = seg_start + len(seg.audio)
+            abs_start = max(range_start_sample, seg_start)
+            abs_end = min(range_end_sample, seg_end)
+            if abs_end <= abs_start:
                 continue
-            chunk = seg.audio[: end_idx - start_idx].copy()
+            start_idx = abs_start - range_start_sample
+            end_idx = abs_end - range_start_sample
+            source_start = abs_start - seg_start
+            chunk = seg.audio[source_start:source_start + end_idx - start_idx].copy()
 
             fresh = ~filled[seg.speaker][start_idx:end_idx]
             filled[seg.speaker][start_idx:end_idx] = True
@@ -2003,8 +2036,8 @@ class SeparationService:
                     # track sai; xóa nó chỉ làm mất lời nói thật.
                     if reason in SAFE_FAIL_REASONS:
                         continue
-                    i = max(start_idx, round(a * sr)) - start_idx
-                    j = min(end_idx, round(b * sr)) - start_idx
+                    i = max(abs_start, round(a * sr)) - abs_start
+                    j = min(abs_end, round(b * sr)) - abs_start
                     if j > i:
                         keep[i:j] = False
                 dropped += int((fresh & ~keep).sum())
@@ -2019,7 +2052,7 @@ class SeparationService:
             else:
                 track_1[start_idx:end_idx] += chunk
 
-        if strict and self.logger:
+        if strict and log_stats and self.logger:
             total = written + dropped
             pct = (100.0 * dropped / total) if total else 0.0
             self.logger.info(
@@ -2036,7 +2069,7 @@ class SeparationService:
         # bằng hệ số để giữ tương quan mức, tránh méo do cắt đỉnh cứng.
         track_0, g0 = safe_limit(track_0)
         track_1, g1 = safe_limit(track_1)
-        if self.logger and (g0 < 1.0 or g1 < 1.0):
+        if log_stats and self.logger and (g0 < 1.0 or g1 < 1.0):
             self.logger.info(
                 f"[SDLM] limiter applied: track_0 x{g0:.3f}, track_1 x{g1:.3f} "
                 "(summed segments exceeded full scale)")

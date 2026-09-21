@@ -45,8 +45,8 @@ def _build_parser():
     parser.add_argument("--audio", help="Path to a single input audio file")
     parser.add_argument("--audio_dir",
                         help="Directory of audio files to process in one run. Files are "
-                             "grouped into batches under batch.max_hours_per_run from "
-                             "config.json; each still writes its own output folder.")
+                             "run as one corpus snapshot with --by_stage (the default "
+                             "profile setting); each writes its own output folder.")
     parser.add_argument("--max_hours", type=float,
                         help="Override batch.max_hours_per_run for this run.")
     parser.add_argument("--config", default="config.json", help="Path to config file")
@@ -78,9 +78,9 @@ def _build_parser():
     parser.add_argument("--initprompt", action="store_true", help="Use initial prompt for LLM")
     parser.add_argument("--env", default="kaggle", type=str, help="Environment profile name in config.json")
     parser.add_argument("--by_stage", action="store_true",
-                        help="Run each stage across the whole batch before the next "
+                        help="Run each stage across the whole pending corpus before the next "
                              "stage, instead of the whole pipeline per file. Loads "
-                             "each model once per batch rather than once per file.")
+                             "each model once per corpus snapshot rather than once per file.")
     parser.add_argument("--only_batch", type=int, default=None,
                         help="Stop after one pass instead of working through the "
                              "whole directory. Lets a corpus larger than a session "
@@ -128,7 +128,12 @@ def _build_parser():
                              "several as name=on,name=off. Exists so a run does not "
                              "have to edit config.json -- which a re-clone reverts "
                              "without saying so.")
-    parser.add_argument("--stop_after", type=str, choices=["music", "diarization", "separation", "asr", "captioning"], help="Stop pipeline gracefully after this stage")
+    parser.add_argument(
+        "--stop_after", type=str,
+        choices=["music", "diarization", "separation", "music_removal", "asr",
+                 "captioning", "refinement", "speaker_relabel", "word_alignment",
+                 "conversation_exports"],
+        help="Stop pipeline gracefully after this stage")
     return parser
 
 
@@ -308,7 +313,9 @@ from services.asr_service import ASRService
 from services.caption_service import CaptionService
 from services.diarization_refinement_service import DiarizationRefinementService
 from services.speaker_relabel_service import SpeakerRelabelService
-from services.dialogue_clip_service import DialogueClipService
+from services.word_alignment_service import WordAlignmentService
+from services.conversation_export_service import ConversationExportService
+from services.clean_two_channel_dataset_service import CleanTwoChannelDatasetService
 from services.export_service import ExportService
 from services.pipeline_service import PipelineService
 from services.qwen3_worker_service import Qwen3WorkerService
@@ -652,9 +659,19 @@ def main():
         relabel_svc = SpeakerRelabelService(
             refinement_svc, logger=logger,
             **dict(env_profile.get("models", {}).get("relabel", {})))
-        clip_svc = DialogueClipService(
+        conversation_export_svc = ConversationExportService(
             refinement_svc, logger=logger,
-            **dict(env_profile.get("models", {}).get("dialogue_clips", {})))
+            **dict(env_profile.get("models", {}).get("conversation_selection", {})))
+        alignment_cfg = dict(
+            env_profile.get("models", {}).get("word_alignment", {}))
+        if alignment_cfg.get("device", "auto") == "auto":
+            alignment_cfg["device"] = (
+                f"cuda:{args.gpu_1}" if torch.cuda.is_available() else "cpu")
+        alignment_cfg["model_cache_only"] = bool(
+            env_profile.get("offline_mode", False))
+        word_alignment_svc = WordAlignmentService(
+            language=args.lang, logger=logger, **alignment_cfg)
+        clean_dataset_svc = CleanTwoChannelDatasetService(logger=logger)
         export_svc = ExportService(logger=logger)
 
         # 4. Orchestrate via PipelineService
@@ -669,7 +686,9 @@ def main():
             },
             performance_monitor=performance_monitor,
             relabel_svc=relabel_svc,
-            clip_svc=clip_svc,
+            conversation_export_svc=conversation_export_svc,
+            word_alignment_svc=word_alignment_svc,
+            clean_dataset_svc=clean_dataset_svc,
         )
         
         # One worker set serves the whole batch: loading models per file cost
@@ -703,11 +722,10 @@ def main():
             logger.error("Rename them or move them apart, then re-run.")
             return
 
-        # A corpus is processed in passes. Each pass re-scans the directory,
-        # takes the next max_hours of unfinished audio, and runs every stage
-        # across that whole group before moving on. Re-scanning is what lets
-        # files be added while the run is going: they are simply there on the
-        # next pass.
+        # File-major runs remain duration-bounded. A stage-major run freezes a
+        # pending-corpus snapshot, so it completes ASR for every file before it
+        # ever loads the refinement LLM. Files copied in during the run wait
+        # for the next invocation instead of causing an ASR reload afterwards.
         ledger = ProgressLedger(args.audio_dir, logger=logger)
         if ledger.done or ledger.failed:
             logger.info(f"Resuming: {ledger.summary(len(paths))} "
@@ -724,7 +742,14 @@ def main():
             if not todo:
                 break
 
-            group = plan_batches(todo, max_hours, logger=logger)[0]
+            # Stage-major is a corpus snapshot, not a duration-bounded group:
+            # every file finishes ASR before the refinement model is loaded.
+            # --only_batch deliberately keeps the old bounded behaviour for a
+            # session that cannot finish the whole snapshot in one allocation.
+            if args.only_batch is not None or not args.by_stage:
+                group = plan_batches(todo, max_hours, logger=logger)[0]
+            else:
+                group = list(todo)
             group_hours = sum(audio_duration(p) for p in group) / 3600.0
             logger.info(
                 f"--- Pass {pass_no}: {len(group)} file(s), {group_hours:.2f}h "
@@ -768,6 +793,14 @@ def main():
 
             if args.only_batch is not None:
                 logger.info("--only_batch was given; stopping after this pass")
+                break
+            if args.by_stage:
+                # Freeze the snapshot. Files copied in while a long stage-major
+                # run was active are left for the next invocation; immediately
+                # starting them would load ASR again after refinement.
+                logger.info(
+                    "Stage-major corpus snapshot complete; newly added files "
+                    "will run on the next invocation")
                 break
 
         logger.info(f"Corpus complete: {ledger.summary()}")

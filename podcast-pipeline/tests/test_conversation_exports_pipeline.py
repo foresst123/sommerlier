@@ -1,4 +1,4 @@
-"""How PipelineService hands a finished file to the clip pass.
+"""How PipelineService hands a finished file to the conversation-export pass.
 
 The pass needs three things the pipeline already has in hand at that point --
 the audio it worked on, the cut timeline, and the SSLAM noise and music maps --
@@ -6,7 +6,7 @@ and each has a way to go quietly wrong: the music map is in the ORIGINAL
 timeline while clips are cut in the shortened one, and a missing noise track must
 not read as a clean recording.
 
-Run:  python -m pytest tests/test_dialogue_clips_pipeline.py -q     (from podcast-pipeline/)
+Run:  python -m pytest tests/test_conversation_exports_pipeline.py -q     (from podcast-pipeline/)
 """
 import json
 import os
@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 pytest.importorskip("soundfile")
 
-from services.dialogue_clip_service import ClipRun, DialogueClipService
+from services.conversation_export_service import ConversationExportRun, ConversationExportService
 from services.pipeline_service import PipelineService
 from services.stage_output_service import StageOutputService
 from utils.excise import TimelineMap
@@ -68,8 +68,8 @@ class _StageOut:
     def __init__(self):
         self.calls = []
 
-    def write_dialogue_clips(self, report, clips):
-        self.calls.append((report, clips))
+    def write_conversation_exports(self, report, exports):
+        self.calls.append((report, exports))
 
 
 class _Capture:
@@ -80,12 +80,12 @@ class _Capture:
 
     def run(self, transcripts, **kwargs):
         self.kwargs = kwargs
-        return ClipRun(clips=[], report={"skipped": "captured"})
+        return ConversationExportRun(exports=[], report={"skipped": "captured"})
 
 
-def _pipeline(clip_svc, timeline=None, noise=None):
+def _pipeline(conversation_export_svc, timeline=None, noise=None):
     pipe = PipelineService.__new__(PipelineService)
-    pipe.clip_svc = clip_svc
+    pipe.conversation_export_svc = conversation_export_svc
     pipe.timeline = timeline if timeline is not None else TimelineMap()
     pipe.noise_track = noise
     pipe.logger = None
@@ -99,31 +99,31 @@ def _audio(seconds=300.0):
 
 def test_a_finished_file_is_cut_into_the_output_folder(tmp_path):
     out = _StageOut()
-    pipe = _pipeline(DialogueClipService(_LLM()), noise=_quiet())
-    result = pipe._extract_clips(out, _talk(30), _audio(), MusicMap(),
+    pipe = _pipeline(ConversationExportService(_LLM()), noise=_quiet())
+    result = pipe._export_conversation_exports(out, _talk(30), _audio(), MusicMap(),
                                  str(tmp_path), "/data/episode 7.mp3")
-    assert result.clips
-    assert (tmp_path / "dialogue_clips" / "audio").is_dir()
-    assert (tmp_path / "dialogue_clips" / "metadata").is_dir()
-    assert result.clips[0]["id"].startswith("episode_7_conv_")
-    assert out.calls and out.calls[0][1] == result.clips
+    assert result.exports
+    assert (tmp_path / "conversation_exports" / "audio").is_dir()
+    assert (tmp_path / "conversation_exports" / "metadata").is_dir()
+    assert result.exports[0]["id"].startswith("episode_7_conversation_")
+    assert out.calls and out.calls[0][1] == result.exports
 
 
 def test_without_a_noise_track_nothing_is_cut_and_it_says_so(tmp_path):
     out = _StageOut()
-    pipe = _pipeline(DialogueClipService(_LLM()), noise=None)
-    result = pipe._extract_clips(out, _talk(30), _audio(), MusicMap(),
+    pipe = _pipeline(ConversationExportService(_LLM()), noise=None)
+    result = pipe._export_conversation_exports(out, _talk(30), _audio(), MusicMap(),
                                  str(tmp_path), "ep.mp3")
-    assert result.clips == []
+    assert result.exports == []
     assert out.calls[0][0]["skipped"] == "noise_not_measured"
-    assert not (tmp_path / "dialogue_clips" / "audio").exists()
+    assert not (tmp_path / "conversation_exports" / "audio").exists()
 
 
 def test_the_music_map_is_moved_into_the_cut_timeline_before_it_is_used(tmp_path):
     timeline = TimelineMap(kept=[(0, 50, 0), (80, 400, 50)])     # 30s removed
     music = MusicMap([(100.0, 110.0, MUSIC)])                    # original time
     capture = _Capture()
-    _pipeline(capture, timeline=timeline, noise=_quiet())._extract_clips(
+    _pipeline(capture, timeline=timeline, noise=_quiet())._export_conversation_exports(
         _StageOut(), [], _audio(), music, str(tmp_path), "ep.mp3")
     moved = capture.kwargs["music_map"]
     assert [(round(a), round(b)) for a, b, _ in moved.spans] == [(70, 80)]
@@ -132,7 +132,7 @@ def test_the_music_map_is_moved_into_the_cut_timeline_before_it_is_used(tmp_path
 def test_with_nothing_cut_the_music_map_is_passed_through_unchanged(tmp_path):
     music = MusicMap([(100.0, 110.0, MUSIC)])
     capture = _Capture()
-    _pipeline(capture, noise=_quiet())._extract_clips(
+    _pipeline(capture, noise=_quiet())._export_conversation_exports(
         _StageOut(), [], _audio(), music, str(tmp_path), "ep.mp3")
     assert capture.kwargs["music_map"] is music
 
@@ -140,7 +140,7 @@ def test_with_nothing_cut_the_music_map_is_passed_through_unchanged(tmp_path):
 def test_the_pass_gets_the_audio_the_pipeline_worked_on(tmp_path):
     audio = _audio(120.0)
     capture = _Capture()
-    _pipeline(capture, noise=_quiet())._extract_clips(
+    _pipeline(capture, noise=_quiet())._export_conversation_exports(
         _StageOut(), [], audio, None, str(tmp_path), "ep.mp3")
     assert capture.kwargs["waveform"] is audio.waveform
     assert capture.kwargs["sample_rate"] == SR
@@ -152,29 +152,31 @@ def test_the_pass_gets_the_audio_the_pipeline_worked_on(tmp_path):
 def test_the_step_is_opt_in_and_keeps_the_llm_loaded_for_it():
     source = open(os.path.join(ROOT, "services", "pipeline_service.py"),
                   encoding="utf-8").read()
-    assert 'opt_in_step_enabled(args, "dialogue_clips")' in source
-    assert 'self.step_enabled(args, "dialogue_clips")' not in source
-    assert "relabel_on or clips_on" in source
+    assert 'opt_in_step_enabled(args, "conversation_exports")' in source
+    assert 'self.step_enabled(args, "conversation_exports")' not in source
+    assert "relabel_on or conversation_exports_on" in source
 
 
 def test_the_pass_runs_after_relabel_and_before_the_llm_is_released():
     source = open(os.path.join(ROOT, "services", "pipeline_service.py"),
                   encoding="utf-8").read()
     relabel = source.index('opt_in_step_enabled(args, "speaker_relabel")')
-    clips = source.index('opt_in_step_enabled(args, "dialogue_clips")')
-    unload = source.index("relabel_on or clips_on")
-    assert relabel < clips < unload
+    alignment = source.index('opt_in_step_enabled(args, "word_alignment")')
+    exports = source.index('opt_in_step_enabled(args, "conversation_exports")')
+    unload = source.index("relabel_on or conversation_exports_on")
+    assert relabel < alignment < exports < unload
 
 
-def test_the_shipped_profiles_accept_their_own_clip_settings():
+def test_the_shipped_profiles_accept_their_own_conversation_selection_settings():
     with open(os.path.join(ROOT, "config.json"), encoding="utf-8") as fh:
         config = json.load(fh)
     for name, profile in config["environments"].items():
-        DialogueClipService(_LLM(), **profile["models"]["dialogue_clips"])
+        ConversationExportService(_LLM(), **profile["models"]["conversation_selection"])
 
 
 def test_the_clip_output_has_a_numbered_stage_directory():
-    assert StageOutputService.STAGES["dialogue_clips"] == "08_dialogue_clips"
+    assert StageOutputService.STAGES["word_alignment"] == "08_word_alignment"
+    assert StageOutputService.STAGES["conversation_exports"] == "09_conversation_exports"
     assert StageOutputService.STAGES["relabel"] == "07_relabel"
 
 
@@ -183,9 +185,9 @@ def test_the_clip_report_is_written_with_its_counts(tmp_path):
     report = {"candidates": 5, "shortlisted": 3, "accepted": 1, "exported": 1,
               "skipped": None, "finder": {"blocks": 4, "blocks_short": 2,
                                           "noise_measured": True}}
-    out.write_dialogue_clips(report, [{"id": "x_conv_000001"}])
-    folder = tmp_path / "08_dialogue_clips"
-    assert json.loads((folder / "clips.json").read_text(encoding="utf-8")) == [
+    out.write_conversation_exports(report, [{"id": "x_conv_000001"}])
+    folder = tmp_path / "09_conversation_exports"
+    assert json.loads((folder / "exports.json").read_text(encoding="utf-8")) == [
         {"id": "x_conv_000001"}]
     assert json.loads((folder / "report.json").read_text(encoding="utf-8"))["candidates"] == 5
     assert json.loads((folder / "stats.json").read_text(encoding="utf-8"))["exported"] == 1
@@ -193,6 +195,6 @@ def test_the_clip_report_is_written_with_its_counts(tmp_path):
 
 def test_a_skipped_pass_leaves_a_warning_saying_why(tmp_path):
     out = StageOutputService(str(tmp_path))
-    out.write_dialogue_clips({"skipped": "noise_not_measured", "finder": {}}, [])
-    stats = json.loads((tmp_path / "08_dialogue_clips" / "stats.json").read_text(encoding="utf-8"))
+    out.write_conversation_exports({"skipped": "noise_not_measured", "finder": {}}, [])
+    stats = json.loads((tmp_path / "09_conversation_exports" / "stats.json").read_text(encoding="utf-8"))
     assert any("noise" in w for w in stats["warnings"])

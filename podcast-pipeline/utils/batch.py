@@ -2,7 +2,7 @@
 
 import os
 
-from utils.steps import step_enabled
+from utils.steps import opt_in_step_enabled, step_enabled
 
 
 def audio_duration(path: str) -> float:
@@ -129,18 +129,25 @@ def split_final_failures(failures, is_done):
 
 
 # Stage order must match the pipeline's own sequence; `None` means "run to the
-# end", which covers refinement and export.
+# end" after all model-backed post-processing, covering clean-data selection
+# and export. Every GPU-backed post-ASR operation has its own corpus-wide pass:
+# refinement -> relabel -> forced alignment -> conversation-export judging. This keeps a model
+# resident for the entire corpus instead of swapping model families per file.
 #
 # "music" leads because it is a stage like any other: it loads PANNs and a
 # vocal separator, and running it as its own pass loads them once for the whole
 # batch instead of once inside each file's diarization pass. It is also the
 # stage a run keeps when everything after it is switched off, so it has to be
 # reachable on its own.
-PIPELINE_STAGES = ("music", "diarization", "separation", "music_removal", "asr", "captioning", None)
+PIPELINE_STAGES = (
+    "music", "diarization", "separation", "music_removal", "asr",
+    "captioning", "refinement", "speaker_relabel", "word_alignment",
+    "conversation_exports", None,
+)
 
 
 def label_of(stage):
-    return stage or "refinement+export"
+    return stage or "clean-data+export"
 
 
 def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELINE_STAGES):
@@ -168,7 +175,9 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
         label = label_of(stage)
 
         # Skip this pass entirely when the stage is switched off in the config.
-        # The None stage covers refinement+export; skip it only if both are off.
+        # Model-backed opt-in passes are explicit stages. The final None pass
+        # only writes clean-data and normal exports, but may still be needed
+        # when the normal export switch is off.
         _stage_step_map = {
             "music": "music_analysis",
             "diarization": "diarization",
@@ -176,17 +185,37 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
             "music_removal": "music_removal_fallback",
             "asr": "asr",
             "captioning": "captioning",
+            "refinement": "refinement",
         }
+        _opt_in_stages = {"speaker_relabel", "word_alignment", "conversation_exports"}
         if stage is not None:
-            step_name = _stage_step_map.get(stage, stage)
-            if not step_enabled(args, step_name):
-                if logger:
-                    logger.info(f"Stage '{label}' is off in the profile; skipping batch pass")
-                continue
+            enabled = (opt_in_step_enabled(args, stage)
+                       if stage in _opt_in_stages else
+                       step_enabled(args, _stage_step_map.get(stage, stage)))
+            if not enabled:
+                # Without diarization there is no segment timeline for the
+                # downstream stages; the music pass is the complete useful run.
+                if stage == "diarization":
+                    if logger:
+                        logger.info("Diarization is off; ending this batch after music")
+                    break
+                # Separation-off is different: PipelineService.passthrough()
+                # preserves the segment shape and later ASR/export stages can
+                # still run. Its pass must therefore reach the pipeline.
+                if stage == "separation":
+                    enabled = True
+                else:
+                    if logger:
+                        logger.info(f"Stage '{label}' is off in the profile; skipping batch pass")
+                    continue
         elif stage is None:
-            if not step_enabled(args, "refinement") and not step_enabled(args, "export"):
+            profile = ((config.get("environments") or {})
+                       .get(getattr(args, "env", ""), {}))
+            clean_data_on = bool(
+                ((profile.get("outputs") or {}).get("clean_two_channel_dir")))
+            if not step_enabled(args, "export") and not clean_data_on:
                 if logger:
-                    logger.info("Both refinement and export are off; skipping batch pass")
+                    logger.info("Clean-data and export are off; skipping final batch pass")
                 continue
         pending = [p for p in batch if p not in failures]
         if not pending:
@@ -200,13 +229,20 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
 
         stage_args = copy.copy(args)
         stage_args.stop_after = stage
+        # The final pass re-enters run() to restore checkpointed state before
+        # export. Clip judging has no checkpoint, so mark this invocation to
+        # prevent a second LLM judgement after its dedicated corpus-wide pass.
+        stage_args.postprocess_only = stage is None
 
         # Hold model releases until every file has passed through this stage.
         # Without this the first file frees the diarizer that the second file
         # is about to use, which turns stage-major back into file-major with
         # extra steps.
+        prepare = getattr(pipeline, "prepare_stage_scope", None)
         begin = getattr(pipeline, "begin_stage_scope", None)
         end = getattr(pipeline, "end_stage_scope", None)
+        if prepare:
+            prepare(stage)
         if begin:
             begin()
 

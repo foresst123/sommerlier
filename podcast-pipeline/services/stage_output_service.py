@@ -104,7 +104,8 @@ class StageOutputService:
         "asr": "05_asr",
         "refinement": "06_refinement",
         "relabel": "07_relabel",
-        "dialogue_clips": "08_dialogue_clips",
+        "word_alignment": "08_word_alignment",
+        "conversation_exports": "09_conversation_exports",
     }
 
     def __init__(self, output_dir: str, logger=None, enabled: bool = True):
@@ -467,12 +468,32 @@ class StageOutputService:
             extra={"rejected.json": report.get("rejected", []),
                    "report.json": report})
 
-    def write_dialogue_clips(self, report: dict, clips: List[dict]):
-        """What the clip pass found, judged and wrote -- and why it wrote few.
+    def write_word_alignment(self, transcripts, report: dict):
+        """Final refined text with Wav2Vec2 timestamps for every aligned word."""
+        stats = {key: report.get(key) for key in (
+            "segments", "segments_aligned", "segments_complete",
+            "expected_words", "aligned_words", "word_coverage")}
+        warnings = []
+        if report.get("segments_failed"):
+            warnings.append(
+                f"{len(report['segments_failed'])} segment(s) failed forced alignment")
+        incomplete = ((report.get("segments_aligned") or 0)
+                      - (report.get("segments_complete") or 0))
+        if incomplete > 0:
+            warnings.append(
+                f"{incomplete} aligned segment(s) do not have one timed row per text word")
+        if warnings:
+            stats["warnings"] = warnings
+        return self._finish(
+            "word_alignment", "transcripts.json", transcripts, stats,
+            extra={"report.json": report})
 
-        The audio and per-clip JSON live in `dialogue_clips/` beside the final
-        export; this directory holds the accounting: `clips.json` is one row per
-        clip written, `report.json` carries the finder's counts (how many blocks
+    def write_conversation_exports(self, report: dict, exports: List[dict]):
+        """What the conversation-export pass found, judged and wrote.
+
+        The audio and per-item JSON live in `conversation_exports/` beside the final
+        export; this directory holds the accounting: `exports.json` is one row per
+        item written, `report.json` carries the finder's counts (how many blocks
         each rule ended, how many windows each noise or music gate refused, how
         many the model turned down), which is where to look when a recording
         gives nothing and the thresholds need moving.
@@ -487,20 +508,26 @@ class StageOutputService:
             "blocks": finder.get("blocks"),
             "blocks_short": finder.get("blocks_short"),
             "noise_measured": finder.get("noise_measured"),
+            "word_alignment_missing": (finder.get("breaks") or {}).get(
+                "word_alignment_missing", 0),
         }
         warnings = []
         if report.get("skipped") == "noise_not_measured":
             warnings.append(
-                "no noise labels for this file, so no clip was cut; turn on "
-                "music_analysis (SSLAM) or set models.dialogue_clips.require_noise "
+                "no noise labels for this file, so no conversation item was exported; turn on "
+                "music_analysis (SSLAM) or set models.conversation_selection.require_noise "
                 "to false")
         if report.get("skipped") == "llm_unavailable":
             warnings.append("the LLM was not available for the semantic check")
         if report.get("unanswered"):
             warnings.append(f"{report['unanswered']} candidate(s) got no answer")
+        if stats["word_alignment_missing"]:
+            warnings.append(
+                f"{stats['word_alignment_missing']} segment(s) were excluded because "
+                "the final text lacks complete word timestamps")
         if warnings:
             stats["warnings"] = warnings
-        return self._finish("dialogue_clips", "clips.json", clips, stats,
+        return self._finish("conversation_exports", "exports.json", exports, stats,
                             extra={"report.json": report})
 
     # -- separated audio ------------------------------------------------
@@ -595,11 +622,13 @@ class StageOutputService:
         self.manifest["stages"] = stages
 
         flow = []
-        for name in ("diarization", "separation", "music_removal", "asr", "refinement"):
+        for name in ("diarization", "separation", "music_removal", "asr",
+                     "refinement", "word_alignment"):
             st = self.manifest["stages"].get(name, {}).get("stats")
             if not st:
                 continue
-            n = st.get("n_segments") or st.get("segments_total") or st.get("n_transcripts")
+            n = (st.get("n_segments") or st.get("segments_total")
+                 or st.get("n_transcripts") or st.get("segments"))
             flow.append({"stage": name, "n": n, "warnings": len(st.get("warnings", []))})
 
         payload = dict(self.manifest)

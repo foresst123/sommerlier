@@ -184,6 +184,27 @@ def test_closing_a_scope_that_was_never_opened_is_safe():
     pipe.end_stage_scope()          # must not raise
 
 
+def test_asr_models_are_held_for_the_full_asr_stage_then_released_once():
+    """ASRService normally releases Whisper/PhoWhisper per file.
+
+    The stage scheduler temporarily changes that rule, so a corpus pass loads
+    each model once and hands both GPUs to refinement only after every file has
+    completed ASR.
+    """
+    pipe = _pipeline(_FakeWorkerService())
+    pipe.model_loader = _Loader()
+    pipe.asr_svc = types.SimpleNamespace(keep_models=False)
+
+    pipe.prepare_stage_scope("asr")
+    pipe.begin_stage_scope()
+    assert pipe.asr_svc.keep_models is True
+
+    pipe.end_stage_scope()
+
+    assert pipe.asr_svc.keep_models is False
+    assert pipe.model_loader.unloaded == ["whisper", "phowhisper"]
+
+
 # --- workers are not revived for stages that will not use them --------------
 
 def test_a_checkpointed_stage_does_not_revive_its_worker():

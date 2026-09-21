@@ -1,11 +1,11 @@
-"""Picking two-person conversation clips out of a transcript.
+"""Picking two-person conversation excerpts out of a transcript.
 
 The rules come from conversation_dataset_plan.md; what is pinned here is the
-part the plan cannot say on its own: that a clip is exactly two people, is never
+part the plan cannot say on its own: that an excerpt is exactly two people, is never
 glued across a cut, is split around lasting noise rather than thrown away whole
 or (worse) kept, and that "not measured" is never read as "clean".
 
-Run:  python -m pytest tests/test_dialogue_clips.py -q     (from podcast-pipeline/)
+Run:  python -m pytest tests/test_conversation_selection.py -q     (from podcast-pipeline/)
 """
 import os
 import sys
@@ -16,8 +16,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.dialogue_clips import (
-    BACKCHANNEL, INVALID, NORMAL, Candidate, ClipConfig, DialogueClipFinder,
+from utils.conversation_selection import (
+    BACKCHANNEL, INVALID, NORMAL, Candidate, ConversationSelectionConfig, ConversationSelectionFinder,
     classify, overlap_fraction, pick_non_overlapping, shortlist, tier_of)
 from utils.excise import TimelineMap
 from utils.music_map import MUSIC, MusicMap
@@ -56,7 +56,7 @@ def _track(total=600, base=0.001, **bursts):
 def _finder(segs, noise="quiet", timeline=None, music=None, **cfg):
     if isinstance(noise, str):
         noise = _track() if noise == "quiet" else NoiseTrack()
-    return DialogueClipFinder(segs, timeline, noise, music, ClipConfig(**cfg))
+    return ConversationSelectionFinder(segs, timeline, noise, music, ConversationSelectionConfig(**cfg))
 
 
 def _covers(cand, pos):
@@ -417,11 +417,11 @@ def test_weights_are_normalised_so_a_score_never_passes_100():
 
 def test_the_configuration_refuses_what_it_does_not_know():
     with pytest.raises(TypeError):
-        ClipConfig(min_secs=30)
+        ConversationSelectionConfig(min_secs=30)
     with pytest.raises(ValueError):
-        ClipConfig(weights={"vibes": 1})
+        ConversationSelectionConfig(weights={"vibes": 1})
     with pytest.raises(ValueError):
-        ClipConfig(min_seconds=300, max_seconds=100)
+        ConversationSelectionConfig(min_seconds=300, max_seconds=100)
 
 
 # --- evaluating a window the model trimmed -------------------------------------------------

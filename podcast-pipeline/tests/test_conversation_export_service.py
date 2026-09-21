@@ -5,7 +5,7 @@ by segment index. What is pinned here is that it can only ever narrow what the
 scan already accepted -- never widen a clip, invent a time, or pass one the scan
 refused -- and that the audio and metadata on disk describe the clip honestly.
 
-Run:  python -m pytest tests/test_dialogue_clip_service.py -q     (from podcast-pipeline/)
+Run:  python -m pytest tests/test_conversation_export_service.py -q     (from podcast-pipeline/)
 """
 import json
 import os
@@ -20,8 +20,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 sf = pytest.importorskip("soundfile")
 
-from services.dialogue_clip_service import (
-    CLIP_PROMPT_VERSION, DialogueClipService, cut_clip, parse_verdict)
+from services.conversation_export_service import (
+    CONVERSATION_EXPORT_PROMPT_VERSION, ConversationExportService, cut_excerpt, parse_verdict)
 from utils.excise import TimelineMap
 from utils.noise_map import KINDS, NoiseTrack
 
@@ -85,7 +85,7 @@ def _good(score=5, topic="chủ đề thử"):
 def _run(tmp_path, llm, segs=None, noise="quiet", timeline=None, **settings):
     segs = segs if segs is not None else _talk(30)
     wave = _wave()
-    svc = DialogueClipService(llm, **settings)
+    svc = ConversationExportService(llm, **settings)
     result = svc.run(
         segs, timeline=timeline or TimelineMap(),
         noise=_quiet() if noise == "quiet" else NoiseTrack(),
@@ -154,11 +154,11 @@ def test_only_the_shortlist_is_sent_to_the_model(tmp_path):
 def test_a_self_contained_clip_is_written_as_audio_and_metadata(tmp_path):
     llm = FakeLLM(_good(5, "chuyện nấu ăn"))
     _, result, wave = _run(tmp_path, llm)
-    assert result.clips
+    assert result.exports
     audio = _files(tmp_path, "audio", ".wav")
     meta = _files(tmp_path, "metadata", ".json")
-    assert audio and len(audio) == len(meta) == len(result.clips)
-    assert audio[0].startswith("ep_01_conv_000001")
+    assert audio and len(audio) == len(meta) == len(result.exports)
+    assert audio[0].startswith("ep_01_conversation_000001")
 
     info = sf.info(str(tmp_path / "audio" / audio[0]))
     assert info.samplerate == SR and info.channels == 1
@@ -174,43 +174,70 @@ def test_a_self_contained_clip_is_written_as_audio_and_metadata(tmp_path):
     assert doc["orig_spans"]
 
 
+def test_clean_clip_metadata_keeps_final_word_times_relative_to_written_audio(tmp_path):
+    segs = _talk(30)
+    by_index = {seg.index: seg for seg in segs}
+    for seg in segs:
+        tokens = seg.text.split()
+        width = (seg.end - seg.start) / len(tokens)
+        seg.words = [
+            {"word": token,
+             "start": seg.start + number * width,
+             "end": seg.start + (number + 1) * width,
+             "score": 0.9}
+            for number, token in enumerate(tokens)
+        ]
+
+    _, result, _ = _run(
+        tmp_path, FakeLLM(_good()), segs=segs, require_word_alignment=True)
+    assert result.exports
+    meta_name = _files(tmp_path, "metadata", ".json")[0]
+    doc = json.loads(
+        (tmp_path / "metadata" / meta_name).read_text(encoding="utf-8"))
+    row = doc["conversation"][0]
+    source = by_index[row["index"]]
+    assert [word["word"] for word in row["words"]] == source.text.split()
+    assert row["words"][0]["start"] == pytest.approx(
+        source.words[0]["start"] - doc["source_start"], abs=0.001)
+
+
 def test_a_low_score_rejects_the_clip(tmp_path):
     _, result, _ = _run(tmp_path, FakeLLM(_good(3)))
-    assert result.clips == []
+    assert result.exports == []
     assert result.report["judged_rejected"]["not_self_contained"] >= 1
     assert _files(tmp_path, "audio", ".wav") == []
 
 
 def test_no_answer_is_not_a_yes_unless_the_requirement_is_off(tmp_path):
     _, strict, _ = _run(tmp_path / "strict", FakeLLM("Đoạn này ổn."))
-    assert strict.clips == []
+    assert strict.exports == []
     assert strict.report["judged_rejected"]["no_verdict"] >= 1
 
     _, lax, _ = _run(tmp_path / "lax", FakeLLM("Đoạn này ổn."), require_semantic=False)
-    assert lax.clips
-    assert all(c["semantic_score"] is None for c in lax.clips)
+    assert lax.exports
+    assert all(c["semantic_score"] is None for c in lax.exports)
 
 
 def test_an_unavailable_model_skips_the_pass_or_passes_unjudged_if_allowed(tmp_path):
     llm = FakeLLM(_good(), loaded=False)
     _, strict, _ = _run(tmp_path / "strict", llm)
-    assert strict.clips == [] and strict.report["skipped"] == "llm_unavailable"
+    assert strict.exports == [] and strict.report["skipped"] == "llm_unavailable"
 
     _, lax, _ = _run(tmp_path / "lax", FakeLLM(_good(), loaded=False),
                      require_semantic=False)
-    assert lax.clips
+    assert lax.exports
 
 
 def test_unmeasured_noise_writes_nothing_and_never_asks_the_model(tmp_path):
     llm = FakeLLM(_good())
     _, result, _ = _run(tmp_path, llm, noise="none")
-    assert result.clips == [] and llm.messages == []
+    assert result.exports == [] and llm.messages == []
     assert result.report["skipped"] == "noise_not_measured"
 
 
 def test_clips_that_are_kept_do_not_overlap_each_other(tmp_path):
     _, result, _ = _run(tmp_path, FakeLLM(_good()), segs=_talk(60), max_candidates=40)
-    spans = sorted((c["source_start"], c["source_end"]) for c in result.clips)
+    spans = sorted((c["source_start"], c["source_end"]) for c in result.exports)
     assert len(spans) > 1
     for (_, prev_end), (next_start, _) in zip(spans, spans[1:]):
         # Padding may share a breath of silence; the turns themselves never do.
@@ -237,12 +264,12 @@ def _trim(first, last):
 def test_a_trim_inside_the_candidate_shortens_it_and_is_marked(tmp_path):
     # Drop the first and the last line of whatever candidate is shown.
     _, result, _ = _run(tmp_path, FakeLLM(_trim(1, -2)), max_candidates=1)
-    assert result.clips and result.clips[0]["trimmed_by_model"] is True
+    assert result.exports and result.exports[0]["trimmed_by_model"] is True
 
 
 def test_a_trim_that_leaves_less_than_the_minimum_is_rejected(tmp_path):
     _, result, _ = _run(tmp_path, FakeLLM(_trim(0, 3)), max_candidates=1)
-    assert result.clips == []
+    assert result.exports == []
     assert result.report["judged_rejected"].get("trim_duration", 0) >= 1
 
 
@@ -251,13 +278,13 @@ def test_a_trim_outside_the_candidate_rejects_it(tmp_path):
         return json.dumps({"self_contained": 5, "start_index": "99999",
                            "end_index": "88888"})
     _, result, _ = _run(tmp_path, FakeLLM(outside), max_candidates=1)
-    assert result.clips == []
+    assert result.exports == []
     assert result.report["judged_rejected"]["bad_trim"] >= 1
 
 
 def test_a_trim_back_to_front_rejects_it(tmp_path):
     _, result, _ = _run(tmp_path, FakeLLM(_trim(-3, 2)), max_candidates=1)
-    assert result.clips == []
+    assert result.exports == []
     assert result.report["judged_rejected"]["bad_trim"] >= 1
 
 
@@ -268,19 +295,19 @@ def test_a_trim_cannot_widen_a_clip_past_the_candidate(tmp_path):
         return json.dumps({"self_contained": 5, "start_index": f"{ids[0] - 1:05d}",
                            "end_index": f"{ids[-1] + 1:05d}"})
     _, result, _ = _run(tmp_path, FakeLLM(widen), max_candidates=1)
-    assert result.clips == []
+    assert result.exports == []
     assert result.report["judged_rejected"] == {"bad_trim": 1}
 
 
 # --- the audio -------------------------------------------------------------------------
 
-def test_the_clip_is_the_recording_between_its_times_and_the_source_is_untouched():
+def test_the_excerpt_is_the_recording_between_its_times_and_the_source_is_untouched():
     wave = _wave(60.0)
     before = wave.copy()
-    plain = cut_clip(wave, SR, 10.0, 20.0, fade_ms=0, zero_cross_ms=0)
+    plain = cut_excerpt(wave, SR, 10.0, 20.0, fade_ms=0, zero_cross_ms=0)
     np.testing.assert_array_equal(plain, wave[10 * SR:20 * SR])
 
-    faded = cut_clip(wave, SR, 10.0, 20.0, fade_ms=50, zero_cross_ms=0)
+    faded = cut_excerpt(wave, SR, 10.0, 20.0, fade_ms=50, zero_cross_ms=0)
     away_from_the_fades = slice(SR, -SR)
     np.testing.assert_array_equal(faded[away_from_the_fades],
                                   wave[10 * SR:20 * SR][away_from_the_fades])
@@ -288,40 +315,40 @@ def test_the_clip_is_the_recording_between_its_times_and_the_source_is_untouched
     np.testing.assert_array_equal(wave, before)
 
 
-def test_a_clip_fades_in_and_out_so_it_cannot_click(tmp_path):
+def test_an_excerpt_fades_in_and_out_so_it_cannot_click(tmp_path):
     wave = np.full(10 * SR, 0.5, dtype=np.float32)
-    clip = cut_clip(wave, SR, 1.0, 9.0, fade_ms=50, zero_cross_ms=0)
-    assert abs(clip[0]) < 1e-3 and abs(clip[-1]) < 1e-3
-    assert clip[len(clip) // 2] == pytest.approx(0.5)
+    excerpt = cut_excerpt(wave, SR, 1.0, 9.0, fade_ms=50, zero_cross_ms=0)
+    assert abs(excerpt[0]) < 1e-3 and abs(excerpt[-1]) < 1e-3
+    assert excerpt[len(excerpt) // 2] == pytest.approx(0.5)
     fade = int(0.05 * SR)
-    assert clip[fade // 2] < 0.5 and clip[-fade // 2] < 0.5
+    assert excerpt[fade // 2] < 0.5 and excerpt[-fade // 2] < 0.5
 
 
-def test_a_clip_starts_and_stops_near_a_zero_crossing(tmp_path):
+def test_an_excerpt_starts_and_stops_near_a_zero_crossing(tmp_path):
     # 200 Hz crosses zero every 2.5 ms, so a 5 ms search always finds one; real
     # voiced speech is at least that busy.
     t = np.arange(20 * SR) / SR
     wave = np.sin(2 * np.pi * 200.0 * t).astype(np.float32)
-    clip = cut_clip(wave, SR, 3.0011, 9.0033, fade_ms=0, zero_cross_ms=5)
-    assert abs(clip[0]) < 0.1 and abs(clip[-1]) < 0.1
-    unsnapped = cut_clip(wave, SR, 3.0011, 9.0033, fade_ms=0, zero_cross_ms=0)
+    excerpt = cut_excerpt(wave, SR, 3.0011, 9.0033, fade_ms=0, zero_cross_ms=5)
+    assert abs(excerpt[0]) < 0.1 and abs(excerpt[-1]) < 0.1
+    unsnapped = cut_excerpt(wave, SR, 3.0011, 9.0033, fade_ms=0, zero_cross_ms=0)
     assert abs(unsnapped[0]) > 0.1 or abs(unsnapped[-1]) > 0.1
 
 
 def test_a_span_past_the_end_of_the_audio_is_clamped(tmp_path):
     wave = _wave(10.0)
-    clip = cut_clip(wave, SR, 8.0, 15.0, fade_ms=0, zero_cross_ms=0)
-    assert len(clip) == 2 * SR
-    assert len(cut_clip(wave, SR, 20.0, 25.0, fade_ms=0, zero_cross_ms=0)) == 0
+    excerpt = cut_excerpt(wave, SR, 8.0, 15.0, fade_ms=0, zero_cross_ms=0)
+    assert len(excerpt) == 2 * SR
+    assert len(cut_excerpt(wave, SR, 20.0, 25.0, fade_ms=0, zero_cross_ms=0)) == 0
 
 
-def test_the_written_wav_is_the_cut_clip(tmp_path):
+def test_the_written_wav_is_the_cut_excerpt(tmp_path):
     _, result, wave = _run(tmp_path, FakeLLM(_good()), max_candidates=1)
-    assert result.clips
+    assert result.exports
     doc = json.loads(next((tmp_path / "metadata").glob("*.json")).read_text(encoding="utf-8"))
     data, sr = sf.read(str(tmp_path / doc["audio"]))
     assert sr == SR
-    expected = cut_clip(wave, SR, doc["source_start"], doc["source_end"], 50, 5)
+    expected = cut_excerpt(wave, SR, doc["source_start"], doc["source_end"], 50, 5)
     assert len(data) == pytest.approx(len(expected), abs=int(0.02 * SR))
 
 
@@ -329,14 +356,14 @@ def test_the_written_wav_is_the_cut_clip(tmp_path):
 
 def test_an_unknown_setting_is_an_error(tmp_path):
     with pytest.raises(TypeError):
-        DialogueClipService(FakeLLM(_good()), min_secs=30)
+        ConversationExportService(FakeLLM(_good()), min_secs=30)
 
 
 def test_the_report_names_the_prompt_version_and_counts(tmp_path):
     _, result, _ = _run(tmp_path, FakeLLM(_good()))
     report = result.report
-    assert report["prompt_version"] == CLIP_PROMPT_VERSION
-    assert report["exported"] == len(result.clips)
+    assert report["prompt_version"] == CONVERSATION_EXPORT_PROMPT_VERSION
+    assert report["exported"] == len(result.exports)
     assert report["accepted"] >= report["exported"]
     assert "finder" in report and report["finder"]["noise_measured"] is True
 
@@ -347,7 +374,7 @@ def test_the_report_names_the_prompt_version_and_counts(tmp_path):
 # in the left ear, the second in the right. It is a listening layout over one
 # microphone, so the mono stays the recording of record.
 
-from services.dialogue_clip_service import fade_edges, gate_channels  # noqa: E402
+from services.conversation_export_service import fade_edges, gate_channels  # noqa: E402
 
 FADE_MS = 10.0
 
@@ -411,9 +438,9 @@ def test_a_speaker_with_no_turns_has_a_silent_channel():
     assert not out[:, 1].any() and out[:, 0].any()
 
 
-def test_the_offset_places_turns_correctly_in_a_clip_cut_from_later_in_the_recording():
-    clip = np.ones(4 * SR, dtype=np.float32)              # the recording from 100.0 s
-    out = gate_channels(clip, SR, 100 * SR, [(101.0, 102.0)], [(102.5, 103.5)], 0.0, FADE_MS)
+def test_the_offset_places_turns_correctly_in_an_excerpt_cut_from_later_in_the_recording():
+    excerpt = np.ones(4 * SR, dtype=np.float32)            # the recording from 100.0 s
+    out = gate_channels(excerpt, SR, 100 * SR, [(101.0, 102.0)], [(102.5, 103.5)], 0.0, FADE_MS)
     assert out[int(1.5 * SR), 0] == 1.0 and out[int(1.5 * SR), 1] == 0.0
     assert out[int(3.0 * SR), 1] == 1.0 and out[int(3.0 * SR), 0] == 0.0
 
@@ -437,7 +464,7 @@ def _first_clip(tmp_path):
 
 def test_the_service_writes_a_two_channel_file_beside_each_mono(tmp_path):
     _, result, _ = _run(tmp_path, FakeLLM(_good()))
-    assert result.clips
+    assert result.exports
     doc = _first_clip(tmp_path)
     mono, sr_m = _read(tmp_path, doc["audio"])
     both, sr_s = _read(tmp_path, doc["audio_2ch"])
@@ -445,7 +472,7 @@ def test_the_service_writes_a_two_channel_file_beside_each_mono(tmp_path):
     assert sr_m == sr_s == SR
     assert len(mono) == len(both)                          # equal length, sample for sample
     assert len(both) / SR == pytest.approx(doc["duration"], abs=0.01)
-    assert result.clips[0]["audio_2ch"] == doc["audio_2ch"]
+    assert result.exports[0]["audio_2ch"] == doc["audio_2ch"]
 
 
 def test_speaker_a_is_the_left_ear_and_b_the_right_and_the_mono_is_unchanged(tmp_path):
@@ -493,11 +520,11 @@ def test_each_clip_has_a_plain_text_transcript_naming_both_speakers(tmp_path):
 
 def test_switching_stereo_off_writes_only_the_mono(tmp_path):
     _, result, _ = _run(tmp_path, FakeLLM(_good()), stereo=False)
-    assert result.clips
+    assert result.exports
     assert not [p for p in (tmp_path / "audio").iterdir() if p.name.endswith("_2ch.wav")]
     doc = _first_clip(tmp_path)
     assert "audio_2ch" not in doc and "channels_2ch" not in doc
-    assert result.clips[0]["audio_2ch"] is None
+    assert result.exports[0]["audio_2ch"] is None
 
 
 def test_one_json_describes_both_audio_files_and_the_one_transcript(tmp_path):

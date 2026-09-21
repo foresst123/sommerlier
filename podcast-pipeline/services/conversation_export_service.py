@@ -1,6 +1,6 @@
-"""Cut two-person conversation clips out of a finished transcript.
+"""Export selected two-person conversation excerpts from a finished transcript.
 
-`utils.dialogue_clips` finds the candidate stretches from numbers alone: exactly
+`utils.conversation_selection` finds the candidate stretches from numbers alone: exactly
 two speakers, no join, no lasting noise, one to four minutes. This service adds
 the one thing numbers cannot say -- whether a stretch is a self-contained piece
 of conversation -- by asking the resident refinement LLM, then writes the audio
@@ -10,14 +10,14 @@ The model is a gate, not an author. It sees the turns of one candidate, renamed
 A and B, and answers with a score and, optionally, where to start and stop. It
 refers to segments by index only: it cannot invent a timestamp, and a trim
 outside the candidate is a misbehaving answer that rejects the candidate. A trim
-that is inside goes back through every check the scan applies, so shortening a
-clip cannot smuggle in what the scan would have refused.
+that is inside goes back through every check the scan applies, so shortening an
+excerpt cannot smuggle in what the scan would have refused.
 
 Audio is cut from the waveform the pipeline actually worked on -- music already
-stripped, cuts already made -- so timestamps line up with it, and a clip never
+stripped, cuts already made -- so timestamps line up with it, and an excerpt never
 holds a join (the finder does not let one in).
 
-Each clip is written twice from one cut, so the two files start on the same
+Each excerpt is written twice from one cut, so the two files start on the same
 sample and are exactly the same length:
 
   audio/<id>.wav       mono, the recording of record: both voices as recorded.
@@ -39,18 +39,18 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-from utils.dialogue_clips import (
-    Candidate, ClipConfig, DialogueClipFinder, pick_non_overlapping, shortlist)
+from utils.conversation_selection import (
+    Candidate, ConversationSelectionConfig, ConversationSelectionFinder, pick_non_overlapping, shortlist)
 from utils.llm_batches import ask_in_batches
 from utils.llm_json import objects_in
 from utils.transcript_windows import norm_index
 
 # Bump when the prompt or the acceptance rules change.
-CLIP_PROMPT_VERSION = "clips-v1"
+CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v1"
 
 _TEMPLATE_SLACK_TOKENS = 64
 
-CLIP_SYSTEM_PROMPT = (
+CONVERSATION_EXPORT_SYSTEM_PROMPT = (
     "Bạn chọn các đoạn hội thoại để cắt ra làm dữ liệu huấn luyện. Bạn nhận MỘT đoạn hội thoại tiếng Việt giữa hai người "
     "(A và B). Bạn chỉ có văn bản, không nghe được audio.\n"
     "\n"
@@ -175,7 +175,7 @@ def fade_edges(clip: np.ndarray, sample_rate: int, fade_ms: float) -> np.ndarray
     return clip
 
 
-def cut_clip(waveform: np.ndarray, sample_rate: int, pad_start: float,
+def cut_excerpt(waveform: np.ndarray, sample_rate: int, pad_start: float,
              pad_end: float, fade_ms: float, zero_cross_ms: float) -> np.ndarray:
     """A faded copy of `waveform` between the two times. The source is untouched."""
     lo, hi = cut_bounds(waveform, sample_rate, pad_start, pad_end, zero_cross_ms)
@@ -249,8 +249,8 @@ def gate_channels(mixture: np.ndarray, sample_rate: int, offset: int, left_spans
 # ---------------------------------------------------------------------------
 
 @dataclass
-class ClipRun:
-    clips: List[dict] = field(default_factory=list)   # one summary row per exported clip
+class ConversationExportRun:
+    exports: List[dict] = field(default_factory=list)  # one summary row per item
     report: dict = field(default_factory=dict)
 
 
@@ -264,25 +264,25 @@ class _Judged:
     reason: Optional[str] = None
 
 
-class DialogueClipService:
+class ConversationExportService:
     """Judge candidates with the resident LLM, then cut and describe the keepers.
 
     `llm` is the refinement service (or anything with the same surface); it is
-    shared, so this pass adds no VRAM. Settings come from `models.dialogue_clips`
-    and are validated by `ClipConfig`: an unknown key raises here.
+    shared, so this pass adds no VRAM. Settings come from `models.conversation_selection`
+    and are validated by `ConversationSelectionConfig`: an unknown key raises here.
     """
 
     def __init__(self, llm, logger=None, **settings):
         self.llm = llm
         self.logger = logger
-        self.cfg = ClipConfig.from_settings(settings)
+        self.cfg = ConversationSelectionConfig.from_settings(settings)
 
     # -- judging -----------------------------------------------------------------
     @staticmethod
     def _names(cand: Candidate) -> Dict[str, str]:
         return {cand.speakers[0]: "A", cand.speakers[1]: "B"}
 
-    def _message(self, finder: DialogueClipFinder, cand: Candidate) -> str:
+    def _message(self, finder: ConversationSelectionFinder, cand: Candidate) -> str:
         names = self._names(cand)
         lines = []
         for pos in range(cand.first, cand.last + 1):
@@ -296,7 +296,7 @@ class DialogueClipService:
         limit = int(getattr(self.llm, "max_batch_tokens", 0) or 0)
         if limit and messages:
             longest = max(self.llm.count_tokens(m) for m in messages)
-            longest += self.llm.count_tokens(CLIP_SYSTEM_PROMPT) + _TEMPLATE_SLACK_TOKENS
+            longest += self.llm.count_tokens(CONVERSATION_EXPORT_SYSTEM_PROMPT) + _TEMPLATE_SLACK_TOKENS
             batch = min(batch, max(1, limit // longest))
         return batch
 
@@ -341,15 +341,16 @@ class DialogueClipService:
         if self.llm.ensure_loaded():
             messages = [self._message(finder, c) for c in shortlisted]
             replies, unanswered = ask_in_batches(
-                self.llm, CLIP_SYSTEM_PROMPT, messages,
+                self.llm, CONVERSATION_EXPORT_SYSTEM_PROMPT, messages,
                 per_call=self._per_call(messages), max_new_tokens=160,
-                label="clip candidate", logger=self.logger)
+                label="conversation export candidate", logger=self.logger)
             report["unanswered"] = unanswered
             verdicts = [parse_verdict(r) if r is not None else None for r in replies]
         else:
             report["llm_available"] = False
             if self.logger:
-                self.logger.warning("[clips] LLM not available for the semantic check")
+                self.logger.warning(
+                    "[conversation-exports] LLM not available for the semantic check")
         return [self._verdict_for(finder, c, v) for c, v in zip(shortlisted, verdicts)]
 
     # -- two-channel file ----------------------------------------------------------
@@ -367,7 +368,7 @@ class DialogueClipService:
 
     @staticmethod
     def _transcript_text(meta: dict) -> str:
-        """The conversation as plain text, one line per turn, timed from the clip start."""
+        """The conversation as plain text, one line per turn, timed from item start."""
         lines = []
         for row in meta["conversation"]:
             t = max(0.0, float(row["start"]))
@@ -375,32 +376,50 @@ class DialogueClipService:
         return "\n".join(lines) + "\n"
 
     # -- metadata ------------------------------------------------------------------
-    def _metadata(self, finder, timeline, clip_id, cand: Candidate, judged: _Judged,
-                  audio_seconds: float) -> dict:
+    def _metadata(self, finder, timeline, export_id, cand: Candidate, judged: _Judged,
+                  audio_seconds: float, audio_start: Optional[float] = None,
+                  audio_end: Optional[float] = None) -> dict:
+        # cut_bounds may move each edge inward by a few milliseconds to the
+        # nearest zero crossing. All item-relative timestamps must use the
+        # sample actually written, not the requested padding edge.
+        origin = cand.pad_start if audio_start is None else float(audio_start)
+        source_end = cand.pad_end if audio_end is None else float(audio_end)
         names = self._names(cand)
         conversation = []
         for pos in range(cand.first, cand.last + 1):
             seg = finder.segs[pos]
-            row = {"speaker": names.get(seg.speaker, "?"),
+            row = {"index": seg.index,
+                   "speaker": names.get(seg.speaker, "?"),
                    "speaker_id": seg.speaker,
-                   "start": round(float(seg.start) - cand.pad_start, 3),
-                   "end": round(float(seg.end) - cand.pad_start, 3),
+                   "start": round(float(seg.start) - origin, 3),
+                   "end": round(float(seg.end) - origin, 3),
                    "text": seg.text,
                    "state": finder.state[pos]}
+            if getattr(seg, "words", None):
+                row["words"] = []
+                for word in seg.words:
+                    timed = dict(word)
+                    if "start" in timed:
+                        timed["start"] = round(
+                            float(timed["start"]) - origin, 3)
+                    if "end" in timed:
+                        timed["end"] = round(
+                            float(timed["end"]) - origin, 3)
+                    row["words"].append(timed)
             if getattr(seg, "speaker_original", None) is not None:
                 row["speaker_original"] = seg.speaker_original
             conversation.append(row)
         m = cand.metrics
         out = {
-            "id": clip_id,
-            "audio": f"audio/{clip_id}.wav",
-            "start": round(cand.start - cand.pad_start, 3),
-            "end": round(cand.end - cand.pad_start, 3),
+            "id": export_id,
+            "audio": f"audio/{export_id}.wav",
+            "start": round(cand.start - origin, 3),
+            "end": round(cand.end - origin, 3),
             "duration": round(audio_seconds, 3),
-            "source_start": round(cand.pad_start, 3),
-            "source_end": round(cand.pad_end, 3),
+            "source_start": round(origin, 3),
+            "source_end": round(source_end, 3),
             "orig_spans": [{"start": round(a, 3), "end": round(b, 3)}
-                           for a, b in timeline.spans_to_original(cand.pad_start, cand.pad_end)],
+                           for a, b in timeline.spans_to_original(origin, source_end)],
             "speakers": ["A", "B"],
             "speaker_ids": {"A": cand.speakers[0], "B": cand.speakers[1]},
             "turn_count": m["turn_count"],
@@ -419,10 +438,10 @@ class DialogueClipService:
             "noise": cand.noise,
             "music_patched_share": cand.music_patched_share,
             "conversation": conversation,
-            "transcript": f"metadata/{clip_id}.txt",
+            "transcript": f"metadata/{export_id}.txt",
         }
         if self.cfg.stereo:
-            out["audio_2ch"] = f"audio/{clip_id}_2ch.wav"
+            out["audio_2ch"] = f"audio/{export_id}_2ch.wav"
             out["channels_2ch"] = {
                 "left": "A", "right": "B", "method": "time_gated",
                 "note": ("Same samples and length as the mono file. Each speaker is "
@@ -433,12 +452,12 @@ class DialogueClipService:
 
     # -- the pass ---------------------------------------------------------------------
     def run(self, transcripts, *, timeline, noise, music_map, waveform,
-            sample_rate: int, out_dir: str, base_name: str) -> ClipRun:
-        """Find, judge and write the clips of one recording."""
+            sample_rate: int, out_dir: str, base_name: str) -> ConversationExportRun:
+        """Find, judge and write selected conversation excerpts of one recording."""
         cfg = self.cfg
-        finder = DialogueClipFinder(transcripts, timeline, noise, music_map, cfg)
-        result = ClipRun()
-        report = {"prompt_version": CLIP_PROMPT_VERSION, "skipped": None,
+        finder = ConversationSelectionFinder(transcripts, timeline, noise, music_map, cfg)
+        result = ConversationExportRun()
+        report = {"prompt_version": CONVERSATION_EXPORT_PROMPT_VERSION, "skipped": None,
                   "candidates": 0, "shortlisted": 0, "judged_rejected": {},
                   "accepted": 0, "exported": 0}
         result.report = report
@@ -450,7 +469,7 @@ class DialogueClipService:
             report["skipped"] = ("noise_not_measured"
                                  if cfg.require_noise and not finder.noise_measured
                                  else "no_candidates")
-            self._log(f"[clips] {base_name}: nothing to cut ({report['skipped']})")
+            self._log(f"[conversation-exports] {base_name}: no eligible item ({report['skipped']})")
             return result
 
         chosen = shortlist(candidates, cfg.max_candidates, cfg.shortlist_overlap)
@@ -483,38 +502,40 @@ class DialogueClipService:
 
         for number, cand in enumerate(final, start=1):
             item = kept[id(cand)]
-            clip_id = f"{re.sub(r'[^A-Za-z0-9._-]+', '_', base_name)}_conv_{number:06d}"
+            export_id = f"{re.sub(r'[^A-Za-z0-9._-]+', '_', base_name)}_conversation_{number:06d}"
             lo, hi = cut_bounds(waveform, sample_rate, cand.pad_start, cand.pad_end,
                                 cfg.zero_cross_ms)
             if hi - lo < sample_rate:
-                self._log(f"[clips] {clip_id}: audio shorter than a second; skipped")
+                self._log(f"[conversation-exports] {export_id}: audio shorter than a second; skipped")
                 continue
             # One cut, two files: both start on the same sample and are exactly the
             # same length, so they can be played against each other.
             raw = np.array(waveform[lo:hi], dtype=np.float32, copy=True)
             mono = fade_edges(raw.copy(), sample_rate, cfg.fade_ms)
             try:
-                sf.write(os.path.join(audio_dir, f"{clip_id}.wav"), mono,
+                sf.write(os.path.join(audio_dir, f"{export_id}.wav"), mono,
                          sample_rate, subtype="PCM_16")
                 if cfg.stereo:
                     stereo = fade_edges(self._two_channel(finder, cand, raw, sample_rate, lo),
                                         sample_rate, cfg.fade_ms)
-                    sf.write(os.path.join(audio_dir, f"{clip_id}_2ch.wav"), stereo,
+                    sf.write(os.path.join(audio_dir, f"{export_id}_2ch.wav"), stereo,
                              sample_rate, subtype="PCM_16")
-                meta = self._metadata(finder, finder.timeline, clip_id, cand,
-                                      item, len(mono) / float(sample_rate))
-                with open(os.path.join(meta_dir, f"{clip_id}.json"), "w",
+                meta = self._metadata(finder, finder.timeline, export_id, cand,
+                                      item, len(mono) / float(sample_rate),
+                                      audio_start=lo / float(sample_rate),
+                                      audio_end=hi / float(sample_rate))
+                with open(os.path.join(meta_dir, f"{export_id}.json"), "w",
                           encoding="utf-8") as fh:
                     json.dump(meta, fh, ensure_ascii=False, indent=2)
-                with open(os.path.join(meta_dir, f"{clip_id}.txt"), "w",
+                with open(os.path.join(meta_dir, f"{export_id}.txt"), "w",
                           encoding="utf-8") as fh:
                     fh.write(self._transcript_text(meta))
             except Exception as exc:                       # pragma: no cover - disk problems
                 if self.logger:
-                    self.logger.warning(f"[clips] could not write {clip_id}: {exc}")
+                    self.logger.warning(f"[conversation-exports] could not write {export_id}: {exc}")
                 continue
-            result.clips.append({
-                "id": clip_id, "tier": cand.tier, "score": cand.score,
+            result.exports.append({
+                "id": export_id, "tier": cand.tier, "score": cand.score,
                 "audio": meta["audio"], "audio_2ch": meta.get("audio_2ch"),
                 "duration": meta["duration"], "topic": item.topic,
                 "semantic_score": item.semantic, "trimmed_by_model": item.trimmed,
@@ -522,8 +543,9 @@ class DialogueClipService:
                 "speaker_ids": meta["speaker_ids"],
                 "noise_kind": (cand.noise or {}).get("dominant_kind"),
             })
-        report["exported"] = len(result.clips)
-        self._log(f"[clips] {base_name}: {len(result.clips)} clip(s) written to {out_dir}")
+        report["exported"] = len(result.exports)
+        self._log(
+            f"[conversation-exports] {base_name}: {len(result.exports)} item(s) written to {out_dir}")
         return result
 
     def _log(self, message: str):

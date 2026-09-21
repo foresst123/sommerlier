@@ -65,10 +65,10 @@ TIERS = ((85.0, "S"), (70.0, "A"), (55.0, "B"), (40.0, "C"))
 
 
 @dataclass
-class ClipConfig:
-    """Every knob of the clip pass. An unknown key is a TypeError, not ignored."""
+class ConversationSelectionConfig:
+    """Every knob used to select a conversation excerpt."""
 
-    # -- shape of a clip
+    # -- shape of one exported conversation item
     min_seconds: float = 60.0
     max_seconds: float = 240.0
     plateau_min: float = 90.0            # duration scores 1.0 between these two
@@ -83,7 +83,10 @@ class ClipConfig:
     # -- what to keep
     min_score: float = 55.0
     min_semantic: int = 4                # the model's self-contained score, 1-5
-    require_semantic: bool = True        # no verdict is not a yes; off accepts un-judged clips
+    require_semantic: bool = True        # no verdict is not a yes; off accepts un-judged items
+    # A selected training item must carry timestamps for the final, refined
+    # text, not stale Whisper words from before the text was edited.
+    require_word_alignment: bool = False
     max_candidates: int = 24             # sent to the model per file
     shortlist_overlap: float = 0.5
 
@@ -97,7 +100,7 @@ class ClipConfig:
     noise_room_max: float = 0.10
     noise_max: float = 0.15              # ceiling on the combined p90
     noisy_share_max: float = 0.20        # share of frames over, where cleanliness hits 0
-    music_patched_max: float = 0.15      # share of the clip whose music bed was replaced
+    music_patched_max: float = 0.15      # share of the item whose music bed was replaced
 
     # -- writing the audio (used by the service)
     fade_ms: float = 50.0
@@ -113,7 +116,7 @@ class ClipConfig:
     def __post_init__(self):
         unknown = set(self.weights) - set(DEFAULT_WEIGHTS)
         if unknown:
-            raise ValueError(f"unknown clip weight(s): {sorted(unknown)}")
+            raise ValueError(f"unknown conversation-export weight(s): {sorted(unknown)}")
         if self.min_seconds > self.max_seconds:
             raise ValueError("min_seconds is above max_seconds")
 
@@ -129,7 +132,7 @@ class ClipConfig:
                 "noise_room": self.noise_room_max}
 
     @classmethod
-    def from_settings(cls, settings: Optional[dict]) -> "ClipConfig":
+    def from_settings(cls, settings: Optional[dict]) -> "ConversationSelectionConfig":
         return cls(**dict(settings or {}))
 
 
@@ -192,6 +195,27 @@ def _unseparated_seconds(seg) -> float:
     return min(total, duration)
 
 
+def has_complete_word_alignment(seg) -> bool:
+    """Every space-delimited final-text word has a valid monotonic timestamp."""
+    expected = len((getattr(seg, "text", "") or "").split())
+    words = getattr(seg, "words", None) or []
+    if expected == 0 or len(words) != expected:
+        return False
+    lower, upper = float(seg.start), float(seg.end)
+    previous = lower
+    for word in words:
+        try:
+            start, end = float(word["start"]), float(word["end"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if start < lower - 0.001 or end > upper + 0.001 or end < start:
+            return False
+        if start < previous - 0.001:
+            return False
+        previous = start
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Candidates
 # ---------------------------------------------------------------------------
@@ -245,8 +269,8 @@ def shortlist(candidates: List[Candidate], k: int,
 def pick_non_overlapping(candidates: List[Candidate]) -> List[Candidate]:
     """The set of non-overlapping candidates with the highest total score.
 
-    Weighted interval scheduling. Two clips may touch but not overlap, so no
-    stretch of the recording ends up in two clips.
+    Weighted interval scheduling. Two exported items may touch but not overlap,
+    so no stretch of the recording is duplicated.
     """
     ordered = sorted(candidates, key=lambda c: (c.end, c.start))
     if not ordered:
@@ -276,7 +300,7 @@ def pick_non_overlapping(candidates: List[Candidate]) -> List[Candidate]:
 # The finder
 # ---------------------------------------------------------------------------
 
-class DialogueClipFinder:
+class ConversationSelectionFinder:
     """Blocks, candidates and their scores for one recording.
 
     `segments` are the relabelled transcript segments in the cut timeline;
@@ -285,7 +309,7 @@ class DialogueClipFinder:
     cut timeline (or None if music was not analysed).
     """
 
-    def __init__(self, segments, timeline, noise, music_map, config: ClipConfig):
+    def __init__(self, segments, timeline, noise, music_map, config: ConversationSelectionConfig):
         self.cfg = config
         self.timeline = timeline or TimelineMap()   # nothing cut: an empty map
         self.noise = noise
@@ -335,6 +359,8 @@ class DialogueClipFinder:
         seg = self.segs[i]
         if self.state[i] == INVALID:
             return f"invalid_{self.reason[i]}"
+        if self.cfg.require_word_alignment and not has_complete_word_alignment(seg):
+            return "word_alignment_missing"
         if self.timeline.crosses_cut(float(seg.start), float(seg.end)):
             return "seam_inside_segment"
         if self._in_lasting_noise(float(seg.start), float(seg.end)):
@@ -553,7 +579,7 @@ class DialogueClipFinder:
 
     # -- evaluating one window -------------------------------------------------------------
     def evaluate(self, i: int, j: int) -> Tuple[Optional[Candidate], Optional[str]]:
-        """(candidate, None) if positions i..j make a clip, else (None, why).
+        """(candidate, None) if positions i..j make an export item, else (None, why).
 
         The same checks whether the window came from the scan or from the model
         trimming a candidate, so a trim cannot smuggle in what the scan would
@@ -664,7 +690,7 @@ class DialogueClipFinder:
         return found
 
     def report(self) -> dict:
-        """The counts that say why a recording gave few clips, or none."""
+        """The counts that say why a recording produced few items, or none."""
         out = dict(self.stats)
         for key in ("invalid", "breaks", "candidates_rejected"):
             out[key] = dict(self.stats[key])

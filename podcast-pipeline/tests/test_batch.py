@@ -81,7 +81,9 @@ def test_unreadable_duration_is_isolated():
 def test_every_file_finishes_a_stage_before_the_next_stage_starts():
     files = ["f1", "f2", "f3"]
     pipe = FakePipeline()
-    run_batch_by_stage(pipe, _args(qwen3omni=True), {}, files)
+    run_batch_by_stage(pipe, _args(
+        qwen3omni=True, step_speaker_relabel=True,
+        step_word_alignment=True, step_conversation_exports=True), {}, files)
 
     seen = []
     for stage, _path in pipe.calls:
@@ -94,6 +96,24 @@ def test_every_file_finishes_a_stage_before_the_next_stage_starts():
         assert [p for s, p in pipe.calls if s == stage] == files
 
 
+def test_all_asr_finishes_before_any_refinement_starts():
+    """The GPU hand-off requested for long corpora: never interleave ASR and LLM.
+
+    This is deliberately more explicit than the generic stage-major assertion:
+    regressing the stage order must not make ASR start again after the first
+    refinement call.
+    """
+    files = ["f1", "f2", "f3"]
+    pipe = FakePipeline()
+    run_batch_by_stage(pipe, _args(), {}, files)
+
+    asr_calls = [i for i, (stage, _) in enumerate(pipe.calls) if stage == "asr"]
+    refinement_calls = [i for i, (stage, _) in enumerate(pipe.calls)
+                        if stage == "refinement"]
+    assert asr_calls and refinement_calls
+    assert max(asr_calls) < min(refinement_calls)
+
+
 def test_captioning_is_skipped_when_its_model_is_off():
     """With qwen3omni off the stage returns without touching the transcripts,
     so the pass only reloads the audio and re-reads four checkpoints."""
@@ -101,9 +121,11 @@ def test_captioning_is_skipped_when_its_model_is_off():
     run_batch_by_stage(pipe, _args(qwen3omni=False), {}, ["f1"])
 
     assert "captioning" not in [s for s, _ in pipe.calls]
-    # Every other stage still runs.
+    # Every always-on stage still runs; optional postprocessing stays opt-in.
     assert [s for s, _ in pipe.calls] == [
-        s for s in PIPELINE_STAGES if s != "captioning"]
+        s for s in PIPELINE_STAGES
+        if s not in {"captioning", "speaker_relabel", "word_alignment",
+                     "conversation_exports"}]
 
 
 def test_captioning_runs_when_its_model_is_on():

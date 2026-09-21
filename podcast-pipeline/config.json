@@ -26,6 +26,9 @@
             "offline_mode": false,
             "gpu_1": 0,
             "gpu_2": 1,
+            "outputs": {
+                "clean_two_channel_dir": ""
+            },
             "steps": {
                 "music_analysis": true,
                 "music_removal": true,
@@ -36,7 +39,8 @@
                 "captioning": false,
                 "refinement": true,
                 "speaker_relabel": true,
-                "dialogue_clips": true,
+                "word_alignment": true,
+                "conversation_exports": true,
                 "export": true
             },
             "pipeline": {
@@ -123,7 +127,13 @@
                     "min_confidence": 0.7,
                     "max_change_fraction": 0.15
                 },
-                "dialogue_clips": {
+                "word_alignment": {
+                    "model_name": "nguyenvulebinh/wav2vec2-base-vi-vlsp2020",
+                    "device": "auto",
+                    "interpolate_method": "nearest",
+                    "batch_seconds": 180
+                },
+                "conversation_selection": {
                     "min_seconds": 60,
                     "max_seconds": 240,
                     "max_silence": 3.0,
@@ -141,7 +151,8 @@
                     "noise_env_max": 0.15,
                     "noise_room_max": 0.10,
                     "noise_max": 0.15,
-                    "music_patched_max": 0.15
+                    "music_patched_max": 0.15,
+                    "require_word_alignment": true
                 },
                 "sidon": {
                     "num_steps": 100
@@ -196,6 +207,9 @@
             "offline_mode": false,
             "gpu_1": 0,
             "gpu_2": 1,
+            "outputs": {
+                "clean_two_channel_dir": ""
+            },
             "steps": {
                 "music_analysis": true,
                 "music_removal": true,
@@ -206,7 +220,8 @@
                 "captioning": false,
                 "refinement": true,
                 "speaker_relabel": true,
-                "dialogue_clips": true,
+                "word_alignment": true,
+                "conversation_exports": true,
                 "export": true
             },
             "pipeline": {
@@ -294,7 +309,13 @@
                     "min_confidence": 0.7,
                     "max_change_fraction": 0.15
                 },
-                "dialogue_clips": {
+                "word_alignment": {
+                    "model_name": "nguyenvulebinh/wav2vec2-base-vi-vlsp2020",
+                    "device": "auto",
+                    "interpolate_method": "nearest",
+                    "batch_seconds": 180
+                },
+                "conversation_selection": {
                     "min_seconds": 60,
                     "max_seconds": 240,
                     "max_silence": 3.0,
@@ -312,7 +333,8 @@
                     "noise_env_max": 0.15,
                     "noise_room_max": 0.10,
                     "noise_max": 0.15,
-                    "music_patched_max": 0.15
+                    "music_patched_max": 0.15,
+                    "require_word_alignment": true
                 },
                 "sidon": {
                     "num_steps": 100

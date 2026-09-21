@@ -196,22 +196,22 @@ def test_both_profiles_list_the_new_steps_as_switches_and_carry_their_settings()
     with open(os.path.join(ROOT, "config.json"), encoding="utf-8") as fh:
         config = json.load(fh)
     for name, profile in config["environments"].items():
-        for step in ("speaker_relabel", "dialogue_clips"):
+        for step in ("speaker_relabel", "conversation_exports"):
             assert isinstance(profile["steps"][step], bool), (name, step)
         assert "relabel" in profile["models"], name
-        assert "dialogue_clips" in profile["models"], name
+        assert "conversation_selection" in profile["models"], name
 
 
-def test_a_profile_that_turns_the_clip_pass_on_also_runs_what_it_reads():
-    """The clip pass reads the SSLAM noise labels and asks the resident LLM; on
+def test_a_profile_that_turns_the_conversation_export_on_also_runs_what_it_reads():
+    """The conversation-export pass reads SSLAM noise labels and asks the resident LLM; on
     without either, it would only ever report that it could not run."""
     with open(os.path.join(ROOT, "config.json"), encoding="utf-8") as fh:
         config = json.load(fh)
     for name, profile in config["environments"].items():
         steps = profile["steps"]
-        if steps["dialogue_clips"]:
+        if steps["conversation_exports"]:
             assert steps["music_analysis"] is True, f"{name}: no noise labels without it"
-        if steps["dialogue_clips"] or steps["speaker_relabel"]:
+        if steps["conversation_exports"] or steps["speaker_relabel"]:
             assert profile["pipeline"]["llm_refinement"] is True, f"{name}: no LLM"
 
 

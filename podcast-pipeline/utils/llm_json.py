@@ -2,7 +2,7 @@
 
 Replies arrive wrapped in a code fence, preceded by reasoning, or cut off by the
 token limit halfway through the last object. The passes that read them (speaker
-relabel, dialogue-clip judging) all want the same thing: whatever complete
+relabel, conversation-export judging) all want the same thing: whatever complete
 objects the reply holds, and an empty result -- never an exception -- when it
 holds none.
 """

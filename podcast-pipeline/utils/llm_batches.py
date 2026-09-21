@@ -1,7 +1,7 @@
 """Ask the resident LLM many independent questions, a batch at a time.
 
-Shared by the passes that reuse the refinement model (speaker relabel, dialogue
-clip judging). A batch that does not fit -- the model's `max_batch_tokens` guard
+Shared by the passes that reuse the refinement model (speaker relabel,
+conversation-export judging). A batch that does not fit -- the model's `max_batch_tokens` guard
 or an out-of-memory -- is halved and retried, as refinement does; a question
 that still fails on its own is recorded and skipped, never raised. The callers
 treat an unanswered question as "no change", which is the safe default for

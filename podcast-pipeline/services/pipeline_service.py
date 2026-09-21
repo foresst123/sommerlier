@@ -9,6 +9,7 @@ from utils.noise_map import NoiseTrack
 from utils.excise import TimelineMap, excise
 from utils.steps import LEGACY_FLAG, opt_in_step_enabled, step_enabled
 from services.speaker_relabel_service import apply_relabels
+from services.word_alignment_service import apply_word_alignments
 from services.stage_output_service import StageOutputService
 from schemas.audio import AudioData
 
@@ -34,7 +35,9 @@ class PipelineService:
                  worker_services=None,
                  performance_monitor=None,
                  relabel_svc=None,
-                 clip_svc=None):
+                 conversation_export_svc=None,
+                 word_alignment_svc=None,
+                 clean_dataset_svc=None):
         self.audio_svc = audio_svc
         self.diarization_svc = diarization_svc
         self.separation_svc = separation_svc
@@ -43,11 +46,13 @@ class PipelineService:
         self.caption_svc = caption_svc
         self.refinement_svc = refinement_svc
         self.export_svc = export_svc
-        # Optional passes over the resident refinement LLM. Both are opt-in
-        # steps (utils.steps.opt_in_step_enabled): passing the service in does
-        # not switch the step on, the profile has to.
+        # Optional post-refinement passes. Relabel and conversation-export judging reuse the
+        # resident LLM; word alignment uses a separate Wav2Vec2 model. All are
+        # opt-in: passing a service does not switch its step on.
         self.relabel_svc = relabel_svc
-        self.clip_svc = clip_svc
+        self.conversation_export_svc = conversation_export_svc
+        self.word_alignment_svc = word_alignment_svc
+        self.clean_dataset_svc = clean_dataset_svc
         self.logger = logger
         self.model_loader = model_loader
         self.performance_monitor = performance_monitor
@@ -175,8 +180,27 @@ class PipelineService:
         self.defer_workers = set()
         self.defer_callbacks = []
 
+    def prepare_stage_scope(self, stage):
+        """Prepare lifecycle rules for one corpus-wide stage pass.
+
+        ASRService used to unload Whisper and PhoWhisper inside every file.
+        During a stage-major pass that turns one model load per corpus back into
+        one load per file. Temporarily retaining them lets the loader's existing
+        idempotence guard reuse both models; end_stage_scope releases them once.
+        """
+        self._stage_scope_name = stage
+        self._stage_asr_keep_models = None
+        asr = getattr(self, "asr_svc", None)
+        if stage == "asr" and asr is not None:
+            self._stage_asr_keep_models = bool(getattr(asr, "keep_models", False))
+            asr.keep_models = True
+
     def end_stage_scope(self):
         """Giải phóng các model/worker đã hoãn; an toàn khi không có phạm vi mở."""
+        stage = getattr(self, "_stage_scope_name", None)
+        asr_keep_models = getattr(self, "_stage_asr_keep_models", None)
+        self._stage_scope_name = None
+        self._stage_asr_keep_models = None
         names = getattr(self, "defer_free", None)
         workers = getattr(self, "defer_workers", None)
         callbacks = getattr(self, "defer_callbacks", None)
@@ -203,6 +227,13 @@ class PipelineService:
             except Exception as e:
                 if self.logger:
                     self.logger.warning(f"Deferred cleanup callback failed: {e}")
+        if stage == "asr" and asr_keep_models is not None:
+            self.asr_svc.keep_models = asr_keep_models
+            if not asr_keep_models and self.model_loader:
+                # These two are in-process models. Qwen3 is the worker released
+                # through defer_workers above.
+                self.model_loader.unload("whisper")
+                self.model_loader.unload("phowhisper")
         self._reclaim_vram()
 
     def _reclaim_vram(self):
@@ -305,7 +336,8 @@ class PipelineService:
 
     # Thứ tự các điểm dừng của run(); None (chạy hết) tới được mọi bước.
     _STOP_ORDER = ("music", "diarization", "separation", "music_removal",
-                   "asr", "captioning")
+                   "asr", "captioning", "refinement", "speaker_relabel",
+                   "word_alignment", "conversation_exports")
 
     @classmethod
     def _reaches(cls, args, stage: str) -> bool:
@@ -344,9 +376,9 @@ class PipelineService:
             raise
         return getattr(service, "process", None)
 
-    def _extract_clips(self, stage_out, transcripts, audio_data, music_map,
-                       output_dir, audio_path):
-        """Cut two-person conversation clips from the audio the pipeline worked on.
+    def _export_conversation_exports(self, stage_out, transcripts, audio_data, music_map,
+                                     output_dir, audio_path):
+        """Export selected two-person conversation excerpts from processed audio.
 
         Runs after relabel, so a stray third label does not end a conversation,
         and while the LLM is still resident. The waveform is the processed one --
@@ -358,18 +390,67 @@ class PipelineService:
         Not checkpointed: judging a couple of dozen candidates is quick next to
         the stages before it, and the files are overwritten in place.
         """
-        # The music map is in the original timeline; the clips are cut in the
+        # The music map is in the original timeline; the excerpts are cut in the
         # shortened one. With nothing cut the two are the same map.
         music_cut = (music_map.remap(self.timeline)
                      if music_map is not None and self.timeline else music_map)
         base_name = os.path.splitext(os.path.basename(audio_path))[0]
-        result = self.clip_svc.run(
+        result = self.conversation_export_svc.run(
             transcripts, timeline=self.timeline,
             noise=getattr(self, "noise_track", None), music_map=music_cut,
             waveform=audio_data.waveform, sample_rate=audio_data.sample_rate,
-            out_dir=os.path.join(output_dir, "dialogue_clips"), base_name=base_name)
-        stage_out.write_dialogue_clips(result.report, result.clips)
+            out_dir=os.path.join(output_dir, "conversation_exports"), base_name=base_name)
+        stage_out.write_conversation_exports(result.report, result.exports)
         return result
+
+    def _export_clean_two_channel_dataset(self, args, config, transcripts,
+                                          speech_segments, audio_data,
+                                          music_map, audio_path):
+        """Write the optional external clean corpus, or perform no filesystem IO.
+
+        The output root is intentionally not an argparse default. An empty or
+        missing config value means disabled, so a normal run keeps exactly the
+        same directory layout it had before this feature.
+        """
+        profile = (config.get("environments", {})
+                   .get(getattr(args, "env", ""), {}))
+        root = ((profile.get("outputs") or {})
+                .get("clean_two_channel_dir", ""))
+        if self.clean_dataset_svc is None:
+            return None
+        root = self.clean_dataset_svc.resolve_root(root)
+        if not root:
+            return None
+        if not getattr(args, "bss", False):
+            message = "BSS is off; clean two-channel export was skipped"
+            if self.logger:
+                self.logger.warning(f"[clean-2ch] {message}")
+            return {"enabled": True, "skipped": "bss_disabled", "error": message}
+        if transcripts is None or speech_segments is None:
+            message = "final transcript or separation segments are unavailable"
+            if self.logger:
+                self.logger.warning(f"[clean-2ch] {message}; export skipped")
+            return {"enabled": True, "skipped": "missing_input", "error": message}
+
+        music_cut = (music_map.remap(self.timeline)
+                     if music_map is not None and self.timeline else music_map)
+        try:
+            return self.clean_dataset_svc.export(
+                root=root, source_path=audio_path, transcripts=transcripts,
+                speech_segments=speech_segments,
+                separation_service=self.separation_svc,
+                timeline=self.timeline,
+                noise=getattr(self, "noise_track", None), music_map=music_cut,
+                sample_rate=audio_data.sample_rate,
+                audio_duration=audio_data.duration,
+                selection_settings=(profile.get("models", {})
+                                    .get("conversation_selection", {})),
+            )
+        except Exception as exc:
+            if self.logger:
+                self.logger.exception(
+                    f"[clean-2ch] optional dataset export failed: {exc}")
+            return {"enabled": True, "skipped": "export_error", "error": str(exc)}
 
     def _relabel_speakers(self, checkpoint, stage_out, transcripts, speech_segments):
         """Reassign speaker labels from the whole transcript. Only `speaker` changes.
@@ -405,6 +486,28 @@ class PipelineService:
             checkpoint.save("speaker_relabel",
                             {"mapping": result.mapping, "report": report})
         stage_out.write_relabel(report)
+        return transcripts
+
+    def _align_words(self, checkpoint, stage_out, transcripts, audio_data,
+                     speech_segments):
+        """Attach final-text word times, reapplying a cached result on resume."""
+        svc = self.word_alignment_svc
+        checkpoint.namespaces["word_alignment"] = svc.checkpoint_namespace_for(transcripts)
+        if checkpoint.exists("word_alignment"):
+            payload = checkpoint.load("word_alignment") or {}
+            applied = apply_word_alignments(
+                transcripts, payload.get("words_by_index", {}))
+            if self.logger:
+                self.logger.info(
+                    f"Loading word alignment from checkpoint ({applied} segment(s))")
+            return transcripts
+
+        result = svc.align(transcripts, audio_data, speech_segments)
+        checkpoint.save("word_alignment", {
+            "words_by_index": result.words_by_index,
+            "report": result.report,
+        })
+        stage_out.write_word_alignment(transcripts, result.report)
         return transcripts
 
 
@@ -836,6 +939,16 @@ class PipelineService:
             computed.add("refinement")
             stage_out.write_refinement(transcripts, before=before)
 
+        if getattr(args, "stop_after", None) == "refinement":
+            if not getattr(args, "keep_models", False):
+                self._defer_or_run(self.refinement_svc.unload)
+            if self.logger:
+                self.logger.info(
+                    "Stopping pipeline after refinement as requested by --stop_after.")
+            stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
+                                      "stopped_after": "refinement"})
+            return transcripts
+
         # 7b. Speaker relabel: the same resident LLM reads the whole transcript
         # and may reassign a segment's speaker. Nothing else about a segment is
         # touched. Opt-in: a profile that does not list it does not run it.
@@ -845,17 +958,80 @@ class PipelineService:
             transcripts = self._relabel_speakers(
                 checkpoint, stage_out, transcripts, speech_segments)
 
-        # 7c. Dialogue clips: cut self-contained two-person stretches, judged by
-        # the same resident LLM. Opt-in and off in the shipped profiles.
-        clips_on = (self.clip_svc is not None
-                    and opt_in_step_enabled(args, "dialogue_clips"))
-        if clips_on and transcripts is not None:
-            self._extract_clips(
-                stage_out, transcripts, audio_data, music_map, output_dir, audio_path)
-
-        if self.step_enabled(args, "refinement") or relabel_on or clips_on:
+        if getattr(args, "stop_after", None) == "speaker_relabel":
             if not getattr(args, "keep_models", False):
                 self._defer_or_run(self.refinement_svc.unload)
+            if self.logger:
+                self.logger.info(
+                    "Stopping pipeline after speaker_relabel as requested by --stop_after.")
+            stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
+                                      "stopped_after": "speaker_relabel"})
+            return transcripts
+
+        # 7c. Forced alignment: refinement may have changed Whisper's words, so
+        # its old word timestamps are no longer valid. Align the final text with
+        # Vietnamese Wav2Vec2 before any clean-data selection reads it.
+        alignment_on = (self.word_alignment_svc is not None
+                        and opt_in_step_enabled(args, "word_alignment"))
+        if alignment_on and transcripts is not None:
+            # The refinement model can span both GPUs. Free it before loading
+            # Wav2Vec2, then the conversation-export pass below reloads it only if it is needed.
+            # A checkpointed alignment loads no model and does not need this.
+            checkpoint.namespaces["word_alignment"] = (
+                self.word_alignment_svc.checkpoint_namespace_for(transcripts))
+            alignment_cached = checkpoint.exists("word_alignment")
+            if (not alignment_cached and not getattr(args, "keep_models", False)
+                    and (self.step_enabled(args, "refinement") or relabel_on)):
+                self.refinement_svc.unload()
+            try:
+                transcripts = self._align_words(
+                    checkpoint, stage_out, transcripts, audio_data, speech_segments)
+            finally:
+                if not getattr(args, "keep_models", False):
+                    self._defer_or_run(self.word_alignment_svc.unload)
+
+        if getattr(args, "stop_after", None) == "word_alignment":
+            if self.logger:
+                self.logger.info(
+                    "Stopping pipeline after word_alignment as requested by --stop_after.")
+            stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
+                                      "stopped_after": "word_alignment"})
+            return transcripts
+
+        # 7d. Conversation exports: cut self-contained two-person stretches, judged by
+        # the same resident LLM. Opt-in and controlled by the active profile.
+        conversation_exports_on = (self.conversation_export_svc is not None
+                    and opt_in_step_enabled(args, "conversation_exports")
+                    # The final export pass replays checkpointed state. Clip
+                    # judging is deliberately not checkpointed, therefore its
+                    # dedicated stage is the only invocation allowed to ask
+                    # the LLM and write its files.
+                    and not getattr(args, "postprocess_only", False))
+        if conversation_exports_on and transcripts is not None:
+            self._export_conversation_exports(
+                stage_out, transcripts, audio_data, music_map, output_dir, audio_path)
+
+        if getattr(args, "stop_after", None) == "conversation_exports":
+            if not getattr(args, "keep_models", False):
+                self._defer_or_run(self.refinement_svc.unload)
+            if self.logger:
+                self.logger.info(
+                    "Stopping pipeline after conversation_exports as requested by --stop_after.")
+            stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
+                                      "stopped_after": "conversation_exports"})
+            return transcripts
+
+        if self.step_enabled(args, "refinement") or relabel_on or conversation_exports_on:
+            if not getattr(args, "keep_models", False):
+                self._defer_or_run(self.refinement_svc.unload)
+
+        # Optional independent corpus. It runs after relabel/alignment, and its
+        # audio is built from strict separation tracks rather than the
+        # conversation-exporter's time-gated mixture. A blank config value returns above
+        # without creating a root directory.
+        clean_dataset_result = self._export_clean_two_channel_dataset(
+            args, config, transcripts, speech_segments, audio_data,
+            music_map, audio_path)
 
         
         # 8. Xuất kết quả
@@ -866,18 +1042,24 @@ class PipelineService:
         if not self.step_enabled(args, "export"):
             if self.logger:
                 self.logger.info("Step 'export' is off in the profile; skipping")
+            extra = ({"clean_two_channel_dataset": clean_dataset_result}
+                     if clean_dataset_result else None)
             stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
                                       "audio_name": base_name,
-                                      "music_enabled": getattr(args, "music", False)})
+                                      "music_enabled": getattr(args, "music", False)},
+                                     extra=extra)
             if self.logger: self.logger.info(f"Pipeline completed successfully. Results saved to {save_path}")
             return transcripts
 
         if transcripts is None:
             if self.logger:
                 self.logger.info("Skipping full export (no transcripts available)")
+            extra = ({"clean_two_channel_dataset": clean_dataset_result}
+                     if clean_dataset_result else None)
             stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
                                       "audio_name": base_name,
-                                      "music_enabled": getattr(args, "music", False)})
+                                      "music_enabled": getattr(args, "music", False)},
+                                     extra=extra)
             if self.logger: self.logger.info(f"Pipeline completed successfully. Results saved to {save_path}")
             return transcripts
 
@@ -908,6 +1090,10 @@ class PipelineService:
             "bss_enabled": getattr(args, "bss", False),
             "llm_refinement": getattr(args, "llm_refinement", False),
             "qwen3omni_caption": getattr(args, "qwen3omni", False),
+            "word_alignment": alignment_on,
+            "word_alignment_model": (
+                getattr(self.word_alignment_svc, "model_name", None)
+                if alignment_on else None),
             # Timestamp của segments thuộc timeline đã cắt; orig_spans ánh xạ về
             # các khoảng tương ứng trong file gốc.
             "timeline": self.timeline.to_json() if self.timeline else None,
@@ -953,7 +1139,10 @@ class PipelineService:
         final = {"json": f"{base_name}.json", "srt": f"{base_name}.srt"}
         if review_page:
             final["review"] = os.path.basename(review_page)
-        stage_out.write_manifest(metadata, extra={"final": final})
+        manifest_extra = {"final": final}
+        if clean_dataset_result:
+            manifest_extra["clean_two_channel_dataset"] = clean_dataset_result
+        stage_out.write_manifest(metadata, extra=manifest_extra)
 
         if self.logger: self.logger.info(f"Pipeline completed successfully. Results saved to {save_path}")
         return transcripts
