@@ -378,7 +378,7 @@ class PipelineService:
         return getattr(service, "process", None)
 
     def _export_conversation_exports(self, stage_out, transcripts, audio_data, music_map,
-                                     output_dir, audio_path):
+                                     output_dir, audio_path, speech_segments=None):
         """Export selected two-person conversation excerpts from processed audio.
 
         Runs after relabel, so a stray third label does not end a conversation,
@@ -400,7 +400,10 @@ class PipelineService:
             transcripts, timeline=self.timeline,
             noise=getattr(self, "noise_track", None), music_map=music_cut,
             waveform=audio_data.waveform, sample_rate=audio_data.sample_rate,
-            out_dir=os.path.join(output_dir, "conversation_exports"), base_name=base_name)
+            out_dir=os.path.join(output_dir, "conversation_exports"), base_name=base_name,
+            # The two-channel file is laid out from the separated speaker tracks.
+            speech_segments=speech_segments,
+            separation_service=getattr(self, "separation_svc", None))
         stage_out.write_conversation_exports(result.report, result.exports)
         return result
 
@@ -1098,7 +1101,8 @@ class PipelineService:
                     and not getattr(args, "postprocess_only", False))
         if conversation_exports_on and transcripts is not None:
             self._export_conversation_exports(
-                stage_out, transcripts, audio_data, music_map, output_dir, audio_path)
+                stage_out, transcripts, audio_data, music_map, output_dir, audio_path,
+                speech_segments=speech_segments)
 
         if getattr(args, "stop_after", None) == "conversation_exports":
             if not getattr(args, "keep_models", False):

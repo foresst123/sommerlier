@@ -103,8 +103,10 @@ def test_a_finished_file_is_cut_into_the_output_folder(tmp_path):
     result = pipe._export_conversation_exports(out, _talk(30), _audio(), MusicMap(),
                                  str(tmp_path), "/data/episode 7.mp3")
     assert result.exports
-    assert (tmp_path / "conversation_exports" / "audio").is_dir()
-    assert (tmp_path / "conversation_exports" / "metadata").is_dir()
+    root = tmp_path / "conversation_exports"
+    assert [p.name for p in root.glob("tier_*")], "conversations are filed in tier folders"
+    first = root / result.exports[0]["folder"]
+    assert (first / "conversation.json").is_file() and (first / "mixture.wav").is_file()
     assert result.exports[0]["id"].startswith("episode_7_conversation_")
     assert out.calls and out.calls[0][1] == result.exports
 
@@ -116,7 +118,7 @@ def test_without_a_noise_track_nothing_is_cut_and_it_says_so(tmp_path):
                                  str(tmp_path), "ep.mp3")
     assert result.exports == []
     assert out.calls[0][0]["skipped"] == "noise_not_measured"
-    assert not (tmp_path / "conversation_exports" / "audio").exists()
+    assert not list((tmp_path / "conversation_exports").glob("tier_*"))
 
 
 def test_the_music_map_is_moved_into_the_cut_timeline_before_it_is_used(tmp_path):

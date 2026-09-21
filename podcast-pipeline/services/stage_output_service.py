@@ -506,8 +506,9 @@ class StageOutputService:
         """What the conversation-export pass found, judged and wrote.
 
         The audio and per-item JSON live in `conversation_exports/` beside the final
-        export; this directory holds the accounting: `exports.json` is one row per
-        item written, `report.json` carries the finder's counts (how many blocks
+        export, one folder per conversation filed under its tier
+        (`tier_1_S/conversation_1/`); this directory holds the accounting:
+        `exports.json` is one row per item written, `report.json` carries the finder's counts (how many blocks
         each rule ended, how many windows each noise or music gate refused, how
         many the model turned down), which is where to look when a recording
         gives nothing and the thresholds need moving. `replies.json` holds the
@@ -526,6 +527,9 @@ class StageOutputService:
             "noise_measured": finder.get("noise_measured"),
             "word_alignment_missing": (finder.get("breaks") or {}).get(
                 "word_alignment_missing", 0),
+            "tiers": report.get("tiers"),
+            "promoted_for_overlap": report.get("promoted_for_overlap"),
+            "verification_failed": report.get("verification_failed"),
         }
         warnings = []
         if report.get("skipped") == "noise_not_measured":
@@ -537,6 +541,11 @@ class StageOutputService:
             warnings.append("the LLM was not available for the semantic check")
         if report.get("unanswered"):
             warnings.append(f"{report['unanswered']} candidate(s) got no answer")
+        if report.get("verification_failed"):
+            warnings.append(
+                f"{report['verification_failed']} conversation folder(s) failed the read-back "
+                "check (length, channels or channel equality); see verification in their "
+                "conversation.json and do not use them")
         if report.get("cut_in_thought"):
             warnings.append(
                 f"{report['cut_in_thought']} candidate(s) ran out of tokens while the "

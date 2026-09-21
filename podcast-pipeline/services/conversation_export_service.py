@@ -25,30 +25,49 @@ Audio is cut from the waveform the pipeline actually worked on -- music already
 stripped, cuts already made -- so timestamps line up with it, and an excerpt never
 holds a join (the finder does not let one in).
 
-Each excerpt is written twice from one cut, so the two files start on the same
-sample and are exactly the same length:
+Each excerpt gets a folder of its own, filed by quality, and everything in it is
+cut from the same samples so the files can be laid against one another:
 
-  audio/<id>.wav       mono, the recording of record: both voices as recorded.
-  audio/<id>_2ch.wav   two channels for listening: the first speaker (A) in the
-                       left ear, the second (B) in the right. Each is heard only
-                       during their own turns; where they overlap, both channels
-                       carry the mixture. One microphone cannot be separated by
-                       gating, so this is a layout, not a separation.
+  tier_1_S/            the best; an excerpt whose overlap was separated cleanly is
+  tier_2_A/            moved up one tier (`overlap_first`), so it lands here first.
+  tier_3_B/            Inside a folder the excerpts with overlap come first, then by score.
+    conversation_1/
+      mixture.wav          mono, the recording of record: both voices as recorded.
+      speaker_A.wav        one channel, one person: A alone (the separated track).
+      speaker_B.wav        one channel, one person: B alone.
+      stereo_2ch.wav       A in the left ear, B in the right: exactly the two files
+                           above, sample for sample.
+      conversation.json    the transcript with times from the start of these files,
+                           who is who, scores, noise, the overlap, how each file was
+                           made, and the checks that were run on them.
+      transcript.txt       the same conversation, one line per turn.
 
-Both are described by one metadata/<id>.json, and the conversation is also
-written as metadata/<id>.txt, one line per turn.
+The speaker files come from the separation stage's speaker tracks, so where the two
+spoke at once each is heard alone. A stretch whose separation failed is silent in
+both instead of carrying the other speaker's voice. Without those tracks (no
+separation output at hand, or a track that comes out silent) they fall back to
+gating the mixture -- each speaker heard only during their own turns, both voices
+in both ears where they overlap -- and conversation.json says which.
+
+After writing, every file is read back: same length, same rate, mono or stereo as
+named, and the two stereo channels equal to the two speaker files. The result and
+a SHA-256 of each file go into conversation.json, so the alignment can be checked
+rather than trusted.
 """
 
+import hashlib
 import json
 import os
 import re
+import shutil
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 import numpy as np
 
 from utils.conversation_selection import (
-    Candidate, ConversationSelectionConfig, ConversationSelectionFinder, pick_non_overlapping, shortlist)
+    TIERS, Candidate, ConversationSelectionConfig, ConversationSelectionFinder,
+    pick_non_overlapping, shortlist)
 from utils.llm_batches import ask_in_batches, reply_budget
 from utils.llm_json import clean_reply, is_cut_in_thought, is_readable, objects_in
 from utils.transcript_windows import line_number
@@ -190,6 +209,70 @@ def parse_verdict(raw: Optional[str]) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 # Writing audio
 # ---------------------------------------------------------------------------
+
+# The files of one conversation folder.
+MIXTURE_FILE = "mixture.wav"
+SPEAKER_FILES = {"A": "speaker_A.wav", "B": "speaker_B.wav"}
+STEREO_FILE = "stereo_2ch.wav"
+JSON_FILE = "conversation.json"
+TEXT_FILE = "transcript.txt"
+
+
+def tier_folder(tier: str) -> str:
+    """`tier_1_S`: numbered, so the best folder sorts first in any file browser."""
+    names = [name for _floor, name in TIERS]
+    rank = names.index(tier) + 1 if tier in names else len(names) + 1
+    return f"tier_{rank}_{tier}"
+
+
+def promote_tier(tier: str, steps: int = 1) -> str:
+    """`steps` tiers up (A -> S), never past the best; a tier that is not one stays."""
+    names = [name for _floor, name in TIERS]
+    if tier not in names:
+        return tier
+    return names[max(0, names.index(tier) - max(0, int(steps)))]
+
+
+def cross_speaker_overlaps(segments):
+    """[(start, end)] wherever two different speakers' segments overlap in time, merged."""
+    segs = sorted((float(s.start), float(s.end), s.speaker) for s in segments)
+    spans = []
+    for i, (a0, a1, who) in enumerate(segs):
+        for b0, b1, other in segs[i + 1:]:
+            if b0 >= a1:
+                break
+            if other != who and min(a1, b1) > max(a0, b0):
+                spans.append((max(a0, b0), min(a1, b1)))
+    spans.sort()
+    merged = []
+    for lo, hi in spans:
+        if merged and lo <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+        else:
+            merged.append((lo, hi))
+    return merged
+
+
+def _sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+# How the two-channel file was made; recorded in each item's metadata.
+STRICT_TRACKS = "strict_separation_tracks"
+TIME_GATED = "time_gated"
+
+
+def _fit(track, length: int) -> np.ndarray:
+    """`track` as float32, trimmed or zero-padded to exactly `length` samples."""
+    track = np.asarray(track, dtype=np.float32)
+    if len(track) >= length:
+        return track[:length]
+    return np.concatenate([track, np.zeros(length - len(track), dtype=np.float32)])
+
 
 def _snap_start(wave: np.ndarray, at: int, limit: int) -> int:
     """The nearest zero crossing at or after `at`, within `limit` samples.
@@ -340,6 +423,28 @@ class _Judged:
     reason: Optional[str] = None              # why it was rejected
     why: str = ""                             # the model's own reason for its score
     trim_ignored: Optional[str] = None        # a trim that could not be honoured, and why
+
+
+@dataclass
+class _Render:
+    """One excerpt as samples: the mixture and, when asked for, one track per speaker."""
+    lo: int                                   # first sample in the pipeline's waveform
+    hi: int
+    mixture: np.ndarray
+    left: Optional[np.ndarray] = None         # speaker A alone
+    right: Optional[np.ndarray] = None        # speaker B alone
+    method: Optional[str] = None              # how left/right were made
+
+
+@dataclass
+class _Plan:
+    """What is decided about one excerpt before any file is written: where it is filed."""
+    cand: Candidate
+    item: _Judged
+    method: Optional[str]
+    overlaps: List[tuple]                     # (start, end) in the pipeline's clock
+    overlap_seconds: float
+    tier: str                                 # the folder it goes in, after any promotion
 
 
 class ConversationExportService:
@@ -494,17 +599,177 @@ class ConversationExportService:
         report["trims_ignored"] = ignored
 
     # -- two-channel file ----------------------------------------------------------
-    def _two_channel(self, finder, cand: Candidate, raw: np.ndarray,
-                     sample_rate: int, offset: int) -> np.ndarray:
-        """Speaker A in the left ear, speaker B in the right, over the same samples."""
+    def _speaker_tracks(self, finder, cand: Candidate, raw: np.ndarray, sample_rate: int,
+                        offset: int, total_samples: int, speech_segments=None,
+                        separation_service=None):
+        """(A, B, method): one track per speaker over the same samples as `raw`.
+
+        The tracks come from the separation stage when it is at hand: where the two
+        spoke at once each then carries one voice. Gating the mixture cannot do
+        that -- one microphone recorded both, and opening a channel during a turn
+        leaves the other speaker's overlapping voice in it -- so it is only the
+        fallback, used when there are no tracks, when laying them out fails, or when
+        one comes out silent.
+        """
+        if speech_segments and separation_service is not None:
+            why = None
+            try:
+                left, right = separation_service.export_sdlm_dual_channel(
+                    speech_segments, total_samples / float(sample_rate), sample_rate,
+                    strict=True, speakers=(cand.speakers[0], cand.speakers[1]),
+                    time_range=(offset / float(sample_rate),
+                                (offset + len(raw)) / float(sample_rate)),
+                    log_stats=False)
+                left, right = _fit(left, len(raw)), _fit(right, len(raw))
+                if np.any(np.abs(left) > 1e-7) and np.any(np.abs(right) > 1e-7):
+                    return left, right, STRICT_TRACKS
+                why = "a separated speaker track is silent over this excerpt"
+            except Exception as exc:                   # pragma: no cover - defensive
+                why = f"the separated tracks could not be laid out ({type(exc).__name__}: {exc})"
+            if self.logger:
+                self.logger.warning(
+                    f"[conversation-exports] speaker files gated from the mixture: {why}")
+
         names = self._names(cand)
         left, right = [], []
         for pos in range(cand.first, cand.last + 1):
             seg = finder.segs[pos]
             span = (float(seg.start), float(seg.end))
             (left if names.get(seg.speaker) == "A" else right).append(span)
-        return gate_channels(raw, sample_rate, offset, left, right,
-                             self.cfg.gate_margin_ms, self.cfg.gate_fade_ms)
+        gated = gate_channels(raw, sample_rate, offset, left, right,
+                              self.cfg.gate_margin_ms, self.cfg.gate_fade_ms)
+        return (np.ascontiguousarray(gated[:, 0], dtype=np.float32),
+                np.ascontiguousarray(gated[:, 1], dtype=np.float32), TIME_GATED)
+
+    def _render(self, finder, cand: Candidate, waveform: np.ndarray, sample_rate: int,
+                speech_segments=None, separation_service=None) -> Optional[_Render]:
+        """Cut the excerpt once; every file is made from this one cut.
+
+        The mixture and both speaker tracks get the same start sample, the same
+        length and the same fades, which is what keeps them on one clock.
+        """
+        cfg = self.cfg
+        lo, hi = cut_bounds(waveform, sample_rate, cand.pad_start, cand.pad_end,
+                            cfg.zero_cross_ms)
+        if hi - lo < sample_rate:
+            return None
+        raw = np.array(waveform[lo:hi], dtype=np.float32, copy=True)
+        out = _Render(lo, hi, fade_edges(raw.copy(), sample_rate, cfg.fade_ms))
+        if cfg.stereo:
+            left, right, out.method = self._speaker_tracks(
+                finder, cand, raw, sample_rate, lo, len(waveform),
+                speech_segments, separation_service)
+            out.left = fade_edges(left, sample_rate, cfg.fade_ms)
+            out.right = fade_edges(right, sample_rate, cfg.fade_ms)
+        return out
+
+    def _plan(self, finder, cand: Candidate, item: _Judged, waveform, sample_rate: int,
+              speech_segments=None, separation_service=None) -> Optional[_Plan]:
+        """Which tier folder the excerpt goes in, and why."""
+        render = self._render(finder, cand, waveform, sample_rate,
+                              speech_segments, separation_service)
+        if render is None:
+            return None
+        overlaps = cross_speaker_overlaps(finder.segs[cand.first:cand.last + 1])
+        seconds = sum(b - a for a, b in overlaps)
+        tier = cand.tier
+        if (self.cfg.overlap_first and render.method == STRICT_TRACKS
+                and seconds >= self.cfg.overlap_min_seconds
+                and not self._zeroed_spans(speech_segments, cand)):
+            tier = promote_tier(cand.tier, self.cfg.overlap_promote_steps)
+        return _Plan(cand, item, render.method, overlaps, seconds, tier)
+
+    @staticmethod
+    def _zeroed_spans(speech_segments, cand: Candidate) -> bool:
+        """Whether the separator failed somewhere in the excerpt, leaving silence in both ears."""
+        from services.clean_two_channel_dataset_service import (
+            CleanTwoChannelDatasetService as _Tracks)
+        try:
+            return any(row["zeroed_in_strict_track"]
+                       for row in _Tracks._failure_rows(speech_segments, cand))
+        except Exception:                              # pragma: no cover - defensive
+            return True                                # cannot tell, so it is not "clean"
+
+    @staticmethod
+    def _clear_previous(out_dir: str) -> None:
+        """Remove the tier folders an earlier run left, so the two do not mix."""
+        if not os.path.isdir(out_dir):
+            return
+        for name in os.listdir(out_dir):
+            path = os.path.join(out_dir, name)
+            if re.fullmatch(r"tier_\d+_[A-Za-z]+", name) and os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+
+    def _verify(self, directory: str, files: Dict[str, str], sample_rate: int,
+                num_samples: int) -> dict:
+        """Read every file back and check that they are the same length and the same clock.
+
+        Compared as the 16-bit samples that were written, so "equal" means the
+        stereo channels are the speaker files, bit for bit.
+        """
+        import soundfile as sf
+        info, data = {}, {}
+        for key, name in files.items():
+            path = os.path.join(directory, name)
+            samples, rate = sf.read(path, dtype="int16", always_2d=True)
+            data[key] = samples
+            info[key] = {"file": name, "channels": int(samples.shape[1]),
+                         "frames": int(samples.shape[0]), "sample_rate": int(rate),
+                         "sha256": _sha256(path)}
+        checks = {
+            "same_sample_rate": {v["sample_rate"] for v in info.values()} == {sample_rate},
+            "same_length": {v["frames"] for v in info.values()} == {num_samples},
+            "mixture_is_mono": info["mixture"]["channels"] == 1,
+        }
+        if "stereo_2ch" in info:
+            checks["speaker_files_are_mono"] = (info["speaker_A"]["channels"] == 1
+                                                and info["speaker_B"]["channels"] == 1)
+            checks["stereo_is_two_channels"] = info["stereo_2ch"]["channels"] == 2
+            stereo = data["stereo_2ch"]
+            checks["stereo_left_is_speaker_A"] = bool(
+                stereo.shape[1] == 2 and np.array_equal(stereo[:, 0], data["speaker_A"][:, 0]))
+            checks["stereo_right_is_speaker_B"] = bool(
+                stereo.shape[1] == 2 and np.array_equal(stereo[:, 1], data["speaker_B"][:, 0]))
+        return {"ok": all(checks.values()), "sample_rate": sample_rate,
+                "num_samples": num_samples,
+                "duration": round(num_samples / float(sample_rate), 6),
+                "files": info, "checks": checks}
+
+    def _write_conversation(self, finder, plan: _Plan, directory: str, folder: str,
+                            export_id: str, waveform, sample_rate: int,
+                            speech_segments=None, separation_service=None) -> dict:
+        """Write one conversation folder and return its conversation.json content."""
+        import soundfile as sf
+        cand = plan.cand
+        render = self._render(finder, cand, waveform, sample_rate,
+                              speech_segments, separation_service)
+        os.makedirs(directory, exist_ok=True)
+        files = {"mixture": MIXTURE_FILE}
+        sf.write(os.path.join(directory, MIXTURE_FILE), render.mixture,
+                 sample_rate, subtype="PCM_16")
+        if render.left is not None:
+            files.update({"speaker_A": SPEAKER_FILES["A"], "speaker_B": SPEAKER_FILES["B"],
+                          "stereo_2ch": STEREO_FILE})
+            sf.write(os.path.join(directory, SPEAKER_FILES["A"]), render.left,
+                     sample_rate, subtype="PCM_16")
+            sf.write(os.path.join(directory, SPEAKER_FILES["B"]), render.right,
+                     sample_rate, subtype="PCM_16")
+            sf.write(os.path.join(directory, STEREO_FILE),
+                     np.column_stack((render.left, render.right)),
+                     sample_rate, subtype="PCM_16")
+        meta = self._metadata(
+            finder, finder.timeline, export_id, cand, plan.item,
+            len(render.mixture) / float(sample_rate),
+            audio_start=render.lo / float(sample_rate),
+            audio_end=render.hi / float(sample_rate),
+            two_channel=render.method, speech_segments=speech_segments,
+            folder=folder, tier=plan.tier, overlaps=plan.overlaps, files=files,
+            verification=self._verify(directory, files, sample_rate, len(render.mixture)))
+        with open(os.path.join(directory, JSON_FILE), "w", encoding="utf-8") as fh:
+            json.dump(meta, fh, ensure_ascii=False, indent=2)
+        with open(os.path.join(directory, TEXT_FILE), "w", encoding="utf-8") as fh:
+            fh.write(self._transcript_text(meta))
+        return meta
 
     @staticmethod
     def _transcript_text(meta: dict) -> str:
@@ -518,7 +783,10 @@ class ConversationExportService:
     # -- metadata ------------------------------------------------------------------
     def _metadata(self, finder, timeline, export_id, cand: Candidate, judged: _Judged,
                   audio_seconds: float, audio_start: Optional[float] = None,
-                  audio_end: Optional[float] = None) -> dict:
+                  audio_end: Optional[float] = None, two_channel: Optional[str] = None,
+                  speech_segments=None, folder: Optional[str] = None,
+                  tier: Optional[str] = None, overlaps=None, files: Optional[dict] = None,
+                  verification: Optional[dict] = None) -> dict:
         # cut_bounds may move each edge inward by a few milliseconds to the
         # nearest zero crossing. All item-relative timestamps must use the
         # sample actually written, not the requested padding edge.
@@ -552,7 +820,8 @@ class ConversationExportService:
         m = cand.metrics
         out = {
             "id": export_id,
-            "audio": f"audio/{export_id}.wav",
+            "folder": folder,
+            "files": dict(files or {}),
             "start": round(cand.start - origin, 3),
             "end": round(cand.end - origin, 3),
             "duration": round(audio_seconds, 3),
@@ -570,7 +839,12 @@ class ConversationExportService:
             "pacing_wpm": m["pacing_wpm"],
             "turn_latency_avg": m["turn_latency_avg"],
             "score": cand.score,
-            "tier": cand.tier,
+            "tier": tier or cand.tier,
+            "tier_by_score": cand.tier,
+            "promoted_for_overlap": bool(tier and tier != cand.tier),
+            "overlap_seconds": round(sum(b - a for a, b in (overlaps or [])), 3),
+            "overlap_spans": [{"start": round(a - origin, 3), "end": round(b - origin, 3)}
+                              for a, b in (overlaps or [])],
             "components": cand.components,
             "topic": judged.topic,
             "semantic_score": judged.semantic,
@@ -580,29 +854,64 @@ class ConversationExportService:
             "noise": cand.noise,
             "music_patched_share": cand.music_patched_share,
             "conversation": conversation,
-            "transcript": f"metadata/{export_id}.txt",
+            "transcript": TEXT_FILE,
+            "verification": verification,
         }
         if self.cfg.stereo:
-            out["audio_2ch"] = f"audio/{export_id}_2ch.wav"
+            method = two_channel or TIME_GATED
             out["channels_2ch"] = {
-                "left": "A", "right": "B", "method": "time_gated",
-                "note": ("Same samples and length as the mono file. Each speaker is "
-                         "heard only during their own turns; where the two speak at "
-                         "once both channels carry the same mixture."),
+                "left": "A", "right": "B", "method": method,
+                "left_file": SPEAKER_FILES["A"], "right_file": SPEAKER_FILES["B"],
+                "note": self._TWO_CHANNEL_NOTES[method],
             }
+            if method == STRICT_TRACKS and speech_segments:
+                from services.clean_two_channel_dataset_service import (
+                    CleanTwoChannelDatasetService as _Tracks)
+                # Where the separator pulled the two voices apart, and where it
+                # could not (silent in both channels), relative to the excerpt.
+                try:
+                    out["separated_spans"] = _Tracks._separated_rows(speech_segments, cand)
+                    out["failed_separation_spans"] = _Tracks._failure_rows(speech_segments, cand)
+                except Exception as exc:               # pragma: no cover - defensive
+                    # A description of the tracks is not worth losing the excerpt for.
+                    if self.logger:
+                        self.logger.warning(
+                            f"[conversation-exports] could not describe the separated "
+                            f"spans of {export_id}: {exc}")
         return out
+
+    _TWO_CHANNEL_NOTES = {
+        STRICT_TRACKS: ("speaker_A.wav and speaker_B.wav are each one person's separated "
+                        "track, one channel each, and stereo_2ch.wav is those two files with "
+                        "A on the left and B on the right, sample for sample. Where the two "
+                        "spoke at once each is heard alone. A stretch whose separation "
+                        "failed is silent in both rather than carrying the other voice. "
+                        "mixture.wav keeps both voices as recorded."),
+        TIME_GATED: ("No separated tracks were used, so speaker_A.wav and speaker_B.wav are "
+                     "the mixture gated to each person's turns, and stereo_2ch.wav is those "
+                     "two files, A left and B right. Each is heard only during their own "
+                     "turns; where the two speak at once both carry the same mixture. "
+                     "mixture.wav keeps both voices as recorded."),
+    }
 
     # -- the pass ---------------------------------------------------------------------
     def run(self, transcripts, *, timeline, noise, music_map, waveform,
-            sample_rate: int, out_dir: str, base_name: str) -> ConversationExportRun:
-        """Find, judge and write selected conversation excerpts of one recording."""
+            sample_rate: int, out_dir: str, base_name: str,
+            speech_segments=None, separation_service=None) -> ConversationExportRun:
+        """Find, judge and write selected conversation excerpts of one recording.
+
+        `speech_segments` and `separation_service` are what the separation stage
+        produced and the object that can lay its speaker tracks out; with both,
+        the two-channel file is built from those tracks (see the module doc).
+        """
         cfg = self.cfg
         finder = ConversationSelectionFinder(transcripts, timeline, noise, music_map, cfg)
         result = ConversationExportRun()
         report = {"prompt_version": CONVERSATION_EXPORT_PROMPT_VERSION,
                   "thinking": cfg.thinking, "skipped": None,
                   "candidates": 0, "shortlisted": 0, "judged_rejected": {},
-                  "accepted": 0, "exported": 0}
+                  "accepted": 0, "exported": 0, "tiers": {}, "promoted_for_overlap": 0,
+                  "verification_failed": 0}
         result.report = report
 
         candidates = finder.candidates()
@@ -637,53 +946,59 @@ class ConversationExportService:
             report["skipped"] = "no_audio"
             return result
 
-        import soundfile as sf
-        audio_dir = os.path.join(out_dir, "audio")
-        meta_dir = os.path.join(out_dir, "metadata")
-        os.makedirs(audio_dir, exist_ok=True)
-        os.makedirs(meta_dir, exist_ok=True)
-
-        for number, cand in enumerate(final, start=1):
-            item = kept[id(cand)]
-            export_id = f"{re.sub(r'[^A-Za-z0-9._-]+', '_', base_name)}_conversation_{number:06d}"
-            lo, hi = cut_bounds(waveform, sample_rate, cand.pad_start, cand.pad_end,
-                                cfg.zero_cross_ms)
-            if hi - lo < sample_rate:
-                self._log(f"[conversation-exports] {export_id}: audio shorter than a second; skipped")
+        plans = []
+        for cand in final:
+            plan = self._plan(finder, cand, kept[id(cand)], waveform, sample_rate,
+                              speech_segments, separation_service)
+            if plan is None:
+                self._log(f"[conversation-exports] {base_name}: an excerpt shorter "
+                          "than a second was skipped")
                 continue
-            # One cut, two files: both start on the same sample and are exactly the
-            # same length, so they can be played against each other.
-            raw = np.array(waveform[lo:hi], dtype=np.float32, copy=True)
-            mono = fade_edges(raw.copy(), sample_rate, cfg.fade_ms)
+            plans.append(plan)
+
+        # The best folder first; inside one, the excerpts with overlap, then by score.
+        rank = {name: k for k, (_floor, name) in enumerate(TIERS)}
+        plans.sort(key=lambda p: (rank.get(p.tier, len(rank)),
+                                  0 if p.overlap_seconds > 0 else 1, -p.cand.score))
+        self._clear_previous(out_dir)
+
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", base_name)
+        filed: Dict[str, int] = {}
+        for global_number, plan in enumerate(plans, start=1):
+            cand, item = plan.cand, plan.item
+            tier_dir = tier_folder(plan.tier)
+            filed[tier_dir] = filed.get(tier_dir, 0) + 1
+            name = f"conversation_{filed[tier_dir]}"
+            folder = f"{tier_dir}/{name}"
+            export_id = f"{safe}_conversation_{global_number:06d}"
             try:
-                sf.write(os.path.join(audio_dir, f"{export_id}.wav"), mono,
-                         sample_rate, subtype="PCM_16")
-                if cfg.stereo:
-                    stereo = fade_edges(self._two_channel(finder, cand, raw, sample_rate, lo),
-                                        sample_rate, cfg.fade_ms)
-                    sf.write(os.path.join(audio_dir, f"{export_id}_2ch.wav"), stereo,
-                             sample_rate, subtype="PCM_16")
-                meta = self._metadata(finder, finder.timeline, export_id, cand,
-                                      item, len(mono) / float(sample_rate),
-                                      audio_start=lo / float(sample_rate),
-                                      audio_end=hi / float(sample_rate))
-                with open(os.path.join(meta_dir, f"{export_id}.json"), "w",
-                          encoding="utf-8") as fh:
-                    json.dump(meta, fh, ensure_ascii=False, indent=2)
-                with open(os.path.join(meta_dir, f"{export_id}.txt"), "w",
-                          encoding="utf-8") as fh:
-                    fh.write(self._transcript_text(meta))
+                meta = self._write_conversation(
+                    finder, plan, os.path.join(out_dir, tier_dir, name), folder, export_id,
+                    waveform, sample_rate, speech_segments, separation_service)
             except Exception as exc:                       # pragma: no cover - disk problems
                 if self.logger:
                     self.logger.warning(f"[conversation-exports] could not write {export_id}: {exc}")
                 continue
+            if not meta["verification"]["ok"]:
+                report["verification_failed"] += 1
+                if self.logger:
+                    bad = [k for k, ok in meta["verification"]["checks"].items() if not ok]
+                    self.logger.error(
+                        f"[conversation-exports] {folder}: failed {bad}; do not trust these files")
+            report["tiers"][tier_dir] = report["tiers"].get(tier_dir, 0) + 1
+            if plan.tier != cand.tier:
+                report["promoted_for_overlap"] += 1
             result.exports.append({
-                "id": export_id, "tier": cand.tier, "score": cand.score,
-                "audio": meta["audio"], "audio_2ch": meta.get("audio_2ch"),
+                "id": export_id, "folder": folder, "tier": plan.tier, "tier_by_score": cand.tier,
+                "promoted_for_overlap": plan.tier != cand.tier,
+                "overlap_seconds": meta["overlap_seconds"], "score": cand.score,
+                "files": {key: f"{folder}/{file}" for key, file in meta["files"].items()},
+                "audio": f"{folder}/{MIXTURE_FILE}",
+                "audio_2ch": (f"{folder}/{STEREO_FILE}" if "stereo_2ch" in meta["files"] else None),
                 "duration": meta["duration"], "topic": item.topic,
                 "semantic_score": item.semantic, "trimmed_by_model": item.trimmed,
                 "source_start": meta["source_start"], "source_end": meta["source_end"],
-                "speaker_ids": meta["speaker_ids"],
+                "speaker_ids": meta["speaker_ids"], "verified": meta["verification"]["ok"],
                 "noise_kind": (cand.noise or {}).get("dominant_kind"),
             })
         report["exported"] = len(result.exports)

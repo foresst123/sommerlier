@@ -107,6 +107,15 @@ class ConversationSelectionConfig:
     noisy_share_max: float = 0.20        # share of frames over, where cleanliness hits 0
     music_patched_max: float = 0.15      # share of the item whose music bed was replaced
 
+    # -- where an excerpt is filed (used by the service)
+    # An excerpt in which the two spoke at once, and the separator pulled the two
+    # voices apart cleanly, is the hardest thing to get and the most useful, so it
+    # is filed higher: `overlap_promote_steps` tiers up (1 = one tier; 3 or more =
+    # straight into the top folder). It only counts when each ear really holds one voice.
+    overlap_first: bool = True
+    overlap_promote_steps: int = 1
+    overlap_min_seconds: float = 0.3     # how much overlap makes an excerpt "with overlap"
+
     # -- writing the audio (used by the service)
     fade_ms: float = 50.0
     zero_cross_ms: float = 5.0
