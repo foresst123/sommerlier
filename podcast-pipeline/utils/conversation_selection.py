@@ -74,7 +74,7 @@ class ConversationSelectionConfig:
     plateau_min: float = 90.0            # duration scores 1.0 between these two
     plateau_max: float = 180.0
     max_silence: float = 3.0             # a longer pause ends the block
-    max_monologue: float = 45.0          # one person without an answer this long ends it
+    max_monologue: float = 45.0          # one person without an answer this long ends it; 0 = no limit
     boundary_gap: float = 0.6            # a pause this long is a place to start or stop
     min_turns_each: int = 2              # each of the two must have real turns
     ends_per_start: int = 3
@@ -395,7 +395,8 @@ class ConversationSelectionFinder:
                     brk = "silence"
                 elif seg.speaker not in speakers and len(speakers) >= 2:
                     brk = "third_speaker"
-                elif (self.state[i] == NORMAL and seg.speaker == last_normal
+                elif (cfg.max_monologue > 0 and self.state[i] == NORMAL
+                      and seg.speaker == last_normal
                       and float(seg.end) - run_start > cfg.max_monologue):
                     brk = "monologue"
                 elif self._in_lasting_noise(float(prev.end), float(seg.start)) and gap > 0:

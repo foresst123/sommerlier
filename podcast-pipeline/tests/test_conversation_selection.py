@@ -129,6 +129,15 @@ def test_one_person_talking_too_long_ends_the_block():
     assert all(c.metrics["max_monologue"] <= 45.0 for c in cands)
 
 
+def test_a_monologue_limit_of_zero_means_no_limit():
+    segs = (_talk(10) + [_seg(10 + k, A, 80.0 + k * 7.5, 80.0 + k * 7.5 + 7.0)
+                         for k in range(8)])
+    limited, free = _finder(segs), _finder(segs, max_monologue=0)
+    assert limited.stats["breaks"].get("monologue", 0) >= 1
+    assert free.stats["breaks"].get("monologue", 0) == 0
+    assert len(free.blocks) < len(limited.blocks)
+
+
 def test_a_block_that_is_too_short_gives_nothing_and_is_counted():
     finder = _finder(_talk(6))
     assert finder.candidates() == []
@@ -182,6 +191,16 @@ def test_a_second_speaker_with_a_single_real_turn_is_not_a_conversation():
     finder = _finder(run + reply + more)
     assert finder.candidates() == []
     assert finder.stats["candidates_rejected"]["too_few_turns"] >= 1
+
+
+def test_one_turn_each_is_enough_when_the_setting_says_so():
+    """An interview with one long answer is a question and its answer."""
+    run = [_seg(k, A, k * 7.5, k * 7.5 + 7.0) for k in range(6)]
+    reply = [_seg(6, B, 45.5, 52.5)]
+    more = [_seg(7 + k, A, 53.0 + k * 7.5, 53.0 + k * 7.5 + 7.0) for k in range(6)]
+    finder = _finder(run + reply + more, min_turns_each=1)
+    assert finder.candidates()
+    assert finder.stats["candidates_rejected"].get("too_few_turns", 0) == 0
 
 
 def test_a_hallucinated_segment_ends_the_block():
