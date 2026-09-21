@@ -1,5 +1,6 @@
 import os
 import tempfile
+import threading
 import pandas as pd
 from typing import List, Tuple, Any
 from pyannote.core import Annotation
@@ -36,6 +37,9 @@ class DiarizationService:
         self.model_loader = model_loader
         self.logger = logger
         self.diarizer_config = diarizer_config or {}
+        # Silero's stateful ONNX wrapper is shared by the lightweight per-file
+        # service copies used by the two-file diarization scheduler.
+        self._vad_lock = threading.Lock()
 
     # Models are fetched from the loader on use, not captured at construction.
     # PipelineService loads each stage's models when that stage runs, so a
@@ -210,7 +214,8 @@ class DiarizationService:
         # Apply VAD to split long continuous segments if VAD is available
         if getattr(args, "vad", False) and self.vad_model:
             vad_audio = {"waveform": audio.waveform, "sample_rate": audio.sample_rate}
-            raw_list = self.vad_model.vad(combined_df, vad_audio)
+            with self._vad_lock:
+                raw_list = self.vad_model.vad(combined_df, vad_audio)
         else:
             raw_list = df_to_list(combined_df)
             

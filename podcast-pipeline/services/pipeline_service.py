@@ -1,4 +1,6 @@
 import os
+import copy
+import threading
 from typing import Any
 from utils.checkpoint import CheckpointManager
 from utils.music_map import MusicMap, build_maps
@@ -54,6 +56,23 @@ class PipelineService:
         # build cửa sổ song song của SeparationService) đăng ký callback vào
         # đây, chạy ở end_stage_scope() cùng lúc với defer_free/defer_workers.
         self.defer_callbacks = None
+        self._model_load_lock = threading.RLock()
+
+    def parallel_stage_view(self, stage: str):
+        """Return an isolated per-file view for a parallel pipeline stage.
+
+        ModelLoader and worker pools remain shared. Timeline-bearing services
+        are copied so two files cannot overwrite each other's excision seams
+        while their DiariZen requests are in flight.
+        """
+        if stage != "diarization":
+            return self
+        view = copy.copy(self)
+        view.diarization_svc = copy.copy(self.diarization_svc)
+        view.separation_svc = copy.copy(self.separation_svc)
+        view.timeline = TimelineMap()
+        view.noise_track = None
+        return view
 
     def _load(self, group: str):
         """Chỉ tải model khi bắt đầu bước cần dùng.
@@ -63,24 +82,29 @@ class PipelineService:
         không gọi hàm này và không tốn VRAM cho model không sử dụng."""
         if self.model_loader is None:
             return
-        w = self.worker_services
+        # Some focused tests and integrations construct this service through
+        # __new__. Initialise lazily as well as in __init__ for compatibility.
+        if not hasattr(self, "_model_load_lock"):
+            self._model_load_lock = threading.RLock()
+        with self._model_load_lock:
+            w = self.worker_services
 
-        # Bảo đảm worker đang chạy khi bước thực sự bắt đầu. main() có thể khởi
-        # động sớm để làm nóng, nhưng tại đây lỗi phải được báo; worker đang chạy
-        # thì không cần khởi động thêm.
-        worker = self.WORKER_FOR_STAGE.get(group)
-        if worker:
-            self._ensure_worker(worker)
+            # Bảo đảm worker đang chạy khi bước thực sự bắt đầu. main() có thể khởi
+            # động sớm để làm nóng, nhưng tại đây lỗi phải được báo; worker đang chạy
+            # thì không cần khởi động thêm.
+            worker = self.WORKER_FOR_STAGE.get(group)
+            if worker:
+                self._ensure_worker(worker)
 
-        {
-            "base":        lambda: self.model_loader.load_base_models(),
-            "diarization": lambda: self.model_loader.load_diarization_models(w.get("diarizen")),
-            "separation":  lambda: self.model_loader.load_separation_models(w.get("sidon")),
-            "music":       lambda: self.model_loader.load_music_models(),
-            "tagger":      lambda: self.model_loader.load_tagger(),
-            "asr":         lambda: self.model_loader.load_asr_models(w.get("qwen3")),
-            "caption":     lambda: self.model_loader.load_caption_model(),
-        }[group]()
+            {
+                "base":        lambda: self.model_loader.load_base_models(),
+                "diarization": lambda: self.model_loader.load_diarization_models(w.get("diarizen")),
+                "separation":  lambda: self.model_loader.load_separation_models(w.get("sidon")),
+                "music":       lambda: self.model_loader.load_music_models(),
+                "tagger":      lambda: self.model_loader.load_tagger(),
+                "asr":         lambda: self.model_loader.load_asr_models(w.get("qwen3")),
+                "caption":     lambda: self.model_loader.load_caption_model(),
+            }[group]()
 
     # Worker cần cho mỗi bước. Loader đọc service.process nên phải có tiến
     # trình thật trước khi dựng client kết nối.

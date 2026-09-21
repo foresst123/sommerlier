@@ -5,6 +5,8 @@ Run:  python -m pytest tests/test_batch.py -q     (from podcast-pipeline/)
 import os
 import sys
 import types
+import threading
+import time
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -164,3 +166,34 @@ def test_caller_args_are_not_mutated():
     args = _args(stop_after=None)
     run_batch_by_stage(FakePipeline(), args, {}, ["f1"])
     assert args.stop_after is None, "stop_after must be set on a copy, not the caller's args"
+
+
+def test_diarization_runs_two_files_concurrently_when_pool_is_enabled():
+    class ConcurrentPipeline(FakePipeline):
+        def __init__(self):
+            super().__init__()
+            self.inside = 0
+            self.max_inside = 0
+            self.lock = threading.Lock()
+
+        def parallel_stage_view(self, stage):
+            return self
+
+        def run(self, args, config, path):
+            with self.lock:
+                self.inside += 1
+                self.max_inside = max(self.max_inside, self.inside)
+            time.sleep(0.03)
+            with self.lock:
+                self.inside -= 1
+
+    perf = {
+        "enabled": True,
+        "stages": {"diarization": {"workers": 2}},
+    }
+    pipe = ConcurrentPipeline()
+    run_batch_by_stage(
+        pipe, _args(performance_config=perf, dia3=False), {},
+        ["f1", "f2", "f3"], stages=("diarization",))
+
+    assert pipe.max_inside == 2

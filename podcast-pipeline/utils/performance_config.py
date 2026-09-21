@@ -51,7 +51,7 @@ _STAGES = {
         "cpu_threads": (INT, 0, 0, 256),
     },
     "diarization": {
-        "workers": (INT, 1, 1, 1),
+        "workers": (INT, 1, 1, 2),
         "placement": (STR, "single", None, None),
     },
     "separation": {
@@ -66,7 +66,7 @@ _STAGES = {
 
 _ENUMS = {
     ("refinement", "placement"): ("auto", "balanced", "sharded", "pipelined"),
-    ("diarization", "placement"): ("single", "split_components"),
+    ("diarization", "placement"): ("single", "split_components", "replicated"),
 }
 
 # Keys that change what the pipeline computes, as opposed to how it is

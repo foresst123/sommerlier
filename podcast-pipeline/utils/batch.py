@@ -214,17 +214,49 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
         # later release, so a stage that dies outside the per-file try would
         # leave the models it finished with resident for the rest of the run.
         try:
-            for i, path in enumerate(pending, start=1):
+            parallelism = _stage_parallelism(stage_args, stage)
+
+            def run_one(i, path):
                 if logger:
-                    logger.info(f"[{label} {i}/{len(pending)}] {os.path.basename(path)}")
-                try:
-                    pipeline.run(stage_args, config, path)
-                except Exception as e:
-                    # A file that dies in diarization must not be retried in
-                    # every later stage, and must not stop its neighbours.
-                    if logger:
-                        logger.error(f"Failed on {path} during {label}: {type(e).__name__}: {e}")
-                    failures[path] = f"{label}: {type(e).__name__}: {e}"
+                    logger.info(
+                        f"[{label} {i}/{len(pending)}] {os.path.basename(path)}")
+                stage_pipeline = (
+                    pipeline.parallel_stage_view(stage)
+                    if parallelism > 1 and hasattr(pipeline, "parallel_stage_view")
+                    else pipeline)
+                stage_pipeline.run(copy.copy(stage_args), config, path)
+
+            if parallelism > 1 and len(pending) > 1:
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(
+                        max_workers=min(parallelism, len(pending)),
+                        thread_name_prefix="diarization") as executor:
+                    submitted = [
+                        (path, executor.submit(run_one, i, path))
+                        for i, path in enumerate(pending, start=1)
+                    ]
+                    for path, future in submitted:
+                        try:
+                            future.result()
+                        except Exception as e:
+                            if logger:
+                                logger.error(
+                                    f"Failed on {path} during {label}: "
+                                    f"{type(e).__name__}: {e}")
+                            failures[path] = (
+                                f"{label}: {type(e).__name__}: {e}")
+            else:
+                for i, path in enumerate(pending, start=1):
+                    try:
+                        run_one(i, path)
+                    except Exception as e:
+                        # A failed file is omitted from every later stage but
+                        # does not stop its neighbours.
+                        if logger:
+                            logger.error(
+                                f"Failed on {path} during {label}: "
+                                f"{type(e).__name__}: {e}")
+                        failures[path] = f"{label}: {type(e).__name__}: {e}"
         finally:
             if end:
                 end()
@@ -237,6 +269,17 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
             break
 
     return list(failures.items())
+
+
+def _stage_parallelism(args, stage) -> int:
+    """Concurrent files allowed for stages with independent GPU workers."""
+    if stage != "diarization" or getattr(args, "dia3", False):
+        return 1
+    perf = getattr(args, "performance_config", None) or {}
+    if not perf.get("enabled", False):
+        return 1
+    diarization = perf.get("stages", {}).get("diarization", {})
+    return max(1, min(2, int(diarization.get("workers", 1))))
 
 
 def _stage_index(stage) -> int:

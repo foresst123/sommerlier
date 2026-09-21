@@ -1,4 +1,5 @@
 import itertools
+import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -13,6 +14,9 @@ class WorkerPoolService:
         self.name = name or self.services[0].name
         self._counter = itertools.count()
         self._pick_lock = threading.Lock()
+        self._available = queue.Queue()
+        for service in self.services:
+            self._available.put(service)
 
     @property
     def process(self):
@@ -48,4 +52,13 @@ class WorkerPoolService:
         return service
 
     def request(self, payload, *, response_id=None):
-        return self.next_service().request(payload, response_id=response_id)
+        # Lease an idle process instead of blindly selecting round-robin. With
+        # more callers than workers, the next request waits for whichever GPU
+        # finishes first rather than queueing behind a still-busy process.
+        service = self._available.get()
+        try:
+            if service.process is None:
+                service.start()
+            return service.request(payload, response_id=response_id)
+        finally:
+            self._available.put(service)

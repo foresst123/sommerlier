@@ -10,7 +10,6 @@ from models.phowhisper import PhoWhisperASR
 from models.silero_vad import SileroVAD
 from models.pyannote import PyannoteDiarizer
 from models.diarizen_model import DiariZenDiarizer
-from models.pyannote_embedding import PyannoteEmbedder
 # from models.sortformer import SortformerDiarizer
 from models.bss_model import BssSeparator
 from models.sslam import SSLAMDetector
@@ -48,7 +47,7 @@ class ModelLoader:
         
     def load_diarization_models(self, diarizen_service=None):
         """Load Pyannote/DiariZen based on args."""
-        if "diarizer" in self.models and "embedder" in self.models:
+        if "diarizer" in self.models:
             return
         if self.args.dia3:
             if self.logger: self.logger.info(f"Loading Pyannote Diarization on {self.device_1}")
@@ -58,17 +57,13 @@ class ModelLoader:
                 use_community=True
             )
         else:
-            # main.py spawns the DiariZen worker with device_id=args.gpu_1, so
-            # device_1 is where it actually lives. The old message said device_2.
-            if self.logger: self.logger.info(f"Connecting to DiariZen worker on {self.device_1}")
-            self.models["diarizer"] = DiariZenDiarizer(process=diarizen_service.process if diarizen_service else None)
-            
-        # Embedder is needed for cross-chunk diarization fusion AND SR-CorrNet speaker identification
-        if self.logger: self.logger.info(f"Loading Pyannote Embedder on {self.device_1}")
-        self.models["embedder"] = PyannoteEmbedder(
-            token=self.config.get("huggingface_token", ""),
-            device=self.device_1
-        )
+            if self.logger: self.logger.info("Connecting to DiariZen worker pool")
+            endpoint = None
+            if diarizen_service is not None:
+                endpoint = (diarizen_service
+                            if hasattr(diarizen_service, "request")
+                            else diarizen_service.process)
+            self.models["diarizer"] = DiariZenDiarizer(process=endpoint)
             
     def load_separation_models(self, sidon_service=None):
         """Load the separator and its WeSpeaker assignment, if enabled.

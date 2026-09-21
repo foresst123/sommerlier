@@ -26,9 +26,8 @@ import sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 from utils.cpu_plan import configure_process as _configure_cpu
 # Worker subprocess types that can be alive at once: qwen3, qwen3_replica,
-# sidon, and diarizen's two roles (diarizen_seg + diarizen_emb) once the
-# pipelined diarization design lands. Diarizen used to be one process; it
-# counts as two now so the thread budget does not undercount it.
+# sidon, and two replicated DiariZen workers. Count both diarizers so the CPU
+# thread budget matches the pool that can actually be resident.
 _CPU_THREADS = _configure_cpu(n_workers=5)
 # _CPU_THREADS=3
 # Sidon worker là subprocess riêng, nên publish rõ thread budget cho nó kế thừa.
@@ -457,7 +456,7 @@ def main():
                 qwen3_worker_script, device_id=args.gpu_1, logger=logger,
                 env_name=args.env, config_path=args.config)
 
-    # 1b. Start DiariZen Worker (if dia3 is not used)
+    # 1b. Start DiariZen workers (if dia3 is not used)
     #
     # Gated on the step as well as the flag: these workers are separate
     # processes with their own interpreter and weights, spawned before the
@@ -469,16 +468,58 @@ def main():
     if not args.dia3 and will_run(args, "diarization"):
         diarizen_worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diarizen_worker.py")
         diar_perf = perf_cfg["stages"]["diarization"]
-        diar_devices = args.gpu_1
-        if (perf_cfg["enabled"]
-                and diar_perf["placement"] == "split_components"
-                and args.gpu_1 != args.gpu_2):
-            diar_devices = [args.gpu_1, args.gpu_2]
-        diarizen_service = _prefetch(DiarizenWorkerService(
-            lambda: resolve_worker_python("diarizen", config=config,
-                                          env_profile=env_profile, logger=logger),
-            diarizen_worker_script, device_id=diar_devices, logger=logger,
-            env_name=args.env, config_path=args.config))
+        configured_devices = list(dict.fromkeys((args.gpu_1, args.gpu_2)))
+        if torch.cuda.is_available():
+            available_devices = [
+                device for device in configured_devices
+                if 0 <= int(device) < torch.cuda.device_count()
+            ]
+        else:
+            # Preserve the existing startup error from the GPU model instead of
+            # turning a missing CUDA runtime into an empty worker-pool error.
+            available_devices = configured_devices[:1]
+        if not available_devices:
+            raise RuntimeError(
+                "No configured diarization GPU is visible: requested "
+                f"{configured_devices}, CUDA exposes {torch.cuda.device_count()}")
+        requested_workers = (
+            int(diar_perf["workers"]) if perf_cfg["enabled"] else 1)
+        worker_count = min(
+            requested_workers, int(perf_cfg["max_gpus"]),
+            len(available_devices))
+
+        if requested_workers > worker_count:
+            logger.warning(
+                f"[performance] diarization requested {requested_workers} workers "
+                f"but only {len(available_devices)} distinct GPU(s) are configured; "
+                f"using {worker_count}")
+
+        if worker_count > 1:
+            diarizen_workers = [DiarizenWorkerService(
+                lambda: resolve_worker_python(
+                    "diarizen", config=config, env_profile=env_profile,
+                    logger=logger),
+                diarizen_worker_script, device_id=device_id, logger=logger,
+                env_name=args.env, config_path=args.config)
+                for device_id in available_devices[:worker_count]]
+            diarizen_service = WorkerPoolService(
+                diarizen_workers, name="DiariZen")
+            logger.info(
+                f"[performance] DiariZen pool: {worker_count} workers on "
+                + ", ".join(f"GPU {d}" for d in available_devices[:worker_count]))
+        else:
+            diar_devices = args.gpu_1
+            if (perf_cfg["enabled"]
+                    and diar_perf["placement"] == "split_components"
+                    and args.gpu_1 != args.gpu_2):
+                diar_devices = [args.gpu_1, args.gpu_2]
+            diarizen_service = DiarizenWorkerService(
+                lambda: resolve_worker_python(
+                    "diarizen", config=config, env_profile=env_profile,
+                    logger=logger),
+                diarizen_worker_script, device_id=diar_devices, logger=logger,
+                env_name=args.env, config_path=args.config)
+        diarizen_service = _prefetch(diarizen_service)
         
 
 

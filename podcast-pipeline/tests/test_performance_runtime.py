@@ -4,10 +4,12 @@ import sys
 import types
 
 import numpy as np
+import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from models.qwen3_asr import Qwen3ASRClient
+from models.diarizen_model import DiariZenClient
 from models.separation_backends import SidonBackend
 from services.base_worker_service import WorkerProcessService
 from services.worker_pool_service import WorkerPoolService
@@ -42,6 +44,27 @@ def test_worker_pool_dispatches_round_robin():
     assert pool.request({})["worker"] == "left"
     assert pool.request({})["worker"] == "right"
     assert (left.calls, right.calls) == (1, 1)
+
+
+def test_diarizen_client_can_dispatch_through_a_pool_endpoint(tmp_path):
+    class Endpoint:
+        def __init__(self):
+            self.calls = 0
+
+        def request(self, payload, response_id=None):
+            self.calls += 1
+            assert os.path.exists(payload["audio_path"])
+            return {"segments": [
+                {"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}
+            ]}
+
+    endpoint = Endpoint()
+    client = DiariZenClient(endpoint)
+    result = client.diarize({"waveform": torch.zeros(16000, dtype=torch.float32),
+                             "sample_rate": 16000})
+
+    assert endpoint.calls == 1
+    assert list(result.itertracks(yield_label=True))[0][2] == "SPEAKER_00"
 
 
 def test_checkpoint_manifest_rejects_a_corrupt_result(tmp_path):

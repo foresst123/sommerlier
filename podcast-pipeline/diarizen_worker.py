@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DiariZen Worker — runs in a separate environment (diarizen_env) on GPU 1.
+DiariZen Worker — runs in a separate environment on one assigned GPU.
 
 Usage:
     CUDA_VISIBLE_DEVICES=1 /path/to/diarizen_env/bin/python diarizen_worker.py

@@ -48,42 +48,39 @@ class DiariZenClient:
                                ("max_speakers", max_speakers)):
                 if value is not None:
                     req[key] = int(value)
-            self.process.stdin.write(json.dumps(req) + "\n")
-            self.process.stdin.flush()
-            
-            resp = None
-            while True:
-                resp_line = self.process.stdout.readline()
-                if not resp_line:
-                    break
-                
-                line_str = resp_line.strip()
-                if not line_str:
-                    continue
-                
-                try:
-                    resp = json.loads(line_str)
-                    if "progress" in resp:
-                        # Use carriage return to overwrite the same line
-                        print(f"\r[DiariZenClient] {resp['progress']}", end="", flush=True)
-                        continue # Keep listening for the final segments response
+            request = getattr(self.process, "request", None)
+            if callable(request):
+                # WorkerPoolService leases one idle subprocess for the whole
+                # request, so concurrent files cannot interleave one pipe.
+                resp = request(req)
+            else:
+                self.process.stdin.write(json.dumps(req) + "\n")
+                self.process.stdin.flush()
 
-                    # Warnings and status lines precede the real answer; treating
-                    # them as the response would discard the segments (or the
-                    # error that explains their absence).
-                    if "segments" not in resp and "error" not in resp:
-                        note = resp.get("warning") or resp.get("status") or line_str
-                        print(f"[DiariZenClient] {note}", flush=True)
+                resp = None
+                while True:
+                    resp_line = self.process.stdout.readline()
+                    if not resp_line:
+                        break
+
+                    line_str = resp_line.strip()
+                    if not line_str:
                         continue
 
-                    # Print a newline once we get the final response so subsequent logs don't overwrite the progress
-                    print()
-                    break # Successfully parsed final output
-                except json.JSONDecodeError:
-                    # DiariZen prints plain-text stage markers ("Extracting
-                    # segmentations.", "Clustering.") alongside its JSON.
-                    print(f"[DiariZenClient] {line_str}", flush=True)
-                    continue
+                    try:
+                        resp = json.loads(line_str)
+                        if "progress" in resp:
+                            print(f"\r[DiariZenClient] {resp['progress']}", end="", flush=True)
+                            continue
+                        if "segments" not in resp and "error" not in resp:
+                            note = resp.get("warning") or resp.get("status") or line_str
+                            print(f"[DiariZenClient] {note}", flush=True)
+                            continue
+                        print()
+                        break
+                    except json.JSONDecodeError:
+                        print(f"[DiariZenClient] {line_str}", flush=True)
+                        continue
 
             if resp is None:
                 print("[DiariZenClient] Empty or invalid response from worker", flush=True)
