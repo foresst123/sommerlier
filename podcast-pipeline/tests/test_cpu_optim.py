@@ -129,6 +129,16 @@ def test_never_allocates_zero_threads(monkeypatch):
     assert thread_plan(n_workers=3)["per_process"] >= 1
 
 
+def test_the_floor_is_two_not_one(monkeypatch):
+    """A single-threaded BLAS/OpenMP pool was measured too slow for this
+    pipeline's matmuls, so the floor is 2 even when cores // processes
+    rounds down to 0. This oversubscribes a box with few cores and many
+    processes -- the 2-core case this module's docstring warns about --
+    deliberately; see the comment on the floor in thread_plan()."""
+    monkeypatch.setenv("SLURM_CPUS_PER_TASK", "2")
+    assert thread_plan(n_workers=5)["per_process"] == 2
+
+
 def test_existing_settings_are_respected(monkeypatch):
     env = {"OMP_NUM_THREADS": "8"}
     apply_to_env(env, 2)

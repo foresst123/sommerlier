@@ -25,7 +25,11 @@ else:
 import sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 from utils.cpu_plan import configure_process as _configure_cpu
-_CPU_THREADS = _configure_cpu(n_workers=4)
+# Worker subprocess types that can be alive at once: qwen3, qwen3_replica,
+# sidon, and diarizen's two roles (diarizen_seg + diarizen_emb) once the
+# pipelined diarization design lands. Diarizen used to be one process; it
+# counts as two now so the thread budget does not undercount it.
+_CPU_THREADS = _configure_cpu(n_workers=5)
 # _CPU_THREADS=3
 # Sidon worker là subprocess riêng, nên publish rõ thread budget cho nó kế thừa.
 # WorkerProcessService/base worker thường dùng os.environ.copy(), vì vậy biến này

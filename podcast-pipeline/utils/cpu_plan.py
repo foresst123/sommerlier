@@ -41,7 +41,13 @@ def thread_plan(n_workers: int = 3, reserve_for_main: bool = True) -> dict:
     """
     cores = usable_cores()
     processes = n_workers + (1 if reserve_for_main else 0)
-    per_process = max(1, cores // max(1, processes))
+    # Floor of 2, not 1: a single-threaded BLAS/OpenMP pool was measured too
+    # slow for the matmuls this pipeline actually runs. The trade-off is
+    # explicit -- on a box with few cores and many processes (the 2-core case
+    # this module's docstring warns about), 2 per process oversubscribes
+    # rather than staying at 1. Chosen deliberately; revisit if a constrained
+    # box regresses the way that 2-core run once did.
+    per_process = max(2, cores // max(1, processes))
 
     return {
         "cores_detected": cores,
