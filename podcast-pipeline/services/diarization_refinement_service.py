@@ -166,7 +166,7 @@ class DiarizationRefinementService:
                  placement: str = "auto", gpu_memory_utilization: float = 0.82,
                  max_batch_tokens: int = 0,
                  pipeline_devices=None, micro_batch_size: int = 1,
-                 pipeline_split_ratio: float = 0.5):
+                 pipeline_split_ratio: float = 0.5, cpu_threads: int = 0):
         self.logger = logger
         self.model = None
         self.tokenizer = None
@@ -182,6 +182,8 @@ class DiarizationRefinementService:
         self.micro_batch_size = max(1, int(micro_batch_size))
         self.pipeline_split_ratio = min(
             0.80, max(0.20, float(pipeline_split_ratio)))
+        self.cpu_threads = max(0, int(cpu_threads))
+        self._active_cpu_threads = None
         self.pipeline_pool = None
         # Every request repeats the same ~1200-token system prompt, and without
         # this each batch re-runs the attention over it from scratch. Caching
@@ -208,10 +210,38 @@ class DiarizationRefinementService:
         # SOMMELIER_LLM still overrides without a code change.
         self.model_name = (model_name or os.environ.get(
             "SOMMELIER_LLM", "Qwen/Qwen2.5-3B-Instruct"))
+
+    def _activate_cpu_threads(self):
+        """Give refinement the cores released by earlier pipeline stages."""
+        if self._active_cpu_threads is not None:
+            return self._active_cpu_threads
+
+        from utils.cpu_plan import usable_cores
+
+        available = max(1, usable_cores())
+        requested = self.cpu_threads or available
+        workers = max(1, min(requested, available))
+        self._active_cpu_threads = workers
+
+        # The refinement tokenizer is created after this call, so its Rayon
+        # pool observes the larger stage-specific budget. PyTorch was imported
+        # at process start and needs its runtime setter as well.
+        os.environ["RAYON_NUM_THREADS"] = str(workers)
+        os.environ["TOKENIZERS_PARALLELISM"] = "true"
+        try:
+            torch.set_num_threads(workers)
+        except RuntimeError:
+            pass
+        if self.logger:
+            self.logger.info(
+                f"LLM refinement CPU budget: {workers}/{available} usable cores")
+        return workers
         
     def _load_model(self):
         if self.model is not None:
             return
+
+        self._activate_cpu_threads()
             
         if self.logger: self.logger.info(f"Loading LLM {self.model_name} for refinement...")
         try:
@@ -528,8 +558,8 @@ class DiarizationRefinementService:
                 f"(< {REFINE_MIN_SECONDS}s or <= {REFINE_MIN_WORDS} words); "
                 "keeping their ROVER text")
 
-        workers = int(os.environ.get("OMP_NUM_THREADS", "1"))
-        if len(indices) > 64 and workers > 1:
+        workers = self._activate_cpu_threads()
+        if len(indices) >= max(8, workers * 2) and workers > 1:
             from concurrent.futures import ThreadPoolExecutor
             with ThreadPoolExecutor(max_workers=workers) as ex:
                 messages = list(ex.map(lambda i: self._build_user_message(segments, i),

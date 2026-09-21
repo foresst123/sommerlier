@@ -48,6 +48,7 @@ _STAGES = {
         "max_batch_tokens": (INT, 0, 0, 1000000),
         "micro_batch_size": (INT, 1, 1, 1024),
         "pipeline_split_ratio": (FLOAT, 0.5, 0.20, 0.80),
+        "cpu_threads": (INT, 0, 0, 256),
     },
     "diarization": {
         "workers": (INT, 1, 1, 1),

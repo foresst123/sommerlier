@@ -53,3 +53,4 @@ def test_shipped_profiles_enable_one_pipelined_model_not_two_replicas():
         assert refinement["workers"] == 2
         assert refinement["micro_batch_size"] >= 1
         assert 0.2 <= refinement["pipeline_split_ratio"] <= 0.8
+        assert refinement["cpu_threads"] >= 2

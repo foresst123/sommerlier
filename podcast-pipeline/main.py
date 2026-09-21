@@ -583,7 +583,7 @@ def main():
         if perf_cfg["enabled"]:
             refinement_perf = perf_cfg["stages"]["refinement"]
             for key in ("placement", "gpu_memory_utilization", "max_batch_tokens",
-                        "micro_batch_size", "pipeline_split_ratio"):
+                        "micro_batch_size", "pipeline_split_ratio", "cpu_threads"):
                 refinement_cfg[key] = refinement_perf[key]
             refinement_cfg["pipeline_devices"] = [args.gpu_1, args.gpu_2]
             refinement_cfg["device"] = f"cuda:{args.gpu_1}"

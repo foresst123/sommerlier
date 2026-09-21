@@ -146,7 +146,8 @@
                         "gpu_memory_utilization": 0.82,
                         "max_batch_tokens": 8192,
                         "micro_batch_size": 1,
-                        "pipeline_split_ratio": 0.5
+                        "pipeline_split_ratio": 0.5,
+                        "cpu_threads": 8
                     },
                     "diarization": {"workers": 1, "placement": "split_components"},
                     "separation": {"max_workers": 1, "ordered_postprocess": true},
@@ -282,7 +283,8 @@
                         "gpu_memory_utilization": 0.85,
                         "max_batch_tokens": 32768,
                         "micro_batch_size": 8,
-                        "pipeline_split_ratio": 0.5
+                        "pipeline_split_ratio": 0.5,
+                        "cpu_threads": 32
                     },
                     "diarization": {"workers": 1, "placement": "split_components"},
                     "separation": {"max_workers": 1, "ordered_postprocess": true},
