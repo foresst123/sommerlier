@@ -31,6 +31,7 @@ already did.
 """
 
 from utils.excise import TimelineMap
+from utils.noise_map import dominant_kind
 
 
 def annotate(segments, timeline=None, noise=None):
@@ -68,6 +69,12 @@ def annotate(segments, timeline=None, noise=None):
 
         if noise is not None:
             seg.noise_score = noise.score_spans(spans)
+            breakdown = noise.breakdown(spans)
+            measured = any(v is not None for v in breakdown.values())
+            # An unmeasured segment has no per-group numbers either, rather
+            # than three Nones that look like a result.
+            seg.noise_breakdown = breakdown if measured else None
+            seg.noise_kind = dominant_kind(breakdown)
 
         previous_end = end
 
@@ -90,4 +97,11 @@ def summary(segments) -> dict:
         ordered = sorted(scored)
         out["noise_p50"] = round(ordered[len(ordered) // 2], 3)
         out["noise_max"] = round(ordered[-1], 3)
+    kinds = {}
+    for seg in segments:
+        kind = getattr(seg, "noise_kind", None)
+        if kind:
+            kinds[kind] = kinds.get(kind, 0) + 1
+    if kinds:
+        out["noise_kinds"] = kinds
     return out

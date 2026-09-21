@@ -28,6 +28,8 @@ class Seg:
     crosses_cut: bool = False
     gap_before: float = None
     noise_score: float = None
+    noise_breakdown: dict = None
+    noise_kind: str = None
 
 
 def _timeline():
@@ -122,6 +124,9 @@ def test_noise_is_scored_over_what_the_segment_actually_holds():
             seen.append(list(spans))
             return 0.42
 
+        def breakdown(self, spans):
+            return {"noise_speech": 0.42, "noise_env": 0.0, "noise_room": 0.0}
+
     seg = Seg(4.0, 6.0)
     annotate([seg], _timeline(), noise=Track())
     assert seg.noise_score == 0.42
@@ -133,6 +138,81 @@ def test_no_detector_leaves_the_score_unset_rather_than_zero():
     seg = Seg(6.0, 7.0)
     annotate([seg], _timeline())
     assert seg.noise_score is None
+
+
+# --- what kind of noise it is ------------------------------------------------
+
+def _stub_track(breakdown, score=0.3):
+    class Track:
+        def score_spans(self, spans):
+            return score
+
+        def breakdown(self, spans):
+            return dict(breakdown)
+    return Track()
+
+
+def test_a_segment_is_labelled_with_the_noise_it_carries():
+    """noise_score says how much; this says what -- a filter treats voices
+    behind the speaker differently from traffic."""
+    numbers = {"noise_speech": 0.05, "noise_env": 0.31, "noise_room": 0.02}
+    seg = Seg(6.0, 7.0)
+
+    annotate([seg], _timeline(), noise=_stub_track(numbers))
+
+    assert seg.noise_kind == "noise_env"
+    assert seg.noise_breakdown == numbers, "the evidence travels with the word"
+
+
+def test_below_the_noticeable_level_is_clean_not_left_unset():
+    """Unset means "not checked". A segment that WAS checked and heard nothing
+    worth naming must not look like one that was never looked at."""
+    numbers = {"noise_speech": 0.02, "noise_env": 0.01, "noise_room": 0.03}
+    seg = Seg(6.0, 7.0)
+
+    annotate([seg], _timeline(), noise=_stub_track(numbers, score=0.03))
+
+    assert seg.noise_kind == "clean"
+    assert seg.noise_breakdown == numbers
+
+
+def test_an_unmeasured_segment_has_no_kind_and_no_numbers():
+    """No frames under the span: three Nones would look like a result."""
+    nothing = {"noise_speech": None, "noise_env": None, "noise_room": None}
+    seg = Seg(6.0, 7.0)
+
+    annotate([seg], _timeline(), noise=_stub_track(nothing, score=None))
+
+    assert seg.noise_score is None
+    assert seg.noise_breakdown is None
+    assert seg.noise_kind is None
+
+
+def test_no_detector_leaves_the_kind_unset_too():
+    seg = Seg(6.0, 7.0)
+    annotate([seg], _timeline())
+    assert seg.noise_kind is None and seg.noise_breakdown is None
+
+
+def test_the_real_track_labels_a_glued_segment_from_its_two_pieces_only():
+    """End to end on the real NoiseTrack: voices in the first piece, silence in
+    the second. The removed stretch between them must not be scored."""
+    import numpy as np
+    from utils.noise_map import NoiseTrack
+
+    fps = 100
+    speech = np.zeros(20 * fps, dtype=np.float32)
+    speech[4 * fps:5 * fps] = 0.6          # inside the first kept piece
+    speech[5 * fps:8 * fps] = 0.9          # inside the REMOVED stretch
+    track = NoiseTrack({"noise_speech": speech,
+                        "noise_env": np.zeros_like(speech),
+                        "noise_room": np.zeros_like(speech)}, fps=fps)
+    seg = Seg(4.0, 6.0)  # cut timeline: original 4-5 and 8-9
+
+    annotate([seg], _timeline(), noise=track)
+
+    assert seg.noise_kind == "noise_speech"
+    assert seg.noise_breakdown["noise_speech"] == pytest.approx(0.6, abs=0.05)
 
 
 # --- the manifest line -------------------------------------------------------
@@ -153,6 +233,8 @@ def test_the_summary_reports_noise_when_it_was_measured():
         def score_spans(self, spans):
             self.n += 1
             return 0.1 * self.n
+        def breakdown(self, spans):
+            return {"noise_speech": 0.0, "noise_env": 0.0, "noise_room": 0.0}
 
     segs = [Seg(6.0, 6.5), Seg(7.0, 7.5), Seg(8.0, 8.5)]
     annotate(segs, _timeline(), noise=Track())
@@ -224,3 +306,16 @@ def test_a_segment_glued_over_a_cut_is_scored_on_its_real_audio():
 
     assert seg.crosses_cut is True
     assert seg.noise_score < 0.1, "scored the audio it holds, not the gap"
+
+
+def test_the_summary_counts_how_many_segments_carry_each_kind():
+    segs = [Seg(6.0, 6.5), Seg(7.0, 7.5), Seg(8.0, 8.5)]
+    kinds = iter(["noise_env", "clean", "noise_env"])
+    for seg in segs:
+        seg.noise_kind = next(kinds)
+
+    assert summary(segs)["noise_kinds"] == {"noise_env": 2, "clean": 1}
+
+
+def test_the_summary_omits_the_kinds_when_none_was_assigned():
+    assert "noise_kinds" not in summary([Seg(6.0, 6.5)])

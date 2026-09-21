@@ -48,3 +48,19 @@ class TranscriptSegment:
     # Non-speech, non-music noise over the span, 0..1, or None when the
     # detector did not run. None is "not checked", not "clean".
     noise_score: Optional[float] = None
+    # The same measure taken on each AudioSet group separately, so a filter can
+    # treat voices differently from a fan: {"noise_speech", "noise_env",
+    # "noise_room"} -> 0..1. Background voices break diarization and put words
+    # in the transcript that nobody said, which is why the groups are kept
+    # apart. None when the detector did not run, like noise_score.
+    noise_breakdown: Optional[Dict[str, Optional[float]]] = None
+    # Which group is loudest, as a word: "noise_speech", "noise_env" or
+    # "noise_room" when it reaches utils.noise_map.NOTICEABLE, "clean" when it
+    # was measured and nothing does, None when it was not measured. "clean" only
+    # means below that provisional level; the numbers above are the evidence.
+    noise_kind: Optional[str] = None
+
+    # The diarizer's label, kept only when the speaker relabel pass changed
+    # `speaker`. None means the label is untouched. Nothing but `speaker` is ever
+    # rewritten by that pass, so this is the one trace that it ran on a segment.
+    speaker_original: Optional[str] = None

@@ -21,7 +21,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.noise_map import KINDS, NoiseTrack, build
+from utils.noise_map import CLEAN, KINDS, NOTICEABLE, NoiseTrack, build, dominant_kind
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -77,6 +77,61 @@ def test_the_breakdown_separates_voices_from_everything_else():
     out = track.breakdown([(0.0, 1.0)])
     assert out["noise_speech"] == pytest.approx(0.7, abs=0.01)
     assert out["noise_env"] == pytest.approx(0.0, abs=0.01)
+
+
+# --- naming the noise --------------------------------------------------------
+
+def _scores(speech=0.0, env=0.0, room=0.0):
+    return {"noise_speech": speech, "noise_env": env, "noise_room": room}
+
+
+def test_the_loudest_group_names_the_noise():
+    assert dominant_kind(_scores(speech=0.05, env=0.31, room=0.02)) == "noise_env"
+    assert dominant_kind(_scores(speech=0.28)) == "noise_speech"
+    assert dominant_kind(_scores(room=0.15)) == "noise_room"
+
+
+def test_nothing_reaching_the_noticeable_level_is_clean():
+    """The floor is the level the module already documents as worth noticing,
+    not a new number."""
+    below = NOTICEABLE - 0.01
+    assert dominant_kind(_scores(below, below, below)) == CLEAN
+
+
+def test_exactly_the_noticeable_level_counts():
+    assert dominant_kind(_scores(env=NOTICEABLE)) == "noise_env"
+
+
+def test_a_measured_silence_is_clean_and_an_unmeasured_one_is_not():
+    """Zero is a reading. No reading is not zero."""
+    assert dominant_kind(_scores()) == CLEAN
+    assert dominant_kind({k: None for k in KINDS}) is None
+    assert dominant_kind({}) is None
+    assert dominant_kind(None) is None
+
+
+def test_a_tie_goes_to_voices_because_they_break_diarization():
+    assert dominant_kind(_scores(0.2, 0.2, 0.2)) == "noise_speech"
+    assert dominant_kind(_scores(0.0, 0.2, 0.2)) == "noise_env"
+
+
+def test_a_group_that_was_not_measured_cannot_win():
+    partial = {"noise_speech": None, "noise_env": 0.02, "noise_room": None}
+    assert dominant_kind(partial) == CLEAN
+
+
+def test_the_floor_can_be_moved_by_the_caller():
+    """A stricter or looser cut-off belongs to whoever is filtering."""
+    scores = _scores(env=0.15)
+    assert dominant_kind(scores, floor=0.10) == "noise_env"
+    assert dominant_kind(scores, floor=0.20) == CLEAN
+
+
+def test_the_label_agrees_with_the_tracks_own_breakdown():
+    """Labels are read off breakdown(), so the two cannot drift apart."""
+    track = _track(noise_speech=np.zeros(100), noise_env=np.full(100, 0.4),
+                   noise_room=np.zeros(100))
+    assert dominant_kind(track.breakdown([(0.0, 1.0)])) == "noise_env"
 
 
 # --- unmeasured is not clean -------------------------------------------------
@@ -269,3 +324,84 @@ def test_the_log_line_uses_the_named_level_not_a_literal():
     source = open(os.path.join(root, "utils", "music_map.py"), encoding="utf-8").read()
     assert "from utils.noise_map import NOTICEABLE" in source
     assert ">= NOTICEABLE" in source
+
+
+# --- where the contamination is, given a level per group ---------------------
+
+LIMITS = {"noise_speech": 0.10, "noise_env": 0.15}
+
+
+def _curve(total_seconds, *bursts, level=0.3, base=0.0):
+    """A 100 fps curve of `base`, with (start, end) bursts raised to `level`."""
+    frames = np.full(int(total_seconds * 100), base, dtype=np.float32)
+    for start, end in bursts:
+        frames[int(start * 100):int(end * 100)] = level
+    return frames
+
+
+def test_share_over_counts_the_frames_at_or_over_the_level():
+    track = _track(noise_speech=_curve(10, (2.0, 4.0)))
+    assert track.share_over([(0.0, 10.0)], LIMITS) == pytest.approx(0.2)
+
+
+def test_exactly_the_level_counts_as_over():
+    track = _track(noise_speech=np.full(100, 0.10, dtype=np.float32))
+    assert track.share_over([(0.0, 1.0)], LIMITS) == 1.0
+
+
+def test_a_group_is_judged_against_its_own_level():
+    """Env at 0.12 is under env's 0.15; the same 0.12 on voices is over 0.10."""
+    env = _track(noise_env=np.full(100, 0.12, dtype=np.float32))
+    voices = _track(noise_speech=np.full(100, 0.12, dtype=np.float32))
+    assert env.share_over([(0.0, 1.0)], LIMITS) == 0.0
+    assert voices.share_over([(0.0, 1.0)], LIMITS) == 1.0
+
+
+def test_a_group_left_out_of_the_limits_is_ignored():
+    track = _track(noise_room=np.full(100, 0.9, dtype=np.float32))
+    assert track.share_over([(0.0, 1.0)], LIMITS) is None
+
+
+def test_any_group_being_over_makes_the_frame_over_once():
+    track = _track(noise_speech=_curve(10, (1.0, 3.0)),
+                   noise_env=_curve(10, (2.0, 4.0)))
+    assert track.share_over([(0.0, 10.0)], LIMITS) == pytest.approx(0.3)
+
+
+def test_unmeasured_spans_report_none_not_zero():
+    track = _track(noise_speech=_curve(5))
+    assert track.share_over([(20.0, 30.0)], LIMITS) is None
+    assert track.longest_run_over([(20.0, 30.0)], LIMITS) is None
+    assert NoiseTrack().share_over([(0.0, 1.0)], LIMITS) is None
+    assert NoiseTrack().sustained_spans(LIMITS, 1.0) == []
+
+
+def test_the_longest_run_is_the_longest_unbroken_stretch():
+    track = _track(noise_speech=_curve(20, (1.0, 2.0), (5.0, 8.5)))
+    assert track.longest_run_over([(0.0, 20.0)], LIMITS) == pytest.approx(3.5)
+
+
+def test_a_run_is_not_bridged_across_two_spans():
+    """The two pieces of a glued segment are not contiguous in the recording."""
+    track = _track(noise_speech=_curve(20, (4.0, 6.0), (10.0, 12.0)))
+    assert track.longest_run_over([(4.0, 6.0), (10.0, 12.0)], LIMITS) == pytest.approx(2.0)
+
+
+def test_a_quiet_span_has_a_zero_run_rather_than_none():
+    track = _track(noise_speech=_curve(10))
+    assert track.longest_run_over([(0.0, 10.0)], LIMITS) == 0.0
+
+
+def test_only_lasting_noise_is_a_sustained_span():
+    track = _track(noise_speech=_curve(30, (2.0, 2.5), (10.0, 13.0)))
+    assert track.sustained_spans(LIMITS, min_seconds=2.0) == [(10.0, 13.0)]
+
+
+def test_a_run_that_straddles_two_turns_is_still_one_sustained_span():
+    track = _track(noise_speech=_curve(30, (9.0, 12.0)))
+    assert track.sustained_spans(LIMITS, min_seconds=2.0) == [(9.0, 12.0)]
+
+
+def test_a_run_that_touches_the_end_of_the_track_is_closed():
+    track = _track(noise_speech=_curve(10, (7.0, 10.0)))
+    assert track.sustained_spans(LIMITS, min_seconds=2.0) == [(7.0, 10.0)]

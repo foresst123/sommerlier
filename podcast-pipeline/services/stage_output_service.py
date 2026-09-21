@@ -103,6 +103,8 @@ class StageOutputService:
         "music_removal": "04_music_removal",
         "asr": "05_asr",
         "refinement": "06_refinement",
+        "relabel": "07_relabel",
+        "dialogue_clips": "08_dialogue_clips",
     }
 
     def __init__(self, output_dir: str, logger=None, enabled: bool = True):
@@ -437,6 +439,69 @@ class StageOutputService:
                     "06_refinement/changes.json for deleted content")
             extra = {"changes.json": changes}
         return self._finish("refinement", "transcripts.json", transcripts, stats, extra)
+
+    def write_relabel(self, report: dict):
+        """What the speaker relabel pass changed, and every proposal it refused.
+
+        Only `speaker` is ever rewritten by that pass, so this directory is the
+        whole record of it: `changes.json` is what was applied, `rejected.json`
+        is what was proposed and refused with the reason -- the place to look
+        when a label looks wrong, or when the model is proposing nonsense.
+        """
+        stats = {k: report.get(k) for k in (
+            "segments", "windows", "failed_windows", "changed",
+            "changed_fraction", "skipped", "discarded")}
+        warnings = []
+        if report.get("discarded"):
+            warnings.append(
+                f"the model proposed too many changes ({report['discarded']}); "
+                "every original label was kept")
+        if report.get("failed_windows"):
+            warnings.append(
+                f"{report['failed_windows']} of {report.get('windows', 0)} "
+                "window(s) got no answer; those labels were left as they were")
+        if warnings:
+            stats["warnings"] = warnings
+        return self._finish(
+            "relabel", "changes.json", report.get("applied", []), stats,
+            extra={"rejected.json": report.get("rejected", []),
+                   "report.json": report})
+
+    def write_dialogue_clips(self, report: dict, clips: List[dict]):
+        """What the clip pass found, judged and wrote -- and why it wrote few.
+
+        The audio and per-clip JSON live in `dialogue_clips/` beside the final
+        export; this directory holds the accounting: `clips.json` is one row per
+        clip written, `report.json` carries the finder's counts (how many blocks
+        each rule ended, how many windows each noise or music gate refused, how
+        many the model turned down), which is where to look when a recording
+        gives nothing and the thresholds need moving.
+        """
+        finder = report.get("finder") or {}
+        stats = {
+            "candidates": report.get("candidates"),
+            "shortlisted": report.get("shortlisted"),
+            "accepted": report.get("accepted"),
+            "exported": report.get("exported"),
+            "skipped": report.get("skipped"),
+            "blocks": finder.get("blocks"),
+            "blocks_short": finder.get("blocks_short"),
+            "noise_measured": finder.get("noise_measured"),
+        }
+        warnings = []
+        if report.get("skipped") == "noise_not_measured":
+            warnings.append(
+                "no noise labels for this file, so no clip was cut; turn on "
+                "music_analysis (SSLAM) or set models.dialogue_clips.require_noise "
+                "to false")
+        if report.get("skipped") == "llm_unavailable":
+            warnings.append("the LLM was not available for the semantic check")
+        if report.get("unanswered"):
+            warnings.append(f"{report['unanswered']} candidate(s) got no answer")
+        if warnings:
+            stats["warnings"] = warnings
+        return self._finish("dialogue_clips", "clips.json", clips, stats,
+                            extra={"report.json": report})
 
     # -- separated audio ------------------------------------------------
     def write_separated_audio(self, segments, sample_rate: int) -> dict:

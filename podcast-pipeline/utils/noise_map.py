@@ -48,6 +48,35 @@ KINDS = ("noise_speech", "noise_env", "noise_room")
 # which is where the ceiling would rise if it rises anywhere.
 NOTICEABLE = float(os.environ.get("NOISE_NOTICEABLE", "0.10"))
 
+# What a segment is labelled when it was measured and no group reached
+# NOTICEABLE. A word for "nothing worth naming", not proof of a clean
+# recording: NOTICEABLE is provisional and was set from indoor material only.
+CLEAN = "clean"
+
+
+def dominant_kind(breakdown, floor=None):
+    """Name the noise a segment carries, from its per-group scores.
+
+    The loudest of the three groups, provided it reaches `floor` (NOTICEABLE
+    unless told otherwise); CLEAN when it was measured and nothing does; None
+    when nothing was measured at all, which is "not checked", not "clean".
+
+    This puts one threshold into a label, which noise_score deliberately does
+    not -- so the per-group numbers travel beside it (`noise_breakdown`), and
+    anyone who wants a different cut-off, or a stricter one for voices, applies
+    it to those instead of to this word.
+
+    A tie goes to the earlier group in KINDS. That is speech, the one that
+    breaks diarization, so the label errs toward the worse diagnosis.
+    """
+    floor = NOTICEABLE if floor is None else floor
+    measured = {k: v for k, v in (breakdown or {}).items()
+                if k in KINDS and v is not None}
+    if not measured:
+        return None
+    kind = max(KINDS, key=lambda k: measured.get(k, -1.0))
+    return kind if measured[kind] >= floor else CLEAN
+
 
 class NoiseTrack:
     """Framewise noise strength for one recording, in the ORIGINAL timeline.
@@ -111,6 +140,85 @@ class NoiseTrack:
             out[kind] = (round(float(np.percentile(frames, percentile)), 4)
                          if len(frames) else None)
         return out
+
+    # -- where the contamination is, given a level per group ---------------
+    #
+    # `limits` maps a group name to the level at which that group is worth
+    # noticing ({"noise_speech": 0.10, "noise_env": 0.15}). A frame is "over" when
+    # ANY listed group reaches its own level, exactly at the level counting --
+    # the same rule `dominant_kind` uses. Groups left out of `limits`, or that
+    # were not measured, are ignored, so asking about voices alone is one entry.
+    # Everything returns None or [] for a span nobody measured: "not checked" is
+    # never turned into "clean".
+
+    def _over(self, lo, hi, limits):
+        """Boolean per frame in [lo, hi), or None when no listed group has any."""
+        pieces = []
+        for kind, limit in limits.items():
+            curve = self.curves.get(kind)
+            if curve is None or not len(curve):
+                continue
+            top = min(len(curve), hi)
+            if top > lo:
+                pieces.append(curve[lo:top] >= limit)
+        if not pieces:
+            return None
+        width = min(len(p) for p in pieces)
+        return np.logical_or.reduce([p[:width] for p in pieces])
+
+    def _span_frames(self, start, end):
+        return (max(0, int(float(start) * self.fps)),
+                int(np.ceil(float(end) * self.fps)))
+
+    @staticmethod
+    def _longest_true_run(flags) -> int:
+        if flags is None or not len(flags) or not flags.any():
+            return 0
+        edges = np.diff(np.concatenate(([0], flags.astype(np.int8), [0])))
+        return int((np.where(edges == -1)[0] - np.where(edges == 1)[0]).max())
+
+    def share_over(self, spans, limits):
+        """Fraction of the frames in `spans` that are over, or None if unmeasured."""
+        over = total = 0
+        for start, end in spans:
+            flags = self._over(*self._span_frames(start, end), limits)
+            if flags is not None:
+                over += int(flags.sum())
+                total += len(flags)
+        return round(over / total, 4) if total else None
+
+    def longest_run_over(self, spans, limits):
+        """Longest unbroken stretch over, in seconds; None if unmeasured.
+
+        Per span, never across two: the pieces of a glued segment are not
+        contiguous in the recording, and a run that appears to bridge them would
+        be two short ones.
+        """
+        longest, measured = 0, False
+        for start, end in spans:
+            flags = self._over(*self._span_frames(start, end), limits)
+            if flags is not None:
+                measured = True
+                longest = max(longest, self._longest_true_run(flags))
+        return round(longest / self.fps, 3) if measured else None
+
+    def sustained_spans(self, limits, min_seconds: float):
+        """Stretches of the whole recording over for at least `min_seconds`.
+
+        (start, end) in the original timeline, in order. The filter that breaks a
+        conversation at a lasting noise reads this once per recording, so a run
+        that straddles two turns is one stretch rather than two short ones that
+        each look harmless.
+        """
+        widest = max((len(c) for c in self.curves.values()), default=0)
+        flags = self._over(0, widest, limits)
+        if flags is None:
+            return []
+        need = max(1, int(np.ceil(float(min_seconds) * self.fps)))
+        edges = np.diff(np.concatenate(([0], flags.astype(np.int8), [0])))
+        starts, ends = np.where(edges == 1)[0], np.where(edges == -1)[0]
+        return [(round(float(a) / self.fps, 3), round(float(b) / self.fps, 3))
+                for a, b in zip(starts, ends) if b - a >= need]
 
     def to_json(self, decimals: int = 3) -> dict:
         """Rounded so a 50-minute track is kilobytes, not megabytes.

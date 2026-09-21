@@ -18,7 +18,7 @@ from utils import steps
 
 STEPS = ("music_analysis", "music_removal",
          "cut_music", "diarization", "separation", "asr", "captioning",
-         "refinement", "export")
+         "refinement", "speaker_relabel", "dialogue_clips", "export")
 
 
 def _args(**kw):
@@ -59,6 +59,20 @@ def test_one_flag_can_gate_two_steps_independently():
     args = _args(music=True, step_music_removal=False)
     assert PipelineService.step_enabled(args, "music_analysis")
     assert not PipelineService.step_enabled(args, "music_removal")
+
+
+def test_an_opt_in_step_is_off_unless_it_was_asked_for():
+    """A step that writes new output must not start running just because a
+    profile written before it existed says nothing about it."""
+    assert not steps.opt_in_step_enabled(_args(), "dialogue_clips")
+    assert not steps.opt_in_step_enabled(_args(step_dialogue_clips=None), "dialogue_clips")
+    assert not steps.opt_in_step_enabled(_args(step_dialogue_clips=False), "dialogue_clips")
+    assert steps.opt_in_step_enabled(_args(step_dialogue_clips=True), "dialogue_clips")
+
+
+def test_the_ordinary_rule_would_switch_the_same_step_on():
+    """Which is why the opt-in rule exists: silence means ON for `step_enabled`."""
+    assert PipelineService.step_enabled(_args(), "dialogue_clips")
 
 
 # --- the profile -------------------------------------------------------------

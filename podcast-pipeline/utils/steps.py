@@ -32,6 +32,18 @@ def step_enabled(args, name: str) -> bool:
     return bool(getattr(args, legacy, True)) if legacy else True
 
 
+def opt_in_step_enabled(args, name: str) -> bool:
+    """Whether an opt-in `name` runs: only when the profile or --steps says so.
+
+    `step_enabled` treats a step nobody listed as ON, which is right for every
+    stage that existed before `steps` did and wrong for one that produces new
+    output. Under that rule a profile written before the step existed would
+    start writing it the next time it was run. Here silence means off, and
+    "not checked" is never read as "wanted".
+    """
+    return getattr(args, f"step_{name}", None) is True
+
+
 def will_run(args, name: str) -> bool:
     """Whether this run actually reaches `name`.
 

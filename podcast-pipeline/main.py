@@ -307,6 +307,8 @@ from services.music_service import MusicService
 from services.asr_service import ASRService
 from services.caption_service import CaptionService
 from services.diarization_refinement_service import DiarizationRefinementService
+from services.speaker_relabel_service import SpeakerRelabelService
+from services.dialogue_clip_service import DialogueClipService
 from services.export_service import ExportService
 from services.pipeline_service import PipelineService
 from services.qwen3_worker_service import Qwen3WorkerService
@@ -643,6 +645,16 @@ def main():
             refinement_cfg["pipeline_devices"] = [args.gpu_1, args.gpu_2]
             refinement_cfg["device"] = f"cuda:{args.gpu_1}"
         refinement_svc = DiarizationRefinementService(logger=logger, **refinement_cfg)
+        # Passes over the same resident LLM. Building them loads nothing and
+        # switches nothing on: `steps.speaker_relabel` decides whether it runs.
+        # An unknown key in `models.relabel` raises here, so a typo is an error
+        # rather than a setting that quietly did not apply.
+        relabel_svc = SpeakerRelabelService(
+            refinement_svc, logger=logger,
+            **dict(env_profile.get("models", {}).get("relabel", {})))
+        clip_svc = DialogueClipService(
+            refinement_svc, logger=logger,
+            **dict(env_profile.get("models", {}).get("dialogue_clips", {})))
         export_svc = ExportService(logger=logger)
 
         # 4. Orchestrate via PipelineService
@@ -656,6 +668,8 @@ def main():
                 "sidon": sidon_service,
             },
             performance_monitor=performance_monitor,
+            relabel_svc=relabel_svc,
+            clip_svc=clip_svc,
         )
         
         # One worker set serves the whole batch: loading models per file cost

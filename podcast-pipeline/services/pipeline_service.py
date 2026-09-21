@@ -1,12 +1,14 @@
 import os
 import copy
+import contextlib
 import threading
 from typing import Any
 from utils.checkpoint import CheckpointManager
 from utils.music_map import MusicMap, build_maps
 from utils.noise_map import NoiseTrack
 from utils.excise import TimelineMap, excise
-from utils.steps import LEGACY_FLAG, step_enabled
+from utils.steps import LEGACY_FLAG, opt_in_step_enabled, step_enabled
+from services.speaker_relabel_service import apply_relabels
 from services.stage_output_service import StageOutputService
 from schemas.audio import AudioData
 
@@ -30,7 +32,9 @@ class PipelineService:
                  logger=None,
                  model_loader=None,
                  worker_services=None,
-                 performance_monitor=None):
+                 performance_monitor=None,
+                 relabel_svc=None,
+                 clip_svc=None):
         self.audio_svc = audio_svc
         self.diarization_svc = diarization_svc
         self.separation_svc = separation_svc
@@ -39,9 +43,22 @@ class PipelineService:
         self.caption_svc = caption_svc
         self.refinement_svc = refinement_svc
         self.export_svc = export_svc
+        # Optional passes over the resident refinement LLM. Both are opt-in
+        # steps (utils.steps.opt_in_step_enabled): passing the service in does
+        # not switch the step on, the profile has to.
+        self.relabel_svc = relabel_svc
+        self.clip_svc = clip_svc
         self.logger = logger
         self.model_loader = model_loader
         self.performance_monitor = performance_monitor
+        # One file at a time through SSLAM. It loads its model on first call
+        # and keeps a set it mutates while running, so two files entering it
+        # together can build it twice. Serialising also gives the music stage
+        # its shape: file N+1 is classified on device_1 while file N is
+        # separated on device_2, instead of both queuing for the same card.
+        # Created once here, so every parallel_stage_view copy holds the
+        # same lock object.
+        self._tagger_lock = threading.Lock()
         # Ánh xạ tên sang dịch vụ worker để giải phóng VRAM ngay khi xong bước.
         self.worker_services = worker_services or {}
         # Timeline sau cắt nhạc. Rỗng nghĩa là chưa cắt phần nào của bản ghi.
@@ -65,7 +82,7 @@ class PipelineService:
         are copied so two files cannot overwrite each other's excision seams
         while their DiariZen requests are in flight.
         """
-        if stage not in ("diarization", "separation"):
+        if stage not in ("music", "diarization", "separation"):
             return self
         view = copy.copy(self)
         view.diarization_svc = copy.copy(self.diarization_svc)
@@ -73,8 +90,20 @@ class PipelineService:
             view.separation_svc = self.separation_svc.fork_for_file()
         else:
             view.separation_svc = copy.copy(self.separation_svc)
+        # music_svc holds no per-file state beyond the cached bs_roformer
+        # reference -- copied so `self.music_svc.bs_roformer = ...` in run()
+        # assigns each file's own slot instead of racing on one. What must NOT
+        # be per-file is BS-RoFormer's checkout queue: it lives in a dict that
+        # music_svc creates once, and a shallow copy shares that dict, so every
+        # file's view checks separators out of the same queue.
+        view.music_svc = copy.copy(self.music_svc)
         view.refinement_svc = copy.copy(self.refinement_svc)
         view.timeline = TimelineMap()
+        # noise_track is written mid-run() (music-analysis step, before
+        # diarization even for a "diarization"-stage pass reading it back from
+        # checkpoint), so a shared PipelineService would let two concurrent
+        # files stomp on each other's here regardless of which stage asked
+        # for a view.
         view.noise_track = None
         return view
 
@@ -315,6 +344,69 @@ class PipelineService:
             raise
         return getattr(service, "process", None)
 
+    def _extract_clips(self, stage_out, transcripts, audio_data, music_map,
+                       output_dir, audio_path):
+        """Cut two-person conversation clips from the audio the pipeline worked on.
+
+        Runs after relabel, so a stray third label does not end a conversation,
+        and while the LLM is still resident. The waveform is the processed one --
+        music already stripped, cuts already made -- so the segments' timestamps
+        line up with it. The noise track and music map are the SSLAM outputs of
+        this same run; when there is no noise track the pass says so and cuts
+        nothing rather than reading "not measured" as "clean".
+
+        Not checkpointed: judging a couple of dozen candidates is quick next to
+        the stages before it, and the files are overwritten in place.
+        """
+        # The music map is in the original timeline; the clips are cut in the
+        # shortened one. With nothing cut the two are the same map.
+        music_cut = (music_map.remap(self.timeline)
+                     if music_map is not None and self.timeline else music_map)
+        base_name = os.path.splitext(os.path.basename(audio_path))[0]
+        result = self.clip_svc.run(
+            transcripts, timeline=self.timeline,
+            noise=getattr(self, "noise_track", None), music_map=music_cut,
+            waveform=audio_data.waveform, sample_rate=audio_data.sample_rate,
+            out_dir=os.path.join(output_dir, "dialogue_clips"), base_name=base_name)
+        stage_out.write_dialogue_clips(result.report, result.clips)
+        return result
+
+    def _relabel_speakers(self, checkpoint, stage_out, transcripts, speech_segments):
+        """Reassign speaker labels from the whole transcript. Only `speaker` changes.
+
+        What is checkpointed is the decision (segment index -> speaker), not the
+        relabelled transcripts: run() is re-entered once per stage and reloads
+        the refinement checkpoint, which predates this pass. The decision is
+        applied again to whatever was loaded, transcripts and separation
+        segments alike, so both stay in step on every entry.
+        """
+        svc = self.relabel_svc
+        checkpoint.namespaces["speaker_relabel"] = svc.checkpoint_namespace
+        if checkpoint.exists("speaker_relabel"):
+            payload = checkpoint.load("speaker_relabel") or {}
+            changed = apply_relabels(
+                transcripts, payload.get("mapping", {}), speech_segments)
+            if self.logger:
+                self.logger.info(
+                    f"Loading speaker relabel from checkpoint ({changed} segment(s))")
+            return transcripts
+
+        # The model reads the gap before each turn; it is written by the same
+        # pass that fills the export, and is safe to write twice.
+        from utils.provenance import annotate as annotate_provenance
+        annotate_provenance(transcripts, self.timeline,
+                            noise=getattr(self, "noise_track", None))
+        result = svc.relabel(transcripts)
+        apply_relabels(transcripts, result.mapping, speech_segments)
+        report = result.to_report()
+        # A pass that never got an answer must be tried again next time, not
+        # remembered as done.
+        if result.skipped is None and result.failed_windows < result.windows:
+            checkpoint.save("speaker_relabel",
+                            {"mapping": result.mapping, "report": report})
+        stage_out.write_relabel(report)
+        return transcripts
+
 
     def _resolve_output_dir(self, args, audio_path: str) -> str:
         """Xác định duy nhất thư mục đầu ra riêng cho mỗi file.
@@ -423,9 +515,15 @@ class PipelineService:
                 # Chỉ tải model phân loại. Model tách nhạc sẽ tải nếu thực sự phát hiện nền.
                 self._load("tagger")
                 detector = self.model_loader.get("tagger") if self.model_loader else None
-                music_map, self.noise_track = build_maps(
-                    audio_data.waveform, audio_data.sample_rate, detector,
-                    logger=self.logger)
+                # _load above must stay outside this lock: the loader has its own
+                # lock, and taking them in opposite orders from two files would
+                # deadlock.
+                tagger_lock = getattr(self, "_tagger_lock", None)
+                with (tagger_lock if tagger_lock is not None
+                      else contextlib.nullcontext()):
+                    music_map, self.noise_track = build_maps(
+                        audio_data.waveform, audio_data.sample_rate, detector,
+                        logger=self.logger)
                 checkpoint.save("music_map", music_map.to_json())
                 # Giữ timeline GỐC vì bước truy nguồn cần chấm trên các khoảng thời gian gốc.
                 checkpoint.save("noise_track", self.noise_track.to_json(), fmt="json")
@@ -738,7 +836,24 @@ class PipelineService:
             computed.add("refinement")
             stage_out.write_refinement(transcripts, before=before)
 
-        if self.step_enabled(args, "refinement"):
+        # 7b. Speaker relabel: the same resident LLM reads the whole transcript
+        # and may reassign a segment's speaker. Nothing else about a segment is
+        # touched. Opt-in: a profile that does not list it does not run it.
+        relabel_on = (self.relabel_svc is not None
+                      and opt_in_step_enabled(args, "speaker_relabel"))
+        if relabel_on and transcripts is not None:
+            transcripts = self._relabel_speakers(
+                checkpoint, stage_out, transcripts, speech_segments)
+
+        # 7c. Dialogue clips: cut self-contained two-person stretches, judged by
+        # the same resident LLM. Opt-in and off in the shipped profiles.
+        clips_on = (self.clip_svc is not None
+                    and opt_in_step_enabled(args, "dialogue_clips"))
+        if clips_on and transcripts is not None:
+            self._extract_clips(
+                stage_out, transcripts, audio_data, music_map, output_dir, audio_path)
+
+        if self.step_enabled(args, "refinement") or relabel_on or clips_on:
             if not getattr(args, "keep_models", False):
                 self._defer_or_run(self.refinement_svc.unload)
 

@@ -150,12 +150,18 @@ def too_short_to_refine(seg) -> bool:
 class DiarizationRefinementService:
     """Fuses the ASR transcripts of one segment into its final text.
 
-    Despite the name, speaker labels are not touched: nothing here writes to a
-    segment's speaker, and no pass downstream moves one speaker's audio under
-    another's label. Diarization decides who spoke, and its clustering is the
-    only place two voices become one. This stage takes the text the voters
-    produced for a segment and returns better text for that same segment, or
-    keeps the ROVER text when the guards reject what the model returned.
+    Despite the name, speaker labels are not touched here: nothing in this
+    class writes to a segment's speaker. It takes the text the voters produced
+    for a segment and returns better text for that same segment, or keeps the
+    ROVER text when the guards reject what the model returned.
+
+    Speaker labels can still change later, in a separate pass:
+    `services/speaker_relabel_service.SpeakerRelabelService` reuses this
+    resident model to reassign a segment's speaker (and only that field) from
+    the whole transcript. That pass has no audio to check against, which is the
+    reason it lives apart from fusion and carries its own guards -- this class
+    keeps the invariant that the text it returns belongs to the segment it was
+    given.
     """
 
     # The ~1200-token system prompt dominates each sequence, so even a modest
@@ -816,8 +822,55 @@ class DiarizationRefinementService:
                     f"prompts: {e}")
             return False
 
-    def _refine_batch(self, batch, system_prompt):
-        """Refine one batch in place. Returns (succeeded, refined_count)."""
+    def count_tokens(self, text: str) -> int:
+        """Tokens `text` takes for this model's tokenizer. Needs the model loaded."""
+        return len(self.tokenizer(text, add_special_tokens=False).input_ids)
+
+    def ensure_loaded(self) -> bool:
+        """Load the LLM if it is not resident yet. False when it cannot be used.
+
+        For passes other than `refine()` (speaker relabel, dialogue-clip
+        judging) that run on the same model: `refine()` loads it itself, but
+        those passes must work with refinement switched off too.
+        """
+        self._load_model()
+        return self.model is not None
+
+    def generate_texts(self, system_prompt, user_messages, max_new_tokens=512,
+                       use_prefix=False, labels=None):
+        """Run one batch of chat requests. Returns (succeeded, decoded_texts).
+
+        The model-facing half of `_refine_batch`, split out so other passes over
+        the same resident LLM (speaker relabel, dialogue-clip judging) share its
+        OOM handling, `max_batch_tokens` guard and pipelined-GPU path instead of
+        loading a second copy. `succeeded` is False when the batch did not fit
+        or generation failed; the caller decides whether to halve and retry.
+
+        The model must already be loaded (`ensure_loaded`). `labels` only names
+        the requests in log lines. `use_prefix` is for the fusion prompt only:
+        the cached prefix is keyed on that one system prompt, and a different
+        prompt must not reuse it.
+        """
+        if not self.model:
+            return False, []
+        tag = (", ".join(str(label) for label in labels) if labels
+               else f"{len(user_messages)} request(s)")
+        tokenizer = self.tokenizer
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        # Decoder-only models need left padding for correct batched generation.
+        # refine() sets it around its whole loop; other callers do not, so it is
+        # set here too and put back afterwards.
+        original_padding_side = tokenizer.padding_side
+        tokenizer.padding_side = "left"
+        try:
+            return self._generate_batch(
+                system_prompt, user_messages, max_new_tokens, use_prefix, tag)
+        finally:
+            tokenizer.padding_side = original_padding_side
+
+    def _generate_batch(self, system_prompt, user_messages, max_new_tokens,
+                        use_prefix, tag):
         tokenizer = self.tokenizer
         texts = [
             tokenizer.apply_chat_template(
@@ -826,16 +879,16 @@ class DiarizationRefinementService:
                 tokenize=False, add_generation_prompt=True,
                  enable_thinking=False,
             )
-            for _, user_msg in batch
+            for user_msg in user_messages
         ]
 
         try:
             inputs = tokenizer(texts, return_tensors="pt", padding=True)
             if (self.max_batch_tokens and
                     int(inputs.attention_mask.sum()) > self.max_batch_tokens):
-                return False, 0
+                return False, []
             gen_kwargs = dict(
-                max_new_tokens=512,
+                max_new_tokens=max_new_tokens,
                 do_sample=False,
                 temperature=None,
                 top_p=None,
@@ -874,9 +927,10 @@ class DiarizationRefinementService:
                 # the same sequence -- only the prefix's attention is not
                 # recomputed. Anything unexpected falls through to the full
                 # prompt path below.
-                if self._build_prefix(system_prompt, batch[0][1]):
+                if use_prefix and self._build_prefix(system_prompt, user_messages[0]):
                     self._prepare_cached_inputs(
-                        batch, system_prompt, inputs, gen_kwargs)
+                        [(None, msg) for msg in user_messages],
+                        system_prompt, inputs, gen_kwargs)
 
                 with torch.no_grad():
                     generated_ids = self.model.generate(**inputs, **gen_kwargs)
@@ -885,25 +939,14 @@ class DiarizationRefinementService:
                 decoded = tokenizer.batch_decode(
                     generated_ids[:, prompt_len:], skip_special_tokens=True
                 )
-            count = 0
-            for (seg, _), refined_text in zip(batch, decoded):
-                refined_text = _THINK_RE.sub("", refined_text)
-                refined_text = refined_text.split("</think>")[-1].strip()
-                if not refined_text:
-                    continue
-                if not self._accept(seg, refined_text):
-                    self.rejected += 1
-                    continue
-                seg.text = refined_text
-                count += 1
-            return True, count
+            return True, decoded
 
         except torch.cuda.OutOfMemoryError as e:
             torch.cuda.empty_cache()
             if self.logger:
-                indices = ", ".join(seg.index for seg, _ in batch)
-                self.logger.warning(f"LLM out of memory on [{indices}] (batch {len(batch)}): {e}")
-            return False, 0
+                self.logger.warning(
+                    f"LLM out of memory on [{tag}] (batch {len(user_messages)}): {e}")
+            return False, []
         except Exception as e:
             if self.pipeline_pool is not None:
                 # The weights are still a valid Accelerate device map. Disable
@@ -916,8 +959,28 @@ class DiarizationRefinementService:
                     self.logger.warning(
                         f"LLM pipeline scheduler failed ({e}); retrying this and "
                         "later batches with serial sharded generation")
-                return self._refine_batch(batch, system_prompt)
+                return self._generate_batch(
+                    system_prompt, user_messages, max_new_tokens, use_prefix, tag)
             if self.logger:
-                indices = ", ".join(seg.index for seg, _ in batch)
-                self.logger.warning(f"LLM failed on segments [{indices}]: {e}")
+                self.logger.warning(f"LLM failed on [{tag}]: {e}")
+            return False, []
+
+    def _refine_batch(self, batch, system_prompt):
+        """Refine one batch in place. Returns (succeeded, refined_count)."""
+        ok, decoded = self.generate_texts(
+            system_prompt, [user_msg for _, user_msg in batch],
+            use_prefix=True, labels=[seg.index for seg, _ in batch])
+        if not ok:
             return False, 0
+        count = 0
+        for (seg, _), refined_text in zip(batch, decoded):
+            refined_text = _THINK_RE.sub("", refined_text)
+            refined_text = refined_text.split("</think>")[-1].strip()
+            if not refined_text:
+                continue
+            if not self._accept(seg, refined_text):
+                self.rejected += 1
+                continue
+            seg.text = refined_text
+            count += 1
+        return True, count
