@@ -99,7 +99,7 @@ def _build_parser():
                              "higher peak: only use it when the GPU has room for every model at once.")
     parser.add_argument("--performance", action="store_true",
                         help="Turn on the performance scheduling path (true ASR batching, "
-                             "sharded refinement, split diarization placement, telemetry). "
+                             "pipelined refinement, split diarization placement, telemetry). "
                              "Forces it on for a profile whose performance.enabled "
                              "is false; a profile that already enables it ignores the flag.")
     parser.add_argument("--no_stage_output", action="store_true",
@@ -582,8 +582,11 @@ def main():
         # the device_map and batch rules the baseline was measured with.
         if perf_cfg["enabled"]:
             refinement_perf = perf_cfg["stages"]["refinement"]
-            for key in ("placement", "gpu_memory_utilization", "max_batch_tokens"):
+            for key in ("placement", "gpu_memory_utilization", "max_batch_tokens",
+                        "micro_batch_size", "pipeline_split_ratio"):
                 refinement_cfg[key] = refinement_perf[key]
+            refinement_cfg["pipeline_devices"] = [args.gpu_1, args.gpu_2]
+            refinement_cfg["device"] = f"cuda:{args.gpu_1}"
         refinement_svc = DiarizationRefinementService(logger=logger, **refinement_cfg)
         export_svc = ExportService(logger=logger)
 

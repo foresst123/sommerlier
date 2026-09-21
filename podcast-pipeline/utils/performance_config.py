@@ -46,6 +46,8 @@ _STAGES = {
         "placement": (STR, "auto", None, None),
         "gpu_memory_utilization": (FLOAT, 0.82, 0.50, 0.95),
         "max_batch_tokens": (INT, 0, 0, 1000000),
+        "micro_batch_size": (INT, 1, 1, 1024),
+        "pipeline_split_ratio": (FLOAT, 0.5, 0.20, 0.80),
     },
     "diarization": {
         "workers": (INT, 1, 1, 1),
@@ -62,7 +64,7 @@ _STAGES = {
 }
 
 _ENUMS = {
-    ("refinement", "placement"): ("auto", "balanced", "sharded"),
+    ("refinement", "placement"): ("auto", "balanced", "sharded", "pipelined"),
     ("diarization", "placement"): ("single", "split_components"),
 }
 

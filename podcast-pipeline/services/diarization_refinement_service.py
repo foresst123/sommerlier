@@ -164,7 +164,9 @@ class DiarizationRefinementService:
                  torch_dtype: str = "bfloat16", prefix_cache: bool = False,
                  device: str = "cuda:0",
                  placement: str = "auto", gpu_memory_utilization: float = 0.82,
-                 max_batch_tokens: int = 0):
+                 max_batch_tokens: int = 0,
+                 pipeline_devices=None, micro_batch_size: int = 1,
+                 pipeline_split_ratio: float = 0.5):
         self.logger = logger
         self.model = None
         self.tokenizer = None
@@ -176,6 +178,11 @@ class DiarizationRefinementService:
         self.gpu_memory_utilization = min(
             0.95, max(0.50, float(gpu_memory_utilization)))
         self.max_batch_tokens = max(0, int(max_batch_tokens))
+        self.pipeline_devices = tuple(pipeline_devices or ())
+        self.micro_batch_size = max(1, int(micro_batch_size))
+        self.pipeline_split_ratio = min(
+            0.80, max(0.20, float(pipeline_split_ratio)))
+        self.pipeline_pool = None
         # Every request repeats the same ~1200-token system prompt, and without
         # this each batch re-runs the attention over it from scratch. Caching
         # its keys and values once per stage cuts the prefill by 43% at batch 2
@@ -208,20 +215,88 @@ class DiarizationRefinementService:
             
         if self.logger: self.logger.info(f"Loading LLM {self.model_name} for refinement...")
         try:
-            from transformers import AutoModelForCausalLM, AutoTokenizer
+            from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
             # bfloat16 keeps fp32's exponent range, so activations cannot
             # overflow the way they can in fp16. It only runs natively from
             # Ampere onwards -- Turing emulates it -- so the profile picks.
             dtype = getattr(torch, self.torch_dtype, torch.bfloat16)
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
             device_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+            wants_pipeline = (
+                self.placement == "pipelined"
+                and len(self.pipeline_devices) == 2
+                and self.pipeline_devices[0] != self.pipeline_devices[1]
+                and all(0 <= int(device) < device_count
+                        for device in self.pipeline_devices)
+            )
+
+            if wants_pipeline:
+                try:
+                    from services.refinement_pipeline_pool import RefinementPipelinePool
+
+                    config = AutoConfig.from_pretrained(self.model_name)
+                    layer_count = int(config.num_hidden_layers)
+                    split_layer = max(1, min(
+                        layer_count - 1,
+                        round(layer_count * self.pipeline_split_ratio),
+                    ))
+                    device_map = RefinementPipelinePool.build_device_map(
+                        layer_count, self.pipeline_devices, split_layer)
+                    max_memory = {
+                        int(index): int(torch.cuda.get_device_properties(int(index)).total_memory
+                                        * self.gpu_memory_utilization)
+                        for index in self.pipeline_devices
+                    }
+                    self.model = AutoModelForCausalLM.from_pretrained(
+                        self.model_name,
+                        torch_dtype=dtype,
+                        device_map=device_map,
+                        max_memory=max_memory,
+                        low_cpu_mem_usage=True,
+                    )
+                    self.pipeline_pool = RefinementPipelinePool(
+                        self.model,
+                        devices=self.pipeline_devices,
+                        split_layer=split_layer,
+                        micro_batch_size=self.micro_batch_size,
+                        logger=self.logger,
+                    )
+                    if self.prefix_cache and self.logger:
+                        self.logger.info(
+                            "Prefix cache is disabled for pipelined refinement; "
+                            "each stage keeps its own per-micro-batch KV cache")
+                    if self.logger:
+                        self.logger.info(
+                            f"LLM pipeline ready: layers 0..{split_layer - 1} on "
+                            f"cuda:{self.pipeline_devices[0]}, layers "
+                            f"{split_layer}..{layer_count - 1} on "
+                            f"cuda:{self.pipeline_devices[1]}, micro-batch "
+                            f"{self.micro_batch_size}")
+                except Exception as pipeline_error:
+                    # A model with an unexpected forward contract must not make
+                    # refinement disappear. Drop any partial allocation and use
+                    # the measured Accelerate-sharded path instead.
+                    self.model = None
+                    self.pipeline_pool = None
+                    try:
+                        import gc
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+                    if self.logger:
+                        self.logger.warning(
+                            f"Pipelined refinement unavailable ({pipeline_error}); "
+                            "falling back to balanced layer placement")
+
             # Sharding is the performance path and stays opt-in. The default
             # pins the whole model to one card, which is what the baseline was
             # measured with and what a single-GPU box needs; asking for a
             # shard without a second card would just be the same placement by
             # a slower route.
-            shard = self.placement in ("sharded", "balanced") and device_count > 1
-            if shard:
+            shard = (self.placement in ("sharded", "balanced", "pipelined")
+                     and device_count > 1)
+            if self.model is None and shard:
                 max_memory = {
                     index: int(torch.cuda.get_device_properties(index).total_memory
                                * self.gpu_memory_utilization)
@@ -234,7 +309,7 @@ class DiarizationRefinementService:
                     max_memory=max_memory,
                     low_cpu_mem_usage=True,
                 )
-            else:
+            elif self.model is None:
                 self.model = AutoModelForCausalLM.from_pretrained(
                     self.model_name,
                     torch_dtype=dtype,
@@ -242,9 +317,16 @@ class DiarizationRefinementService:
                 ).to(self.device)
             self.model.eval()
             if self.logger:
-                placed = ("balanced across "
-                          f"{device_count} GPU(s): {getattr(self.model, 'hf_device_map', None)}"
-                          if shard else f"pinned to {self.device}")
+                if self.pipeline_pool is not None:
+                    placed = ("pipeline across "
+                              f"cuda:{self.pipeline_devices[0]} and "
+                              f"cuda:{self.pipeline_devices[1]}")
+                elif shard:
+                    placed = ("balanced across "
+                              f"{device_count} GPU(s): "
+                              f"{getattr(self.model, 'hf_device_map', None)}")
+                else:
+                    placed = f"pinned to {self.device}"
                 self.logger.info(f"LLM loaded successfully ({placed}).")
         except Exception as e:
             # Do not swallow this. refine() treats a missing model as "nothing
@@ -286,6 +368,7 @@ class DiarizationRefinementService:
         # model without it would leave that memory pinned for the rest of the run.
         self._release_prefix()
         self._prefix_failed = False
+        self.pipeline_pool = None
         self.model = None
         self.tokenizer = None
         try:
@@ -430,8 +513,8 @@ class DiarizationRefinementService:
         # GPU busy instead of running one 1200-token prefill at a time.
         # _build_user_message is pure string work over the pre-refinement text,
         # so the segments are independent and this parallelises cleanly. It is
-        # the one part of refinement that is CPU-bound: generation itself is on
-        # the GPU and stays sequential.
+        # the one part of refinement that is CPU-bound. In pipelined mode the
+        # generated micro-batches then circulate through the two GPU stages.
         indices = [i for i, seg in enumerate(segments)
                    if (seg.text_whisper or seg.text_phowhisper or seg.text_qwen3)
                    and not too_short_to_refine(seg)]
@@ -721,7 +804,6 @@ class DiarizationRefinementService:
             if (self.max_batch_tokens and
                     int(inputs.attention_mask.sum()) > self.max_batch_tokens):
                 return False, 0
-            inputs = inputs.to(self._input_device())
             gen_kwargs = dict(
                 max_new_tokens=512,
                 do_sample=False,
@@ -732,23 +814,47 @@ class DiarizationRefinementService:
                 pad_token_id=tokenizer.pad_token_id,
             )
 
-            # Reuse the shared prefix's KV cache when one is available. The
-            # tails are re-tokenised on their own and the attention mask is
-            # widened to cover the cached span, so the model sees exactly the
-            # same sequence -- only the prefix's attention is not recomputed.
-            # Anything unexpected falls through to the full-prompt path below,
-            # which is the one that has always run.
-            past = None
-            if self._build_prefix(system_prompt, batch[0][1]):
-                past = self._prepare_cached_inputs(batch, system_prompt, inputs, gen_kwargs)
+            if self.pipeline_pool is not None:
+                configured_eos = getattr(
+                    getattr(self.model, "generation_config", None),
+                    "eos_token_id", None)
+                if configured_eos is None:
+                    configured_eos = tokenizer.eos_token_id
+                if configured_eos is None:
+                    eos_ids = []
+                elif isinstance(configured_eos, (list, tuple, set)):
+                    eos_ids = [int(value) for value in configured_eos]
+                else:
+                    eos_ids = [int(configured_eos)]
 
-            with torch.no_grad():
-                generated_ids = self.model.generate(**inputs, **gen_kwargs)
+                generated_rows = self.pipeline_pool.generate(
+                    inputs.input_ids,
+                    inputs.attention_mask,
+                    eos_token_ids=eos_ids,
+                    pad_token_id=int(tokenizer.pad_token_id),
+                    max_new_tokens=gen_kwargs["max_new_tokens"],
+                )
+                decoded = tokenizer.batch_decode(
+                    generated_rows, skip_special_tokens=True)
+            else:
+                inputs = inputs.to(self._input_device())
+                # Reuse the shared prefix's KV cache when one is available. The
+                # tails are re-tokenised on their own and the attention mask is
+                # widened to cover the cached span, so the model sees exactly
+                # the same sequence -- only the prefix's attention is not
+                # recomputed. Anything unexpected falls through to the full
+                # prompt path below.
+                if self._build_prefix(system_prompt, batch[0][1]):
+                    self._prepare_cached_inputs(
+                        batch, system_prompt, inputs, gen_kwargs)
 
-            prompt_len = inputs.input_ids.shape[1]
-            decoded = tokenizer.batch_decode(
-                generated_ids[:, prompt_len:], skip_special_tokens=True
-            )
+                with torch.no_grad():
+                    generated_ids = self.model.generate(**inputs, **gen_kwargs)
+
+                prompt_len = inputs.input_ids.shape[1]
+                decoded = tokenizer.batch_decode(
+                    generated_ids[:, prompt_len:], skip_special_tokens=True
+                )
             count = 0
             for (seg, _), refined_text in zip(batch, decoded):
                 refined_text = _THINK_RE.sub("", refined_text)
@@ -769,6 +875,18 @@ class DiarizationRefinementService:
                 self.logger.warning(f"LLM out of memory on [{indices}] (batch {len(batch)}): {e}")
             return False, 0
         except Exception as e:
+            if self.pipeline_pool is not None:
+                # The weights are still a valid Accelerate device map. Disable
+                # only the custom scheduler and retry through transformers'
+                # proven serial generate() path, preserving refinement rather
+                # than failing the file because one model revision changed an
+                # internal forward detail.
+                self.pipeline_pool = None
+                if self.logger:
+                    self.logger.warning(
+                        f"LLM pipeline scheduler failed ({e}); retrying this and "
+                        "later batches with serial sharded generation")
+                return self._refine_batch(batch, system_prompt)
             if self.logger:
                 indices = ", ".join(seg.index for seg, _ in batch)
                 self.logger.warning(f"LLM failed on segments [{indices}]: {e}")

@@ -141,10 +141,12 @@
                         "replica_speed_ratio": 0.5
                     },
                     "refinement": {
-                        "workers": 1,
-                        "placement": "sharded",
+                        "workers": 2,
+                        "placement": "pipelined",
                         "gpu_memory_utilization": 0.82,
-                        "max_batch_tokens": 8192
+                        "max_batch_tokens": 8192,
+                        "micro_batch_size": 1,
+                        "pipeline_split_ratio": 0.5
                     },
                     "diarization": {"workers": 1, "placement": "split_components"},
                     "separation": {"max_workers": 1, "ordered_postprocess": true},
@@ -275,10 +277,12 @@
                         "replica_speed_ratio": 0.5
                     },
                     "refinement": {
-                        "workers": 1,
-                        "placement": "sharded",
+                        "workers": 2,
+                        "placement": "pipelined",
                         "gpu_memory_utilization": 0.85,
-                        "max_batch_tokens": 32768
+                        "max_batch_tokens": 32768,
+                        "micro_batch_size": 8,
+                        "pipeline_split_ratio": 0.5
                     },
                     "diarization": {"workers": 1, "placement": "split_components"},
                     "separation": {"max_workers": 1, "ordered_postprocess": true},
