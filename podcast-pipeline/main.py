@@ -96,8 +96,8 @@ def _build_parser():
     parser.add_argument("--performance", action="store_true",
                         help="Turn on the performance scheduling path (true ASR batching, "
                              "sharded refinement, split diarization placement, telemetry). "
-                             "The profiles ship it off because it has not passed the "
-                             "benchmark gates yet; this flag is how a trial run enables it.")
+                             "Forces it on for a profile whose performance.enabled "
+                             "is false; a profile that already enables it ignores the flag.")
     parser.add_argument("--no_stage_output", action="store_true",
                         help="Skip the per-stage artifact directories (01_diarization/, "
                              "02_separation/, ...). They are written by default so a run "
@@ -696,9 +696,14 @@ def main():
 
         logger.info(f"Corpus complete: {ledger.summary()}")
 
-        if failures:
-            logger.warning(f"{len(failures)}/{len(paths)} file(s) failed:")
-            for path, err in failures:
+        from utils.batch import split_final_failures
+        still_failed, recovered = split_final_failures(failures, ledger.is_done)
+        for path, err in recovered:
+            logger.info(f"Recovered on retry: {os.path.basename(path)} "
+                        f"(earlier failure: {err})")
+        if still_failed:
+            logger.warning(f"{len(still_failed)}/{len(paths)} file(s) failed:")
+            for path, err in still_failed:
                 logger.warning(f"  {os.path.basename(path)}: {err}")
         else:
             logger.info(f"All {len(paths)} file(s) completed")

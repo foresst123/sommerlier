@@ -13,6 +13,36 @@ from utils.audio_normalize import normalize_for_asr, remove_dc, measure
 CONTEXT_PAD_BELOW = 2.0
 CONTEXT_PAD_SECONDS = 2.0
 EDGE_PAD_SECONDS = 0.02
+def estimate_replica_gain(remaining, rate, load_seconds, replica_rate,
+                          peer_remaining=0.0):
+    """Seconds a second Qwen worker would take off the ASR stage.
+
+    The formula is the plan's (section 6.3): T_old = W / r1 for the worker
+    already running, T_new = L + (W - r1*L) / (r1 + r2) once a replica that
+    takes L seconds to load joins it. Whatever the running worker finishes
+    during the load is gone before the replica can take it, so a small W is
+    finished alone.
+
+    The stage ends when its slowest model does, so both times are compared
+    against the other models' remaining work. While PhoWhisper is still the
+    tail, finishing Qwen sooner saves nothing -- the gain is zero however
+    large Qwen's backlog is.
+
+    Returns (gain, t_old, t_new), all in seconds.
+    """
+    if rate <= 0 or remaining <= 0:
+        return 0.0, 0.0, 0.0
+    t_old = remaining / rate
+    left = remaining - rate * load_seconds
+    if left <= 0 or replica_rate <= 0:
+        t_new = t_old
+    else:
+        t_new = load_seconds + left / (rate + replica_rate)
+    peer = max(0.0, float(peer_remaining or 0.0))
+    gain = max(t_old, peer) - max(t_new, peer)
+    return max(0.0, gain), t_old, t_new
+
+
 class ASRService:
     """Coordinates MoE ASR models and ROVER ensemble."""
     
@@ -31,6 +61,10 @@ class ASRService:
         self.qwen3_replica_service = qwen3_replica_service
         self.performance_config = performance_config or {}
         self.performance_monitor = performance_monitor
+        # What the last replica actually cost and delivered in this process.
+        # None until one has run; the profile's estimates stand in until then.
+        self._replica_load_seconds = None
+        self._replica_speed_ratio = None
         self.language = language
         self.batch_size = batch_size
         self.keep_models = keep_models
@@ -214,8 +248,34 @@ class ASRService:
             if self.logger: self.logger.error(f"PhoWhisper batch error: {e}")
             return [""] * len(audios_16k)
 
+    def _learn_from_replica(self, load_seconds, rate_alone, jobs_together,
+                            seconds_together, record=None):
+        """Keep what the replica really cost and added, for the next decision.
+
+        The throughput a replica adds is measured, not assumed: on 2x T4 the
+        first one loaded in 31s and lifted combined throughput from 1.36 to
+        1.44 jobs/s -- a 6% gain that the textbook r2 = r1 predicted as 100%.
+        The ratio is what the pair did together over what one did alone, so
+        CPU, PCIe or disk contention that slows the first worker is counted.
+        """
+        if seconds_together <= 0 or rate_alone <= 0:
+            return
+        together = jobs_together / seconds_together
+        self._replica_load_seconds = float(load_seconds)
+        self._replica_speed_ratio = max(0.0, together / rate_alone - 1.0)
+        if record:
+            record("asr_replica_measured", load_seconds=round(load_seconds, 1),
+                   rate_alone=round(rate_alone, 3), rate_together=round(together, 3),
+                   speed_ratio=round(self._replica_speed_ratio, 3))
+        if self.logger:
+            self.logger.info(
+                f"[ASR scheduler] replica measured: load {load_seconds:.0f}s, "
+                f"{rate_alone:.2f} -> {together:.2f} jobs/s "
+                f"(adds {self._replica_speed_ratio:.0%})")
+
     def _run_qwen3_batch(self, audios_16k: list, chunk_indices: list,
-                         tmp_dir: str, callback=None, replica_event=None) -> list:
+                         tmp_dir: str, callback=None, replica_event=None,
+                         peer_remaining=None) -> list:
         if not self.qwen3:
             if callback:
                 for _ in audios_16k: callback()
@@ -241,7 +301,9 @@ class ASRService:
             result_lock = threading.Lock()
             batch_size = max(1, self.batch_size)
 
-            def consume(client):
+            done = {"primary": 0, "replica": 0}
+
+            def consume(client, who="primary"):
                 while True:
                     picked = []
                     try:
@@ -258,6 +320,7 @@ class ASRService:
                     if len(values) < len(picked):
                         values.extend([""] * (len(picked) - len(values)))
                     with result_lock:
+                        done[who] += len(picked)
                         for (position, _job), value in zip(picked, values):
                             results[position] = value
                             if callback:
@@ -265,63 +328,117 @@ class ASRService:
                     for _ in picked:
                         work.task_done()
 
-            min_jobs = int(self.performance_config.get(
-                "replica_min_pending_jobs", batch_size * 2))
+            cfg = self.performance_config
+            min_jobs = int(cfg.get("replica_min_pending_jobs", batch_size * 2))
+            min_gain = float(cfg.get("replica_min_gain_seconds", 15.0))
+            load_estimate = (self._replica_load_seconds
+                             if self._replica_load_seconds is not None
+                             else float(cfg.get("replica_load_seconds", 30.0)))
+            speed_ratio = (self._replica_speed_ratio
+                           if self._replica_speed_ratio is not None
+                           else float(cfg.get("replica_speed_ratio", 0.5)))
+            # A rate from the first batch alone is mostly warm-up.
+            min_samples = max(2, 2 * batch_size)
+            total_jobs = len(jobs)
+
+            def record(event, **fields):
+                if self.performance_monitor:
+                    self.performance_monitor.record(event, model="qwen3", **fields)
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                primary = pool.submit(consume, self.qwen3)
+                started = time.time()
+                primary = pool.submit(consume, self.qwen3, "primary")
                 replica = None
-                replica_decision_recorded = False
+                replica_ready_at = None
+                done_at_ready = 0
+                skipped_reason = None
                 while not primary.done():
-                    if (replica is None and replica_service is not None
-                            and replica_event is not None
-                            and replica_event.is_set()
-                            and work.qsize() >= min_jobs):
-                        if self.logger:
-                            self.logger.info(
-                                f"[ASR scheduler] Whisper released its GPU; "
-                                f"starting Qwen replica for {work.qsize()} pending job(s)")
-                        if self.performance_monitor:
-                            self.performance_monitor.record(
-                                "asr_replica_loading", model="qwen3",
-                                pending_jobs=work.qsize())
-                        try:
-                            replica_service.spawn()
-                            replica_service.wait_ready()
-                            from models.qwen3_asr import Qwen3ASRClient
-                            replica = pool.submit(
-                                consume, Qwen3ASRClient(replica_service.process))
-                            if self.performance_monitor:
-                                self.performance_monitor.record(
-                                    "asr_replica_started", model="qwen3",
-                                    pending_jobs=work.qsize())
-                        except Exception as exc:
-                            if self.logger:
-                                self.logger.warning(
-                                    f"Qwen replica could not start: {type(exc).__name__}: {exc}")
-                            try:
-                                replica_service.stop()
-                            except Exception:
-                                pass
-                            replica_service = None
-                            if self.performance_monitor:
-                                self.performance_monitor.record(
-                                    "asr_replica_failed", model="qwen3",
-                                    error=f"{type(exc).__name__}: {exc}")
-                    elif (not replica_decision_recorded
-                          and replica is None and replica_service is not None
-                          and replica_event is not None
-                          and replica_event.is_set()
-                          and work.qsize() < min_jobs):
-                        replica_decision_recorded = True
-                        if self.performance_monitor:
-                            self.performance_monitor.record(
-                                "asr_replica_skipped", model="qwen3",
-                                reason="backlog_below_threshold",
-                                pending_jobs=work.qsize(), threshold=min_jobs)
                     time.sleep(0.05)
+                    if (replica is not None or replica_service is None
+                            or replica_event is None or not replica_event.is_set()):
+                        continue
+                    with result_lock:
+                        primary_done = done["primary"]
+                    remaining = total_jobs - primary_done
+                    if remaining < min_jobs:
+                        # Remaining only shrinks from here: this call is settled.
+                        if skipped_reason is None:
+                            record("asr_replica_skipped", reason="backlog_below_threshold",
+                                   pending_jobs=remaining, threshold=min_jobs)
+                        replica_service = None
+                        continue
+                    elapsed = time.time() - started
+                    if primary_done < min_samples or elapsed <= 0:
+                        continue
+                    peer = peer_remaining() if peer_remaining else 0.0
+                    if peer is None:
+                        # The other model has not reported yet, so which one is
+                        # the tail is unknown. Wait rather than guess.
+                        continue
+                    rate = primary_done / elapsed
+                    gain, t_old, t_new = estimate_replica_gain(
+                        remaining, rate, load_estimate, rate * speed_ratio, peer)
+                    estimate = dict(pending_jobs=remaining, rate=round(rate, 3),
+                                    load_seconds=round(load_estimate, 1),
+                                    speed_ratio=round(speed_ratio, 3),
+                                    peer_remaining=round(peer, 1),
+                                    t_old=round(t_old, 1), t_new=round(t_new, 1),
+                                    gain=round(gain, 1), min_gain=min_gain)
+                    if gain <= 0 or gain < min_gain:
+                        # Strict: a replica that saves nothing never opens,
+                        # even with the threshold at zero. Re-evaluated every
+                        # tick, since the gain can grow once the other model
+                        # finishes. Recorded once per reason.
+                        reason = "not_the_tail" if peer >= t_old else "gain_below_threshold"
+                        if reason != skipped_reason:
+                            skipped_reason = reason
+                            record("asr_replica_skipped", reason=reason, **estimate)
+                        continue
+                    if self.logger:
+                        self.logger.info(
+                            f"[ASR scheduler] starting Qwen replica: {remaining} job(s) left, "
+                            f"{t_old:.0f}s alone vs {t_new:.0f}s with a replica "
+                            f"(expected gain {gain:.0f}s)")
+                    record("asr_replica_loading", **estimate)
+                    load_started = time.time()
+                    try:
+                        replica_service.spawn()
+                        replica_service.wait_ready()
+                        from models.qwen3_asr import Qwen3ASRClient
+                        replica_ready_at = time.time()
+                        with result_lock:
+                            done_at_ready = done["primary"]
+                        replica = pool.submit(
+                            consume, Qwen3ASRClient(replica_service.process), "replica")
+                        pid = getattr(replica_service.process, "pid", None)
+                        if self.performance_monitor and pid:
+                            register = getattr(self.performance_monitor,
+                                               "register_process", None)
+                            if register:
+                                register(pid, "qwen3_replica")
+                        record("asr_replica_started", pid=pid,
+                               load_seconds=round(replica_ready_at - load_started, 1),
+                               pending_jobs=total_jobs - done_at_ready)
+                    except Exception as exc:
+                        if self.logger:
+                            self.logger.warning(
+                                f"Qwen replica could not start: {type(exc).__name__}: {exc}")
+                        try:
+                            replica_service.stop()
+                        except Exception:
+                            pass
+                        replica_service = None
+                        record("asr_replica_failed", error=f"{type(exc).__name__}: {exc}")
                 primary.result()
                 if replica is not None:
                     replica.result()
+                    finished = time.time()
+                    self._learn_from_replica(
+                        load_seconds=replica_ready_at - load_started,
+                        rate_alone=done_at_ready / max(1e-6, replica_ready_at - started),
+                        jobs_together=total_jobs - done_at_ready,
+                        seconds_together=finished - replica_ready_at,
+                        record=record)
         finally:
             if (replica_service is not None
                     and replica_service.process is not None):
@@ -480,13 +597,26 @@ class ASRService:
         def cb_pho(): progress["pho"] += 1
         def cb_qwen(): progress["qwen"] += 1
         
+        pho_started = time.time()
+
+        def pho_remaining():
+            """PhoWhisper's projected seconds left; None until it has reported."""
+            if not self.phowhisper:
+                return 0.0
+            finished = progress["pho"]
+            if finished >= total:
+                return 0.0
+            if finished == 0:
+                return None
+            return (total - finished) * (time.time() - pho_started) / finished
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
             fw = executor.submit(self._run_whisper_batch, audios_16k, dummy_vads,
                                  cb_whisper, whisper_released)
             fp = executor.submit(self._run_phowhisper_batch, core_audios_16k, cb_pho)
             fq = executor.submit(
                 self._run_qwen3_batch, core_audios_16k, chunk_indices,
-                tmp_dir, cb_qwen, whisper_released)
+                tmp_dir, cb_qwen, whisper_released, pho_remaining)
 
             try:
                 whisper_results = fw.result()

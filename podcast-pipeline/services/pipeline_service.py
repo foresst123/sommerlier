@@ -146,6 +146,40 @@ class PipelineService:
             except Exception as e:
                 if self.logger:
                     self.logger.warning(f"Deferred cleanup callback failed: {e}")
+        self._reclaim_vram()
+
+    def _reclaim_vram(self):
+        """Trả VRAM về driver ở ranh giới stage, rồi ghi lại còn trống bao nhiêu.
+
+        Dòng "Unloaded X from VRAM" chỉ nói tham chiếu đã bị bỏ. Bộ nhớ vẫn
+        nằm trong cache của allocator cho tới khi được thu hồi, và đo được là
+        nó có thể nán lại khoảng một phút -- đủ để stage sau xin 82% VRAM mỗi
+        card và trượt. Đây là con số thật để đối chiếu, không phải giả định.
+        """
+        free = {}
+        try:
+            import gc
+            import torch
+            gc.collect()
+            if torch.cuda.is_available():
+                # empty_cache() dọn allocator của MỌI card, không riêng card
+                # hiện tại, nên một lần gọi là đủ cho cả hai.
+                torch.cuda.empty_cache()
+                for index in range(torch.cuda.device_count()):
+                    with torch.cuda.device(index):
+                        free_bytes, total = torch.cuda.mem_get_info()
+                    free[str(index)] = round(free_bytes / (1024 ** 3), 2)
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"Could not reclaim VRAM at the stage boundary: {e}")
+            return
+        if free and self.logger:
+            self.logger.info(
+                "Stage boundary: VRAM free "
+                + ", ".join(f"GPU{i} {g:.2f} GiB" for i, g in sorted(free.items())))
+        monitor = getattr(self, "performance_monitor", None)
+        if monitor and free:
+            monitor.record("stage_vram_reclaimed", free_gib=free)
 
     def _defer_or_run(self, callback):
         """Chạy callback ngay, hoặc hoãn tới end_stage_scope() nếu đang mở
@@ -199,6 +233,31 @@ class PipelineService:
         if endpoint is not None and getattr(client, "process", None) is not endpoint:
             client.process = endpoint
 
+    def _register_worker_pids(self, name: str, service):
+        """Báo PID của worker cho monitor để quy VRAM theo tên worker.
+        Pool (nhiều tiến trình Sidon) có `processes`; worker đơn có `process`."""
+        processes = (getattr(service, "processes", None)
+                     or [getattr(service, "process", None)])
+        pids = [p.pid for p in processes if getattr(p, "pid", None)]
+        monitor = getattr(self, "performance_monitor", None)
+        register = getattr(monitor, "register_process", None)
+        if register:
+            for index, pid in enumerate(pids):
+                register(pid, name if len(pids) == 1 else f"{name}[{index}]")
+        return pids
+
+    # Thứ tự các điểm dừng của run(); None (chạy hết) tới được mọi bước.
+    _STOP_ORDER = ("music", "diarization", "separation", "music_removal",
+                   "asr", "captioning")
+
+    @classmethod
+    def _reaches(cls, args, stage: str) -> bool:
+        """Lượt chạy này có đi tới `stage` không, xét theo --stop_after."""
+        stop = getattr(args, "stop_after", None)
+        if stop is None or stop not in cls._STOP_ORDER:
+            return True
+        return cls._STOP_ORDER.index(stop) >= cls._STOP_ORDER.index(stage)
+
     def _ensure_worker(self, name: str):
         """Khởi động worker chưa chạy và trả tiến trình của nó.
         _load gọi khi bước bắt đầu; _rebind_worker dùng để cập nhật client đã có.
@@ -207,6 +266,7 @@ class PipelineService:
         if service is None:
             return None
         if getattr(service, "process", None) is not None:
+            self._register_worker_pids(name, service)
             return service.process
         if self.logger:
             self.logger.info(f"Starting {name} worker for this stage")
@@ -216,8 +276,9 @@ class PipelineService:
         try:
             service.spawn()
             service.wait_ready()
+            pids = self._register_worker_pids(name, service)
             if monitor:
-                monitor.record("worker_ready", worker=name)
+                monitor.record("worker_ready", worker=name, pids=pids)
         except Exception as e:
             # Báo lỗi thay vì trả None: bước sắp chạy không thể dùng client thiếu
             # worker. Nuốt lỗi ở đây từng dẫn đến đầu ra rỗng ở bước phía sau.
@@ -300,14 +361,17 @@ class PipelineService:
         # lại. Chỉ khởi động worker cho bước sẽ chạy; hồi sinh tất cả từng khiến
         # LLM thiếu VRAM dù các bước trước đã giải phóng. Bước có checkpoint
         # không cần worker riêng.
-        if not checkpoint.exists("diarization"):
+        # Cũng chỉ khi lượt này thực sự chạy tới bước đó: chạy theo giai đoạn,
+        # client của lượt trước vẫn còn, nên pass "music" từng hồi sinh worker
+        # ASR và để nó giữ ~6 GB VRAM suốt music/diarization/separation.
+        if not checkpoint.exists("diarization") and self._reaches(args, "diarization"):
             self._rebind_worker(args, "diarizen", self.diarization_svc, "diarizer")
 
-        if not checkpoint.exists("asr"):
+        if not checkpoint.exists("asr") and self._reaches(args, "asr"):
             self._rebind_worker(args, "qwen3", self.asr_svc, "qwen3")
 
         # Chỉ backend chạy ngoài tiến trình mới có worker cần gán lại.
-        if not checkpoint.exists("separation"):
+        if not checkpoint.exists("separation") and self._reaches(args, "separation"):
             self._rebind_worker(args, "sidon", self.separation_svc, "bss_model")
         
         # 1. Chuẩn bị âm thanh
@@ -550,6 +614,18 @@ class PipelineService:
             if self.logger: self.logger.info("Stopping pipeline after separation as requested by --stop_after.")
             stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
                                       "stopped_after": "separation"})
+            return None
+
+        # Pass "music_removal" của chạy theo giai đoạn: bước tách nhạc theo
+        # segment từng nằm ở đây nay đã chuyển lên đầu (bước 2), nên lượt này
+        # không còn việc gì. Thiếu điểm dừng, nó chạy thẳng ASR -> LLM -> export
+        # cho từng file, khiến LLM của file trước và ASR của file sau cùng nằm
+        # trên GPU -- chính là lỗi OOM -- và pass "asr"/"refinement" chỉ còn
+        # đọc checkpoint.
+        if getattr(args, "stop_after", None) == "music_removal":
+            if self.logger: self.logger.info("Stopping pipeline after music_removal as requested by --stop_after.")
+            stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
+                                      "stopped_after": "music_removal"})
             return None
             
         # Không còn tách nhạc theo từng segment ở đây. Bước quét và bỏ nhạc đã

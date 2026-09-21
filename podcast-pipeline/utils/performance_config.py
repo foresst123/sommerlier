@@ -33,6 +33,13 @@ _STAGES = {
         "dynamic_replicas": (BOOL, True, None, None),
         "max_replicas_per_model": (INT, 2, 1, 4),
         "replica_min_pending_jobs": (INT, 12, 1, 100000),
+        # A replica opens only when it is forecast to end the ASR stage at
+        # least this much sooner. The next two are only a first guess: after a
+        # replica has run once, its measured load time and added throughput
+        # replace them for the rest of the process.
+        "replica_min_gain_seconds": (FLOAT, 15.0, 0.0, 3600.0),
+        "replica_load_seconds": (FLOAT, 30.0, 1.0, 1800.0),
+        "replica_speed_ratio": (FLOAT, 0.5, 0.0, 1.0),
     },
     "refinement": {
         "workers": (INT, 1, 1, 2),

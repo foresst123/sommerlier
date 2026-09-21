@@ -112,6 +112,22 @@ def plan_batches(paths, max_hours: float, logger=None):
     return batches
 
 
+def split_final_failures(failures, is_done):
+    """Separate files that stayed failed from those a later pass recovered.
+
+    `failures` accumulates across passes, so a file that failed in pass 1 and
+    finished in pass 2 is still in it. Reporting that list as-is printed
+    "1/2 file(s) failed" right under "Corpus complete: 2 done". A file that
+    failed twice appears twice; only its last error is kept.
+    """
+    last = {}
+    for path, err in failures:
+        last[path] = err
+    still = [(p, e) for p, e in last.items() if not is_done(p)]
+    recovered = [(p, e) for p, e in last.items() if is_done(p)]
+    return still, recovered
+
+
 # Stage order must match the pipeline's own sequence; `None` means "run to the
 # end", which covers refinement and export.
 #

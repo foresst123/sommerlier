@@ -135,7 +135,10 @@
                         "true_batching": true,
                         "dynamic_replicas": true,
                         "max_replicas_per_model": 2,
-                        "replica_min_pending_jobs": 12
+                        "replica_min_pending_jobs": 12,
+                        "replica_min_gain_seconds": 15.0,
+                        "replica_load_seconds": 30.0,
+                        "replica_speed_ratio": 0.5
                     },
                     "refinement": {
                         "workers": 1,
@@ -266,7 +269,10 @@
                         "true_batching": true,
                         "dynamic_replicas": true,
                         "max_replicas_per_model": 2,
-                        "replica_min_pending_jobs": 32
+                        "replica_min_pending_jobs": 32,
+                        "replica_min_gain_seconds": 15.0,
+                        "replica_load_seconds": 30.0,
+                        "replica_speed_ratio": 0.5
                     },
                     "refinement": {
                         "workers": 1,

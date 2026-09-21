@@ -74,3 +74,12 @@ results/
 
 # Thư viện dùng riêng để chạy kiểm thử trên máy này.
 .test-deps/
+
+# Kaggle run artifacts pulled back for analysis: a notebook exported with its
+# output cells (~1MB of log) and the telemetry the performance monitor writes.
+# They belong to one run, not to the code. Notebooks meant to be kept live in
+# notebooks/, so only the repo root is ignored here.
+/notebook*.ipynb
+/performance_summary.json
+/scheduler_events.jsonl
+/resource_samples.jsonl
