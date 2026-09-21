@@ -24,6 +24,8 @@ recorded. See models/separation_backends.py and doc/audio-cleanliness.md.
 """
 import os
 import sys
+import copy
+import threading
 import torch
 import numpy as np
 import librosa
@@ -93,11 +95,13 @@ class BssSeparator:
         self.target_embed_cache: Dict[str, torch.Tensor] = {}
         self._temp_dir = tempfile.mkdtemp(prefix="bss_exchange_")
         self._req_counter = 0
+        self._logger = logger
 
         # Which separator produces the two tracks. Everything else in this
         # class -- enrollment embeddings, QC scoring, the not-A test -- is the
         # same whichever one runs, which is what makes them comparable.
         name = separator or os.environ.get("BSS_SEPARATOR", "sidon")
+        self._separator_name = name
         self.backend = make_backend(name, process=process, temp_dir=self._temp_dir,
                                     device=device, logger=logger)
 
@@ -109,6 +113,7 @@ class BssSeparator:
         # from noise and invert the A/B assignment. Silero judges voice, not
         # loudness. Falls back to the energy gate if it cannot load.
         self._vad = None
+        self._vad_lock = threading.Lock()
         try:
             from models.silero_vad import SileroVAD
             self._vad = SileroVAD(device=self.device)
@@ -117,6 +122,25 @@ class BssSeparator:
         except Exception as exc:
             print(f"[BSS] Silero VAD unavailable ({exc}); using energy gate",
                   file=sys.stderr)
+
+    def fork(self):
+        """Create file-local assignment state while sharing heavy embedders.
+
+        DialogueSidon itself lives in the external worker pool. The clone owns
+        only a request backend, scratch directory and speaker cache; WeSpeaker
+        and Silero weights stay shared in the main process.
+        """
+        import tempfile
+        from models.separation_backends import make_backend
+
+        clone = copy.copy(self)
+        clone.target_embed_cache = {}
+        clone._temp_dir = tempfile.mkdtemp(prefix="bss_exchange_")
+        clone._req_counter = 0
+        clone.backend = make_backend(
+            self._separator_name, process=self._process,
+            temp_dir=clone._temp_dir, device=self.device, logger=self._logger)
+        return clone
 
     @property
     def process(self):
@@ -334,7 +358,8 @@ class BssSeparator:
         vad = getattr(self, "_vad", None)
         if vad is not None and seg.size >= int(0.10 * sr):
             try:
-                ts = vad.get_speech_timestamps(seg, sampling_rate=sr)
+                with self._vad_lock:
+                    ts = vad.get_speech_timestamps(seg, sampling_rate=sr)
             except Exception:
                 ts = None
             if ts:
@@ -379,8 +404,22 @@ class BssSeparator:
             return None
         return frames[keep].reshape(-1)
 
-    def separate_two_speakers(self, mixture_audio: np.ndarray, enroll_A: List[np.ndarray], enroll_B: List[np.ndarray], sample_rate: int = 16000, id_A: Optional[str] = None, id_B: Optional[str] = None, probe_A: Optional[List[Tuple[int, int]]] = None, probe_B: Optional[List[Tuple[int, int]]] = None, core_range: Optional[Tuple[int, int]] = None):
-        """Run blind separation, then map the two output tracks onto A and B.
+    def separate_raw(self, mixture_audio: np.ndarray, sample_rate: int = 16000,
+                     enroll_A=None, enroll_B=None):
+        """Run only the blind separator so GPU work can be prefetched."""
+        if len(mixture_audio) == 0:
+            raise ValueError("Input mixture_audio is empty.")
+        return self.backend.separate(
+            mixture_audio, sample_rate, enroll_A=enroll_A, enroll_B=enroll_B)
+
+    def postprocess_separated(self, mixture_audio: np.ndarray, raw_tracks,
+                              enroll_A: List[np.ndarray], enroll_B: List[np.ndarray],
+                              sample_rate: int = 16000, id_A: Optional[str] = None,
+                              id_B: Optional[str] = None,
+                              probe_A: Optional[List[Tuple[int, int]]] = None,
+                              probe_B: Optional[List[Tuple[int, int]]] = None,
+                              core_range: Optional[Tuple[int, int]] = None):
+        """Map a raw separator result onto speakers A and B.
 
         probe_A / probe_B: (start, end) sample ranges within mixture_audio where
         that speaker is known to speak ALONE. Assignment and the returned
@@ -393,14 +432,9 @@ class BssSeparator:
         """
         if not self.speaker_embedder:
             raise RuntimeError("WeSpeaker is not loaded.")
-        if len(mixture_audio) == 0:
-            raise ValueError("Input mixture_audio is empty.")
-
         import torchaudio.functional as F_audio
 
-        # Chạy tách mù (Blind Separation)
-        track_1_np, track_2_np, target_sr = self.backend.separate(
-            mixture_audio, sample_rate, enroll_A=enroll_A, enroll_B=enroll_B)
+        track_1_np, track_2_np, target_sr = raw_tracks
         track_1_np = np.asarray(track_1_np, dtype=np.float32)
         track_2_np = np.asarray(track_2_np, dtype=np.float32)
 
@@ -650,3 +684,20 @@ class BssSeparator:
             return track_np
             
         return restore_track(out_A_tensor), restore_track(out_B_tensor), sim_A, sim_B, diag
+
+    def separate_two_speakers(self, mixture_audio: np.ndarray,
+                              enroll_A: List[np.ndarray], enroll_B: List[np.ndarray],
+                              sample_rate: int = 16000, id_A: Optional[str] = None,
+                              id_B: Optional[str] = None,
+                              probe_A: Optional[List[Tuple[int, int]]] = None,
+                              probe_B: Optional[List[Tuple[int, int]]] = None,
+                              core_range: Optional[Tuple[int, int]] = None):
+        """Compatibility path: run separation and assignment synchronously."""
+        raw_tracks = self.separate_raw(
+            mixture_audio, sample_rate, enroll_A=enroll_A, enroll_B=enroll_B)
+        return self.postprocess_separated(
+            mixture_audio, raw_tracks,
+            enroll_A=enroll_A, enroll_B=enroll_B,
+            sample_rate=sample_rate, id_A=id_A, id_B=id_B,
+            probe_A=probe_A, probe_B=probe_B, core_range=core_range,
+        )

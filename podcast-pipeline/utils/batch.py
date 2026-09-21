@@ -273,13 +273,20 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
 
 def _stage_parallelism(args, stage) -> int:
     """Concurrent files allowed for stages with independent GPU workers."""
-    if stage != "diarization" or getattr(args, "dia3", False):
-        return 1
     perf = getattr(args, "performance_config", None) or {}
     if not perf.get("enabled", False):
         return 1
-    diarization = perf.get("stages", {}).get("diarization", {})
-    return max(1, min(2, int(diarization.get("workers", 1))))
+    stages = perf.get("stages", {})
+    if stage == "diarization" and not getattr(args, "dia3", False):
+        return max(1, min(2, int(
+            stages.get("diarization", {}).get("workers", 1))))
+    if stage == "separation":
+        separator = (getattr(args, "separator", None)
+                     or os.environ.get("BSS_SEPARATOR", "sidon"))
+        if str(separator).strip().lower() == "sidon":
+            return max(1, min(2, int(
+                stages.get("separation", {}).get("max_workers", 1))))
+    return 1
 
 
 def _stage_index(stage) -> int:

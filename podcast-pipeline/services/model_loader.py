@@ -75,7 +75,6 @@ class ModelLoader:
         if "separator" in self.models:
             return
         if getattr(self.args, "bss", False):
-            if self.logger: self.logger.info(f"Loading separator + WeSpeaker on {self.device_1}")
             # Same resolution order the extractor uses: an explicit flag wins,
             # then the profile (published as BSS_SEPARATOR in main.py), then the
             # default. Resolved here too so the log line names what actually ran.
@@ -83,13 +82,23 @@ class ModelLoader:
                          or os.environ.get("BSS_SEPARATOR") or "sidon")
             bss_cfg = self.config.get("environments", {}).get(
                 self.args.env, {}).get("models", {}).get("bss", {})
+            perf = getattr(self.args, "performance_config", None) or {}
+            sep_perf = perf.get("stages", {}).get("separation", {})
+            postprocess_device = self.device_1
+            if (perf.get("enabled", False)
+                    and str(separator).strip().lower() == "sidon"
+                    and sep_perf.get("postprocess_device", "cpu") == "cpu"):
+                postprocess_device = torch.device("cpu")
+            if self.logger:
+                self.logger.info(
+                    f"Loading separator assignment models on {postprocess_device}")
             if self.logger: self.logger.info(f"  separator backend: {separator}")
             endpoint = None
             if sidon_service is not None:
                 endpoint = (sidon_service if hasattr(sidon_service, "request")
                             else sidon_service.process)
             self.models["separator"] = BssSeparator(
-                device=self.device_1,
+                device=postprocess_device,
                 process=endpoint,
                 separator=separator,
                 embedding_repository=bss_cfg.get("embedding_repository"),

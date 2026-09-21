@@ -1,7 +1,9 @@
 import json
 import os
 import sys
+import threading
 import types
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import torch
@@ -44,6 +46,26 @@ def test_worker_pool_dispatches_round_robin():
     assert pool.request({})["worker"] == "left"
     assert pool.request({})["worker"] == "right"
     assert (left.calls, right.calls) == (1, 1)
+
+
+def test_worker_pool_leases_two_workers_concurrently():
+    barrier = threading.Barrier(2)
+
+    class Worker:
+        def __init__(self, name):
+            self.name = name
+            self.process = object()
+
+        def request(self, payload, response_id=None):
+            barrier.wait(timeout=1.0)
+            return {"worker": self.name}
+
+    pool = WorkerPoolService([Worker("gpu0"), Worker("gpu1")])
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(pool.request, {"job": i}) for i in range(2)]
+        workers = {future.result(timeout=2.0)["worker"] for future in futures}
+
+    assert workers == {"gpu0", "gpu1"}
 
 
 def test_diarizen_client_can_dispatch_through_a_pool_endpoint(tmp_path):
@@ -117,3 +139,43 @@ def test_sidon_backend_can_use_a_pool_endpoint(tmp_path):
     assert rate == 24000
     assert first.tolist() == [1.0] * 8
     assert second.tolist() == [0.0] * 8
+
+
+def test_concurrent_separation_views_do_not_share_speaker_cache():
+    from services.separation_service import SeparationService
+
+    class FileModel:
+        def __init__(self):
+            self.target_embed_cache = {}
+            self.closed = False
+
+        def reset_speakers(self):
+            self.target_embed_cache.clear()
+
+        def close(self):
+            self.closed = True
+
+    class BaseModel:
+        def __init__(self):
+            self.forks = []
+
+        def fork(self):
+            model = FileModel()
+            self.forks.append(model)
+            return model
+
+    base = BaseModel()
+    loader = types.SimpleNamespace(get=lambda name: base if name == "separator" else None)
+    service = SeparationService(model_loader=loader)
+    left = service.fork_for_file()
+    right = service.fork_for_file()
+
+    left.bss_model.target_embed_cache["1"] = "file-a"
+    right.bss_model.target_embed_cache["1"] = "file-b"
+
+    assert left.bss_model is not right.bss_model
+    assert left.bss_model.target_embed_cache == {"1": "file-a"}
+    assert right.bss_model.target_embed_cache == {"1": "file-b"}
+    left.close_file_model()
+    right.close_file_model()
+    assert all(model.closed for model in base.forks)

@@ -85,11 +85,13 @@ class SidonBackend(SeparationBackend):
 
     def __init__(self, *, process=None, temp_dir=None, device=None, logger=None):
         import tempfile
+        import threading
 
         self._process = process
         self._temp_dir = temp_dir or tempfile.mkdtemp(prefix="sidon_exchange_")
         self._logger = logger
         self._counter = 0
+        self._counter_lock = threading.Lock()
 
     def set_process(self, proc):
         self._process = proc
@@ -111,8 +113,9 @@ class SidonBackend(SeparationBackend):
         if not len(mixture):
             raise ValueError("empty mixture")
 
-        self._counter += 1
-        req_id = str(self._counter)
+        with self._counter_lock:
+            self._counter += 1
+            req_id = str(self._counter)
         mix_path = os.path.join(self._temp_dir, f"mix_{req_id}.npy")
         np.save(mix_path, mixture)
 

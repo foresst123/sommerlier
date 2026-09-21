@@ -6,6 +6,7 @@ frontend and ONNX Runtime, so inference stays deliberately small here.
 """
 
 import os
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +32,7 @@ class WeSpeakerONNXEmbedder:
         self.filename = filename
         self.revision = revision
         self._session = None
+        self._session_lock = threading.Lock()
 
     def _model_path(self):
         override = os.environ.get("WESPEAKER_MODEL_PATH")
@@ -49,19 +51,21 @@ class WeSpeakerONNXEmbedder:
 
     def _get_session(self):
         if self._session is None:
-            from utils.cpu_plan import onnx_session_options
-            providers = ["CPUExecutionProvider"]
-            if self.device.type == "cuda":
-                providers.insert(0, (
-                    "CUDAExecutionProvider",
-                    {"device_id": int(self.device.index or 0)},
-                ))
-            # sess_options caps ORT's intra-op thread pool; see cpu_plan.
-            self._session = ort.InferenceSession(
-                self._model_path(),
-                sess_options=onnx_session_options(),
-                providers=providers,
-            )
+            with self._session_lock:
+                if self._session is None:
+                    from utils.cpu_plan import onnx_session_options
+                    providers = ["CPUExecutionProvider"]
+                    if self.device.type == "cuda":
+                        providers.insert(0, (
+                            "CUDAExecutionProvider",
+                            {"device_id": int(self.device.index or 0)},
+                        ))
+                    # sess_options caps ORT's intra-op thread pool; see cpu_plan.
+                    self._session = ort.InferenceSession(
+                        self._model_path(),
+                        sess_options=onnx_session_options(),
+                        providers=providers,
+                    )
         return self._session
 
     @staticmethod

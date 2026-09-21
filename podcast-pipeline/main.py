@@ -537,19 +537,26 @@ def main():
         sidon_worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sidon_worker.py")
         sep_perf = perf_cfg["stages"]["separation"]
         max_sidon_workers = int(sep_perf["max_workers"])
-        sidon_devices = [args.gpu_1]
-        # A second worker is held back until separation can actually feed it.
-        # SeparationService walks its windows one at a time and extends the
-        # enrollment memory between them, so the pool would still have a single
-        # request in flight -- a whole extra copy of the weights resident on the
-        # other card, bought for no throughput. Splitting Sidon's blind
-        # inference from the stateful speaker assignment is what unlocks this.
-        if (perf_cfg["enabled"]
-                and max_sidon_workers > 1 and args.gpu_2 != args.gpu_1):
+        configured_devices = list(dict.fromkeys((args.gpu_1, args.gpu_2)))
+        if torch.cuda.is_available():
+            sidon_devices = [
+                device for device in configured_devices
+                if 0 <= int(device) < torch.cuda.device_count()
+            ]
+        else:
+            sidon_devices = configured_devices[:1]
+        requested_sidon_workers = (
+            max_sidon_workers if perf_cfg["enabled"] else 1)
+        sidon_devices = sidon_devices[:min(
+            requested_sidon_workers, int(perf_cfg["max_gpus"]))]
+        if not sidon_devices:
+            raise RuntimeError(
+                "No configured separation GPU is visible: requested "
+                f"{configured_devices}, CUDA exposes {torch.cuda.device_count()}")
+        if requested_sidon_workers > len(sidon_devices):
             logger.warning(
-                f"[performance] separation.max_workers={max_sidon_workers} ignored: "
-                "the window loop is sequential, so a second Sidon worker would "
-                "hold VRAM without taking work. Using 1.")
+                f"[performance] separation requested {requested_sidon_workers} "
+                f"workers but only {len(sidon_devices)} GPU(s) are available")
         sidon_workers = [SidonWorkerService(
             resolve_worker_python("sidon", config=config,
                                   env_profile=env_profile, logger=logger),
@@ -559,6 +566,9 @@ def main():
         sidon_service = _prefetch(
             WorkerPoolService(sidon_workers, name="Sidon")
             if len(sidon_workers) > 1 else sidon_workers[0])
+        logger.info(
+            f"[performance] Sidon pool: {len(sidon_workers)} worker(s) on "
+            + ", ".join(f"GPU {d}" for d in sidon_devices))
 
     # 1d. Join whichever actually started. They were launched without blocking,
     # so startup is bounded by the slowest rather than the sum -- that is the
@@ -596,7 +606,11 @@ def main():
         )
         separation_svc = SeparationService(
             model_loader=model_loader,
-            logger=logger
+            logger=logger,
+            performance_config={
+                **perf_cfg["stages"]["separation"],
+                "enabled": perf_cfg["enabled"],
+            },
         )
         music_svc = MusicService(
             model_loader=model_loader,

@@ -65,11 +65,15 @@ class PipelineService:
         are copied so two files cannot overwrite each other's excision seams
         while their DiariZen requests are in flight.
         """
-        if stage != "diarization":
+        if stage not in ("diarization", "separation"):
             return self
         view = copy.copy(self)
         view.diarization_svc = copy.copy(self.diarization_svc)
-        view.separation_svc = copy.copy(self.separation_svc)
+        if stage == "separation" and hasattr(self.separation_svc, "fork_for_file"):
+            view.separation_svc = self.separation_svc.fork_for_file()
+        else:
+            view.separation_svc = copy.copy(self.separation_svc)
+        view.refinement_svc = copy.copy(self.refinement_svc)
         view.timeline = TimelineMap()
         view.noise_track = None
         return view
@@ -622,6 +626,9 @@ class PipelineService:
             stage_out.write_separated_audio(speech_segments, audio_data.sample_rate)
 
         self._free(args, "separator", "embedder")
+        close_file_model = getattr(self.separation_svc, "close_file_model", None)
+        if callable(close_file_model):
+            close_file_model()
         # Worker giữ trọng số separator trên GPU mà ASR sắp cần; dừng sau bước
         # này. Backend trong cùng tiến trình không có worker nên không cần làm gì.
         self._release_worker(args, "sidon")
@@ -633,6 +640,10 @@ class PipelineService:
         self._defer_or_run(
             lambda: self.separation_svc.close_window_pool()
             if self.separation_svc else None)
+        self._defer_or_run(
+            lambda: self.separation_svc.close_async_pools()
+            if self.separation_svc
+            and hasattr(self.separation_svc, "close_async_pools") else None)
 
         if getattr(args, "stop_after", None) == "separation":
             if self.logger: self.logger.info("Stopping pipeline after separation as requested by --stop_after.")

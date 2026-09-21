@@ -197,3 +197,34 @@ def test_diarization_runs_two_files_concurrently_when_pool_is_enabled():
         ["f1", "f2", "f3"], stages=("diarization",))
 
     assert pipe.max_inside == 2
+
+
+def test_separation_runs_two_files_concurrently_when_pool_is_enabled():
+    class ConcurrentPipeline(FakePipeline):
+        def __init__(self):
+            super().__init__()
+            self.inside = 0
+            self.max_inside = 0
+            self.lock = threading.Lock()
+
+        def parallel_stage_view(self, stage):
+            return self
+
+        def run(self, args, config, path):
+            with self.lock:
+                self.inside += 1
+                self.max_inside = max(self.max_inside, self.inside)
+            time.sleep(0.03)
+            with self.lock:
+                self.inside -= 1
+
+    perf = {
+        "enabled": True,
+        "stages": {"separation": {"max_workers": 2}},
+    }
+    pipe = ConcurrentPipeline()
+    run_batch_by_stage(
+        pipe, _args(performance_config=perf, separator="sidon"), {},
+        ["f1", "f2", "f3"], stages=("separation",))
+
+    assert pipe.max_inside == 2

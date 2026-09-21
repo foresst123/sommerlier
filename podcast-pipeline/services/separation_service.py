@@ -1,8 +1,11 @@
 import collections
+import copy
 import json
 import os
+import threading
 import time as _time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 
 # Set BSS_TIMING=1 để bật log thời gian chi tiết từng bước trong separation loop.
 # Tắt mặc định vì mỗi job log thêm ~4 dòng, với 55 job sẽ rất dài.
@@ -176,7 +179,7 @@ class SeparationService:
     checkpoint_version = POLICY_VERSION
 
     def __init__(self, bss_model=None, logger=None, dump_dir: Optional[str] = None,
-                 model_loader=None):
+                 model_loader=None, performance_config=None):
         self._bss_model = bss_model
         self.model_loader = model_loader
         self.logger = logger
@@ -202,6 +205,20 @@ class SeparationService:
         # utils/window_pool.py để biết lý do (chi phí spawn không chia sẻ
         # được giữa các file nếu tạo/đóng theo từng file).
         self._window_pool = None
+        self._window_pool_state = {
+            "pool": None,
+            "lock": threading.Lock(),
+        }
+        self.performance_config = dict(performance_config or {})
+        self._async_state = {
+            "gpu_executor": None,
+            "post_executor": None,
+            "lock": threading.Lock(),
+            "next_file_id": 0,
+        }
+        self._file_run_id = None
+        self._fork_bss_model = False
+        self._owns_bss_model = False
 
     # Lấy model từ loader khi dùng vì model được tải theo từng giai đoạn.
     # Giữ tham chiếu lúc khởi tạo có thể giữ mãi giá trị None của model chưa tải.
@@ -209,12 +226,93 @@ class SeparationService:
     def bss_model(self):
         if self._bss_model is not None:
             return self._bss_model
-        return getattr(self, "model_loader", None) and self.model_loader.get("separator")
+        base = (getattr(self, "model_loader", None)
+                and self.model_loader.get("separator"))
+        if base is not None and self._fork_bss_model:
+            fork = getattr(base, "fork", None)
+            self._bss_model = fork() if callable(fork) else base
+            self._owns_bss_model = self._bss_model is not base
+            self._fork_bss_model = False
+            return self._bss_model
+        return base
 
     @bss_model.setter
     def bss_model(self, model):
         """Cho phép truyền model trực tiếp, dùng khi tạo dịch vụ trong kiểm thử."""
         self._bss_model = model
+
+    def fork_for_file(self):
+        """Isolate mutable separation state for one concurrent audio file."""
+        clone = copy.copy(self)
+        clone._bss_model = None
+        clone._fork_bss_model = True
+        clone._owns_bss_model = False
+        clone.stats = collections.Counter()
+        clone.sims = []
+        clone.overlap_durations = []
+        clone.window_layouts = []
+        clone.failures = []
+        clone.failure_artifacts = []
+        clone._dump_warned = False
+        clone._failure_artifact_counter = 0
+        clone._file_run_id = None
+        clone.memory = copy.copy(self.memory)
+        clone.memory._clips = {}
+        clone.memory.added = 0
+        clone.memory.rejected = 0
+        # _window_pool_state is intentionally shared: it owns stateless CPU
+        # workers, while each open_file call owns separate shared memory.
+        return clone
+
+    def _async_runtime(self):
+        """Return shared GPU/post executors and a file-local scheduling id."""
+        cfg = self.performance_config
+        if not cfg.get("enabled", False) or not cfg.get("ordered_postprocess", True):
+            return None
+
+        model = self.bss_model
+        if not (callable(getattr(model, "separate_raw", None))
+                and callable(getattr(model, "postprocess_separated", None))):
+            return None
+
+        gpu_workers = max(1, int(cfg.get("max_workers", 1)))
+        post_workers = max(1, int(cfg.get("postprocess_workers", 1)))
+        state = self._async_state
+        with state["lock"]:
+            if state["gpu_executor"] is None:
+                state["gpu_executor"] = ThreadPoolExecutor(
+                    max_workers=gpu_workers, thread_name_prefix="sidon-gpu")
+                state["post_executor"] = ThreadPoolExecutor(
+                    max_workers=post_workers, thread_name_prefix="sidon-post")
+            if self._file_run_id is None:
+                self._file_run_id = state["next_file_id"]
+                state["next_file_id"] += 1
+        return state["gpu_executor"], state["post_executor"], model
+
+    def close_async_pools(self):
+        """Drain and close the shared Sidon pipeline executors once per stage."""
+        state = getattr(self, "_async_state", None)
+        if state is None:
+            return
+        with state["lock"]:
+            gpu_executor = state["gpu_executor"]
+            post_executor = state["post_executor"]
+            state["gpu_executor"] = None
+            state["post_executor"] = None
+        if gpu_executor is not None:
+            gpu_executor.shutdown(wait=True, cancel_futures=False)
+        if post_executor is not None:
+            post_executor.shutdown(wait=True, cancel_futures=False)
+
+    def close_file_model(self):
+        """Release scratch state owned by a concurrent per-file model clone."""
+        if not self._owns_bss_model or self._bss_model is None:
+            return
+        close = getattr(self._bss_model, "close", None)
+        if callable(close):
+            close()
+        self._bss_model = None
+        self._owns_bss_model = False
 
     def reset_stats(self):
         """Xóa thống kê từng file vì cùng một dịch vụ được dùng lại cho cả batch.
@@ -245,8 +343,15 @@ class SeparationService:
         giữ sống qua nhiều file rồi mới dừng. reset_stats() KHÔNG gọi hàm
         này: reset_stats() chạy giữa các file trong cùng một stage, lúc đó
         pool vẫn còn cần dùng tiếp cho file kế."""
-        pool = self._window_pool
-        self._window_pool = None
+        state = getattr(self, "_window_pool_state", None)
+        if state is None:
+            pool = self._window_pool
+            self._window_pool = None
+        else:
+            with state["lock"]:
+                pool = state["pool"]
+                state["pool"] = None
+                self._window_pool = None
         if pool is not None:
             pool.close()
 
@@ -1099,15 +1204,18 @@ class SeparationService:
             pool_size = _resolve_pool_size()
             if pool_size > 0:
                 try:
-                    if self._window_pool is None:
-                        self._window_pool = WindowBuildPool(
-                            n_workers=pool_size,
-                            max_pending=min(BSS_WINDOW_MAX_PENDING,
-                                            max(1, pool_size * 2)))
-                        if self.logger:
-                            self.logger.info(
-                                f"[TSE] window pool started with {pool_size} worker "
-                                "process(es) (persists for the rest of this batch)")
+                    state = self._window_pool_state
+                    with state["lock"]:
+                        if state["pool"] is None:
+                            state["pool"] = WindowBuildPool(
+                                n_workers=pool_size,
+                                max_pending=min(BSS_WINDOW_MAX_PENDING,
+                                                max(1, pool_size * 2)))
+                            if self.logger:
+                                self.logger.info(
+                                    f"[TSE] window pool started with {pool_size} worker "
+                                    "process(es) (persists for the rest of this batch)")
+                        self._window_pool = state["pool"]
                     file_windows = self._window_pool.open_file(
                         segments, pairs, waveform, sr, music_map=self.music_map,
                         seams=self.seams(), context_seconds=BSS_STITCH_EDGE_PAD,
@@ -1266,12 +1374,71 @@ class SeparationService:
                         return
                     yield job, outcome, 0
 
+        async_runtime = self._async_runtime()
+
+        def scheduled_processing_iter():
+            """Prefetch raw Sidon work while preserving file-local commit order.
+
+            Raw separation is blind and has no dependency on enrollment memory.
+            Speaker assignment, continuity, retries and writes remain in the
+            consumer below, one ordered stream per SeparationService clone.
+            """
+            if async_runtime is None:
+                for item in processing_iter():
+                    yield item, None, None
+                return
+
+            gpu_executor, _post_executor, model = async_runtime
+            prefetch_per_worker = max(
+                1, int(self.performance_config.get("gpu_prefetch_per_worker", 1)))
+            prefetch_limit = max(
+                1, int(self.performance_config.get("max_workers", 1))
+                * prefetch_per_worker)
+            initial = iter(expanded_window_iter())
+            scheduled = collections.deque()
+            initial_done = False
+            next_sequence = 0
+
+            def schedule(item):
+                nonlocal next_sequence
+                job, outcome, attempt = item
+                built = outcome[0]
+                sequence_id = next_sequence
+                next_sequence += 1
+                future = None
+                if built is not None:
+                    # The future owns only immutable window audio. All mutable
+                    # state stays in this file's ordered consumer.
+                    future = gpu_executor.submit(
+                        model.separate_raw, built.audio, sr)
+                return item, future, sequence_id
+
+            while True:
+                if pending_retries:
+                    retries = []
+                    while pending_retries:
+                        retries.append(pending_retries.popleft())
+                    for retry in reversed(retries):
+                        scheduled.appendleft(schedule(retry))
+
+                while len(scheduled) < prefetch_limit and not initial_done:
+                    try:
+                        job, outcome = next(initial)
+                    except StopIteration:
+                        initial_done = True
+                        break
+                    scheduled.append(schedule((job, outcome, 0)))
+
+                if not scheduled:
+                    return
+                yield scheduled.popleft()
+
         from tqdm import tqdm
         pbar = tqdm(desc="[TSE Extractor]", unit="window", leave=True)
         try:
-            for (spk_a, spk_b, plist, targets), (
+            for ((spk_a, spk_b, plist, targets), (
                 built, reason, detail, planner_actions
-            ), attempt in processing_iter():
+            ), attempt), raw_future, sequence_id in scheduled_processing_iter():
                 pbar.update(1)
                 _t_job = _time.perf_counter()
                 uncovered = []
@@ -1394,16 +1561,32 @@ class SeparationService:
 
                 _t_sidon = _time.perf_counter()
                 if _BSS_TIMING and self.logger:
-                    self.logger.debug(f"[TIMING] {job_lo:.2f}s: → Sidon")
+                    self.logger.debug(
+                        f"[TIMING] {job_lo:.2f}s: → Sidon "
+                        f"file={self._file_run_id} seq={sequence_id}")
                 try:
-                    track_A, track_B, sim_A, sim_B, diag = self.bss_model.separate_two_speakers(
-                        window_audio,
-                        enroll_A=enroll_a, enroll_B=enroll_b,
-                        sample_rate=sr, id_A=spk_a, id_B=spk_b,
-                        probe_A=probe_a_s,
-                        probe_B=probe_b_s,
-                        core_range=core,
-                    )
+                    if raw_future is None:
+                        track_A, track_B, sim_A, sim_B, diag = (
+                            self.bss_model.separate_two_speakers(
+                                window_audio,
+                                enroll_A=enroll_a, enroll_B=enroll_b,
+                                sample_rate=sr, id_A=spk_a, id_B=spk_b,
+                                probe_A=probe_a_s,
+                                probe_B=probe_b_s,
+                                core_range=core,
+                            )
+                        )
+                    else:
+                        raw_tracks = raw_future.result()
+                        post_future = async_runtime[1].submit(
+                            async_runtime[2].postprocess_separated,
+                            window_audio, raw_tracks,
+                            enroll_A=enroll_a, enroll_B=enroll_b,
+                            sample_rate=sr, id_A=spk_a, id_B=spk_b,
+                            probe_A=probe_a_s, probe_B=probe_b_s,
+                            core_range=core,
+                        )
+                        track_A, track_B, sim_A, sim_B, diag = post_future.result()
                 except Exception as exc:
                     error_detail = f"{type(exc).__name__}: {exc}"
                     retry_failed([(sd, lo, hi, "model_error", error_detail)

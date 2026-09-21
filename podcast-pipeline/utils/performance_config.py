@@ -56,6 +56,9 @@ _STAGES = {
     },
     "separation": {
         "max_workers": (INT, 1, 1, 2),
+        "gpu_prefetch_per_worker": (INT, 1, 1, 8),
+        "postprocess_workers": (INT, 1, 1, 16),
+        "postprocess_device": (STR, "cpu", None, None),
         "ordered_postprocess": (BOOL, True, None, None),
     },
     "music": {
@@ -67,6 +70,7 @@ _STAGES = {
 _ENUMS = {
     ("refinement", "placement"): ("auto", "balanced", "sharded", "pipelined"),
     ("diarization", "placement"): ("single", "split_components", "replicated"),
+    ("separation", "postprocess_device"): ("cpu", "cuda"),
 }
 
 # Keys that change what the pipeline computes, as opposed to how it is
