@@ -81,7 +81,8 @@ def _pipeline(llm, **cfg):
 
 
 def _fix_seven():
-    return json.dumps([{"i": "00007", "speaker": B, "conf": 0.9, "why": "trả lời"}])
+    # One window covers the file, so segment 7 is line 8; B is the diarizer's second label.
+    return json.dumps([{"i": 8, "speaker": "B", "conf": 0.9, "why": "trả lời"}])
 
 
 def _speech(segs):

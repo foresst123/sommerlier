@@ -68,6 +68,28 @@ def loads_loose(text: str):
     return None
 
 
+def is_readable(raw: Optional[str]) -> bool:
+    """Whether a reply held any JSON at all.
+
+    `objects_in` returns an empty list both for a model that answered `[]` and
+    for one that answered in prose, and a pass that treats "nothing to change"
+    as the safe default cannot tell them apart. An empty list is an answer;
+    prose is not.
+    """
+    text = clean_reply(raw)
+    if not text:
+        return False
+    if isinstance(loads_loose(text), (list, dict)):
+        return True
+    for chunk in iter_objects(text):
+        try:
+            json.loads(chunk)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
 def objects_in(raw: Optional[str], wrapper_keys=()) -> List[dict]:
     """Every dict a reply holds, whole-reply parse first, salvage second.
 

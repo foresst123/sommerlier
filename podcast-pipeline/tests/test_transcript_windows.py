@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.transcript_windows import Window, build_windows, clock, format_line
+from utils.transcript_windows import Window, build_windows, clock, format_line, line_number
 
 
 def _owners(windows, n):
@@ -87,25 +87,41 @@ def test_clock_runs_minutes_past_fifty_nine():
     assert clock(-1) == "00:00.0"
 
 
-def test_a_line_carries_index_time_speaker_gap_and_text():
-    line = format_line(_seg())
-    assert line.startswith("#00012 [01:05")
-    assert "SPEAKER_01" in line and "(gap +0.4s)" in line
-    assert line.endswith("xin chào")
+def test_a_line_carries_number_time_speaker_gap_and_text():
+    line = format_line(_seg(), 7, "B")
+    assert line.startswith("[7] 01:05.2-01:10.0 B ")
+    assert "(gap +0.4s)" in line and line.endswith("xin chào")
+
+
+def test_a_line_shows_the_name_it_is_given_never_the_diarizers_label_or_index():
+    line = format_line(_seg(), 3, "A")
+    assert "SPEAKER_01" not in line and "00012" not in line
 
 
 def test_a_negative_gap_is_shown_as_an_interruption():
-    assert "(gap -0.3s)" in format_line(_seg(gap_before=-0.3))
+    assert "(gap -0.3s)" in format_line(_seg(gap_before=-0.3), 1, "A")
 
 
 def test_an_unknown_gap_is_left_out_not_shown_as_zero():
-    assert "gap" not in format_line(_seg(gap_before=None))
+    assert "gap" not in format_line(_seg(gap_before=None), 1, "A")
 
 
 def test_a_locked_segment_is_marked():
-    assert "[cố định]" in format_line(_seg(), locked=True)
-    assert "[cố định]" not in format_line(_seg(), locked=False)
+    assert "[cố định]" in format_line(_seg(), 1, "A", locked=True)
+    assert "[cố định]" not in format_line(_seg(), 1, "A", locked=False)
 
 
 def test_newlines_in_the_text_do_not_break_the_line():
-    assert "\n" not in format_line(_seg(text="một\nhai\n\nba"))
+    assert "\n" not in format_line(_seg(text="một\nhai\n\nba"), 1, "A")
+
+
+# --- the number a model wrote back ------------------------------------------
+
+def test_the_ways_a_model_writes_a_line_number_all_read_as_that_number():
+    for written in (12, 12.0, "12", " 12 ", "#12", "[12]", "dòng 12"):
+        assert line_number(written) == 12, written
+
+
+def test_what_is_no_line_number_is_none():
+    for written in (0, -1, 1.5, True, False, None, "", "đầu", float("nan"), float("inf")):
+        assert line_number(written) is None, written

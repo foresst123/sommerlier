@@ -198,3 +198,28 @@ def test_a_skipped_pass_leaves_a_warning_saying_why(tmp_path):
     out.write_conversation_exports({"skipped": "noise_not_measured", "finder": {}}, [])
     stats = json.loads((tmp_path / "09_conversation_exports" / "stats.json").read_text(encoding="utf-8"))
     assert any("noise" in w for w in stats["warnings"])
+
+
+def test_raw_replies_go_to_their_own_file_not_into_the_report(tmp_path):
+    out = StageOutputService(str(tmp_path))
+    rows = [{"first_index": "00021", "raw": "{\"self_contained\": 4}", "outcome": "accepted"}]
+    out.write_conversation_exports({"finder": {}, "replies": rows, "unreadable": 1}, [])
+    folder = tmp_path / "09_conversation_exports"
+    assert json.loads((folder / "replies.json").read_text(encoding="utf-8")) == rows
+    assert "replies" not in json.loads((folder / "report.json").read_text(encoding="utf-8"))
+    stats = json.loads((folder / "stats.json").read_text(encoding="utf-8"))
+    assert any("replies.json" in w for w in stats["warnings"])
+
+
+def test_relabel_replies_go_to_their_own_file_and_unreadable_windows_warn(tmp_path):
+    out = StageOutputService(str(tmp_path))
+    rows = [{"window": 0, "raw": "Không có gì sai.", "readable": False}]
+    out.write_relabel({"segments": 10, "windows": 1, "failed_windows": 0,
+                       "unreadable_windows": 1, "proposed": 0, "changed": 0,
+                       "replies": rows, "applied": [], "rejected": []})
+    folder = tmp_path / "07_relabel"
+    assert json.loads((folder / "replies.json").read_text(encoding="utf-8")) == rows
+    assert "replies" not in json.loads((folder / "report.json").read_text(encoding="utf-8"))
+    stats = json.loads((folder / "stats.json").read_text(encoding="utf-8"))
+    assert stats["unreadable_windows"] == 1
+    assert any("without any JSON" in w for w in stats["warnings"])

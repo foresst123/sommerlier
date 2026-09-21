@@ -122,8 +122,8 @@
                     "prefix_cache": false
                 },
                 "relabel": {
-                    "window_tokens": 3500,
-                    "overlap_segments": 12,
+                    "window_tokens": 6000,
+                    "overlap_segments": 30,
                     "min_confidence": 0.7,
                     "max_change_fraction": 0.15
                 },
@@ -306,7 +306,7 @@
                 },
                 "relabel": {
                     "window_tokens": 8000,
-                    "overlap_segments": 12,
+                    "overlap_segments": 30,
                     "min_confidence": 0.7,
                     "max_change_fraction": 0.15
                 },

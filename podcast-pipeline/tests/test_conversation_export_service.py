@@ -21,7 +21,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sf = pytest.importorskip("soundfile")
 
 from services.conversation_export_service import (
-    CONVERSATION_EXPORT_PROMPT_VERSION, ConversationExportService, cut_excerpt, parse_verdict)
+    CONVERSATION_EXPORT_PROMPT_VERSION, ConversationExportService, _EXAMPLE_BAD, _EXAMPLE_GOOD,
+    cut_excerpt, parse_verdict)
 from utils.excise import TimelineMap
 from utils.noise_map import KINDS, NoiseTrack
 
@@ -64,6 +65,7 @@ class FakeLLM:
     def __init__(self, reply, loaded=True):
         self.reply, self.loaded = reply, loaded
         self.messages = []
+        self.system_prompts = []
 
     def ensure_loaded(self):
         return self.loaded
@@ -74,6 +76,7 @@ class FakeLLM:
     def generate_texts(self, system_prompt, user_messages, max_new_tokens=512,
                        use_prefix=False, labels=None):
         self.messages.extend(user_messages)
+        self.system_prompts.append(system_prompt)
         return True, [self.reply(m) if callable(self.reply) else self.reply
                       for m in user_messages]
 
@@ -104,10 +107,10 @@ def _files(tmp_path, sub, ext):
 # --- reading the model's verdict -------------------------------------------------
 
 def test_a_plain_verdict_is_parsed():
-    v = parse_verdict('{"self_contained": 4, "topic": "làm bếp", '
-                      '"start_index": "00012", "end_index": "00040"}')
-    assert v == {"self_contained": 4, "topic": "làm bếp",
-                 "start_index": "00012", "end_index": "00040"}
+    v = parse_verdict('{"topic": "làm bếp", "reason": "mở và kết tự nhiên", '
+                      '"self_contained": 4, "start_line": 3, "end_line": 9}')
+    assert v == {"self_contained": 4, "topic": "làm bếp", "reason": "mở và kết tự nhiên",
+                 "start_line": 3, "end_line": 9, "trim_garbled": False}
 
 
 def test_a_fenced_reply_with_reasoning_is_parsed():
@@ -127,19 +130,42 @@ def test_a_reply_with_no_json_is_no_verdict():
 
 def test_unknown_keys_in_the_verdict_are_dropped():
     v = parse_verdict(json.dumps({"self_contained": 4, "start": 1.0, "text": "bịa"}))
-    assert set(v) == {"self_contained", "topic", "start_index", "end_index"}
+    assert set(v) == {"self_contained", "topic", "reason", "start_line", "end_line",
+                      "trim_garbled"}
+
+
+def test_a_trim_written_in_any_of_the_usual_ways_is_the_same_line():
+    for start in (3, 3.0, "3", "#3", "[3]", "dòng 3"):
+        v = parse_verdict(json.dumps({"self_contained": 4, "start_line": start}))
+        assert (v["start_line"], v["trim_garbled"]) == (3, False), start
+
+
+def test_no_trim_is_null_or_absent_or_empty_and_is_not_garbled():
+    for body in ({}, {"start_line": None, "end_line": None},
+                 {"start_line": "", "end_line": "null"}):
+        v = parse_verdict(json.dumps({"self_contained": 4, **body}))
+        assert (v["start_line"], v["end_line"], v["trim_garbled"]) == (None, None, False), body
+
+
+def test_a_trim_that_names_no_line_is_garbled_not_absent():
+    for bad in ("đầu", 0, -2, 1.5, True, "hết"):
+        v = parse_verdict(json.dumps({"self_contained": 4, "start_line": bad}))
+        assert v["trim_garbled"] is True and v["start_line"] is None, bad
 
 
 # --- what the model sees ------------------------------------------------------------
 
-def test_the_model_sees_turns_as_a_and_b_by_index_without_raw_labels_or_times(tmp_path):
+def test_the_model_sees_numbered_turns_as_a_and_b_without_raw_labels_or_segment_ids(tmp_path):
     llm = FakeLLM(_good())
     _run(tmp_path, llm, max_candidates=2)
     assert llm.messages
     message = llm.messages[0]
-    assert "SPEAKER_" not in message
-    assert re.search(r"^#\d{5} [AB]: ", message, re.M)
-    assert not re.search(r"\d{2}:\d{2}", message)
+    assert "SPEAKER_" not in message and "#0" not in message
+    assert re.search(r"^\[1\] 0:00 [AB]: ", message, re.M)
+    assert re.search(r"^\[2\] \d+:\d{2} [AB]: ", message, re.M)
+    assert re.search(r"dài \d+ giây, \d+ dòng", message)
+    numbers = [int(n) for n in re.findall(r"^\[(\d+)\] ", message, re.M)]
+    assert numbers == list(range(1, len(numbers) + 1))
 
 
 def test_only_the_shortlist_is_sent_to_the_model(tmp_path):
@@ -249,54 +275,135 @@ def test_clips_that_are_kept_do_not_overlap_each_other(tmp_path):
 def _trim(first, last):
     """Reply that asks to keep only lines `first`..`last` of whatever it is shown."""
     def reply(message):
-        ids = re.findall(r"^#(\d{5}) ", message, re.M)
-        lo = ids[first] if first is not None else None
-        hi = ids[last] if last is not None else None
-        body = {"self_contained": 5, "topic": "t"}
-        if lo:
-            body["start_index"] = lo
-        if hi:
-            body["end_index"] = hi
+        numbers = [int(n) for n in re.findall(r"^\[(\d+)\] ", message, re.M)]
+        body = {"topic": "t", "reason": "r", "self_contained": 5}
+        if first is not None:
+            body["start_line"] = numbers[first]
+        if last is not None:
+            body["end_line"] = numbers[last]
         return json.dumps(body)
     return reply
+
+
+def _only_row(result):
+    (row,) = result.report["replies"]
+    return row
 
 
 def test_a_trim_inside_the_candidate_shortens_it_and_is_marked(tmp_path):
     # Drop the first and the last line of whatever candidate is shown.
     _, result, _ = _run(tmp_path, FakeLLM(_trim(1, -2)), max_candidates=1)
     assert result.exports and result.exports[0]["trimmed_by_model"] is True
+    assert _only_row(result)["trim_ignored"] is None
 
 
-def test_a_trim_that_leaves_less_than_the_minimum_is_rejected(tmp_path):
+def test_a_trim_keeps_exactly_the_lines_it_names(tmp_path):
+    """Line 2 to the one before the last: the excerpt is those lines, no more, no fewer."""
+    shown = {}
+
+    def reply(message):
+        shown["rows"] = re.findall(r"^\[(\d+)\] \d+:\d{2} [AB]: (.*)$", message, re.M)
+        return json.dumps({"topic": "t", "self_contained": 5,
+                           "start_line": int(shown["rows"][1][0]),
+                           "end_line": int(shown["rows"][-2][0])})
+    _run(tmp_path, FakeLLM(reply), max_candidates=1)
+    (name,) = _files(tmp_path, "metadata", ".json")
+    meta = json.loads((tmp_path / "metadata" / name).read_text(encoding="utf-8"))
+    assert [row["text"] for row in meta["conversation"]] == [
+        text for _, text in shown["rows"][1:-1]]
+
+
+def test_a_trim_that_leaves_less_than_the_minimum_is_ignored_and_the_excerpt_kept_whole(tmp_path):
     _, result, _ = _run(tmp_path, FakeLLM(_trim(0, 3)), max_candidates=1)
-    assert result.exports == []
-    assert result.report["judged_rejected"].get("trim_duration", 0) >= 1
+    assert result.exports and result.exports[0]["trimmed_by_model"] is False
+    assert _only_row(result)["trim_ignored"] == "trim_duration"
+    assert result.report["judged_rejected"] == {}
 
 
-def test_a_trim_outside_the_candidate_rejects_it(tmp_path):
+def test_a_trim_to_a_line_that_does_not_exist_is_ignored_and_the_excerpt_kept_whole(tmp_path):
     def outside(message):
-        return json.dumps({"self_contained": 5, "start_index": "99999",
-                           "end_index": "88888"})
+        return json.dumps({"topic": "t", "self_contained": 5,
+                           "start_line": 99999, "end_line": 88888})
     _, result, _ = _run(tmp_path, FakeLLM(outside), max_candidates=1)
-    assert result.exports == []
-    assert result.report["judged_rejected"]["bad_trim"] >= 1
+    assert result.exports and result.exports[0]["trimmed_by_model"] is False
+    assert _only_row(result)["trim_ignored"] == "trim_out_of_range"
+    assert result.report["judged_rejected"] == {}
+    assert result.report["trims_ignored"] == {"trim_out_of_range": 1}
 
 
-def test_a_trim_back_to_front_rejects_it(tmp_path):
+def test_a_trim_back_to_front_is_ignored(tmp_path):
     _, result, _ = _run(tmp_path, FakeLLM(_trim(-3, 2)), max_candidates=1)
-    assert result.exports == []
-    assert result.report["judged_rejected"]["bad_trim"] >= 1
+    assert result.exports
+    assert _only_row(result)["trim_ignored"] == "trim_out_of_range"
+
+
+def test_a_trim_that_names_no_line_is_ignored(tmp_path):
+    def prose(message):
+        return json.dumps({"topic": "t", "self_contained": 5, "start_line": "đầu"})
+    _, result, _ = _run(tmp_path, FakeLLM(prose), max_candidates=1)
+    assert result.exports and _only_row(result)["trim_ignored"] == "trim_unreadable"
 
 
 def test_a_trim_cannot_widen_a_clip_past_the_candidate(tmp_path):
-    """Indexes just outside the candidate exist in the recording but not in it."""
+    """One line past the last is not in the candidate, whatever the recording holds."""
     def widen(message):
-        ids = [int(i) for i in re.findall(r"^#(\d{5}) ", message, re.M)]
-        return json.dumps({"self_contained": 5, "start_index": f"{ids[0] - 1:05d}",
-                           "end_index": f"{ids[-1] + 1:05d}"})
+        numbers = [int(n) for n in re.findall(r"^\[(\d+)\] ", message, re.M)]
+        return json.dumps({"topic": "t", "self_contained": 5, "end_line": numbers[-1] + 1})
     _, result, _ = _run(tmp_path, FakeLLM(widen), max_candidates=1)
-    assert result.exports == []
-    assert result.report["judged_rejected"] == {"bad_trim": 1}
+    assert result.exports and result.exports[0]["trimmed_by_model"] is False
+    assert _only_row(result)["trim_ignored"] == "trim_out_of_range"
+
+
+def test_null_trims_are_no_trim_and_nothing_is_ignored(tmp_path):
+    reply = json.dumps({"topic": "t", "self_contained": 5, "start_line": None, "end_line": None})
+    _, result, _ = _run(tmp_path, FakeLLM(reply), max_candidates=1)
+    assert result.exports and result.exports[0]["trimmed_by_model"] is False
+    assert _only_row(result)["trim_ignored"] is None and result.report["trims_ignored"] == {}
+
+
+def test_an_ignored_trim_is_written_into_the_metadata(tmp_path):
+    def outside(message):
+        return json.dumps({"topic": "t", "reason": "vì sao", "self_contained": 5,
+                           "start_line": 99999})
+    _run(tmp_path, FakeLLM(outside), max_candidates=1)
+    (name,) = _files(tmp_path, "metadata", ".json")
+    meta = json.loads((tmp_path / "metadata" / name).read_text(encoding="utf-8"))
+    assert meta["trim_ignored"] == "trim_out_of_range" and meta["semantic_reason"] == "vì sao"
+
+
+# --- the prompt and its examples --------------------------------------------------
+
+def test_the_prompt_is_filled_in_with_this_runs_thresholds(tmp_path):
+    llm = FakeLLM(_good())
+    _run(tmp_path, llm, max_candidates=1, min_semantic=4, min_seconds=60)
+    prompt = llm.system_prompts[0]
+    assert not re.findall(r"\{[a-z_]+\}", prompt)
+    assert "từ 4 trở lên" in prompt and "ít nhất 60 giây" in prompt
+
+
+def test_the_examples_in_the_prompt_trim_nothing_so_copying_them_cannot_cut_anything(tmp_path):
+    llm = FakeLLM(_good())
+    _run(tmp_path, llm, max_candidates=1)
+    for example in (_EXAMPLE_GOOD, _EXAMPLE_BAD):
+        assert example["start_line"] is None and example["end_line"] is None
+        assert json.dumps(example, ensure_ascii=False) in llm.system_prompts[0]
+    assert "00012" not in llm.system_prompts[0]
+    assert '"topic": "tối đa 10 từ"' not in llm.system_prompts[0]
+
+
+def test_a_verdict_that_is_the_prompts_own_example_is_refused(tmp_path):
+    for example in (_EXAMPLE_GOOD, _EXAMPLE_BAD):
+        reply = json.dumps(example, ensure_ascii=False)
+        _, result, _ = _run(tmp_path, FakeLLM(reply), max_candidates=1)
+        assert result.exports == []
+        assert result.report["judged_rejected"] == {"copied_example": 1}
+        assert _only_row(result)["outcome"] == "copied_example"
+
+
+def test_a_copied_example_is_recognised_however_it_is_spaced_or_capitalised(tmp_path):
+    reply = json.dumps({"topic": "  Cách nấu canh chua cho người mới. ", "self_contained": 5})
+    _, result, _ = _run(tmp_path, FakeLLM(reply), max_candidates=1)
+    assert result.exports == [] and result.report["judged_rejected"] == {"copied_example": 1}
 
 
 # --- the audio -------------------------------------------------------------------------
@@ -532,3 +639,40 @@ def test_one_json_describes_both_audio_files_and_the_one_transcript(tmp_path):
     docs = list((tmp_path / "metadata").glob("*.json"))
     audio = [p for p in (tmp_path / "audio").iterdir() if p.suffix == ".wav"]
     assert len(audio) == 2 * len(docs)
+
+
+# --- what the model actually said ---------------------------------------------------
+
+def test_every_reply_is_kept_beside_the_verdict_made_of_it(tmp_path):
+    reply = json.dumps({"topic": "t", "reason": "vì sao", "self_contained": 5,
+                        "start_line": 99999, "end_line": 88888})
+    _, result, _ = _run(tmp_path, FakeLLM(reply), max_candidates=1)
+    row = result.report["replies"][0]
+    assert row["raw"] == reply and row["readable"] is True
+    assert row["verdict"]["start_line"] == 99999 and row["verdict"]["reason"] == "vì sao"
+    assert row["outcome"] == "accepted" and row["trimmed"] is False
+    assert row["trim_ignored"] == "trim_out_of_range"
+    assert re.fullmatch(r"\d{5}", row["first_index"]) and re.fullmatch(r"\d{5}", row["last_index"])
+    assert result.report["unreadable"] == 0
+
+
+def test_an_accepted_candidate_says_so_in_its_row(tmp_path):
+    _, result, _ = _run(tmp_path, FakeLLM(_good()), max_candidates=1)
+    assert result.exports
+    assert [r["outcome"] for r in result.report["replies"]] == ["accepted"]
+
+
+def test_a_reply_in_prose_is_counted_as_unreadable(tmp_path):
+    _, result, _ = _run(tmp_path, FakeLLM("Đoạn này khá ổn."), max_candidates=1)
+    row = result.report["replies"][0]
+    assert row["answered"] is True and row["readable"] is False and row["verdict"] is None
+    assert row["outcome"] == "no_verdict"
+    assert result.report["unreadable"] == 1
+
+
+def test_an_unavailable_model_leaves_rows_with_no_reply(tmp_path):
+    _, result, _ = _run(tmp_path, FakeLLM(_good(), loaded=False), max_candidates=1,
+                        require_semantic=False)
+    assert all(r["raw"] is None and r["answered"] is False
+               for r in result.report["replies"])
+    assert result.report["unreadable"] == 0

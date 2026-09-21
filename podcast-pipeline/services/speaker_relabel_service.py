@@ -12,66 +12,118 @@ narrow terms:
   * `apply_relabels` writes one attribute, `speaker`. Start, end, text and every
     other field are untouched, and no segment is split or merged.
   * With no audio to check against, the guards work from what the file itself
-    says: only labels the file already has, a confidence floor, segments tied
+    says: only speakers the file already has, a confidence floor, segments tied
     to overlap separation are locked, one window decides each segment, and a
     model that disagrees with too much of the file is treated as broken and
     discarded whole.
+
+What the model is asked to copy back is kept small. Each window numbers its own
+lines 1, 2, 3... and the speakers are lettered A, B, C...; the model answers
+"line 7 is B" and this module turns that back into a segment index and the
+diarizer's label. A long zero-padded id, or a label that is a bare digit and
+reads like a line number, is what a small model gets wrong; a number outside
+1..N or a letter that is not in the list is a wrong answer that is refused where
+it stands, and the report says so.
 
 `relabel()` only computes: it returns a `RelabelResult` and leaves the segments
 alone, so the caller can checkpoint the decision before applying it.
 """
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from utils.llm_batches import ask_in_batches
-from utils.llm_json import objects_in
-from utils.transcript_windows import build_windows, format_line, norm_index
+from utils.llm_json import is_readable, objects_in
+from utils.transcript_windows import build_windows, format_line, line_number
 
 # Bump when the prompt or the acceptance rules change: it is part of the
 # checkpoint namespace, so a changed prompt recomputes instead of reusing labels
 # that an older one produced.
-RELABEL_PROMPT_VERSION = "relabel-v1"
+RELABEL_PROMPT_VERSION = "relabel-v3"
 
 # Room the chat template and the reply framing take beyond the counted prompt.
 _TEMPLATE_SLACK_TOKENS = 64
 
+# The worked example in the prompt names lines 901-904. No window is that long, so
+# a model that copies the example's answer names a line that does not exist and
+# the answer is refused; the same answer with a real line number would be a
+# real, false, relabel.
 RELABEL_SYSTEM_PROMPT = (
-    "Bạn kiểm tra nhãn người nói (speaker) trong transcript của MỘT cuộc hội thoại tiếng Việt. "
-    "Bạn không nghe được audio: chỉ có văn bản, mốc thời gian và nhãn do hệ thống nhận dạng giọng nói gán, "
-    "và hệ thống đó đôi khi gán sai.\n"
+    "Bạn kiểm tra nhãn người nói trong transcript của MỘT cuộc hội thoại tiếng Việt (podcast, phỏng vấn hoặc trò chuyện). "
+    "Nhãn do máy nhận dạng giọng nói gán và đôi khi gán sai, nhất là ở các câu ngắn, lời đệm và chỗ hai người nói chồng lên nhau. "
+    "Bạn không nghe được audio: bạn chỉ có văn bản, mốc thời gian và nhãn máy đã gán.\n"
     "\n"
     "### NHIỆM VỤ DUY NHẤT\n"
-    "Tìm các đoạn bị gán SAI nhãn và nói đoạn đó thực ra thuộc người nói nào. "
-    "Bạn KHÔNG sửa văn bản, KHÔNG sửa mốc thời gian, KHÔNG tách hay gộp đoạn.\n"
+    "Tìm các dòng bị gán SAI người nói và cho biết dòng đó thực ra thuộc người nào trong số những người đã có. "
+    "Bạn KHÔNG sửa văn bản, KHÔNG sửa mốc thời gian, KHÔNG tách hay gộp dòng, KHÔNG thêm người nói mới.\n"
     "\n"
     "### ĐỊNH DẠNG MỖI DÒNG\n"
-    "#số_thứ_tự [bắt_đầu-kết_thúc] NHÃN (gap ±giây) văn bản\n"
-    "- gap là số giây từ lúc đoạn trước kết thúc đến lúc đoạn này bắt đầu. Gap ÂM nghĩa là hai người nói chồng lên nhau. "
-    "Gap dài thường là đổi lượt; gap rất ngắn giữa hai đoạn cùng nhãn thường là cùng một người đang nói tiếp.\n"
-    "- Dòng có [cố định] đã gắn chặt với âm thanh đã tách giọng: KHÔNG đề xuất đổi nhãn cho dòng đó.\n"
+    "[số dòng] bắt_đầu-kết_thúc NGƯỜI (gap ±giây) nội dung\n"
+    "- Số dòng: số trong ngoặc vuông, đếm từ 1 trong phần transcript bạn nhận. Chỉ dùng số này để chỉ một dòng.\n"
+    "- NGƯỜI: một chữ cái (A, B, C...) đại diện cho một người nói. Cùng chữ là cùng một người.\n"
+    "- gap: số giây từ lúc dòng trước kết thúc đến lúc dòng này bắt đầu. Gap ÂM nghĩa là hai người nói chồng lên nhau. "
+    "Gap dài thường là đổi lượt; gap rất ngắn giữa hai dòng cùng chữ thường là một người đang nói tiếp.\n"
+    "- Dòng có [cố định] đã gắn chặt với âm thanh đã tách giọng: dùng nó làm ngữ cảnh, nhưng KHÔNG đề xuất đổi người cho nó.\n"
+    "- Đoạn bạn nhận có thể bắt đầu hoặc kết thúc giữa cuộc trò chuyện. Với vài dòng sát đầu và sát cuối, bạn thiếu ngữ cảnh "
+    "ở một phía, nên hãy thận trọng hơn.\n"
     "\n"
     "### CÁCH XÉT (chỉ đề xuất khi mạch hội thoại cho bằng chứng rõ)\n"
-    "1. Hỏi – đáp: một câu hỏi thường được người KHÁC trả lời. Nếu câu trả lời mang nhãn của người vừa hỏi, có thể nhãn sai.\n"
-    "2. Xưng hô: người nói tự xưng và gọi người kia nhất quán ('anh/em', 'mình/bạn'). "
-    "Đoạn xưng hô ngược với các đoạn xung quanh của cùng nhãn có thể là của người kia.\n"
-    "3. Câu bị cắt đôi: một câu dở dang ở đoạn trước được nói tiếp ở đoạn sau thì thường là CÙNG một người.\n"
-    "4. Lời đệm ngắn (ừ, dạ, vâng, à, đúng rồi) thường là của người đang NGHE, không phải người đang nói dài.\n"
-    "5. Khi phân vân, KHÔNG đề xuất. Nhãn hiện tại đúng ở phần lớn các đoạn.\n"
+    "1. Hỏi – đáp: một câu hỏi thường được người KHÁC trả lời. Nếu câu trả lời mang chữ của chính người vừa hỏi, "
+    "hoặc một câu hỏi mang chữ của người vừa nói xong, có thể nhãn sai.\n"
+    "2. Xưng hô: mỗi người thường xưng hô nhất quán (anh/em, mình/bạn, tôi/bác...). "
+    "Dòng xưng hô ngược với các dòng khác cùng chữ có thể là của người kia.\n"
+    "3. Câu bị cắt đôi: câu dở dang ở dòng trước được nói tiếp ở dòng sau thì thường là CÙNG một người. "
+    "Nếu hai dòng đó mang hai chữ khác nhau thì một trong hai có thể sai.\n"
+    "4. Lời đệm ngắn (ừ, ừm, dạ, vâng, à, đúng rồi) thường của người đang NGHE. "
+    "Lời đệm mang chữ của chính người đang nói dài ngay quanh nó thì có thể sai.\n"
+    "5. Khi phân vân, KHÔNG đề xuất. Nhãn hiện tại đúng ở phần lớn các dòng.\n"
+    "\n"
+    "### KHÔNG PHẢI LÝ DO ĐỂ ĐỔI\n"
+    "- Một người nói liền nhiều dòng (lượt nói dài) là bình thường.\n"
+    "- Một chữ chỉ xuất hiện ở vài dòng không có nghĩa là sai: đó có thể là một người khác thật sự "
+    "(khách mời, người trong đoạn video chèn vào, giọng đọc quảng cáo). "
+    "Chỉ đổi khi nội dung và mạch hội thoại cho thấy rõ dòng đó là của người khác.\n"
+    "- Lỗi chính tả hoặc từ lạ trong văn bản không liên quan đến người nói.\n"
+    "- Đừng đề xuất hàng loạt. Nếu bạn muốn đổi nhiều dòng trong một đoạn, hãy xét lại: có thể bạn đang hiểu sai mạch hội thoại.\n"
     "\n"
     "### ĐẦU RA\n"
-    "Chỉ dùng các nhãn có trong danh sách 'Nhãn hợp lệ'. Chỉ xuất MỘT mảng JSON, không giải thích ngoài JSON, "
-    "mỗi phần tử có đúng bốn khoá:\n"
-    '[{"i": "00012", "speaker": "SPEAKER_01", "conf": 0.85, "why": "trả lời câu hỏi ở dòng trước"}]\n'
-    "- i: số thứ tự của dòng cần đổi nhãn (đúng như trong dòng).\n"
-    "- speaker: nhãn ĐÚNG mà bạn cho là của đoạn đó.\n"
-    "- conf: độ chắc chắn từ 0 đến 1.\n"
-    "- why: tối đa 12 từ.\n"
-    "Nếu không có đoạn nào sai, xuất []."
+    "Chỉ MỘT mảng JSON, không viết gì ngoài JSON, không dùng ```. Mỗi phần tử có đúng bốn khoá:\n"
+    '- "i": số dòng cần đổi, là số nguyên, đúng như số trong ngoặc vuông.\n'
+    '- "speaker": chữ cái của người ĐÚNG. Chỉ dùng các chữ có trong dòng "Người nói".\n'
+    '- "conf": độ chắc chắn từ 0 đến 1. Chỉ đề xuất khi conf từ {min_confidence} trở lên.\n'
+    '- "why": lý do, tối đa 12 từ.\n'
+    "Nếu không có dòng nào sai, xuất đúng: []\n"
+    "\n"
+    "### VÍ DỤ MINH HOẠ\n"
+    "Số dòng và nội dung dưới đây chỉ để minh hoạ cách xét, không phải transcript của bạn.\n"
+    "[901] 00:10.0-00:14.2 A (gap +1.0s) Anh làm nghề này được bao lâu rồi ạ?\n"
+    "[902] 00:14.6-00:23.0 B (gap +0.4s) Cũng gần mười năm rồi em. Hồi đầu thì cực lắm.\n"
+    "[903] 00:23.4-00:26.1 B (gap +0.4s) Vậy điều gì giữ anh lại với nghề?\n"
+    "[904] 00:26.5-00:35.9 B (gap +0.4s) Chắc là vì mình thấy mình làm được điều có ích.\n"
+    "Dòng 903 là một câu hỏi nhưng mang chữ B, cùng chữ với người vừa trả lời ở dòng 902, và dòng 904 mới là câu trả lời. "
+    "Câu hỏi đó là của người hỏi ở dòng 901, nên kết quả đúng là:\n"
+    '[{"i": 903, "speaker": "A", "conf": 0.9, "why": "câu hỏi, người trả lời vừa nói xong"}]'
 )
 
 _WRAPPER_KEYS = ("changes", "relabels", "proposals", "items", "result")
+
+
+def relabel_system_prompt(min_confidence: float = 0.7) -> str:
+    """The prompt as sent, with the confidence floor the guards will apply."""
+    return RELABEL_SYSTEM_PROMPT.replace("{min_confidence}", f"{min_confidence:g}")
+
+
+def speaker_names(labels: List[str]) -> Dict[str, str]:
+    """The diarizer's labels as the model is told them: A, B, C...
+
+    Labels are whatever the diarizer produced ('0'..'4', 'SPEAKER_01'); bare
+    digits sit beside line numbers in the prompt and read as one. Sorted, so the
+    same file always gets the same letters.
+    """
+    return {label: (chr(ord("A") + k) if k < 26 else f"S{k + 1}")
+            for k, label in enumerate(sorted(labels))}
 
 
 # ---------------------------------------------------------------------------
@@ -116,8 +168,12 @@ def parse_proposals(raw: str) -> List[dict]:
 class RelabelResult:
     segments: int = 0
     labels: List[str] = field(default_factory=list)
+    names: Dict[str, str] = field(default_factory=dict)  # the model's letter -> diarizer label
     windows: int = 0
-    failed_windows: int = 0
+    failed_windows: int = 0             # windows the model could not be run on
+    unreadable_windows: int = 0         # answered, but with no JSON in the reply
+    proposed: int = 0                   # proposals read, before any guard
+    replies: List[dict] = field(default_factory=list)   # one row per window, raw reply included
     skipped: Optional[str] = None       # why nothing was attempted
     discarded: Optional[str] = None     # why an attempt was thrown away whole
     applied: List[dict] = field(default_factory=list)
@@ -134,14 +190,18 @@ class RelabelResult:
             "prompt_version": RELABEL_PROMPT_VERSION,
             "segments": self.segments,
             "labels": self.labels,
+            "names": self.names,
             "windows": self.windows,
             "failed_windows": self.failed_windows,
+            "unreadable_windows": self.unreadable_windows,
+            "proposed": self.proposed,
             "skipped": self.skipped,
             "discarded": self.discarded,
             "changed": changed,
             "changed_fraction": round(changed / self.segments, 4) if self.segments else 0.0,
             "applied": self.applied,
             "rejected": self.rejected,
+            "replies": self.replies,
         }
 
 
@@ -209,18 +269,22 @@ class SpeakerRelabelService:
 
     # -- prompt ------------------------------------------------------------
     @staticmethod
-    def _header(labels: List[str]) -> str:
-        return f"Nhãn hợp lệ: {', '.join(labels)}\n\nTranscript:\n"
+    def _header(names: List[str], lines: int) -> str:
+        return (f"Người nói: {', '.join(names)} (mỗi chữ là một người)\n"
+                f"Số dòng: 1 đến {lines}\n\nTranscript:\n")
 
     _FOOTER = "\n\nDanh sách đề xuất (JSON):"
 
-    def prompt_overhead(self, labels: List[str]) -> int:
-        """Tokens every window pays before its first transcript line."""
-        return (self.llm.count_tokens(RELABEL_SYSTEM_PROMPT)
-                + self.llm.count_tokens(self._header(labels) + self._FOOTER))
+    def _system_prompt(self) -> str:
+        return relabel_system_prompt(self.min_confidence)
 
-    def _message(self, labels: List[str], lines: List[str]) -> str:
-        return self._header(labels) + "\n".join(lines) + self._FOOTER
+    def prompt_overhead(self, names: List[str]) -> int:
+        """Tokens every window pays before its first transcript line."""
+        return (self.llm.count_tokens(self._system_prompt())
+                + self.llm.count_tokens(self._header(names, 999) + self._FOOTER))
+
+    def _message(self, names: List[str], lines: List[str]) -> str:
+        return self._header(names, len(lines)) + "\n".join(lines) + self._FOOTER
 
     def _windows_per_call(self) -> int:
         batch = max(1, int(getattr(self.llm, "batch_size", 1) or 1))
@@ -256,60 +320,77 @@ class SpeakerRelabelService:
                 self.logger.warning("[relabel] LLM not available; labels left as they are")
             return result
 
+        names = speaker_names(labels)
+        result.names = {name: label for label, name in names.items()}
+        letters = [names[label] for label in labels]
+        by_name = {name.lower(): label for name, label in result.names.items()}
+
         locked = [self.is_locked(s) for s in segments]
-        lines = [format_line(s, l) for s, l in zip(segments, locked)]
-        counts = [self.llm.count_tokens(line) + 1 for line in lines]
-        budget = max(1, self.window_tokens - self.prompt_overhead(labels))
+
+        def text_of(pos: int, number: int) -> str:
+            seg = segments[pos]
+            return format_line(seg, number, names[str(seg.speaker)], locked[pos])
+
+        # Sized with each segment's own position as its number; a window renumbers
+        # from 1, which never costs more than a digit or two per line.
+        counts = [self.llm.count_tokens(text_of(pos, pos + 1)) + 1
+                  for pos in range(len(segments))]
+        budget = max(1, self.window_tokens - self.prompt_overhead(letters))
         windows = build_windows(counts, budget, self.overlap_segments)
         result.windows = len(windows)
-        messages = [self._message(labels, lines[w.start:w.stop]) for w in windows]
+        messages = [self._message(letters, [text_of(pos, pos - w.start + 1)
+                                            for pos in range(w.start, w.stop)])
+                    for w in windows]
 
         replies = self._ask(messages, result)
 
-        by_index = {norm_index(s.index): pos for pos, s in enumerate(segments)}
-        by_label = {label.strip().lower(): label for label in labels}
         accepted: Dict[str, dict] = {}
 
-        def reject(proposal, reason, window):
+        def reject(proposal, reason, window, pos=None):
             result.rejected.append({
-                "index": proposal["i"], "to": proposal["speaker"],
-                "conf": proposal["conf"], "reason": reason, "window": window})
+                "line": line_number(proposal["i"]) or proposal["i"],
+                "index": str(segments[pos].index) if pos is not None else None,
+                "to": proposal["speaker"], "conf": proposal["conf"],
+                "reason": reason, "window": window})
 
         for w_no, (window, reply) in enumerate(zip(windows, replies)):
+            proposals = parse_proposals(reply) if reply is not None else []
+            self._record(result, segments, w_no, window, reply, len(proposals))
             if reply is None:
                 continue
-            for proposal in parse_proposals(reply):
-                pos = by_index.get(norm_index(proposal["i"]))
-                if pos is None or not window.shows(pos):
+            for proposal in proposals:
+                line = line_number(proposal["i"])
+                if line is None or line > window.stop - window.start:
                     reject(proposal, "unknown_index", w_no)
                     continue
-                target = by_label.get(proposal["speaker"].strip().lower())
+                pos = window.start + line - 1
+                target = by_name.get(proposal["speaker"].strip().lower())
                 if target is None:
-                    reject(proposal, "unknown_label", w_no)
+                    reject(proposal, "unknown_label", w_no, pos)
                     continue
                 conf = proposal["conf"]
                 if conf is None or not 0.0 <= conf <= 1.0:
-                    reject(proposal, "bad_confidence", w_no)
+                    reject(proposal, "bad_confidence", w_no, pos)
                     continue
                 if conf < self.min_confidence:
-                    reject(proposal, "low_confidence", w_no)
+                    reject(proposal, "low_confidence", w_no, pos)
                     continue
                 if locked[pos]:
-                    reject(proposal, "locked_segment", w_no)
+                    reject(proposal, "locked_segment", w_no, pos)
                     continue
                 if not window.owns(pos):
-                    reject(proposal, "outside_window_core", w_no)
+                    reject(proposal, "outside_window_core", w_no, pos)
                     continue
                 seg = segments[pos]
                 if str(seg.index) in accepted:
-                    reject(proposal, "duplicate", w_no)
+                    reject(proposal, "duplicate", w_no, pos)
                     continue
                 if target == str(seg.speaker):
-                    reject(proposal, "no_change", w_no)
+                    reject(proposal, "no_change", w_no, pos)
                     continue
                 accepted[str(seg.index)] = {
-                    "index": str(seg.index), "from": str(seg.speaker), "to": target,
-                    "conf": conf, "why": proposal["why"], "window": w_no}
+                    "index": str(seg.index), "line": line, "from": str(seg.speaker),
+                    "to": target, "conf": conf, "why": proposal["why"], "window": w_no}
 
         allowed = max(self.min_change_allowance,
                       int(self.max_change_fraction * len(segments)))
@@ -319,8 +400,8 @@ class SpeakerRelabelService:
             result.discarded = "over_cap"
             for entry in accepted.values():
                 result.rejected.append({
-                    "index": entry["index"], "to": entry["to"], "conf": entry["conf"],
-                    "reason": "over_cap", "window": entry["window"]})
+                    "line": entry["line"], "index": entry["index"], "to": entry["to"],
+                    "conf": entry["conf"], "reason": "over_cap", "window": entry["window"]})
             if self.logger:
                 self.logger.warning(
                     f"[relabel] proposed {len(accepted)} changes in {len(segments)} "
@@ -332,9 +413,33 @@ class SpeakerRelabelService:
         if self.logger:
             self.logger.info(
                 f"[relabel] {len(result.applied)} of {len(segments)} segment(s) "
-                f"relabelled, {len(result.rejected)} proposal(s) refused, "
-                f"{result.failed_windows}/{result.windows} window(s) unanswered")
+                f"relabelled, {result.proposed} proposed, {len(result.rejected)} refused, "
+                f"{result.failed_windows}/{result.windows} window(s) unanswered, "
+                f"{result.unreadable_windows} unreadable")
         return result
+
+    def _record(self, result: RelabelResult, segments, w_no: int, window,
+                reply: Optional[str], proposals: int) -> None:
+        """Keep the reply as the model wrote it, and count the ones with no JSON.
+
+        A window answered with prose looks exactly like one answered `[]` once
+        parsed -- no proposals either way -- so without this a broken prompt and
+        a clean transcript produce the same report.
+        """
+        readable = reply is not None and is_readable(reply)
+        result.proposed += proposals
+        if reply is not None and not readable:
+            result.unreadable_windows += 1
+        first, last = str(segments[window.start].index), str(segments[window.stop - 1].index)
+        result.replies.append({
+            "window": w_no, "first_index": first, "last_index": last,
+            "lines": window.stop - window.start, "answered": reply is not None,
+            "readable": readable, "proposals": proposals, "raw": reply})
+        if self.logger:
+            shown = " ".join((reply or "").split())[:200]
+            say = self.logger.warning if reply is not None and not readable else self.logger.info
+            say(f"[relabel] window {w_no} (#{first}-#{last}): "
+                + ("no answer" if reply is None else f"{proposals} proposal(s), reply {shown!r}"))
 
     def _ask(self, messages: List[str], result: RelabelResult) -> List[Optional[str]]:
         """One reply per window, None where the model could not answer it.
@@ -343,7 +448,7 @@ class SpeakerRelabelService:
         simply keep their labels.
         """
         replies, unanswered = ask_in_batches(
-            self.llm, RELABEL_SYSTEM_PROMPT, messages,
+            self.llm, self._system_prompt(), messages,
             per_call=self._windows_per_call(), max_new_tokens=self.max_new_tokens,
             label="relabel window", logger=self.logger)
         result.failed_windows += unanswered

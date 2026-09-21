@@ -227,7 +227,8 @@ def test_the_relabel_pass_runs_on_the_real_service():
 
     segs = [seg(i, "SPEAKER_00" if i % 2 == 0 else "SPEAKER_01") for i in range(10)]
     segs[4].speaker = "SPEAKER_01"                      # the mislabel
-    reply = '[{"i": "00004", "speaker": "SPEAKER_00", "conf": 0.9, "why": "x"}]'
+    # One window covers the file: segment 4 is line 5, and SPEAKER_00 is told as "A".
+    reply = '[{"i": 5, "speaker": "A", "conf": 0.9, "why": "x"}]'
     llm = _svc([reply] * 5, max_batch_tokens=100000)
 
     result = SpeakerRelabelService(llm, window_tokens=100000).relabel(segs)

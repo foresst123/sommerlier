@@ -7,11 +7,19 @@ of conversation -- by asking the resident refinement LLM, then writes the audio
 and a JSON sidecar for each stretch it keeps.
 
 The model is a gate, not an author. It sees the turns of one candidate, renamed
-A and B, and answers with a score and, optionally, where to start and stop. It
-refers to segments by index only: it cannot invent a timestamp, and a trim
-outside the candidate is a misbehaving answer that rejects the candidate. A trim
-that is inside goes back through every check the scan applies, so shortening an
+A and B and numbered 1, 2, 3..., and answers with a score and, optionally, which
+lines to start and stop at. The score is for the excerpt as it was shown; the
+trim is polish on something already good. So a trim that cannot be honoured --
+a line that does not exist, back to front, or one that leaves too little to
+keep -- is dropped and the excerpt goes on whole, marked `trim_ignored`, rather
+than being thrown away for a detail the score did not depend on. A trim that can
+be honoured goes back through every check the scan applies, so shortening an
 excerpt cannot smuggle in what the scan would have refused.
+
+The model refers to lines by number only: it cannot invent a timestamp. What it
+is asked to copy back is deliberately small -- a line number is far easier to
+copy than a zero-padded segment id -- and the prompt's examples cannot do harm if
+copied (they trim nothing, and their topics are recognised and refused).
 
 Audio is cut from the waveform the pipeline actually worked on -- music already
 stripped, cuts already made -- so timestamps line up with it, and an excerpt never
@@ -42,36 +50,91 @@ import numpy as np
 from utils.conversation_selection import (
     Candidate, ConversationSelectionConfig, ConversationSelectionFinder, pick_non_overlapping, shortlist)
 from utils.llm_batches import ask_in_batches
-from utils.llm_json import objects_in
-from utils.transcript_windows import norm_index
+from utils.llm_json import is_readable, objects_in
+from utils.transcript_windows import line_number
 
 # Bump when the prompt or the acceptance rules change.
-CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v1"
+CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v2"
 
 _TEMPLATE_SLACK_TOKENS = 64
 
+# The two examples in the prompt. A model that copies one answers for an excerpt
+# it did not read, so a verdict whose topic is one of these is refused. Neither
+# trims anything, so a copied trim is harmless even before that check.
+_EXAMPLE_GOOD = {"topic": "cách nấu canh chua cho người mới",
+                 "reason": "mở bằng câu hỏi, kết bằng lời chốt công thức, một chủ đề",
+                 "self_contained": 5, "start_line": None, "end_line": None}
+_EXAMPLE_BAD = {"topic": "lời cảm ơn nhà tài trợ chương trình",
+                "reason": "đọc kịch bản một chiều, không có trao đổi",
+                "self_contained": 2, "start_line": None, "end_line": None}
+
+
+def _topic_key(text) -> str:
+    """A topic compared loosely: case, spacing and trailing punctuation ignored."""
+    return " ".join(str(text or "").lower().split()).strip(" .,;:!?\"'")
+
+
+_EXAMPLE_TOPICS = {_topic_key(_EXAMPLE_GOOD["topic"]), _topic_key(_EXAMPLE_BAD["topic"])}
+
 CONVERSATION_EXPORT_SYSTEM_PROMPT = (
-    "Bạn chọn các đoạn hội thoại để cắt ra làm dữ liệu huấn luyện. Bạn nhận MỘT đoạn hội thoại tiếng Việt giữa hai người "
-    "(A và B). Bạn chỉ có văn bản, không nghe được audio.\n"
+    "Bạn kiểm duyệt dữ liệu hội thoại tiếng Việt. Các đoạn hội thoại giữa hai người (A và B) được cắt ra từ podcast "
+    "và phỏng vấn dài để làm dữ liệu huấn luyện. Máy đã chọn sẵn đoạn bạn nhận bằng số liệu (đúng hai người nói, độ dài, "
+    "độ sạch âm thanh). Việc của bạn là phần máy không làm được: đọc nội dung và cho biết đoạn này có đáng giữ làm MỘT mẫu "
+    "hội thoại hoàn chỉnh, có ý nghĩa hay không.\n"
+    "Bạn chỉ có văn bản, không nghe được audio. Văn bản do máy nhận dạng giọng nói tạo ra nên có thể sai chính tả hoặc "
+    "lệch vài từ; đừng trừ điểm vì lỗi nhỏ đó.\n"
     "\n"
-    "### NHIỆM VỤ\n"
-    "Đánh giá đoạn này có TỰ TRỌN NGHĨA không: mở đầu tự nhiên (không bắt đầu giữa chừng một ý), "
-    "kết thúc tự nhiên (không bị cắt ngang câu hay chủ đề còn dang dở), và xoay quanh một chủ đề hay một ý rõ ràng.\n"
+    "### ĐỊNH DẠNG ĐẦU VÀO\n"
+    "[số dòng] mốc_thời_gian NGƯỜI: nội dung\n"
+    "- Số dòng: số trong ngoặc vuông, đếm từ 1 ở dòng đầu tiên của đoạn.\n"
+    "- Mốc thời gian (phút:giây): lúc dòng đó bắt đầu, tính từ đầu đoạn.\n"
+    "- NGƯỜI: A hoặc B. Nhãn chỉ để phân biệt hai người trong đoạn này.\n"
     "\n"
-    "### THANG ĐIỂM self_contained\n"
-    "5 = trọn vẹn, mở và kết tự nhiên, một chủ đề rõ.\n"
-    "4 = tốt, có thể hơi thiếu ở đầu hoặc đuôi.\n"
-    "3 = dùng tạm được.\n"
-    "2 = bị cắt ngang hoặc lan man nhiều chủ đề.\n"
+    "### ĐIỀU BẠN ĐÁNH GIÁ\n"
+    "Một đoạn TỰ TRỌN NGHĨA khi người nghe không biết gì về phần trước và phần sau vẫn theo dõi được:\n"
+    "1. Mở đầu tự nhiên: dòng đầu là lời chào, câu hỏi, lời dẫn hoặc mở ra một ý mới. Không bắt đầu giữa chừng một câu trả lời "
+    "hay một câu chuyện đang dở (dấu hiệu: mở đầu bằng \"và\", \"nhưng\", \"cho nên\", \"vậy là\", hoặc \"nó\", \"họ\", "
+    "\"cái đó\" mà không rõ chỉ ai).\n"
+    "2. Kết thúc tự nhiên: ý được khép lại, hoặc một lượt hỏi – đáp trọn vẹn. Không dừng ngang câu, ngang một liệt kê, "
+    "hay ngay trước khi người kia kịp trả lời.\n"
+    "3. Một mạch: xoay quanh một chủ đề hoặc một câu chuyện. Chuyển sang chủ đề khác giữa chừng là lan man.\n"
+    "4. Có nội dung: có ý, kiến thức, câu chuyện hoặc trao đổi thật. Đoạn chỉ gồm chào hỏi, cảm ơn, tạm biệt, giới thiệu "
+    "chương trình, hoặc đọc lời tài trợ / quảng cáo theo kịch bản một chiều thì KHÔNG phải một cuộc hội thoại có ý nghĩa.\n"
+    "Một người nói dài còn người kia chỉ hỏi hoặc đệm \"ừ\", \"dạ\" vẫn là hội thoại hợp lệ nếu ý trọn vẹn: "
+    "đừng trừ điểm chỉ vì một người nói nhiều hơn. Cũng đừng chấm cao chỉ vì đoạn dài hoặc hai người thay phiên nhau nhiều.\n"
+    "\n"
+    "### THANG ĐIỂM self_contained (chấm cho đoạn NGUYÊN VẸN như bạn nhận)\n"
+    "5 = trọn vẹn: mở và kết tự nhiên, một chủ đề rõ, có nội dung.\n"
+    "4 = tốt: ý rõ, chỉ hơi thiếu hoặc thừa một chút ở đầu hoặc đuôi.\n"
+    "3 = tạm: theo dõi được nhưng bị cụt ở đầu hoặc đuôi, hoặc chủ đề mờ.\n"
+    "2 = kém: bị cắt ngang giữa ý, lan man nhiều chủ đề, hoặc gần như không có nội dung (chào hỏi, quảng cáo, đọc kịch bản).\n"
     "1 = không hiểu được nếu tách khỏi ngữ cảnh.\n"
+    "Đoạn chỉ được giữ khi bạn chấm từ {min_semantic} trở lên. Nếu còn nghi ngờ giữa hai mức, chọn mức thấp hơn.\n"
     "\n"
-    "### CẮT BỚT (tuỳ chọn)\n"
-    "Nếu bỏ vài dòng ở đầu hoặc đuôi làm đoạn trọn nghĩa hơn, cho start_index và end_index: số thứ tự của dòng ĐẦU và dòng CUỐI "
-    "muốn giữ. Cả hai PHẢI là dòng có trong đoạn. Không thêm dòng ngoài đoạn. Bỏ qua hai khoá này nếu không cần cắt.\n"
+    "### CẮT BỚT (tuỳ chọn, chỉ khi thật cần)\n"
+    "Nếu đoạn đã tốt nhưng vài dòng ở ĐẦU hoặc ĐUÔI thừa hoặc dở dang, bạn có thể đề nghị chỉ giữ từ dòng start_line "
+    "đến dòng end_line.\n"
+    "- start_line và end_line là số dòng (số nguyên, như số trong ngoặc vuông), lấy từ chính đoạn bạn nhận.\n"
+    "- Chỉ cắt ở đầu hoặc đuôi, không cắt giữa đoạn, và chỉ bỏ vài dòng. Sau khi cắt phải còn ít nhất {min_seconds} giây "
+    "(nhìn mốc thời gian) và vẫn có cả A lẫn B.\n"
+    "- Không cần cắt: để null cả hai. Chỉ cần cắt một đầu: đầu còn lại để null.\n"
+    "- Không chắc thì KHÔNG cắt. Cắt sai còn tệ hơn để nguyên.\n"
     "\n"
     "### ĐẦU RA\n"
-    "Chỉ MỘT đối tượng JSON, không giải thích ngoài JSON:\n"
-    '{"self_contained": 4, "topic": "tối đa 10 từ", "start_index": "00012", "end_index": "00040"}'
+    "Chỉ MỘT đối tượng JSON, không viết gì ngoài JSON, không dùng ```. Năm khoá, theo đúng thứ tự này:\n"
+    '- "topic": chủ đề thật của đoạn, tiếng Việt, tối đa 10 từ, lấy từ nội dung bạn vừa đọc.\n'
+    '- "reason": vì sao bạn chấm như vậy, tối đa 20 từ, nói về phần mở đầu và phần kết thúc.\n'
+    '- "self_contained": số nguyên từ 1 đến 5.\n'
+    '- "start_line": số dòng đầu muốn giữ, hoặc null.\n'
+    '- "end_line": số dòng cuối muốn giữ, hoặc null.\n'
+    "Viết topic và reason trước, rồi mới chấm điểm.\n"
+    "\n"
+    "### HAI VÍ DỤ VỀ ĐỊNH DẠNG\n"
+    "Nội dung dưới đây chỉ để minh hoạ định dạng và cách chấm, không phải đoạn của bạn. Đừng chép lại.\n"
+    "Đoạn hỏi – đáp trọn vẹn về một việc cụ thể:\n"
+    "{example_good}\n"
+    "Đoạn chỉ là lời cảm ơn nhà tài trợ đọc theo kịch bản:\n"
+    "{example_bad}"
 )
 
 
@@ -79,12 +142,26 @@ CONVERSATION_EXPORT_SYSTEM_PROMPT = (
 # The model's answer
 # ---------------------------------------------------------------------------
 
+def _trim_line(value):
+    """(line, garbled): the line a trim field names, and whether it named nothing usable.
+
+    Absent, null and empty are not a trim, and not garbled either.
+    """
+    if value is None or str(value).strip().lower() in ("", "null", "none"):
+        return None, False
+    line = line_number(value)
+    return line, line is None
+
+
 def parse_verdict(raw: Optional[str]) -> Optional[dict]:
-    """{'self_contained', 'topic', 'start_index', 'end_index'} from one reply.
+    """The model's verdict from one reply, reduced to the keys this pass reads.
 
     `self_contained` is an int in 1..5 or None when it was missing or unusable.
-    Returns None when the reply holds no JSON object at all. Any other key the
-    model adds is dropped.
+    `start_line` / `end_line` are 1-based line numbers or None; `trim_garbled` is
+    True when either was given but is no line number at all ("đầu", 0, -2), which
+    is a trim that cannot be honoured, not the absence of one. Returns None when
+    the reply holds no JSON object at all. Any other key the model adds is
+    dropped.
     """
     objects = objects_in(raw)
     if not objects:
@@ -101,14 +178,13 @@ def parse_verdict(raw: Optional[str]) -> Optional[dict]:
     if score is not None and not 1 <= score <= 5:
         score = None
 
-    def _index(key):
-        value = obj.get(key)
-        return None if value is None or str(value).strip() == "" else str(value).strip()
-
+    start, start_garbled = _trim_line(obj.get("start_line"))
+    end, end_garbled = _trim_line(obj.get("end_line"))
     return {"self_contained": score,
             "topic": str(obj.get("topic") or "").strip()[:120],
-            "start_index": _index("start_index"),
-            "end_index": _index("end_index")}
+            "reason": str(obj.get("reason") or "").strip()[:240],
+            "start_line": start, "end_line": end,
+            "trim_garbled": start_garbled or end_garbled}
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +337,9 @@ class _Judged:
     semantic: Optional[int] = None
     topic: str = ""
     trimmed: bool = False
-    reason: Optional[str] = None
+    reason: Optional[str] = None              # why it was rejected
+    why: str = ""                             # the model's own reason for its score
+    trim_ignored: Optional[str] = None        # a trim that could not be honoured, and why
 
 
 class ConversationExportService:
@@ -282,67 +360,84 @@ class ConversationExportService:
     def _names(cand: Candidate) -> Dict[str, str]:
         return {cand.speakers[0]: "A", cand.speakers[1]: "B"}
 
+    def _system_prompt(self) -> str:
+        return (CONVERSATION_EXPORT_SYSTEM_PROMPT
+                .replace("{min_semantic}", str(self.cfg.min_semantic))
+                .replace("{min_seconds}", f"{self.cfg.min_seconds:g}")
+                .replace("{example_good}", json.dumps(_EXAMPLE_GOOD, ensure_ascii=False))
+                .replace("{example_bad}", json.dumps(_EXAMPLE_BAD, ensure_ascii=False)))
+
     def _message(self, finder: ConversationSelectionFinder, cand: Candidate) -> str:
+        """The candidate as the model reads it: numbered lines, A and B, time from the start."""
         names = self._names(cand)
         lines = []
-        for pos in range(cand.first, cand.last + 1):
+        for number, pos in enumerate(range(cand.first, cand.last + 1), start=1):
             seg = finder.segs[pos]
             text = " ".join(str(seg.text or "").split())
-            lines.append(f"#{seg.index} {names.get(seg.speaker, '?')}: {text}")
-        return "Đoạn hội thoại giữa A và B:\n" + "\n".join(lines) + "\n\nĐánh giá (JSON):"
+            t = max(0.0, float(seg.start) - cand.start)
+            lines.append(f"[{number}] {int(t // 60)}:{int(t % 60):02d} "
+                         f"{names.get(seg.speaker, '?')}: {text}")
+        return (f"Đoạn hội thoại giữa A và B (dài {cand.duration:.0f} giây, {len(lines)} dòng):\n"
+                + "\n".join(lines) + "\n\nĐánh giá (JSON):")
 
     def _per_call(self, messages: List[str]) -> int:
         batch = max(1, int(getattr(self.llm, "batch_size", 1) or 1))
         limit = int(getattr(self.llm, "max_batch_tokens", 0) or 0)
         if limit and messages:
             longest = max(self.llm.count_tokens(m) for m in messages)
-            longest += self.llm.count_tokens(CONVERSATION_EXPORT_SYSTEM_PROMPT) + _TEMPLATE_SLACK_TOKENS
+            longest += self.llm.count_tokens(self._system_prompt()) + _TEMPLATE_SLACK_TOKENS
             batch = min(batch, max(1, limit // longest))
         return batch
 
     def _verdict_for(self, finder, cand, verdict) -> _Judged:
         cfg = self.cfg
         judged = _Judged(original=cand)
-        if verdict is None or verdict["self_contained"] is None:
+        copied = verdict is not None and _topic_key(verdict["topic"]) in _EXAMPLE_TOPICS
+        if verdict is None or verdict["self_contained"] is None or copied:
             if cfg.require_semantic:
-                judged.reason = "no_verdict"
+                # A verdict whose topic is the prompt's example was written for
+                # some other excerpt; it says nothing about this one.
+                judged.reason = "copied_example" if copied else "no_verdict"
                 return judged
             judged.candidate = cand
             return judged
         judged.semantic, judged.topic = verdict["self_contained"], verdict["topic"]
+        judged.why = verdict["reason"]
         if judged.semantic < cfg.min_semantic:
             judged.reason = "not_self_contained"
             return judged
 
+        # The score stands for the excerpt as shown. A trim is optional polish, so
+        # one that cannot be honoured is dropped and the excerpt goes on whole.
         first, last = cand.first, cand.last
-        start_idx, end_idx = verdict["start_index"], verdict["end_index"]
-        if start_idx is not None or end_idx is not None:
-            inside = {norm_index(finder.segs[p].index): p
-                      for p in range(cand.first, cand.last + 1)}
-            new_first = first if start_idx is None else inside.get(norm_index(start_idx))
-            new_last = last if end_idx is None else inside.get(norm_index(end_idx))
-            if new_first is None or new_last is None or new_first > new_last:
-                # Outside the candidate, or back to front: the model is not
-                # following the task, so its verdict on this one is not trusted.
-                judged.reason = "bad_trim"
-                return judged
-            if (new_first, new_last) != (first, last):
+        lines = last - first + 1
+        start, end = verdict["start_line"], verdict["end_line"]
+        if verdict["trim_garbled"]:
+            judged.trim_ignored = "trim_unreadable"
+        elif start is not None or end is not None:
+            new_first = first if start is None else first + start - 1
+            new_last = last if end is None else first + end - 1
+            in_range = ((start is None or start <= lines) and (end is None or end <= lines))
+            if not in_range or new_first > new_last:
+                judged.trim_ignored = "trim_out_of_range"
+            elif (new_first, new_last) != (first, last):
                 trimmed, why = finder.evaluate(new_first, new_last)
                 if trimmed is None:
-                    judged.reason = f"trim_{why}"
+                    judged.trim_ignored = f"trim_{why}"
+                else:
+                    judged.candidate, judged.trimmed = trimmed, True
                     return judged
-                judged.candidate, judged.trimmed = trimmed, True
-                return judged
         judged.candidate = cand
         return judged
 
     def _judge(self, finder, shortlisted: List[Candidate], report: dict) -> List[_Judged]:
         verdicts: List[Optional[dict]] = [None] * len(shortlisted)
+        replies: List[Optional[str]] = [None] * len(shortlisted)
         if self.llm.ensure_loaded():
             messages = [self._message(finder, c) for c in shortlisted]
             replies, unanswered = ask_in_batches(
-                self.llm, CONVERSATION_EXPORT_SYSTEM_PROMPT, messages,
-                per_call=self._per_call(messages), max_new_tokens=160,
+                self.llm, self._system_prompt(), messages,
+                per_call=self._per_call(messages), max_new_tokens=256,
                 label="conversation export candidate", logger=self.logger)
             report["unanswered"] = unanswered
             verdicts = [parse_verdict(r) if r is not None else None for r in replies]
@@ -351,7 +446,43 @@ class ConversationExportService:
             if self.logger:
                 self.logger.warning(
                     "[conversation-exports] LLM not available for the semantic check")
-        return [self._verdict_for(finder, c, v) for c, v in zip(shortlisted, verdicts)]
+        judged = [self._verdict_for(finder, c, v) for c, v in zip(shortlisted, verdicts)]
+        self._record(finder, report, shortlisted, replies, verdicts, judged)
+        return judged
+
+    def _record(self, finder, report: dict, shortlisted: List[Candidate],
+                replies: List[Optional[str]], verdicts: List[Optional[dict]],
+                judged: List[_Judged]) -> None:
+        """Keep each reply as the model wrote it beside what was made of it.
+
+        A verdict that is refused (`copied_example`, `not_self_contained`) only shows up
+        as a count; whether the model copied the example, invented an index or
+        wrote prose is only visible in the reply itself.
+        """
+        rows = []
+        for cand, raw, verdict, item in zip(shortlisted, replies, verdicts, judged):
+            first, last = str(finder.segs[cand.first].index), str(finder.segs[cand.last].index)
+            row = {"first_index": first, "last_index": last,
+                   "start": round(cand.start, 3), "end": round(cand.end, 3),
+                   "score": cand.score, "answered": raw is not None,
+                   "readable": raw is not None and is_readable(raw),
+                   "raw": raw, "verdict": verdict,
+                   "outcome": item.reason or "accepted", "trimmed": item.trimmed,
+                   "trim_ignored": item.trim_ignored}
+            rows.append(row)
+            if self.logger:
+                shown = " ".join((raw or "").split())[:160]
+                self.logger.info(
+                    f"[conversation-exports] candidate #{first}-#{last} "
+                    f"({row['start']:.0f}-{row['end']:.0f}s): {row['outcome']}; "
+                    + ("no answer" if raw is None else f"reply {shown!r}"))
+        report["replies"] = rows
+        report["unreadable"] = sum(1 for r in rows if r["answered"] and not r["readable"])
+        ignored: Dict[str, int] = {}
+        for item in judged:
+            if item.trim_ignored:
+                ignored[item.trim_ignored] = ignored.get(item.trim_ignored, 0) + 1
+        report["trims_ignored"] = ignored
 
     # -- two-channel file ----------------------------------------------------------
     def _two_channel(self, finder, cand: Candidate, raw: np.ndarray,
@@ -434,7 +565,9 @@ class ConversationExportService:
             "components": cand.components,
             "topic": judged.topic,
             "semantic_score": judged.semantic,
+            "semantic_reason": judged.why,
             "trimmed_by_model": judged.trimmed,
+            "trim_ignored": judged.trim_ignored,
             "noise": cand.noise,
             "music_patched_share": cand.music_patched_share,
             "conversation": conversation,

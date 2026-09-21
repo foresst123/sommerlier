@@ -15,8 +15,10 @@ Pure functions over token counts, so the arithmetic is tested without a
 tokenizer.
 """
 
+import math
+import re
 from dataclasses import dataclass
-from typing import List, Sequence
+from typing import List, Optional, Sequence
 
 
 @dataclass(frozen=True)
@@ -70,9 +72,23 @@ def build_windows(token_counts: Sequence[int], budget: int,
     return windows
 
 
-def norm_index(value) -> str:
-    """'#00012', '00012' and 12 name the same segment."""
-    return str(value).strip().lstrip("#").strip().lstrip("0") or "0"
+def line_number(value) -> Optional[int]:
+    """The line number a model named, or None when what it wrote names no line.
+
+    Models write 12, 12.0, "12", "#12", "[12]" and "dòng 12" for the same line;
+    all of them are 12. Zero, negatives, fractions, booleans and prose are not
+    lines -- lines count from 1.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        found = re.search(r"\d+", str(value))
+        number = float(found.group()) if found else None
+    if number is None or not math.isfinite(number) or number != int(number) or number < 1:
+        return None
+    return int(number)
 
 
 def clock(seconds: float) -> str:
@@ -81,8 +97,15 @@ def clock(seconds: float) -> str:
     return f"{int(seconds // 60):02d}:{seconds % 60:04.1f}"
 
 
-def format_line(seg, locked: bool = False) -> str:
-    """One segment as the model reads it.
+def format_line(seg, number: int, name: str, locked: bool = False) -> str:
+    """One segment as the model reads it: `[number] start-end NAME (gap) text`.
+
+    The model points at a line by its `number` -- 1, 2, 3... within the window it
+    was shown -- and never by the segment's own index. A short count is far
+    easier to copy back correctly than a zero-padded id, and a wrong one is
+    plainly out of range instead of quietly naming some other segment. `name` is
+    the speaker as the model should call them (a letter, not the diarizer's
+    label, which is often a bare digit that reads like a line number).
 
     `gap_before` is shown because it is the strongest timing evidence for a
     change of turn: a long pause suggests one, a negative one is an
@@ -90,8 +113,7 @@ def format_line(seg, locked: bool = False) -> str:
     out rather than shown as zero.
     """
     text = " ".join(str(getattr(seg, "text", "") or "").split())
-    parts = [f"#{seg.index}", f"[{clock(seg.start)}-{clock(seg.end)}]",
-             str(seg.speaker)]
+    parts = [f"[{number}]", f"{clock(seg.start)}-{clock(seg.end)}", str(name)]
     if locked:
         parts.append("[cố định]")
     gap = getattr(seg, "gap_before", None)

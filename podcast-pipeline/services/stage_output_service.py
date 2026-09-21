@@ -448,10 +448,12 @@ class StageOutputService:
         whole record of it: `changes.json` is what was applied, `rejected.json`
         is what was proposed and refused with the reason -- the place to look
         when a label looks wrong, or when the model is proposing nonsense.
+        `replies.json` is what the model actually wrote for each window; it is
+        the only way to tell "found nothing wrong" from "did not answer in JSON".
         """
         stats = {k: report.get(k) for k in (
-            "segments", "windows", "failed_windows", "changed",
-            "changed_fraction", "skipped", "discarded")}
+            "segments", "windows", "failed_windows", "unreadable_windows", "proposed",
+            "changed", "changed_fraction", "skipped", "discarded")}
         warnings = []
         if report.get("discarded"):
             warnings.append(
@@ -461,12 +463,18 @@ class StageOutputService:
             warnings.append(
                 f"{report['failed_windows']} of {report.get('windows', 0)} "
                 "window(s) got no answer; those labels were left as they were")
+        if report.get("unreadable_windows"):
+            warnings.append(
+                f"{report['unreadable_windows']} of {report.get('windows', 0)} "
+                "window(s) were answered without any JSON; read replies.json to see what "
+                "the model wrote instead")
         if warnings:
             stats["warnings"] = warnings
         return self._finish(
             "relabel", "changes.json", report.get("applied", []), stats,
             extra={"rejected.json": report.get("rejected", []),
-                   "report.json": report})
+                   "replies.json": report.get("replies", []),
+                   "report.json": {k: v for k, v in report.items() if k != "replies"}})
 
     def write_word_alignment(self, transcripts, report: dict):
         """Final refined text with Wav2Vec2 timestamps for every aligned word."""
@@ -496,7 +504,9 @@ class StageOutputService:
         item written, `report.json` carries the finder's counts (how many blocks
         each rule ended, how many windows each noise or music gate refused, how
         many the model turned down), which is where to look when a recording
-        gives nothing and the thresholds need moving.
+        gives nothing and the thresholds need moving. `replies.json` holds the
+        model's raw answer for every candidate it was asked about, with the
+        verdict made of it.
         """
         finder = report.get("finder") or {}
         stats = {
@@ -521,14 +531,20 @@ class StageOutputService:
             warnings.append("the LLM was not available for the semantic check")
         if report.get("unanswered"):
             warnings.append(f"{report['unanswered']} candidate(s) got no answer")
+        if report.get("unreadable"):
+            warnings.append(
+                f"{report['unreadable']} candidate(s) were answered without any JSON; "
+                "read replies.json to see what the model wrote instead")
         if stats["word_alignment_missing"]:
             warnings.append(
                 f"{stats['word_alignment_missing']} segment(s) were excluded because "
                 "the final text lacks complete word timestamps")
         if warnings:
             stats["warnings"] = warnings
-        return self._finish("conversation_exports", "exports.json", exports, stats,
-                            extra={"report.json": report})
+        return self._finish(
+            "conversation_exports", "exports.json", exports, stats,
+            extra={"replies.json": report.get("replies", []),
+                   "report.json": {k: v for k, v in report.items() if k != "replies"}})
 
     # -- separated audio ------------------------------------------------
     def write_separated_audio(self, segments, sample_rate: int) -> dict:
