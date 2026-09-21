@@ -924,23 +924,18 @@ def test_the_pass_is_given_the_separation_output_by_the_pipeline(tmp_path):
 
 from services import conversation_export_service
 from services.conversation_export_service import (
-    cross_speaker_overlaps, promote_tier, tier_folder)
+    FOLDER_ORDER, OVERLAP_BAD, OVERLAP_GOOD, cross_speaker_overlaps, tier_folder)
 
 
 def test_tier_folders_are_numbered_so_the_best_one_sorts_first():
-    names = [tier_folder(t) for t in ("S", "A", "B", "C")]
-    assert names == ["tier_1_S", "tier_2_A", "tier_3_B", "tier_4_C"]
+    names = [tier_folder(t) for t in FOLDER_ORDER]
+    assert names == ["tier_1_overlap_good", "tier_2_S", "tier_3_A", "tier_4_B",
+                     "tier_5_C", "tier_6_overlap_bad"]
     assert names == sorted(names)
 
 
-def test_a_promotion_is_one_tier_up_and_the_top_stays_the_top():
-    assert [promote_tier(t) for t in ("C", "B", "A", "S")] == ["B", "A", "S", "S"]
-    assert promote_tier("Reject") == "Reject"
-
-
-def test_a_promotion_can_be_several_tiers_and_stops_at_the_top():
-    assert [promote_tier("C", 2), promote_tier("B", 2), promote_tier("C", 9)] == ["A", "S", "S"]
-    assert promote_tier("B", 0) == "B" and promote_tier("B", -3) == "B"
+def test_a_folder_that_is_not_a_known_tier_sorts_after_all_of_them():
+    assert tier_folder("odd") == "tier_7_odd" and tier_folder("odd") > tier_folder(OVERLAP_BAD)
 
 
 def test_overlap_is_where_two_different_speakers_are_heard_at_once():
@@ -1065,101 +1060,28 @@ def test_a_failed_check_is_counted_and_reported_as_an_error(tmp_path, monkeypatc
     assert any("same_length" in m for m in log.errors)
 
 
-# --- overlap first ----------------------------------------------------------------------
+# --- overlap folders --------------------------------------------------------------------
 
-def _speech_for(segs):
-    """Separation output for `segs`: A at one level, B at another, nothing failed."""
+def _speech_for(segs, similarity=0.8, covered=1.0):
+    """Separation output for `segs`: A at one level, B at another, nothing failed.
+
+    Each segment that takes part in an overlap carries the span the separator worked
+    on, with its similarity; `covered` is the share of the overlap it managed.
+    """
+    overlaps = cross_speaker_overlaps(segs)
     out = []
     for seg in segs:
         n = round((seg.end - seg.start) * SR)
+        spans = []
+        for a, b in overlaps:
+            lo, hi = max(a, seg.start), min(b, seg.end)
+            if hi > lo:
+                spans.append((lo, lo + (hi - lo) * covered, similarity))
         out.append(SimpleNamespace(
             index=seg.index, speaker=seg.speaker, start=seg.start, end=seg.end,
             audio=np.full(n, 0.1 if seg.speaker == A else 0.2, dtype=np.float32),
-            bss_spans=[], bss_failed_spans=[]))
+            bss_spans=spans, bss_failed_spans=[]))
     return out
-
-
-def _planned(overlap=True, tier="B", fake=None, speech=None, **settings):
-    """The tier `_plan` files an excerpt under, for the first candidate of a talk."""
-    from utils.conversation_selection import ConversationSelectionFinder
-    segs = _talk(30)
-    if overlap:
-        segs[21].start -= 3.0            # B starts 3s before A has finished
-    svc = ConversationExportService(FakeLLM(_good()), **settings)
-    finder = ConversationSelectionFinder(segs, TimelineMap(), _quiet(), None, svc.cfg)
-    cand = next(c for c in finder.candidates()
-                if finder.segs[c.first].index <= "00020" and finder.segs[c.last].index >= "00022")
-    cand.tier = tier
-    from services.separation_service import SeparationService
-    real = SeparationService.__new__(SeparationService)
-    real.logger = None
-    speech = speech if speech is not None else _speech_for(segs)
-    plan = svc._plan(finder, cand, _Item(), _wave(), SR, speech,
-                     fake if fake is not None else real)
-    return plan
-
-
-class _Item:
-    topic, semantic, trimmed, reason, why, trim_ignored, candidate = "t", 5, False, None, "", None, None
-
-
-def test_an_excerpt_with_a_cleanly_separated_overlap_is_filed_one_tier_up():
-    plan = _planned(overlap=True, tier="B")
-    assert plan.overlap_seconds > 0.3
-    assert plan.method == "strict_separation_tracks"
-    assert plan.tier == "A"
-
-
-def test_the_top_tier_stays_where_it_is():
-    assert _planned(overlap=True, tier="S").tier == "S"
-
-
-def test_the_promotion_can_go_straight_to_the_top_folder():
-    assert _planned(overlap=True, tier="B", overlap_promote_steps=9).tier == "S"
-    assert _planned(overlap=True, tier="B", overlap_promote_steps=0).tier == "B"
-
-
-def test_without_overlap_the_tier_is_the_one_the_score_gives():
-    plan = _planned(overlap=False, tier="B")
-    assert plan.overlap_seconds == 0.0 and plan.tier == "B"
-
-
-def test_overlap_is_not_rewarded_when_the_switch_is_off():
-    assert _planned(overlap=True, tier="B", overlap_first=False).tier == "B"
-
-
-def test_a_short_overlap_below_the_threshold_does_not_promote():
-    assert _planned(overlap=True, tier="B", overlap_min_seconds=10.0).tier == "B"
-
-
-def test_an_overlap_that_was_only_gated_from_the_mixture_does_not_promote():
-    """Both voices are still in both ears there, which is what the promotion is meant to be free of."""
-    class NoTracks(FakeSeparation):
-        def export_sdlm_dual_channel(self, *a, **k):
-            raise RuntimeError("no tracks")
-    plan = _planned(overlap=True, tier="B", fake=NoTracks())
-    assert plan.method == "time_gated" and plan.overlap_seconds > 0.3 and plan.tier == "B"
-
-
-def test_an_overlap_the_separator_failed_on_does_not_promote():
-    segs = _talk(30)
-    speech = _speech_for(segs)
-    speech[21].bss_failed_spans = [(165.0, 166.0, "low_similarity", "sim 0.1")]
-    assert _planned(overlap=True, tier="B", speech=speech).tier == "B"
-
-
-def test_the_json_records_the_overlap_and_the_promotion(tmp_path):
-    segs = _talk(30)
-    segs[21].start -= 3.0
-    result, meta, _, _, _ = _tracks(tmp_path, segs=segs, speech_segments=_speech_for(segs),
-                                    fake=_real_tracks())
-    assert meta["overlap_seconds"] > 0.3 and meta["overlap_spans"]
-    span = meta["overlap_spans"][0]
-    assert 0.0 <= span["start"] < span["end"] <= meta["duration"]
-    assert meta["tier_by_score"] in ("S", "A", "B", "C")
-    assert meta["tier"] == (promote_tier(meta["tier_by_score"]))
-    assert meta["promoted_for_overlap"] is (meta["tier"] != meta["tier_by_score"])
-    assert result.exports[0]["overlap_seconds"] == meta["overlap_seconds"]
 
 
 def _real_tracks():
@@ -1167,6 +1089,169 @@ def _real_tracks():
     real = SeparationService.__new__(SeparationService)
     real.logger = None
     return real
+
+
+class _Item:
+    topic, semantic, trimmed, reason, why, trim_ignored, candidate = "t", 5, False, None, "", None, None
+
+
+def _planned(overlap=True, tier="B", fake=None, speech=None, speech_args=None, **settings):
+    """The plan for the first candidate of a talk in which B breaks in on A (or does not)."""
+    from utils.conversation_selection import ConversationSelectionFinder
+    segs = _talk(30)
+    if overlap:
+        segs[21].start -= 3.0            # B starts 3s before A (seg 20) has finished
+    svc = ConversationExportService(FakeLLM(_good()), **settings)
+    finder = ConversationSelectionFinder(segs, TimelineMap(), _quiet(), None, svc.cfg)
+    cand = next(c for c in finder.candidates()
+                if finder.segs[c.first].index <= "00020" and finder.segs[c.last].index >= "00022")
+    cand.tier = tier
+    speech = speech if speech is not None else _speech_for(segs, **(speech_args or {}))
+    return svc._plan(finder, cand, _Item(), _wave(), SR, speech,
+                     fake if fake is not None else _real_tracks())
+
+
+def test_a_cleanly_separated_overlap_is_filed_apart_whatever_its_score():
+    for tier in ("S", "B"):
+        plan = _planned(overlap=True, tier=tier)
+        assert plan.overlap_seconds > 0.3
+        assert plan.method == "strict_separation_tracks"
+        assert plan.tier == OVERLAP_GOOD and plan.overlap_quality == "good"
+        assert plan.overlap_reasons == []
+        assert plan.separated_share == pytest.approx(1.0) and plan.min_similarity == 0.8
+
+
+def test_without_overlap_the_tier_is_the_one_the_score_gives():
+    plan = _planned(overlap=False, tier="B")
+    assert plan.overlap_seconds == 0.0 and plan.tier == "B" and plan.overlap_quality is None
+
+
+def test_the_folders_are_by_score_alone_when_overlap_first_is_off():
+    plan = _planned(overlap=True, tier="B", overlap_first=False)
+    assert plan.tier == "B"
+    assert plan.overlap_quality == "good", "how good the overlap is is still recorded"
+
+
+def test_an_overlap_shorter_than_the_threshold_is_not_an_overlap_excerpt():
+    plan = _planned(overlap=True, tier="B", overlap_min_seconds=10.0)
+    assert plan.tier == "B" and plan.overlap_quality is None
+
+
+def test_an_overlap_that_was_only_gated_from_the_mixture_is_a_bad_one():
+    """Both voices are still in both ears there."""
+    class NoTracks(FakeSeparation):
+        def export_sdlm_dual_channel(self, *a, **k):
+            raise RuntimeError("no tracks")
+    plan = _planned(overlap=True, tier="S", fake=NoTracks())
+    assert plan.method == "time_gated" and plan.overlap_seconds > 0.3
+    assert plan.tier == OVERLAP_BAD and plan.overlap_reasons == ["not_separated_tracks"]
+
+
+def test_an_overlap_with_no_separation_output_at_all_is_a_bad_one():
+    plan = _planned(overlap=True, tier="S", speech=[])
+    assert plan.tier == OVERLAP_BAD and plan.overlap_reasons == ["not_separated_tracks"]
+
+
+def test_an_overlap_the_separator_failed_on_is_a_bad_one():
+    segs = _talk(30)
+    segs[21].start -= 3.0
+    speech = _speech_for(segs)
+    speech[21].bss_failed_spans = [(165.0, 166.0, "low_similarity", "sim 0.1")]
+    plan = _planned(overlap=True, tier="S", speech=speech)
+    assert plan.tier == OVERLAP_BAD and "separation_failed" in plan.overlap_reasons
+
+
+def test_an_overlap_separated_with_a_weak_match_is_a_bad_one():
+    plan = _planned(overlap=True, tier="S", speech_args={"similarity": 0.3})
+    assert plan.tier == OVERLAP_BAD and plan.overlap_reasons == ["low_similarity"]
+    assert plan.min_similarity == 0.3
+
+
+def test_an_overlap_only_partly_separated_is_a_bad_one():
+    plan = _planned(overlap=True, tier="S", speech_args={"covered": 0.5})
+    assert plan.tier == OVERLAP_BAD and plan.overlap_reasons == ["overlap_not_separated"]
+    assert plan.separated_share == pytest.approx(0.5, abs=0.02)
+
+
+def test_the_bar_for_a_good_overlap_is_configurable():
+    assert _planned(overlap=True, tier="S", speech_args={"similarity": 0.3},
+                    overlap_good_min_similarity=0.2).tier == OVERLAP_GOOD
+    assert _planned(overlap=True, tier="S", speech_args={"covered": 0.5},
+                    overlap_good_min_coverage=0.4).tier == OVERLAP_GOOD
+
+
+def test_every_reason_an_overlap_is_bad_is_listed_not_just_the_first():
+    segs = _talk(30)
+    segs[21].start -= 3.0
+    speech = _speech_for(segs, similarity=0.3, covered=0.5)
+    speech[21].bss_failed_spans = [(165.0, 166.0, "low_similarity", "x")]
+    plan = _planned(overlap=True, tier="S", speech=speech)
+    assert set(plan.overlap_reasons) == {"separation_failed", "low_similarity",
+                                         "overlap_not_separated"}
+
+
+def test_the_json_says_how_good_the_overlap_is(tmp_path):
+    segs = _talk(30)
+    segs[21].start -= 3.0
+    result, meta, _, _, _ = _tracks(tmp_path, segs=segs, speech_segments=_speech_for(segs),
+                                    fake=_real_tracks())
+    assert meta["tier"] == OVERLAP_GOOD and meta["folder"].startswith("tier_1_overlap_good/")
+    assert meta["overlap_quality"] == "good" and meta["overlap_reasons"] == []
+    assert meta["overlap_separated_share"] == pytest.approx(1.0)
+    assert meta["overlap_min_similarity"] == 0.8
+    assert meta["overlap_seconds"] > 0.3 and meta["overlap_spans"]
+    span = meta["overlap_spans"][0]
+    assert 0.0 <= span["start"] < span["end"] <= meta["duration"]
+    assert meta["tier_by_score"] in ("S", "A", "B", "C")
+    assert result.exports[0]["overlap_quality"] == "good"
+
+
+def test_the_json_says_why_a_bad_overlap_is_bad(tmp_path):
+    segs = _talk(30)
+    segs[21].start -= 3.0
+    result, meta, _, _, _ = _tracks(tmp_path, segs=segs,
+                                    speech_segments=_speech_for(segs, similarity=0.3),
+                                    fake=_real_tracks())
+    assert meta["tier"] == OVERLAP_BAD and meta["folder"].startswith("tier_6_overlap_bad/")
+    assert meta["overlap_quality"] == "bad" and meta["overlap_reasons"] == ["low_similarity"]
+    assert result.exports[0]["overlap_reasons"] == ["low_similarity"]
+
+
+def test_conversations_with_overlap_leave_the_score_tiers_and_the_rest_stay(tmp_path):
+    segs = _talk(60)
+    segs[41].start -= 3.0                          # an overlap far into the recording
+    _, result, _ = _run(tmp_path, FakeLLM(_good()), segs=segs, max_candidates=40,
+                        max_seconds=100.0,
+                        run_kwargs={"speech_segments": _speech_for(segs),
+                                    "separation_service": _real_tracks()})
+    with_overlap = [r for r in result.exports if r["overlap_seconds"] > 0]
+    without = [r for r in result.exports if r["overlap_seconds"] == 0]
+    assert with_overlap and without
+    assert {r["tier"] for r in with_overlap} == {OVERLAP_GOOD}
+    assert not {r["tier"] for r in without} & {OVERLAP_GOOD, OVERLAP_BAD}
+    names = sorted(p.name for p in tmp_path.glob("tier_*"))
+    assert names[0] == "tier_1_overlap_good"
+
+
+def test_the_bad_overlaps_sort_after_every_score_tier(tmp_path):
+    segs = _talk(60)
+    segs[41].start -= 3.0
+    _, result, _ = _run(tmp_path, FakeLLM(_good()), segs=segs, max_candidates=40,
+                        max_seconds=100.0,
+                        run_kwargs={"speech_segments": _speech_for(segs, similarity=0.2),
+                                    "separation_service": _real_tracks()})
+    names = sorted(p.name for p in tmp_path.glob("tier_*"))
+    assert names[-1] == "tier_6_overlap_bad" and len(names) >= 2
+
+
+def test_the_report_counts_the_overlap_folders_too(tmp_path):
+    segs = _talk(60)
+    segs[41].start -= 3.0
+    _, result, _ = _run(tmp_path, FakeLLM(_good()), segs=segs, max_candidates=40,
+                        max_seconds=100.0,
+                        run_kwargs={"speech_segments": _speech_for(segs),
+                                    "separation_service": _real_tracks()})
+    assert result.report["tiers"].get("tier_1_overlap_good", 0) >= 1
 
 
 def _refiled(monkeypatch, assign):
@@ -1194,30 +1279,8 @@ def test_each_tier_folder_is_numbered_from_one_and_ids_follow_the_folder_order(t
         numbers = sorted(int(c.name.rsplit("_", 1)[1]) for c in tier.glob("conversation_*"))
         assert numbers == list(range(1, len(numbers) + 1)), tier.name
         for conv in tier.glob("conversation_*"):
-            assert _doc_of(conv)["tier"] == tier.name.rsplit("_", 1)[1]
+            assert _doc_of(conv)["tier"] == tier.name.split("_", 2)[2]
     ranks = [tier_folder(row["tier"]) for row in result.exports]
     assert ranks == sorted(ranks), "the best folder is written and numbered first"
     ids = [row["id"] for row in result.exports]
     assert ids == sorted(ids) and len(set(ids)) == len(ids)
-
-
-def test_inside_a_tier_the_excerpt_with_overlap_is_first_even_with_a_lower_score(tmp_path, monkeypatch):
-    segs = _talk(60)
-    segs[41].start -= 3.0                          # an overlap far into the recording
-    spans_with_overlap = (segs[41].start, segs[40].end)
-
-    def assign(k, cand):
-        holds = cand.start <= spans_with_overlap[0] and cand.end >= spans_with_overlap[1]
-        return "A", (60.0 if holds else 90.0 - k)  # the one with the overlap scores lowest
-
-    _refiled(monkeypatch, assign)
-    _, result, _ = _run(tmp_path, FakeLLM(_good()), segs=segs, max_candidates=40,
-                        max_seconds=100.0, overlap_first=False,
-                        run_kwargs={"speech_segments": _speech_for(segs),
-                                    "separation_service": _real_tracks()})
-    rows = [r for r in result.exports]
-    assert len(rows) >= 3 and {r["tier"] for r in rows} == {"A"}
-    assert rows[0]["overlap_seconds"] > 0, "the excerpt with the overlap is conversation_1"
-    assert rows[0]["score"] == 60.0 and rows[0]["folder"].endswith("conversation_1")
-    rest = [r["score"] for r in rows[1:]]
-    assert rest == sorted(rest, reverse=True)

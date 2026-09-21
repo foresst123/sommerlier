@@ -28,9 +28,15 @@ holds a join (the finder does not let one in).
 Each excerpt gets a folder of its own, filed by quality, and everything in it is
 cut from the same samples so the files can be laid against one another:
 
-  tier_1_S/            the best; an excerpt whose overlap was separated cleanly is
-  tier_2_A/            moved up one tier (`overlap_first`), so it lands here first.
-  tier_3_B/            Inside a folder the excerpts with overlap come first, then by score.
+  tier_1_overlap_good/ the two spoke at once and the separator pulled the voices
+                       apart cleanly: each ear holds one voice.
+  tier_2_S/            no overlap (or `overlap_first` off), filed by score:
+  tier_3_A/            S from 85, A from 70, B from 55, C from 40.
+  tier_4_B/
+  tier_6_overlap_bad/  the two spoke at once and the separation is not to be
+                       trusted (failed, low similarity, part left unseparated, or
+                       no separated tracks at all); conversation.json says why.
+                       Inside a folder the best score comes first.
     conversation_1/
       mixture.wav          mono, the recording of record: both voices as recorded.
       speaker_A.wav        one channel, one person: A alone (the separated track).
@@ -218,19 +224,41 @@ JSON_FILE = "conversation.json"
 TEXT_FILE = "transcript.txt"
 
 
+OVERLAP_GOOD = "overlap_good"
+OVERLAP_BAD = "overlap_bad"
+# Best folder first: the clean overlaps, then the tiers by score, then the doubtful overlaps.
+FOLDER_ORDER = (OVERLAP_GOOD,) + tuple(name for _floor, name in TIERS) + (OVERLAP_BAD,)
+
+
 def tier_folder(tier: str) -> str:
-    """`tier_1_S`: numbered, so the best folder sorts first in any file browser."""
-    names = [name for _floor, name in TIERS]
-    rank = names.index(tier) + 1 if tier in names else len(names) + 1
+    """`tier_2_S`: numbered, so the best folder sorts first in any file browser."""
+    rank = FOLDER_ORDER.index(tier) + 1 if tier in FOLDER_ORDER else len(FOLDER_ORDER) + 1
     return f"tier_{rank}_{tier}"
 
 
-def promote_tier(tier: str, steps: int = 1) -> str:
-    """`steps` tiers up (A -> S), never past the best; a tier that is not one stays."""
-    names = [name for _floor, name in TIERS]
-    if tier not in names:
-        return tier
-    return names[max(0, names.index(tier) - max(0, int(steps)))]
+def _merge(spans):
+    merged = []
+    for lo, hi in sorted(spans):
+        if merged and lo <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+        else:
+            merged.append((lo, hi))
+    return merged
+
+
+def _shared_seconds(a, b) -> float:
+    """Seconds two lists of intervals have in common."""
+    a, b = _merge(a), _merge(b)
+    total, i, j = 0.0, 0, 0
+    while i < len(a) and j < len(b):
+        lo, hi = max(a[i][0], b[j][0]), min(a[i][1], b[j][1])
+        if hi > lo:
+            total += hi - lo
+        if a[i][1] < b[j][1]:
+            i += 1
+        else:
+            j += 1
+    return total
 
 
 def cross_speaker_overlaps(segments):
@@ -243,14 +271,7 @@ def cross_speaker_overlaps(segments):
                 break
             if other != who and min(a1, b1) > max(a0, b0):
                 spans.append((max(a0, b0), min(a1, b1)))
-    spans.sort()
-    merged = []
-    for lo, hi in spans:
-        if merged and lo <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
-        else:
-            merged.append((lo, hi))
-    return merged
+    return _merge(spans)
 
 
 def _sha256(path: str) -> str:
@@ -444,7 +465,11 @@ class _Plan:
     method: Optional[str]
     overlaps: List[tuple]                     # (start, end) in the pipeline's clock
     overlap_seconds: float
-    tier: str                                 # the folder it goes in, after any promotion
+    tier: str                                 # the folder it goes in
+    overlap_quality: Optional[str] = None     # "good" / "bad" when there is an overlap
+    overlap_reasons: List[str] = field(default_factory=list)   # why "bad"
+    separated_share: Optional[float] = None   # share of the overlap the separator covered
+    min_similarity: Optional[float] = None    # the weakest separated span in the overlap
 
 
 class ConversationExportService:
@@ -672,12 +697,46 @@ class ConversationExportService:
             return None
         overlaps = cross_speaker_overlaps(finder.segs[cand.first:cand.last + 1])
         seconds = sum(b - a for a, b in overlaps)
-        tier = cand.tier
-        if (self.cfg.overlap_first and render.method == STRICT_TRACKS
-                and seconds >= self.cfg.overlap_min_seconds
-                and not self._zeroed_spans(speech_segments, cand)):
-            tier = promote_tier(cand.tier, self.cfg.overlap_promote_steps)
-        return _Plan(cand, item, render.method, overlaps, seconds, tier)
+        plan = _Plan(cand, item, render.method, overlaps, seconds, cand.tier)
+        if seconds >= self.cfg.overlap_min_seconds:
+            self._judge_overlap(plan, speech_segments)
+            if self.cfg.overlap_first:
+                plan.tier = OVERLAP_GOOD if plan.overlap_quality == "good" else OVERLAP_BAD
+        return plan
+
+    def _judge_overlap(self, plan: _Plan, speech_segments) -> None:
+        """Say whether the overlap in this excerpt was captured cleanly, and if not, why.
+
+        Clean means each ear really holds one voice there: the separated tracks
+        were used, none of the separator's failures fall inside the excerpt, every
+        span it separated was a confident match to the speaker, and nearly all of
+        the overlap was separated at all. Anything less and one ear may carry
+        both voices, or none.
+        """
+        cfg, cand = self.cfg, plan.cand
+        reasons = []
+        if plan.method != STRICT_TRACKS or not speech_segments:
+            reasons.append("not_separated_tracks")
+        else:
+            spans, sims = [], []
+            for seg in speech_segments:
+                if seg.speaker not in cand.speakers:
+                    continue
+                for a, b, sim in getattr(seg, "bss_spans", ()):
+                    if _shared_seconds([(float(a), float(b))], plan.overlaps) > 0:
+                        spans.append((float(a), float(b)))
+                        sims.append(float(sim))
+            total = sum(b - a for a, b in plan.overlaps)
+            plan.separated_share = round(_shared_seconds(spans, plan.overlaps) / total, 4) if total else 1.0
+            plan.min_similarity = round(min(sims), 4) if sims else None
+            if self._zeroed_spans(speech_segments, cand):
+                reasons.append("separation_failed")
+            if sims and min(sims) < cfg.overlap_good_min_similarity:
+                reasons.append("low_similarity")
+            if plan.separated_share < cfg.overlap_good_min_coverage:
+                reasons.append("overlap_not_separated")
+        plan.overlap_reasons = reasons
+        plan.overlap_quality = "bad" if reasons else "good"
 
     @staticmethod
     def _zeroed_spans(speech_segments, cand: Candidate) -> bool:
@@ -697,7 +756,7 @@ class ConversationExportService:
             return
         for name in os.listdir(out_dir):
             path = os.path.join(out_dir, name)
-            if re.fullmatch(r"tier_\d+_[A-Za-z]+", name) and os.path.isdir(path):
+            if re.fullmatch(r"tier_\d+_[A-Za-z_]+", name) and os.path.isdir(path):
                 shutil.rmtree(path, ignore_errors=True)
 
     def _verify(self, directory: str, files: Dict[str, str], sample_rate: int,
@@ -764,6 +823,9 @@ class ConversationExportService:
             audio_end=render.hi / float(sample_rate),
             two_channel=render.method, speech_segments=speech_segments,
             folder=folder, tier=plan.tier, overlaps=plan.overlaps, files=files,
+            overlap_info={"quality": plan.overlap_quality, "reasons": plan.overlap_reasons,
+                          "separated_share": plan.separated_share,
+                          "min_similarity": plan.min_similarity},
             verification=self._verify(directory, files, sample_rate, len(render.mixture)))
         with open(os.path.join(directory, JSON_FILE), "w", encoding="utf-8") as fh:
             json.dump(meta, fh, ensure_ascii=False, indent=2)
@@ -786,7 +848,7 @@ class ConversationExportService:
                   audio_end: Optional[float] = None, two_channel: Optional[str] = None,
                   speech_segments=None, folder: Optional[str] = None,
                   tier: Optional[str] = None, overlaps=None, files: Optional[dict] = None,
-                  verification: Optional[dict] = None) -> dict:
+                  verification: Optional[dict] = None, overlap_info: Optional[dict] = None) -> dict:
         # cut_bounds may move each edge inward by a few milliseconds to the
         # nearest zero crossing. All item-relative timestamps must use the
         # sample actually written, not the requested padding edge.
@@ -841,7 +903,10 @@ class ConversationExportService:
             "score": cand.score,
             "tier": tier or cand.tier,
             "tier_by_score": cand.tier,
-            "promoted_for_overlap": bool(tier and tier != cand.tier),
+            "overlap_quality": (overlap_info or {}).get("quality"),
+            "overlap_reasons": (overlap_info or {}).get("reasons", []),
+            "overlap_separated_share": (overlap_info or {}).get("separated_share"),
+            "overlap_min_similarity": (overlap_info or {}).get("min_similarity"),
             "overlap_seconds": round(sum(b - a for a, b in (overlaps or [])), 3),
             "overlap_spans": [{"start": round(a - origin, 3), "end": round(b - origin, 3)}
                               for a, b in (overlaps or [])],
@@ -910,8 +975,7 @@ class ConversationExportService:
         report = {"prompt_version": CONVERSATION_EXPORT_PROMPT_VERSION,
                   "thinking": cfg.thinking, "skipped": None,
                   "candidates": 0, "shortlisted": 0, "judged_rejected": {},
-                  "accepted": 0, "exported": 0, "tiers": {}, "promoted_for_overlap": 0,
-                  "verification_failed": 0}
+                  "accepted": 0, "exported": 0, "tiers": {}, "verification_failed": 0}
         result.report = report
 
         candidates = finder.candidates()
@@ -957,9 +1021,8 @@ class ConversationExportService:
             plans.append(plan)
 
         # The best folder first; inside one, the excerpts with overlap, then by score.
-        rank = {name: k for k, (_floor, name) in enumerate(TIERS)}
-        plans.sort(key=lambda p: (rank.get(p.tier, len(rank)),
-                                  0 if p.overlap_seconds > 0 else 1, -p.cand.score))
+        rank = {name: k for k, name in enumerate(FOLDER_ORDER)}
+        plans.sort(key=lambda p: (rank.get(p.tier, len(rank)), -p.cand.score))
         self._clear_previous(out_dir)
 
         safe = re.sub(r"[^A-Za-z0-9._-]+", "_", base_name)
@@ -986,11 +1049,9 @@ class ConversationExportService:
                     self.logger.error(
                         f"[conversation-exports] {folder}: failed {bad}; do not trust these files")
             report["tiers"][tier_dir] = report["tiers"].get(tier_dir, 0) + 1
-            if plan.tier != cand.tier:
-                report["promoted_for_overlap"] += 1
             result.exports.append({
                 "id": export_id, "folder": folder, "tier": plan.tier, "tier_by_score": cand.tier,
-                "promoted_for_overlap": plan.tier != cand.tier,
+                "overlap_quality": plan.overlap_quality, "overlap_reasons": plan.overlap_reasons,
                 "overlap_seconds": meta["overlap_seconds"], "score": cand.score,
                 "files": {key: f"{folder}/{file}" for key, file in meta["files"].items()},
                 "audio": f"{folder}/{MIXTURE_FILE}",

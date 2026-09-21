@@ -528,7 +528,6 @@ class StageOutputService:
             "word_alignment_missing": (finder.get("breaks") or {}).get(
                 "word_alignment_missing", 0),
             "tiers": report.get("tiers"),
-            "promoted_for_overlap": report.get("promoted_for_overlap"),
             "verification_failed": report.get("verification_failed"),
         }
         warnings = []
