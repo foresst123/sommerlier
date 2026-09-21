@@ -190,13 +190,29 @@ def test_the_step_is_opt_in_in_run_and_keeps_the_llm_loaded_for_it():
     assert 'self.step_enabled(args, "refinement") or relabel_on' in source
 
 
-def test_both_profiles_ship_the_pass_off_until_it_has_been_measured():
+def test_both_profiles_list_the_new_steps_as_switches_and_carry_their_settings():
+    """Whether they are on is the profile's call; that it says so explicitly, and
+    that the settings they read are there, is what has to hold."""
     with open(os.path.join(ROOT, "config.json"), encoding="utf-8") as fh:
         config = json.load(fh)
     for name, profile in config["environments"].items():
-        assert profile["steps"]["speaker_relabel"] is False, name
-        assert profile["steps"]["dialogue_clips"] is False, name
+        for step in ("speaker_relabel", "dialogue_clips"):
+            assert isinstance(profile["steps"][step], bool), (name, step)
         assert "relabel" in profile["models"], name
+        assert "dialogue_clips" in profile["models"], name
+
+
+def test_a_profile_that_turns_the_clip_pass_on_also_runs_what_it_reads():
+    """The clip pass reads the SSLAM noise labels and asks the resident LLM; on
+    without either, it would only ever report that it could not run."""
+    with open(os.path.join(ROOT, "config.json"), encoding="utf-8") as fh:
+        config = json.load(fh)
+    for name, profile in config["environments"].items():
+        steps = profile["steps"]
+        if steps["dialogue_clips"]:
+            assert steps["music_analysis"] is True, f"{name}: no noise labels without it"
+        if steps["dialogue_clips"] or steps["speaker_relabel"]:
+            assert profile["pipeline"]["llm_refinement"] is True, f"{name}: no LLM"
 
 
 def test_the_shipped_relabel_settings_are_accepted_by_the_service():

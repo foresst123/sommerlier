@@ -35,8 +35,8 @@
                 "asr": true,
                 "captioning": false,
                 "refinement": true,
-                "speaker_relabel": false,
-                "dialogue_clips": false,
+                "speaker_relabel": true,
+                "dialogue_clips": true,
                 "export": true
             },
             "pipeline": {
@@ -205,8 +205,8 @@
                 "asr": true,
                 "captioning": false,
                 "refinement": true,
-                "speaker_relabel": false,
-                "dialogue_clips": false,
+                "speaker_relabel": true,
+                "dialogue_clips": true,
                 "export": true
             },
             "pipeline": {

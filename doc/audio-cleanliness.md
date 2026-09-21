@@ -118,6 +118,24 @@ Ba lựa chọn thiết kế, mỗi cái có test giữ:
 
 `None` nghĩa là chưa đo, không phải sạch.
 
+Mỗi segment ở file JSON cuối mang ba trường về nhiễu, gắn lúc xuất (sau
+refinement, cùng chỗ với `orig_spans`):
+
+| Trường | Là gì |
+|---|---|
+| `noise_score` | Một số 0..1: percentile 90 của đường cong **gộp** (max của 3 nhóm). Cho biết *bao nhiêu*. |
+| `noise_breakdown` | Cùng phép đo, tính riêng từng nhóm: `noise_speech`, `noise_env`, `noise_room`. Cho biết *nhóm nào*, để đặt ngưỡng riêng (giọng người chặt hơn). |
+| `noise_kind` | Nhóm to nhất, dưới dạng một từ: `noise_speech` / `noise_env` / `noise_room`; `clean` nếu đã đo mà không nhóm nào tới `NOTICEABLE` (0.10, đổi bằng `NOISE_NOTICEABLE`); `null` nếu chưa đo. |
+
+`noise_kind` là tiện ích đọc nhanh và **có mang một ngưỡng** — điều mà
+`noise_score` cố ý không làm. Muốn ngưỡng khác thì lọc trên `noise_breakdown`,
+đừng lọc trên chữ `clean`: ngưỡng 0.10 còn tạm, đo trên ba file trong nhà, và
+`clean` chỉ có nghĩa "dưới mức đó", không phải bản ghi sạch.
+
+Các trường này chỉ nói *nhóm* (3 nhóm), không nói nhãn AudioSet cụ thể
+(`Dog`, `Siren`…). Nhãn cụ thể không được giữ lại sau bước max trong nhóm; muốn
+có thì phải lưu thêm cột nhãn từ SSLAM.
+
 ---
 
 ## 3. Chưa làm — Dùng dấu để dựng hội thoại (giai đoạn 3)
