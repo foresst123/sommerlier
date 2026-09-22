@@ -41,10 +41,20 @@ from utils.transcript_windows import build_windows, format_line, line_number
 # Bump when the prompt or the acceptance rules change: it is part of the
 # checkpoint namespace, so a changed prompt recomputes instead of reusing labels
 # that an older one produced.
-RELABEL_PROMPT_VERSION = "relabel-v3"
+RELABEL_PROMPT_VERSION = "relabel-v4"
 
 # Room the chat template and the reply framing take beyond the counted prompt.
 _TEMPLATE_SLACK_TOKENS = 64
+
+# Used only when a normal reply contains no usable JSON.  The retry is
+# intentionally shorter and stricter so a reasoning-capable model does not
+# spend the whole generation budget narrating its analysis before the JSON.
+_STRICT_JSON_SUFFIX = (
+    "\n\n### BẮT BUỘC Ở LẦN TRẢ LỜI NÀY\n"
+    "Không giải thích, không phân tích thành lời, không dùng <think>, không dùng ``` . "
+    "Ký tự đầu tiên phải là [ và ký tự cuối cùng phải là ]. "
+    "Nếu không có dòng nào cần đổi, chỉ trả về []."
+)
 
 # The worked example in the prompt names lines 901-904. No window is that long, so
 # a model that copies the example's answer names a line that does not exist and
@@ -253,7 +263,8 @@ class SpeakerRelabelService:
     def __init__(self, llm, logger=None, window_tokens: int = 3500,
                  overlap_segments: int = 12, min_confidence: float = 0.7,
                  max_change_fraction: float = 0.15, min_change_allowance: int = 2,
-                 max_new_tokens: int = 768, thinking: bool = False):
+                 max_new_tokens: int = 768, thinking: bool = False,
+                 max_window_segments: int = 60, unreadable_retries: int = 1):
         self.llm = llm
         self.logger = logger
         self.window_tokens = max(1, int(window_tokens))
@@ -265,6 +276,13 @@ class SpeakerRelabelService:
         self.min_change_allowance = max(0, int(min_change_allowance))
         self.thinking = bool(thinking)
         self.max_new_tokens = reply_budget(max_new_tokens, self.thinking)
+        # Token counting in a subprocess is approximate.  A second, segment-based
+        # ceiling prevents a long transcript from accidentally becoming one giant
+        # prompt (the failure mode seen with 149 segments in one window).
+        self.max_window_segments = max(1, int(max_window_segments))
+        # A malformed/non-JSON answer is not accepted as "no changes".  Retry a
+        # small number of times with a JSON-only prompt, then keep labels unchanged.
+        self.unreadable_retries = max(0, int(unreadable_retries))
 
     @property
     def checkpoint_namespace(self) -> str:
@@ -274,8 +292,20 @@ class SpeakerRelabelService:
         without, so the two do not share a checkpoint.
         """
         model = getattr(self.llm, "model_name", None) or "unknown"
-        mode = "-think" if self.thinking else ""
-        return re.sub(r"[^A-Za-z0-9._-]+", "_", f"{RELABEL_PROMPT_VERSION}{mode}-{model}")
+        mode = "think" if self.thinking else "nothink"
+        # These values change either the prompt, the window boundaries or the
+        # acceptance policy, so they must not silently reuse an older checkpoint.
+        key = (
+            f"{RELABEL_PROMPT_VERSION}-{mode}-{model}"
+            f"-conf{self.min_confidence:g}"
+            f"-win{self.window_tokens}"
+            f"-seg{self.max_window_segments}"
+            f"-ov{self.overlap_segments}"
+            f"-new{self.max_new_tokens}"
+            f"-cap{self.max_change_fraction:g}"
+            f"-retry{self.unreadable_retries}"
+        )
+        return re.sub(r"[^A-Za-z0-9._-]+", "_", key)
 
     # -- prompt ------------------------------------------------------------
     @staticmethod
@@ -287,6 +317,10 @@ class SpeakerRelabelService:
 
     def _system_prompt(self) -> str:
         return relabel_system_prompt(self.min_confidence)
+
+    def _strict_system_prompt(self) -> str:
+        """Prompt used only to recover from a prose/thinking reply."""
+        return self._system_prompt() + _STRICT_JSON_SUFFIX
 
     def prompt_overhead(self, names: List[str]) -> int:
         """Tokens every window pays before its first transcript line."""
@@ -346,8 +380,23 @@ class SpeakerRelabelService:
         counts = [self.llm.count_tokens(text_of(pos, pos + 1)) + 1
                   for pos in range(len(segments))]
         budget = max(1, self.window_tokens - self.prompt_overhead(letters))
-        windows = build_windows(counts, budget, self.overlap_segments)
+
+        # `count_tokens()` is approximate when the real tokenizer lives in the
+        # refinement subprocess.  The approximation can under-count Vietnamese
+        # badly enough that the whole file becomes one window.  Preserve the
+        # existing build_windows()/owns() semantics, but give every segment a
+        # minimum synthetic token cost so no window can grow far beyond the
+        # configured segment ceiling merely because token counting was optimistic.
+        segment_floor = max(1, (budget + self.max_window_segments - 1)
+                            // self.max_window_segments)
+        effective_counts = [max(c, segment_floor) for c in counts]
+        windows = build_windows(effective_counts, budget, self.overlap_segments)
         result.windows = len(windows)
+        if self.logger:
+            largest = max((w.stop - w.start for w in windows), default=0)
+            self.logger.info(
+                f"[relabel] built {len(windows)} window(s); largest={largest} segments, "
+                f"token_budget={budget}, segment_cap={self.max_window_segments}")
         messages = [self._message(letters, [text_of(pos, pos - w.start + 1)
                                             for pos in range(w.start, w.stop)])
                     for w in windows]
@@ -462,14 +511,58 @@ class SpeakerRelabelService:
             say(f"[relabel] window {w_no} (#{first}-#{last}): {note}")
 
     def _ask(self, messages: List[str], result: RelabelResult) -> List[Optional[str]]:
-        """One reply per window, None where the model could not answer it.
+        """One reply per window, retrying prose/thinking answers as JSON-only.
 
-        A window that cannot be answered is recorded and skipped -- its segments
-        simply keep their labels.
+        The normal call may still produce visible reasoning even when `thinking`
+        is disabled by the caller (model/template versions differ).  Such a reply
+        must not be mistaken for a clean `[]`.  Retry only those windows with a
+        stricter prompt and `thinking=False`; if they still contain no readable
+        JSON, `_record()` marks them unreadable and their labels stay unchanged.
         """
         replies, unanswered = ask_in_batches(
             self.llm, self._system_prompt(), messages,
             per_call=self._windows_per_call(), max_new_tokens=self.max_new_tokens,
             label="relabel window", logger=self.logger, thinking=self.thinking)
         result.failed_windows += unanswered
+
+        if not self.unreadable_retries:
+            return replies
+
+        pending = [
+            i for i, reply in enumerate(replies)
+            if reply is not None and not is_readable(reply)
+        ]
+
+        for attempt in range(1, self.unreadable_retries + 1):
+            if not pending:
+                break
+            if self.logger:
+                self.logger.warning(
+                    f"[relabel] retrying {len(pending)} unreadable window(s) "
+                    f"as strict JSON (attempt {attempt}/{self.unreadable_retries})")
+
+            retry_messages = [
+                messages[i] + (
+                    "\n\nNHẮC LẠI: chỉ trả về mảng JSON. "
+                    "Không viết phân tích trước hoặc sau JSON."
+                )
+                for i in pending
+            ]
+            retry_replies, _retry_unanswered = ask_in_batches(
+                self.llm, self._strict_system_prompt(), retry_messages,
+                per_call=min(self._windows_per_call(), max(1, len(retry_messages))),
+                max_new_tokens=self.max_new_tokens,
+                label=f"relabel JSON retry {attempt}",
+                logger=self.logger, thinking=False)
+
+            still_bad = []
+            for original_index, retry_reply in zip(pending, retry_replies):
+                # Preserve the original prose reply when the retry produced no
+                # answer at all; it is more useful for diagnostics.
+                if retry_reply is not None:
+                    replies[original_index] = retry_reply
+                if retry_reply is None or not is_readable(retry_reply):
+                    still_bad.append(original_index)
+            pending = still_bad
+
         return replies

@@ -807,7 +807,7 @@ class SeparationService:
             return result
 
         # Mỗi ramp không chiếm quá một phần tám độ dài vùng thay thế.
-        fade_samples = min(fade_samples, limit // 8)
+        fade_samples = min(fade_samples, max(int(0.005 * sr), limit // 8))
         if fade_samples <= 0:
             result[:limit] = new_audio[:limit]
             return result

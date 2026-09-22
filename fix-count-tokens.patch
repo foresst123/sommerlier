@@ -1,0 +1,20 @@
+diff --git a/podcast-pipeline/services/diarization_refinement_service.py b/podcast-pipeline/services/diarization_refinement_service.py
+index c61079e..c601aa5 100644
+--- a/podcast-pipeline/services/diarization_refinement_service.py
++++ b/podcast-pipeline/services/diarization_refinement_service.py
+@@ -912,7 +912,14 @@ class DiarizationRefinementService:
+             return False
+ 
+     def count_tokens(self, text: str) -> int:
+-        """Tokens `text` takes for this model's tokenizer. Needs the model loaded."""
++        """Tokens `text` takes for this model's tokenizer.
++
++        Khi dùng subprocess worker tokenizer không có trong main process —
++        dùng xấp xỉ len/3.5 (phù hợp tiếng Việt với Qwen tokenizer).
++        Sai số ~10-15%, đủ cho việc chia batch của speaker_relabel.
++        """
++        if self.tokenizer is None:
++            return max(1, int(len(text) / 3.5))
+         return len(self.tokenizer(text, add_special_tokens=False).input_ids)
+ 
+     def ensure_loaded(self) -> bool:

@@ -1,6 +1,7 @@
 import os
 from typing import List
 from difflib import SequenceMatcher
+from utils.worker_env import resolve_worker_python
 from algorithms.asr.hallucination import diacritic_ratio, foreign_script_ratio
 from algorithms.asr.rover import normalize_token
 from schemas.transcript import TranscriptSegment
@@ -220,6 +221,69 @@ class DiarizationRefinementService:
         self.model_name = (model_name or os.environ.get(
             "SOMMELIER_LLM", "Qwen/Qwen2.5-3B-Instruct"))
 
+        # Nếu có refinement_env riêng → dùng subprocess worker để tránh
+        # xung đột transformers 4.53 (main env) vs 5.x (Qwen3.5/3.8).
+        # KHÔNG start ở đây: worker chỉ spawn khi stage refinement thực sự
+        # chạy (lazy, giống qwen3/diarizen/sidon). __init__ chỉ kiểm tra
+        # xem refinement_env có tồn tại không để quyết định dùng worker
+        # hay fallback direct-load.
+        self._worker = None
+        self._worker_python = None
+        try:
+            self._worker_python = resolve_worker_python("refinement", logger=logger)
+            if logger:
+                logger.info(
+                    f"[refinement] refinement_env found ({self._worker_python}); "
+                    f"worker will start when refinement stage begins")
+        except FileNotFoundError:
+            if logger:
+                logger.info(
+                    "[refinement] no refinement_env found, "
+                    "loading model directly in main process")
+        except Exception as _e:
+            if logger:
+                logger.warning(
+                    f"[refinement] worker env resolution failed ({_e}), "
+                    "falling back to direct load")
+            self._worker_python = None
+
+    def _ensure_worker_started(self):
+        """Spawn worker subprocess lần đầu cần dùng (lazy start).
+
+        Gọi từ ensure_loaded/generate_texts — tức khi stage refinement
+        thực sự chạy, không phải lúc pipeline khởi tạo service.
+        """
+        if self._worker is not None:
+            return True  # đã start
+        if self._worker_python is None:
+            return False  # không có refinement_env → dùng direct load
+        try:
+            import os as _os
+            _script = _os.path.join(
+                _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                "refinement_worker.py")
+            from services.refinement_worker_service import RefinementWorkerService
+            self._worker = RefinementWorkerService(
+                python_env_path=self._worker_python,
+                worker_script_path=_script,
+                model_name=self.model_name,
+                logger=self.logger,
+            )
+            self._worker.start()
+            if self.logger:
+                self.logger.info(
+                    f"[refinement] subprocess worker started "
+                    f"(python={self._worker_python}, model={self.model_name})")
+            return True
+        except Exception as _e:
+            if self.logger:
+                self.logger.warning(
+                    f"[refinement] worker start failed ({_e}), "
+                    "falling back to direct load")
+            self._worker = None
+            self._worker_python = None
+            return False
+
     def _activate_cpu_threads(self):
         """Give refinement the cores released by earlier pipeline stages."""
         if self._active_cpu_threads is not None:
@@ -403,6 +467,13 @@ class DiarizationRefinementService:
         files run back to back and every later stage competes for what this
         stage is no longer using.
         """
+        if self._worker is not None:
+            try:
+                self._worker.stop()
+            except Exception:
+                pass
+            self._worker = None
+            return
         if self.model is None and self.tokenizer is None:
             return
         # The prefix cache holds tensors on the model's device; dropping the
@@ -537,13 +608,11 @@ class DiarizationRefinementService:
         )
 
     def refine(self, segments: List[TranscriptSegment], prompt: str = None) -> List[TranscriptSegment]:
-        """Call local Qwen LLM to fix hallucination and text errors.
+        if not self.ensure_loaded():
+            raise RuntimeError(
+                f"Failed to initialize refinement LLM {self.model_name}"
+            )
 
-        ``prompt`` overrides the built-in fusion system prompt when supplied.
-        """
-        self._load_model()
-        if not self.model:
-            return segments
         self.last_failure = None
 
         if self.logger: self.logger.info("Running LLM Refinement on all segments...")
@@ -585,12 +654,17 @@ class DiarizationRefinementService:
         if not pending:
             return segments
 
-        tokenizer = self.tokenizer
-        if tokenizer.pad_token_id is None:
-            tokenizer.pad_token = tokenizer.eos_token
-        # Decoder-only models need left padding for correct batched generation.
-        original_padding_side = tokenizer.padding_side
-        tokenizer.padding_side = "left"
+        tokenizer = None
+        original_padding_side = None
+
+        if self._worker is None:
+            tokenizer = self.tokenizer
+
+            if tokenizer.pad_token_id is None:
+                tokenizer.pad_token = tokenizer.eos_token
+
+            original_padding_side = tokenizer.padding_side
+            tokenizer.padding_side = "left"
 
         from tqdm import tqdm
         refined_count = 0
@@ -620,7 +694,8 @@ class DiarizationRefinementService:
                     start += len(batch)
                     bar.update(len(batch))
         finally:
-            tokenizer.padding_side = original_padding_side
+            if tokenizer is not None:
+                tokenizer.padding_side = original_padding_side
 
         tail = f", {self.rejected} rejected as unfaithful" if self.rejected else ""
         if self.logger:
@@ -837,7 +912,14 @@ class DiarizationRefinementService:
             return False
 
     def count_tokens(self, text: str) -> int:
-        """Tokens `text` takes for this model's tokenizer. Needs the model loaded."""
+        """Tokens `text` takes for this model's tokenizer.
+
+        Khi dùng subprocess worker tokenizer không có trong main process —
+        dùng xấp xỉ len/3.5 (phù hợp tiếng Việt với Qwen tokenizer).
+        Sai số ~10-15%, đủ cho việc chia batch của speaker_relabel.
+        """
+        if self.tokenizer is None:
+            return max(1, int(len(text) / 3.5))
         return len(self.tokenizer(text, add_special_tokens=False).input_ids)
 
     def ensure_loaded(self) -> bool:
@@ -847,6 +929,8 @@ class DiarizationRefinementService:
         judging) that run on the same model: `refine()` loads it itself, but
         those passes must work with refinement switched off too.
         """
+        if self._ensure_worker_started():
+            return self._worker.ping()
         self._load_model()
         return self.model is not None
 
@@ -872,6 +956,12 @@ class DiarizationRefinementService:
         then starts with a `<think>` block, so `max_new_tokens` has to cover the
         reasoning as well as the answer. A model with no thinking mode ignores it.
         """
+        if self._ensure_worker_started():
+            return self._worker.generate_texts(
+                system_prompt, user_messages,
+                max_new_tokens=max_new_tokens,
+                thinking=bool(thinking),
+            )
         if not self.model:
             return False, []
         tag = (", ".join(str(label) for label in labels) if labels
