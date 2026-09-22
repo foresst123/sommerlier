@@ -6,6 +6,7 @@ import threading
 import time as _time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 
 # Set BSS_TIMING=1 để bật log thời gian chi tiết từng bước trong separation loop.
 # Tắt mặc định vì mỗi job log thêm ~4 dòng, với 55 job sẽ rất dài.
@@ -169,6 +170,21 @@ REASONS = (
 # track sai; với các lý do dưới đây không có giọng nào để chặn, nên xóa chỉ
 # làm mất lời nói thật.
 SAFE_FAIL_REASONS = frozenset({"same_speaker"})
+
+
+@dataclass
+class _OverlapPlan:
+    """Every CPU-only step of process_overlaps, materialized ahead of any GPU
+    call: which windows to build and what each one produced. Safe to build on
+    a fork_for_file() clone from a background thread (see prefetch_overlap_plan)."""
+    speech: list
+    pairs: list
+    enrollments: dict
+    seg_by_index: dict
+    jobs: list                # the flattened (subjob, outcome) sequence expanded_window_iter() used to yield
+    stats_jobs: int
+    stats_pairs: int
+    overlap_durations: list
 
 
 class SeparationService:
@@ -1090,34 +1106,24 @@ class SeparationService:
             e.audio = audio.waveform[round(e.start * sr):round(e.end * sr)].copy()
         return speech
 
-    def process_overlaps(self, segments: List[Segment], audio: AudioData, overlap_threshold: float = 0.1) -> List[SpeechSegment]:
-        if not self.bss_model:
-            # passthrough gắn mixture vào từng segment. Trả SpeechSegment rỗng
-            # audio ở đây làm checkpoint, bước xuất clip và dual-channel đều
-            # nhận về giá trị None mà không có dấu hiệu nào là separation đã
-            # không chạy.
-            if self.logger:
-                self.logger.warning(
-                    "[TSE] no separator is loaded; every overlap stays raw mixture")
-            return self.passthrough(segments, audio)
-
-        if self.logger:
-            self.logger.info("Processing overlaps with blind source separation")
-
-        seg_dicts = [{"start": s.start, "end": s.end, "speaker": s.speaker, "index": s.index} for s in segments]
-        # Phát hiện mọi giao dương; ngưỡng chạy model chỉ áp dụng sau khi nhóm.
+    def _build_overlap_plan(self, segments: List[Segment], audio: AudioData,
+                            overlap_threshold: float = 0.1) -> "_OverlapPlan":
+        """Every CPU-only step of process_overlaps: detect pairs, mine
+        enrollments, group jobs, and materialize every window plan. No GPU
+        call happens here -- self.bss_model is never read -- so this is safe
+        to run on a fork_for_file() clone, from a background thread, for a
+        file whose diarization just finished while this SeparationService's
+        real instance may be handling a different file's actual separation."""
+        seg_dicts = [{"start": s.start, "end": s.end, "speaker": s.speaker, "index": s.index}
+                     for s in segments]
         pairs = detect_overlapping_segments(seg_dicts, overlap_threshold=0.0, logger=self.logger)
 
-        # Bỏ qua micro-overlap (< 60ms): thường là khoảng lặng ở ranh giới
-        # segment, không đáng tách và dễ gây insufficient_evidence khi retry.
-       
         micro = [p for p in pairs if p["overlap_end"] - p["overlap_start"] < MIN_OVERLAP_SECONDS]
         if micro and self.logger:
             self.logger.info(
                 f"[TSE] skipping {len(micro)} micro-overlap(s) < {MIN_OVERLAP_SECONDS*1000:.0f}ms")
         pairs = [p for p in pairs if p["overlap_end"] - p["overlap_start"] >= MIN_OVERLAP_SECONDS]
 
-        # Tạo danh sách các SpeechSegment từ danh sách segments
         speech = [SpeechSegment(**s.__dict__) for s in segments]
         sr = audio.sample_rate
         waveform = audio.waveform
@@ -1130,21 +1136,22 @@ class SeparationService:
                 self.logger.info(
                     f"[TSE] no overlap >= {overlap_threshold}s among {len(segments)} segments"
                 )
-            return speech
+            return _OverlapPlan(speech=speech, pairs=[], enrollments={}, seg_by_index={},
+                                jobs=[], stats_jobs=0, stats_pairs=0, overlap_durations=[])
 
         enrollments = self.mine_enrollments(segments, audio)
         seg_by_index = {s.index: s for s in speech}
 
-        # Tách hết, không lọc theo overlap_threshold. WindowPlanner giữ nguyên
-        # core dù rất ngắn rồi lấy context có giới hạn và padding sạch để bù.
+        stats_jobs = 0
+        stats_pairs = 0
+        overlap_durations = []
         queue, same_speaker_pairs = self._group_jobs(pairs)
-        below = []  # giữ để không vỡ bss_spans tracking
         buildable = []
         for spk_a, spk_b, plist in queue:
-            self.stats["jobs"] += 1
-            self.stats["pairs"] += len(plist)
+            stats_jobs += 1
+            stats_pairs += len(plist)
             for p in plist:
-                self.overlap_durations.append(p["overlap_end"] - p["overlap_start"])
+                overlap_durations.append(p["overlap_end"] - p["overlap_start"])
             targets = self._splice_pairs(plist)
             buildable.append((spk_a, spk_b, plist, targets))
 
@@ -1234,13 +1241,6 @@ class SeparationService:
                             "falling back to sequential build")
                     file_windows = None
 
-        recovery_planner = WindowPlanner(
-            segments, pairs, waveform, sr, music_map=self.music_map,
-            seams=self.seams(), vad=getattr(self.bss_model, "_vad", None),
-            context_seconds=BSS_STITCH_EDGE_PAD,
-            max_context_seconds=BSS_STITCH_EDGE_MAX,
-            padding_min_seconds=BSS_PADDING_MIN_PER_SPEAKER,
-            search_seconds=BSS_STITCH_SEARCH)
         if file_windows is not None:
             window_iter = file_windows.build_all([plist for _a, _b, plist, _t in buildable])
         else:
@@ -1299,6 +1299,73 @@ class SeparationService:
 
                 if not emitted:
                     yield job, (None, reason, detail or "no_core_targets", actions)
+
+        # Drained eagerly: by the time this list exists, every pool job for
+        # this file has finished, so file_windows' shared memory can close
+        # now instead of waiting for the (separate) GPU consumption loop in
+        # process_overlaps.
+        jobs = list(expanded_window_iter())
+        if file_windows is not None:
+            file_windows.close()
+
+        return _OverlapPlan(
+            speech=speech, pairs=pairs, enrollments=enrollments, seg_by_index=seg_by_index,
+            jobs=jobs, stats_jobs=stats_jobs, stats_pairs=stats_pairs,
+            overlap_durations=overlap_durations)
+
+    def process_overlaps(self, segments: List[Segment], audio: AudioData,
+                         overlap_threshold: float = 0.1,
+                         audio_path: Optional[str] = None) -> List[SpeechSegment]:
+        if not self.bss_model:
+            # passthrough gắn mixture vào từng segment. Trả SpeechSegment rỗng
+            # audio ở đây làm checkpoint, bước xuất clip và dual-channel đều
+            # nhận về giá trị None mà không có dấu hiệu nào là separation đã
+            # không chạy.
+            if self.logger:
+                self.logger.warning(
+                    "[TSE] no separator is loaded; every overlap stays raw mixture")
+            return self.passthrough(segments, audio)
+
+        if self.logger:
+            self.logger.info("Processing overlaps with blind source separation")
+
+        sr = audio.sample_rate
+        waveform = audio.waveform
+
+        # A prefetch started while this file's diarization pass returned (see
+        # PipelineService.run()) may already have built every window on a
+        # background thread. On a miss (no prefetch, file-major mode, or the
+        # background build raised) this builds the plan right now, exactly as
+        # process_overlaps always has.
+        plan = self._take_prefetched_plan(audio_path) if audio_path else None
+        if plan is None:
+            plan = self._build_overlap_plan(segments, audio, overlap_threshold)
+
+        speech = plan.speech
+        if not plan.pairs:
+            return speech
+
+        enrollments = plan.enrollments
+        seg_by_index = plan.seg_by_index
+        # Stats belong to whichever instance is actually handling this file's
+        # separation -- never to a fork_for_file() clone a prefetch ran on --
+        # so they are applied here, once, regardless of where the plan came from.
+        self.stats["jobs"] += plan.stats_jobs
+        self.stats["pairs"] += plan.stats_pairs
+        self.overlap_durations.extend(plan.overlap_durations)
+
+        pairs = plan.pairs
+
+        recovery_planner = WindowPlanner(
+            segments, pairs, waveform, sr, music_map=self.music_map,
+            seams=self.seams(), vad=getattr(self.bss_model, "_vad", None),
+            context_seconds=BSS_STITCH_EDGE_PAD,
+            max_context_seconds=BSS_STITCH_EDGE_MAX,
+            padding_min_seconds=BSS_PADDING_MIN_PER_SPEAKER,
+            search_seconds=BSS_STITCH_SEARCH)
+
+        def expanded_window_iter():
+            return iter(plan.jobs)
 
         pending_retries = collections.deque()
         previous_outputs = {}
@@ -1949,10 +2016,11 @@ class SeparationService:
                         f"splice={_t_end-_t_splice:.3f}s")
         finally:
             pbar.close()
-            # Chỉ đóng shared memory của FILE NÀY -- pool process (nếu có)
-            # sống tiếp cho file kế trong batch, đóng ở close_window_pool().
-            if file_windows is not None:
-                file_windows.close()
+            # file_windows (this file's shared memory, if the pool path was
+            # used) is now closed inside _build_overlap_plan right after its
+            # window list is drained -- by the time process_overlaps runs,
+            # every window for this file is already built, so there is
+            # nothing left here to close.
         self._finalize_failure_artifacts(speech, sr)
         self._report_stats()
         return speech

@@ -84,6 +84,25 @@ def test_group_jobs_returns_same_speaker_pairs_instead_of_mutating_self():
     assert {a, b} == {"SPEAKER_01", "SPEAKER_02"}
 
 
+def test_build_overlap_plan_returns_one_materialized_job_for_the_backchannel():
+    """_build_overlap_plan carries every CPU-only step of process_overlaps
+    through the materialized window list, with no GPU call. Extracted so a
+    plan can be built ahead of time on a fork_for_file() clone (see
+    test_separation_prefetch.py) while the real process_overlaps still
+    consumes it exactly the same way it consumes one built inline."""
+    svc = SeparationService(FakeTSE(), logger=None)
+    plan = svc._build_overlap_plan(_dialogue(), _audio(), overlap_threshold=0.1)
+    assert len(plan.pairs) == 1
+    assert plan.stats_jobs == 1 and plan.stats_pairs == 1
+    assert len(plan.jobs) == 1
+    subjob, outcome = plan.jobs[0]
+    assert outcome[0] is not None, "the window must already be built, not just planned"
+    assert len(plan.speech) == len(_dialogue())
+    assert svc.stats["jobs"] == 0, (
+        "building a plan must not touch self.stats -- only process_overlaps "
+        "may, once it knows the plan is actually being used")
+
+
 def test_a_backchannel_window_is_grown_well_past_the_overlap():
     """Cửa sổ phải đủ ngữ cảnh để Sidon phân biệt giọng và ECAPA nhận diện track.
     Cửa sổ 2 s trước đây không có solo đủ dài, làm similarity xuống mức
