@@ -1,14 +1,13 @@
 """Export selected two-person conversation excerpts from a finished transcript.
 
-`utils.conversation_selection` finds the candidate stretches from numbers alone: exactly
-two speakers, no join, no lasting noise, one to four minutes. This service adds
-the one thing numbers cannot say -- whether a stretch is a self-contained piece
-of conversation -- by asking the resident refinement LLM, then writes the audio
-and a JSON sidecar for each stretch it keeps.
+The resident refinement LLM now finds semantic conversation stretches directly
+from large overlapping transcript windows. `utils.conversation_selection` no
+longer decides the blocks first; it validates and scores each range proposed by
+the model (duration, exactly two speakers, seams, noise, turns and quality), then
+this service writes the audio and JSON sidecars.
 
-The model is a gate, not an author. It sees the turns of one candidate, renamed
-A and B and numbered 1, 2, 3..., and answers with a score and, optionally, which
-lines to start and stop at. The score is for the excerpt as it was shown; the
+The model is the semantic finder, not the final authority: it proposes line
+ranges, and deterministic code verifies every proposal before anything is cut. The score is for the excerpt as it was shown; the
 trim is polish on something already good. So a trim that cannot be honoured --
 a line that does not exist, back to front, or one that leaves too little to
 keep -- is dropped and the excerpt goes on whole, marked `trim_ignored`, rather
@@ -67,7 +66,7 @@ import os
 import re
 import shutil
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -79,7 +78,7 @@ from utils.llm_json import clean_reply, is_cut_in_thought, is_readable, objects_
 from utils.transcript_windows import line_number
 
 # Bump when the prompt or the acceptance rules change.
-CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v2"
+CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v4-quality-aware-finder"
 
 _TEMPLATE_SLACK_TOKENS = 64
 
@@ -100,6 +99,55 @@ def _topic_key(text) -> str:
 
 
 _EXAMPLE_TOPICS = {_topic_key(_EXAMPLE_GOOD["topic"]), _topic_key(_EXAMPLE_BAD["topic"])}
+
+CONVERSATION_FINDER_SYSTEM_PROMPT = (
+    "Bạn là bộ TÌM ĐOẠN hội thoại tiếng Việt để tạo dữ liệu huấn luyện full-duplex. "
+    "Bạn nhận một cửa sổ dài của transcript sau diarization/ASR. Cửa sổ có thể có nhiều người nói. "
+    "Nhiệm vụ của bạn là tìm TẤT CẢ các đoạn con đáng giữ, thay vì chấm một đoạn máy đã chọn sẵn.\n"
+    "\n"
+    "Mỗi dòng có dạng: [số dòng] start-end NGƯỜI {THÔNG_SỐ}: nội dung. "
+    "NGƯỜI là nhãn A/B/C/... chỉ để phân biệt người nói.\n"
+    "THÔNG_SỐ là đo trực tiếp từ pipeline, không phải suy đoán của model:\n"
+    "- gap: khoảng cách với segment trước; số âm nghĩa là có overlap thời gian.\n"
+    "- ov: số giây segment này overlap với người nói khác.\n"
+    "- noise: combined p90; ns/ne/nr lần lượt là noise_speech/noise_env/noise_room; thấp hơn sạch hơn.\n"
+    "- noisy: tỷ lệ frame vượt ngưỡng noise; run: chuỗi noise liên tục dài nhất.\n"
+    "- music: tỷ lệ segment đã bị music-patch; 0 là không patch, càng thấp càng tốt.\n"
+    "- bss=1 nghĩa là segment có dùng separation; unsep là tỷ lệ chưa tách được.\n"
+    "- seam_before/seam_inside và flags là cảnh báo kỹ thuật; tránh đặt candidate xuyên seam hoặc chứa hard flag.\n"
+    "Ngưỡng validator: combined noise <= {noise_max}, noise_speech <= {noise_speech_max}, "
+    "noise_env <= {noise_env_max}, noise_room <= {noise_room_max}, music <= {music_patched_max}; "
+    "noisy_share khoảng {noisy_share_max} trở lên là rất xấu và noisy run >= {noisy_run_seconds}s sẽ bị loại.\n"
+    "\n"
+    "Một đoạn đề xuất phải:\n"
+    "- dài khoảng {min_seconds}-{max_seconds} giây;\n"
+    "- chứa đúng HAI người nói trong chính đoạn được chọn;\n"
+    "- mỗi người có ít nhất {min_turns_each} lượt nói thật;\n"
+    "- tự trọn nghĩa: mở đầu tự nhiên, theo được khi không biết phần trước, và kết thúc không bị cụt;\n"
+    "- có một chủ đề/câu chuyện tương đối liền mạch và có nội dung thực.\n"
+    "\n"
+    "RẤT QUAN TRỌNG:\n"
+    "- Đừng loại cả cửa sổ chỉ vì có người thứ ba, khoảng im lặng dài, quảng cáo, hoặc một đoạn dở. "
+    "Hãy đặt start_line/end_line để lấy phần tốt ở trước hoặc sau chúng.\n"
+    "- Một người thứ ba ở NGOÀI đoạn bạn chọn không sao. Nhưng từ start_line đến end_line phải chỉ có đúng hai nhãn người nói.\n"
+    "- Khoảng im lặng vài giây không tự động làm hỏng hội thoại nếu nội dung trước/sau vẫn cùng mạch.\n"
+    "- Không tạo nhiều biến thể gần như trùng nhau của cùng một đoạn; chọn biên tốt nhất.\n"
+    "- Nếu đoạn có vẻ bắt đầu trước cửa sổ hoặc còn tiếp sau cửa sổ, đừng chọn biên bị cụt đó.\n"
+    "- Transcript có thể sai vài từ; đừng loại chỉ vì lỗi ASR nhỏ.\n"
+    "- Khi có nhiều đoạn cùng tốt về nội dung, ƯU TIÊN đoạn có noise/noisy/music/unsep thấp hơn, ít hard flag hơn, "
+    "và có overlap hội thoại thật nếu chất lượng separation vẫn tốt.\n"
+    "- Đừng kéo candidate qua vài segment xấu chỉ để đạt thời lượng; hãy chọn biên sạch nhất vẫn giữ được một ý trọn vẹn.\n"
+    "\n"
+    "self_contained: 5 = rất trọn vẹn, 4 = tốt, 3 = còn cụt/mơ hồ, 1-2 = không nên dùng. "
+    "Chỉ trả các đoạn có điểm từ {min_semantic} trở lên.\n"
+    "\n"
+    "ĐẦU RA: chỉ một JSON ARRAY, không markdown, không giải thích ngoài JSON. "
+    "Mỗi phần tử đúng 5 khóa: "
+    "start_line, end_line, self_contained, topic, reason. "
+    "start_line/end_line là số dòng trong cửa sổ hiện tại. "
+    "topic tối đa 10 từ, reason tối đa 20 từ. "
+    "Tối đa {max_proposals} đoạn trong một cửa sổ. Nếu không có đoạn phù hợp, trả []."
+)
 
 CONVERSATION_EXPORT_SYSTEM_PROMPT = (
     "Bạn kiểm duyệt dữ liệu hội thoại tiếng Việt. Các đoạn hội thoại giữa hai người (A và B) được cắt ra từ podcast "
@@ -210,6 +258,51 @@ def parse_verdict(raw: Optional[str]) -> Optional[dict]:
             "reason": str(obj.get("reason") or "").strip()[:240],
             "start_line": start, "end_line": end,
             "trim_garbled": start_garbled or end_garbled}
+
+
+
+def parse_finder_reply(raw: Optional[str]) -> List[dict]:
+    """Parse the LLM finder's JSON array into safe line-range proposals."""
+    if raw is None:
+        return []
+    cleaned = clean_reply(raw).strip()
+    data = None
+    try:
+        data = json.loads(cleaned)
+    except Exception:
+        # Fallback for a model that wrapped otherwise valid objects in prose.
+        objs = objects_in(raw)
+        if objs:
+            data = objs
+    if isinstance(data, dict):
+        nested = data.get("candidates")
+        data = nested if isinstance(nested, list) else [data]
+    if not isinstance(data, list):
+        return []
+
+    out = []
+    for obj in data:
+        if not isinstance(obj, dict):
+            continue
+        start, bad_start = _trim_line(obj.get("start_line"))
+        end, bad_end = _trim_line(obj.get("end_line"))
+        if bad_start or bad_end or start is None or end is None:
+            continue
+        score = obj.get("self_contained")
+        try:
+            score = int(round(float(score)))
+        except (TypeError, ValueError):
+            continue
+        if not 1 <= score <= 5:
+            continue
+        out.append({
+            "start_line": start,
+            "end_line": end,
+            "self_contained": score,
+            "topic": str(obj.get("topic") or "").strip()[:120],
+            "reason": str(obj.get("reason") or "").strip()[:240],
+        })
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -473,7 +566,7 @@ class _Plan:
 
 
 class ConversationExportService:
-    """Judge candidates with the resident LLM, then cut and describe the keepers.
+    """Let the resident LLM find semantic spans, then validate and export them.
 
     `llm` is the refinement service (or anything with the same surface); it is
     shared, so this pass adds no VRAM. Settings come from `models.conversation_selection`
@@ -484,9 +577,248 @@ class ConversationExportService:
         self.llm = llm
         self.logger = logger
         self.cfg = ConversationSelectionConfig.from_settings(settings)
-        self.max_new_tokens = reply_budget(self.cfg.max_new_tokens, self.cfg.thinking)
+        # A finder reply can contain many candidates, so never use the tiny budget
+        # that was sufficient for the old one-candidate semantic judge.
+        self.max_new_tokens = reply_budget(max(768, self.cfg.max_new_tokens), self.cfg.thinking)
 
-    # -- judging -----------------------------------------------------------------
+    # -- LLM candidate finder ------------------------------------------------------
+    def _finder_system_prompt(self) -> str:
+        limits = {
+            "noise_max": self.cfg.noise_max,
+            "noise_speech_max": self.cfg.noise_speech_max,
+            "noise_env_max": self.cfg.noise_env_max,
+            "noise_room_max": self.cfg.noise_room_max,
+            "noisy_share_max": self.cfg.noisy_share_max,
+            "noisy_run_seconds": self.cfg.noisy_run_seconds,
+            "music_patched_max": self.cfg.music_patched_max,
+        }
+        prompt = (CONVERSATION_FINDER_SYSTEM_PROMPT
+                  .replace("{min_seconds}", f"{self.cfg.min_seconds:g}")
+                  .replace("{max_seconds}", f"{self.cfg.max_seconds:g}")
+                  .replace("{min_turns_each}", str(self.cfg.min_turns_each))
+                  .replace("{min_semantic}", str(self.cfg.min_semantic))
+                  .replace("{max_proposals}", str(self.cfg.finder_max_proposals_per_window)))
+        for key, value in limits.items():
+            prompt = prompt.replace("{" + key + "}", f"{value:g}")
+        return prompt
+
+    @staticmethod
+    def _speaker_labels(finder: ConversationSelectionFinder) -> Dict[str, str]:
+        """Stable A/B/C/... labels in order of first appearance in the recording."""
+        labels: Dict[str, str] = {}
+        for seg in finder.segs:
+            key = str(seg.speaker)
+            if key in labels:
+                continue
+            n = len(labels)
+            labels[key] = chr(ord("A") + n) if n < 26 else f"S{n + 1}"
+        return labels
+
+    @staticmethod
+    def _clock(seconds: float) -> str:
+        seconds = max(0, int(seconds))
+        return f"{seconds // 60}:{seconds % 60:02d}"
+
+    @staticmethod
+    def _fmt_metric(value, digits: int = 3) -> str:
+        if value is None:
+            return "na"
+        try:
+            return f"{float(value):.{digits}f}"
+        except (TypeError, ValueError):
+            return "na"
+
+    def _finder_line(self, finder, pos: int, number: int, names: Dict[str, str]) -> str:
+        seg = finder.segs[pos]
+        q = finder.segment_quality(pos)
+        text = " ".join(str(seg.text or "").split())
+        who = names.get(str(seg.speaker), "?")
+        noise = q.get("noise") or {}
+        by_kind = noise.get("by_kind") or {}
+        flags = ",".join(q.get("hard_flags") or []) or "-"
+        gap = self._fmt_metric(q.get("gap_before"), 2)
+        ov = self._fmt_metric(q.get("cross_overlap_seconds"), 2)
+        music = self._fmt_metric(q.get("music_patched_share"), 3)
+        combined = self._fmt_metric(noise.get("combined_p90"), 3)
+        noisy = self._fmt_metric(noise.get("noisy_frame_share"), 3)
+        run = self._fmt_metric(noise.get("longest_noisy_run_seconds"), 2)
+        ns = self._fmt_metric(by_kind.get("noise_speech"), 3)
+        ne = self._fmt_metric(by_kind.get("noise_env"), 3)
+        nr = self._fmt_metric(by_kind.get("noise_room"), 3)
+        meta = (
+            f"gap={gap}s ov={ov}s noise={combined} ns={ns} ne={ne} nr={nr} "
+            f"noisy={noisy} run={run}s music={music} "
+            f"bss={int(bool(q.get('bss')))} unsep={self._fmt_metric(q.get('unseparated_share'), 3)} "
+            f"seam_before={int(bool(q.get('seam_before')))} "
+            f"seam_inside={int(bool(q.get('seam_inside')))} flags={flags}"
+        )
+        return (f"[{number}] {self._clock(float(seg.start))}-{self._clock(float(seg.end))} "
+                f"{who} {{{meta}}}: {text}")
+
+    def _finder_windows(self, finder, names: Dict[str, str]) -> List[Tuple[int, int]]:
+        """Token-aware overlapping windows; returns (start, stop) with stop exclusive."""
+        n = len(finder.segs)
+        if not n:
+            return []
+        max_segments = max(1, int(self.cfg.finder_window_segments))
+        overlap = max(0, int(self.cfg.finder_overlap_segments))
+        system_cost = self.llm.count_tokens(self._finder_system_prompt())
+        budget = max(512, int(self.cfg.finder_window_tokens) - system_cost - 128)
+
+        # Count each line approximately once. Local line numbers change by only a
+        # few characters and do not materially affect the budget.
+        costs = [max(1, self.llm.count_tokens(self._finder_line(finder, p, p + 1, names)) + 1)
+                 for p in range(n)]
+        windows: List[Tuple[int, int]] = []
+        start = 0
+        while start < n:
+            total, stop = 0, start
+            while stop < n and stop - start < max_segments:
+                cost = costs[stop]
+                if stop > start and total + cost > budget:
+                    break
+                total += cost
+                stop += 1
+            if stop <= start:
+                stop = min(n, start + 1)
+            windows.append((start, stop))
+            if stop >= n:
+                break
+            # Always make progress even if configured overlap is larger than the
+            # current window. Large overlap is intentional: a 1-4 minute semantic
+            # excerpt near a window edge should be fully visible in another window.
+            ov = min(overlap, max(0, stop - start - 1))
+            start = max(start + 1, stop - ov)
+        return windows
+
+    def _finder_message(self, finder, window: Tuple[int, int], names: Dict[str, str]) -> str:
+        start, stop = window
+        lines = [self._finder_line(finder, pos, pos - start + 1, names)
+                 for pos in range(start, stop)]
+        first = str(finder.segs[start].index)
+        last = str(finder.segs[stop - 1].index)
+        limits = finder.finder_limits()
+        return (
+            f"Cửa sổ transcript #{first}-#{last}, {len(lines)} dòng. "
+            f"Hãy tìm TẤT CẢ đoạn hội thoại tốt nằm bên trong cửa sổ này.\n"
+            f"Giới hạn kỹ thuật: noise<={limits['noise_combined_max']:g}, "
+            f"ns<={limits['noise_speech_max']:g}, ne<={limits['noise_env_max']:g}, "
+            f"nr<={limits['noise_room_max']:g}, music<={limits['music_patched_max']:g}, "
+            f"noisy_run<{limits['noisy_run_seconds']:g}s.\n\n"
+            + "\n".join(lines) + "\n\nJSON array:")
+
+    def _finder_per_call(self, messages: List[str]) -> int:
+        batch = max(1, int(getattr(self.llm, "batch_size", 1) or 1))
+        limit = int(getattr(self.llm, "max_batch_tokens", 0) or 0)
+        if limit and messages:
+            longest = max(self.llm.count_tokens(m) for m in messages)
+            longest += self.llm.count_tokens(self._finder_system_prompt()) + _TEMPLATE_SLACK_TOKENS
+            batch = min(batch, max(1, limit // max(1, longest)))
+        return batch
+
+    def _find_with_llm(self, finder: ConversationSelectionFinder, report: dict) -> List[_Judged]:
+        """Ask Qwen where the conversations are, then hard-validate every proposal."""
+        if not finder.segs:
+            return []
+        if not self.llm.ensure_loaded():
+            report["llm_available"] = False
+            self._log("[conversation-exports] LLM not available for candidate finding")
+            return []
+
+        names = self._speaker_labels(finder)
+        windows = self._finder_windows(finder, names)
+        messages = [self._finder_message(finder, w, names) for w in windows]
+        replies, unanswered = ask_in_batches(
+            self.llm, self._finder_system_prompt(), messages,
+            per_call=self._finder_per_call(messages), max_new_tokens=self.max_new_tokens,
+            label="conversation finder window", logger=self.logger,
+            thinking=self.cfg.thinking)
+        report["windows"] = len(windows)
+        report["unanswered"] = unanswered
+
+        rejected: Dict[str, int] = {}
+        rows = []
+        proposals_total = 0
+        accepted_by_range: Dict[Tuple[int, int], _Judged] = {}
+
+        def reject(reason: str):
+            rejected[reason] = rejected.get(reason, 0) + 1
+
+        for w_no, ((start, stop), raw) in enumerate(zip(windows, replies)):
+            proposals = parse_finder_reply(raw) if raw is not None else []
+            proposals_total += len(proposals)
+            first_index = str(finder.segs[start].index)
+            last_index = str(finder.segs[stop - 1].index)
+            row = {
+                "window": w_no, "first_index": first_index, "last_index": last_index,
+                "lines": stop - start, "answered": raw is not None,
+                "readable": raw is not None and is_readable(raw),
+                "cut_in_thought": raw is not None and is_cut_in_thought(raw),
+                "proposals": len(proposals), "proposal_results": [], "raw": raw,
+            }
+            rows.append(row)
+
+            for proposal in proposals:
+                a, b = proposal["start_line"], proposal["end_line"]
+                detail = {
+                    "start_line": a, "end_line": b,
+                    "self_contained": proposal["self_contained"],
+                    "topic": proposal["topic"], "reason": proposal["reason"],
+                }
+                if a < 1 or b < a or b > stop - start:
+                    detail["validator"] = "proposal_out_of_range"
+                    row["proposal_results"].append(detail)
+                    reject("proposal_out_of_range")
+                    continue
+                i, j = start + a - 1, start + b - 1
+                detail["first_index"] = str(finder.segs[i].index)
+                detail["last_index"] = str(finder.segs[j].index)
+                if proposal["self_contained"] < self.cfg.min_semantic:
+                    detail["validator"] = "not_self_contained"
+                    row["proposal_results"].append(detail)
+                    reject("not_self_contained")
+                    continue
+                cand, why = finder.evaluate(i, j)
+                if cand is None:
+                    detail["validator"] = why or "validation_failed"
+                    row["proposal_results"].append(detail)
+                    reject(why or "validation_failed")
+                    continue
+                detail.update({
+                    "validator": "accepted",
+                    "duration": cand.duration,
+                    "score": cand.score,
+                    "tier": cand.tier,
+                    "noise": cand.noise,
+                    "music_patched_share": cand.music_patched_share,
+                    "metrics": cand.metrics,
+                })
+                row["proposal_results"].append(detail)
+                item = _Judged(
+                    original=cand, candidate=cand,
+                    semantic=proposal["self_contained"],
+                    topic=proposal["topic"], why=proposal["reason"])
+                key = (i, j)
+                old = accepted_by_range.get(key)
+                if old is None or (item.semantic or 0) > (old.semantic or 0):
+                    accepted_by_range[key] = item
+
+        # Do not pre-shortlist before Qwen. Every model proposal reaches the same
+        # validator. Exact duplicates caused by overlapping windows are merged here.
+        judged = list(accepted_by_range.values())
+        judged.sort(key=lambda x: (x.candidate.start if x.candidate else 0.0,
+                                   -(x.semantic or 0)))
+        report["candidates"] = proposals_total
+        report["shortlisted"] = len(judged)   # kept for compatibility: now means validated unique proposals
+        report["validated"] = len(judged)
+        report["judged_rejected"] = rejected
+        report["replies"] = rows
+        report["unreadable"] = sum(1 for r in rows if r["answered"] and not r["readable"])
+        report["cut_in_thought"] = sum(1 for r in rows if r["cut_in_thought"])
+        report["trims_ignored"] = {}
+        return judged
+
+    # -- legacy one-candidate judge (kept for compatibility) ----------------------
     @staticmethod
     def _names(cand: Candidate) -> Dict[str, str]:
         return {cand.speakers[0]: "A", cand.speakers[1]: "B"}
@@ -973,38 +1305,33 @@ class ConversationExportService:
         finder = ConversationSelectionFinder(transcripts, timeline, noise, music_map, cfg)
         result = ConversationExportRun()
         report = {"prompt_version": CONVERSATION_EXPORT_PROMPT_VERSION,
-                  "thinking": cfg.thinking, "skipped": None,
-                  "candidates": 0, "shortlisted": 0, "judged_rejected": {},
-                  "accepted": 0, "exported": 0, "tiers": {}, "verification_failed": 0}
+                  "thinking": cfg.thinking, "mode": "llm_finder_then_validator",
+                  "skipped": None, "windows": 0,
+                  "candidates": 0, "shortlisted": 0, "validated": 0,
+                  "judged_rejected": {}, "accepted": 0, "exported": 0,
+                  "tiers": {}, "verification_failed": 0}
         result.report = report
 
-        candidates = finder.candidates()
-        report["finder"] = finder.report()
-        report["candidates"] = len(candidates)
-        if not candidates:
-            report["skipped"] = ("noise_not_measured"
-                                 if cfg.require_noise and not finder.noise_measured
-                                 else "no_candidates")
-            self._log(f"[conversation-exports] {base_name}: no eligible item ({report['skipped']})")
-            return result
-
-        chosen = shortlist(candidates, cfg.max_candidates, cfg.shortlist_overlap)
-        report["shortlisted"] = len(chosen)
-        judged = self._judge(finder, chosen, report)
-        if report.get("llm_available") is False and cfg.require_semantic:
+        # Qwen sees the transcript first and proposes semantic spans. The numeric
+        # finder no longer destroys context by pre-splitting on silence/third-speaker.
+        # It is now the validator/scorer for each model-proposed range.
+        report["finder"] = finder.report()   # diagnostics only; not a pre-filter
+        judged = self._find_with_llm(finder, report)
+        if report.get("llm_available") is False:
             report["skipped"] = "llm_unavailable"
             return result
+        if not judged:
+            report["skipped"] = "no_valid_model_proposals"
+            self._log(f"[conversation-exports] {base_name}: no validated LLM proposal")
+            return result
 
-        rejected: Dict[str, int] = {}
-        kept: Dict[int, _Judged] = {}
-        for item in judged:
-            if item.candidate is None:
-                rejected[item.reason] = rejected.get(item.reason, 0) + 1
-            else:
-                kept[id(item.candidate)] = item
-        report["judged_rejected"] = rejected
+        kept: Dict[int, _Judged] = {
+            id(item.candidate): item for item in judged if item.candidate is not None
+        }
         report["accepted"] = len(kept)
 
+        # Only after Qwen has found and the validator has checked every proposal do
+        # we resolve overlaps, so the same source audio is not exported twice.
         final = pick_non_overlapping([j.candidate for j in kept.values()])
         if waveform is None:
             report["skipped"] = "no_audio"
