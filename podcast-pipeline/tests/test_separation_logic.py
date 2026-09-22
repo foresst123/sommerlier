@@ -10,6 +10,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from algorithms.diarization.overlap import detect_overlapping_segments
 from schemas.audio import AudioData
 from schemas.segment import Segment
 from services.separation_service import SeparationService
@@ -57,6 +58,30 @@ def _dialogue():
     ]
 
 
+def test_group_jobs_returns_same_speaker_pairs_instead_of_mutating_self():
+    """_group_jobs used to stash same-speaker pairs on self._same_speaker_pairs.
+    Once plan-building can run on a background clone for one file while the
+    real process_overlaps runs for another (see test_separation_prefetch.py),
+    a shared instance attribute like that is a race. Returning the pairs
+    directly removes the shared mutable state instead of isolating it."""
+    segs = [
+        Segment(index="00001", start=0.0, end=15.0, speaker="SPEAKER_00"),
+        Segment(index="00002", start=14.0, end=30.0, speaker="SPEAKER_00"),
+        Segment(index="00003", start=32.0, end=40.0, speaker="SPEAKER_01"),
+        Segment(index="00004", start=39.0, end=48.0, speaker="SPEAKER_02"),
+    ]
+    seg_dicts = [{"start": s.start, "end": s.end, "speaker": s.speaker, "index": s.index}
+                 for s in segs]
+    pairs = detect_overlapping_segments(seg_dicts, overlap_threshold=0.0)
+
+    svc = SeparationService(FakeTSE(), logger=None)
+    jobs, same_speaker = svc._group_jobs(pairs)
+
+    assert len(same_speaker) == 1, "the two SPEAKER_00 segments overlap each other"
+    assert same_speaker[0]["seg1"]["speaker"] == same_speaker[0]["seg2"]["speaker"] == "SPEAKER_00"
+    assert len(jobs) == 1
+    a, b, plist = jobs[0]
+    assert {a, b} == {"SPEAKER_01", "SPEAKER_02"}
 
 
 def test_a_backchannel_window_is_grown_well_past_the_overlap():

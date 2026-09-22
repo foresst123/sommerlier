@@ -795,13 +795,17 @@ class SeparationService:
                 if any(b > lo and a < hi for a, b in ivals)}
 
     def _group_jobs(self, pairs):
-        """Chỉ nhóm overlap giao/chạm nhau của cùng hai người; giữ mọi nguồn."""
+        """Chỉ nhóm overlap giao/chạm nhau của cùng hai người; giữ mọi nguồn.
+        Trả (jobs, same_speaker_pairs) thay vì ghi self._same_speaker_pairs --
+        việc dựng kế hoạch có thể chạy trên một bản sao nền cho file này trong
+        khi self đang xử lý thật cho file khác (xem prefetch_overlap_plan),
+        nên không có thuộc tính instance nào dùng chung an toàn ở đây."""
         buckets = {}
-        self._same_speaker_pairs = []
+        same_speaker_pairs = []
         for p in pairs:
             key = tuple(sorted({p["seg1"]["speaker"], p["seg2"]["speaker"]}))
             if len(key) != 2:
-                self._same_speaker_pairs.append(p)
+                same_speaker_pairs.append(p)
                 continue
             buckets.setdefault(key, []).append(p)
         jobs = []
@@ -815,7 +819,7 @@ class SeparationService:
                 end = max(end, p["overlap_end"]) if end is not None else p["overlap_end"]
             if current:
                 jobs.append((a, b, current))
-        return sorted(jobs, key=lambda job: job[2][0]["overlap_start"])
+        return sorted(jobs, key=lambda job: job[2][0]["overlap_start"]), same_speaker_pairs
 
     @staticmethod
     def _splice_pairs(plist):
@@ -1131,10 +1135,9 @@ class SeparationService:
         enrollments = self.mine_enrollments(segments, audio)
         seg_by_index = {s.index: s for s in speech}
 
-        self._same_speaker_pairs = []
         # Tách hết, không lọc theo overlap_threshold. WindowPlanner giữ nguyên
         # core dù rất ngắn rồi lấy context có giới hạn và padding sạch để bù.
-        queue = list(self._group_jobs(pairs))
+        queue, same_speaker_pairs = self._group_jobs(pairs)
         below = []  # giữ để không vỡ bss_spans tracking
         buildable = []
         for spk_a, spk_b, plist in queue:
@@ -1151,7 +1154,7 @@ class SeparationService:
         # Chỉ ghi vào bss_spans với sim=-2 (passthrough marker) để downstream
         # biết vùng này đã được xem xét, không phải bỏ sót.
         by_index = {e.index: e for e in speech}
-        for p in self._same_speaker_pairs:
+        for p in same_speaker_pairs:
             lo, hi = p["overlap_start"], p["overlap_end"]
             # Same-speaker là passthrough; vùng đánh dấu vẫn có context nền.
             pad = 2.0

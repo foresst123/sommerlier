@@ -140,6 +140,6 @@ def test_fusing_sorts_before_merging():
                 "seg1": {"speaker": "1"}, "seg2": {"speaker": "2"}}
 
     fused = [job[2][0] for job in sep.SeparationService()._group_jobs(
-        [pair(5.0, 5.2), pair(1.0, 1.2)])]
+        [pair(5.0, 5.2), pair(1.0, 1.2)])[0]]
     assert len(fused) == 2
     assert fused[0]["overlap_start"] == 1.0

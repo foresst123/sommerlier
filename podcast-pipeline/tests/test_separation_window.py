@@ -32,7 +32,7 @@ def setup(rows, **kwargs):
     pairs = detect_overlapping_segments([s.__dict__ for s in segs], overlap_threshold=0)
     planner = WindowPlanner(segs, pairs, waveform(), SR, **kwargs)
     svc = SeparationService()
-    return planner, svc._group_jobs(pairs)
+    return planner, svc._group_jobs(pairs)[0]
 
 
 def basic():
@@ -243,7 +243,7 @@ def test_pad_less_fallback_never_exceeds_the_15s_target():
     segs = segments([(5, 55, "A"), (25, 33, "B")])
     pairs = detect_overlapping_segments([s.__dict__ for s in segs], overlap_threshold=0)
     planner = WindowPlanner(segs, pairs, _sparse_waveform(), SR)
-    jobs = SeparationService()._group_jobs(pairs)
+    jobs, _ = SeparationService()._group_jobs(pairs)
     result = planner.build(jobs[0][2])
     if result is None:
         # Từ chối hẳn còn hơn đưa cửa sổ quá khổ vào model; lý do phải nói rõ
