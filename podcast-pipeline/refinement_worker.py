@@ -59,24 +59,53 @@ def _patch_torch_load():
 
 def load_model(model_name: str, dtype_str: str, device_map: str,
                gpu_ids: list, gpu_memory_fraction: float):
-    """Load model và tokenizer, trả về (model, tokenizer)."""
+
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    dtype = torch.bfloat16 if dtype_str == "bfloat16" else torch.float16
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available")
 
-    print(json.dumps({"status": "loading", "model": model_name}), flush=True)
+    if not gpu_ids:
+        gpu_ids = [0]
+
+    device_count = torch.cuda.device_count()
+
+    for gpu_id in gpu_ids:
+        if gpu_id < 0 or gpu_id >= device_count:
+            raise RuntimeError(
+                f"Invalid GPU id {gpu_id}; worker sees "
+                f"{device_count} GPU(s)"
+            )
+
+    gpu_memory_fraction = min(
+        0.95,
+        max(0.1, float(gpu_memory_fraction))
+    )
+
+    dtype = (
+        torch.bfloat16
+        if dtype_str == "bfloat16"
+        else torch.float16
+    )
+
+    print(json.dumps({
+        "status": "loading",
+        "model": model_name
+    }), flush=True)
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     if device_map == "pipeline" and len(gpu_ids) >= 2:
-        # Chia đôi layers: GPU 0 phần đầu, GPU 1 phần sau
-        # refinement_pipeline_pool.py làm điều này bằng cách split layers.
-        # Ở đây ta dùng device_map="balanced" để đơn giản hơn.
+
         max_memory = {
-            i: int(torch.cuda.get_device_properties(i).total_memory
-                   * gpu_memory_fraction)
+            i: int(
+                torch.cuda.get_device_properties(i).total_memory
+                * gpu_memory_fraction
+            )
             for i in gpu_ids
         }
+
+        # Hiện tại là balanced sharding, chưa phải pipeline parallel thật.
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=dtype,
@@ -84,12 +113,17 @@ def load_model(model_name: str, dtype_str: str, device_map: str,
             max_memory=max_memory,
             low_cpu_mem_usage=True,
         )
-    elif device_map == "auto" or len(gpu_ids) > 1:
+
+    elif device_map == "auto":
+
         max_memory = {
-            i: int(torch.cuda.get_device_properties(i).total_memory
-                   * gpu_memory_fraction)
+            i: int(
+                torch.cuda.get_device_properties(i).total_memory
+                * gpu_memory_fraction
+            )
             for i in gpu_ids
         }
+
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=dtype,
@@ -97,8 +131,10 @@ def load_model(model_name: str, dtype_str: str, device_map: str,
             max_memory=max_memory,
             low_cpu_mem_usage=True,
         )
+
     else:
-        device = f"cuda:{gpu_ids[0]}" if gpu_ids else "cuda:0"
+        device = f"cuda:{gpu_ids[0]}"
+
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=dtype,
@@ -106,7 +142,13 @@ def load_model(model_name: str, dtype_str: str, device_map: str,
         ).to(device)
 
     model.eval()
-    print(json.dumps({"status": "ready", "model": model_name}), flush=True)
+
+    print(json.dumps({
+        "status": "ready",
+        "model": model_name,
+        "device_map": getattr(model, "hf_device_map", None),
+    }), flush=True)
+
     return model, tokenizer
 
 

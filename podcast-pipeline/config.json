@@ -216,7 +216,7 @@
             "gpu_1": 0,
             "gpu_2": 1,
             "outputs": {
-                "clean_two_channel_dir": ""
+                "clean_two_channel_dir": "./output_fullduplex_data"
             },
             "steps": {
                 "music_analysis": true,
@@ -264,14 +264,14 @@
                 "whisper": {
                     "model_size": "large-v3",
                     "compute_type": "float32",
-                    "batch_size": 256
+                    "batch_size": 32
                 },
                 "phowhisper": {
                     "compute_type": "float32",
-                    "batch_size": 256
+                    "batch_size": 32
                 },
                 "qwen3": {
-                    "batch_size": 256,
+                    "batch_size": 32,
                     "use_flash_attention": false,
                     "torch_dtype": "float32"
                 },
@@ -306,7 +306,7 @@
                     "hi_res": true
                 },
                 "refinement": {
-                    "model_name": "Qwen/Qwen3-8B",
+                    "model_name": "Qwen/Qwen3.8-27B",
                     "batch_size": 96,
                     "torch_dtype": "bfloat16",
 
