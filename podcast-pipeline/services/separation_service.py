@@ -793,7 +793,7 @@ class SeparationService:
         return gain, info
 
     def _cross_fade(self, orig_audio: np.ndarray, new_audio: np.ndarray,
-                    fade_samples: int, fade_left=True, fade_right=True) -> np.ndarray:
+                    fade_samples: int, sr: int, fade_left=True, fade_right=True) -> np.ndarray:
         """Thay vùng âm thanh gốc bằng track đã tách, làm mượt hai biên.
 
         Dùng linear crossfade thay cho equal-power sin/cos. Original overlap và
@@ -2067,7 +2067,7 @@ class SeparationService:
                         )
 
                     enh.audio[dst:dst + limit] = self._cross_fade(
-                        enh.audio[dst:dst + limit], patch, fade_samples,
+                        enh.audio[dst:dst + limit], patch, fade_samples, sr,
                         fade_left=not internal_left, fade_right=not internal_right)
                     enh.bss = True
                     enh.bss_spans.append((sample_lo / sr, (sample_lo + limit) / sr,
