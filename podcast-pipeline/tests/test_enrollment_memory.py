@@ -152,7 +152,7 @@ def _pair(start, end, a="1", b="2"):
 
 def _groups(pairs):
     import services.separation_service as sep
-    return [job[2] for job in sep.SeparationService()._group_jobs(pairs)]
+    return [job[2] for job in sep.SeparationService()._group_jobs(pairs)[0]]
 
 
 def test_a_half_second_gap_keeps_targets_separate():

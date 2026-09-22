@@ -32,7 +32,7 @@ def plan(rows):
     segs = [Segment(str(i), a, b, s) for i, (a, b, s) in enumerate(rows)]
     pairs = detect_overlapping_segments([s.__dict__ for s in segs], overlap_threshold=0)
     planner = WindowPlanner(segs, pairs, waveform(), SR)
-    jobs = SeparationService()._group_jobs(pairs)
+    jobs, _ = SeparationService()._group_jobs(pairs)
     return planner, planner.build(jobs[0][2])
 
 
