@@ -399,6 +399,10 @@ class SeparationService:
         future = self._prefetch_pool().submit(clone._build_overlap_plan, segments, audio)
         with self._prefetch_lock:
             self._prefetch_cache[audio_path] = future
+        if self.logger:
+            self.logger.info(
+                f"[TSE] prefetching overlap windows for {os.path.basename(audio_path)} "
+                "in the background")
 
     def _take_prefetched_plan(self, audio_path: str) -> Optional["_OverlapPlan"]:
         """The plan prefetch_overlap_plan started for this path, or None.
@@ -411,15 +415,28 @@ class SeparationService:
         with self._prefetch_lock:
             future = self._prefetch_cache.pop(audio_path, None)
         if future is None:
+            if self.logger:
+                self.logger.info(
+                    f"[TSE] no prefetch found for {os.path.basename(audio_path)}; "
+                    "building its windows now")
             return None
+        _t0 = _time.perf_counter()
         try:
-            return future.result()
+            plan = future.result()
         except Exception as exc:
             if self.logger:
                 self.logger.warning(
                     f"[TSE] prefetch for {os.path.basename(audio_path)} failed "
                     f"({type(exc).__name__}: {exc}); building its windows now")
             return None
+        if self.logger:
+            wait = _time.perf_counter() - _t0
+            self.logger.info(
+                f"[TSE] reusing prefetched overlap windows for "
+                f"{os.path.basename(audio_path)}"
+                + (f" (waited {wait:.1f}s for the background build to finish)"
+                   if wait > 0.05 else " (already built)"))
+        return plan
 
     def drop_prefetched_plan(self, audio_path: str) -> None:
         """Discard a prefetch that will never be consumed -- the file failed
