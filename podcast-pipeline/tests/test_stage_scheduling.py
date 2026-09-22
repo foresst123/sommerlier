@@ -56,6 +56,44 @@ def test_music_removal_stops_before_asr():
         "the music_removal pass must return before ASR starts")
 
 
+def test_window_prefetch_fires_only_on_the_diarization_stop_and_only_when_separation_runs():
+    """Window building is pure CPU and does not need Sidon loaded, so it can
+    start the moment this file's diarization result exists -- while DiariZen
+    is still busy with the rest of the batch and before Sidon's worker has
+    even started. It must fire on exactly the one pass that stops after
+    diarization, not on a later pass re-entering that section of run() to
+    load the checkpoint on its way to another stage."""
+    src = _source("services/pipeline_service.py")
+    stop = src.index('getattr(args, "stop_after", None) == "diarization"')
+    block = src[stop:src.index("return None", stop)]
+    assert "prefetch_overlap_plan" in block, (
+        "the diarization pass must kick off window building while it still "
+        "has the rest of the batch to run on GPU")
+    assert 'self.step_enabled(args, "separation")' in block, (
+        "prefetching must not run when separation itself is switched off")
+
+
+def test_the_real_separation_call_passes_its_audio_path_to_the_prefetch_cache():
+    src = _source("services/pipeline_service.py")
+    call = re.search(r"self\.separation_svc\.process_overlaps\([^)]*\)", src, re.S).group(0)
+    assert "audio_path=audio_path" in call, (
+        "without the path, process_overlaps can never find what was prefetched for this file")
+
+
+def test_closing_the_prefetch_pool_is_deferred_like_the_window_pool():
+    """A prefetch started during 'diarization' is only consumed during
+    'separation'; close_prefetch_pool() must be deferred to that SAME stage
+    boundary as close_window_pool(), not fired eagerly, or an in-flight
+    prefetch would be torn down before the separation pass ever reads it."""
+    src = _source("services/pipeline_service.py")
+    window_pool_defer = src.index("self.separation_svc.close_window_pool()")
+    prefetch_defer = src.index("self.separation_svc.close_prefetch_pool()")
+    between = src[window_pool_defer:prefetch_defer]
+    assert between.count("_defer_or_run(") == 1, (
+        "close_prefetch_pool must be the very next _defer_or_run() call after "
+        "close_window_pool(), in the same deferred-cleanup block")
+
+
 @pytest.mark.parametrize("stop, stage, expected", [
     (None, "asr", True),
     ("music", "diarization", False),

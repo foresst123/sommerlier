@@ -865,6 +865,18 @@ class PipelineService:
         self._release_worker(args, "diarizen")
 
         if getattr(args, "stop_after", None) == "diarization":
+            # This is the one pass that sets stop_after == "diarization" --
+            # a later pass re-enters this section of run() only to load the
+            # checkpoint on its way to another stage -- so this fires exactly
+            # once per file. Window building is pure CPU (utils/window_pool.py)
+            # and does not need Sidon loaded, so it can run now, in the
+            # background, while DiariZen is still busy with the rest of this
+            # stage-major pass and before the separation stage has even
+            # started the Sidon worker. See
+            # services/separation_service.py:prefetch_overlap_plan.
+            if diarization_result is not None and self.step_enabled(args, "separation"):
+                self.separation_svc.prefetch_overlap_plan(
+                    diarization_result.segments, audio_data, audio_path)
             if self.logger: self.logger.info("Stopping pipeline after diarization as requested by --stop_after.")
             stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
                                       "stopped_after": "diarization"})
@@ -903,7 +915,8 @@ class PipelineService:
             self._load("separation")
             self.separation_svc.dump_dir = os.path.join(
                 output_dir, "03_separation", "audio", "raw")
-            speech_segments = self.separation_svc.process_overlaps(diarization_result.segments, audio_data)
+            speech_segments = self.separation_svc.process_overlaps(
+                diarization_result.segments, audio_data, audio_path=audio_path)
             if self.logger: self.logger.info(f"[DEBUG] After Separation: {len(speech_segments)} segments")
             checkpoint.save("separation", speech_segments)
             if hasattr(self.separation_svc, "report_payload"):
@@ -933,6 +946,10 @@ class PipelineService:
         self._defer_or_run(
             lambda: self.separation_svc.close_window_pool()
             if self.separation_svc else None)
+        self._defer_or_run(
+            lambda: self.separation_svc.close_prefetch_pool()
+            if self.separation_svc
+            and hasattr(self.separation_svc, "close_prefetch_pool") else None)
         self._defer_or_run(
             lambda: self.separation_svc.close_async_pools()
             if self.separation_svc
