@@ -608,13 +608,11 @@ class DiarizationRefinementService:
         )
 
     def refine(self, segments: List[TranscriptSegment], prompt: str = None) -> List[TranscriptSegment]:
-        """Call local Qwen LLM to fix hallucination and text errors.
+        if not self.ensure_loaded():
+            raise RuntimeError(
+                f"Failed to initialize refinement LLM {self.model_name}"
+            )
 
-        ``prompt`` overrides the built-in fusion system prompt when supplied.
-        """
-        self._load_model()
-        if not self.model:
-            return segments
         self.last_failure = None
 
         if self.logger: self.logger.info("Running LLM Refinement on all segments...")
@@ -656,12 +654,17 @@ class DiarizationRefinementService:
         if not pending:
             return segments
 
-        tokenizer = self.tokenizer
-        if tokenizer.pad_token_id is None:
-            tokenizer.pad_token = tokenizer.eos_token
-        # Decoder-only models need left padding for correct batched generation.
-        original_padding_side = tokenizer.padding_side
-        tokenizer.padding_side = "left"
+        tokenizer = None
+        original_padding_side = None
+
+        if self._worker is None:
+            tokenizer = self.tokenizer
+
+            if tokenizer.pad_token_id is None:
+                tokenizer.pad_token = tokenizer.eos_token
+
+            original_padding_side = tokenizer.padding_side
+            tokenizer.padding_side = "left"
 
         from tqdm import tqdm
         refined_count = 0
@@ -691,7 +694,8 @@ class DiarizationRefinementService:
                     start += len(batch)
                     bar.update(len(batch))
         finally:
-            tokenizer.padding_side = original_padding_side
+            if tokenizer is not None:
+                tokenizer.padding_side = original_padding_side
 
         tail = f", {self.rejected} rejected as unfaithful" if self.rejected else ""
         if self.logger:
