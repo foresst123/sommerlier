@@ -1,6 +1,7 @@
 import os
 from typing import List
 from difflib import SequenceMatcher
+from utils.worker_env import resolve_worker_python
 from algorithms.asr.hallucination import diacritic_ratio, foreign_script_ratio
 from algorithms.asr.rover import normalize_token
 from schemas.transcript import TranscriptSegment
@@ -220,6 +221,39 @@ class DiarizationRefinementService:
         self.model_name = (model_name or os.environ.get(
             "SOMMELIER_LLM", "Qwen/Qwen2.5-3B-Instruct"))
 
+        # Nếu có refinement_env riêng → dùng subprocess worker để tránh
+        # xung đột transformers 4.53 (main env) vs 5.x (Qwen3.5/3.8).
+        self._worker = None
+        try:
+            import os as _os
+            _script = _os.path.join(
+                _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                "refinement_worker.py")
+            _python = resolve_worker_python("refinement", logger=logger)
+            from services.refinement_worker_service import RefinementWorkerService
+            self._worker = RefinementWorkerService(
+                python_env_path=_python,
+                worker_script_path=_script,
+                model_name=self.model_name,
+                logger=logger,
+            )
+            self._worker.start()
+            if logger:
+                logger.info(
+                    f"[refinement] subprocess worker started "
+                    f"(python={_python}, model={self.model_name})")
+        except FileNotFoundError:
+            if logger:
+                logger.info(
+                    "[refinement] no refinement_env found, "
+                    "loading model directly in main process")
+        except Exception as _e:
+            if logger:
+                logger.warning(
+                    f"[refinement] worker start failed ({_e}), "
+                    "falling back to direct load")
+            self._worker = None
+
     def _activate_cpu_threads(self):
         """Give refinement the cores released by earlier pipeline stages."""
         if self._active_cpu_threads is not None:
@@ -403,6 +437,13 @@ class DiarizationRefinementService:
         files run back to back and every later stage competes for what this
         stage is no longer using.
         """
+        if self._worker is not None:
+            try:
+                self._worker.stop()
+            except Exception:
+                pass
+            self._worker = None
+            return
         if self.model is None and self.tokenizer is None:
             return
         # The prefix cache holds tensors on the model's device; dropping the
@@ -847,6 +888,8 @@ class DiarizationRefinementService:
         judging) that run on the same model: `refine()` loads it itself, but
         those passes must work with refinement switched off too.
         """
+        if self._worker is not None:
+            return self._worker.ping()
         self._load_model()
         return self.model is not None
 
@@ -872,6 +915,12 @@ class DiarizationRefinementService:
         then starts with a `<think>` block, so `max_new_tokens` has to cover the
         reasoning as well as the answer. A model with no thinking mode ignores it.
         """
+        if self._worker is not None:
+            return self._worker.generate_texts(
+                system_prompt, user_messages,
+                max_new_tokens=max_new_tokens,
+                thinking=bool(thinking),
+            )
         if not self.model:
             return False, []
         tag = (", ".join(str(label) for label in labels) if labels

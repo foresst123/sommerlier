@@ -1,0 +1,448 @@
+diff --git a/podcast-pipeline/refinement_worker.py b/podcast-pipeline/refinement_worker.py
+new file mode 100644
+index 0000000..21201ef
+--- /dev/null
++++ b/podcast-pipeline/refinement_worker.py
+@@ -0,0 +1,240 @@
++#!/usr/bin/env python3
++"""Refinement LLM Worker — chạy trong venv riêng có transformers>=5.2.
++
++Mục đích: tách refinement LLM (Qwen3.5/3.8) ra khỏi main env để tránh
++xung đột transformers 4.53 (cần cho pyannote/whisperx) vs 5.x (cần cho
++Qwen3.5). Worker này chạy trong refinement_env với transformers>=5.2.
++
++Cài venv:
++    python3 -m venv /path/to/refinement_env
++    refinement_env/bin/pip install torch transformers>=5.2.0 accelerate
++
++Chạy thủ công:
++    REFINEMENT_PYTHON=/path/to/refinement_env/bin/python
++    CUDA_VISIBLE_DEVICES=0,1 $REFINEMENT_PYTHON refinement_worker.py \\
++        --model Qwen/Qwen3.8-27B --dtype bfloat16
++
++Protocol (stdin/stdout, line-delimited JSON):
++    Yêu cầu:
++        {"cmd": "ping"}
++        {"cmd": "quit"}
++        {"cmd": "generate",
++         "id": "req-001",
++         "system_prompt": "...",
++         "user_messages": ["...", "..."],
++         "max_new_tokens": 512,
++         "thinking": false}
++    Phản hồi:
++        {"status": "ok"}                   # ping
++        {"status": "shutdown"}             # quit
++        {"id": "req-001",
++         "texts": ["...", "..."],
++         "ok": true}                       # generate thành công
++        {"id": "req-001", "ok": false,
++         "error": "OOM or similar"}        # generate thất bại
++        {"status": "ready", "model": "..."} # sau khi load xong
++"""
++
++import sys
++import json
++import os
++import argparse
++import warnings
++
++warnings.filterwarnings("ignore")
++
++import torch
++
++
++def _patch_torch_load():
++    """Tránh lỗi weights_only trên checkpoint cũ."""
++    if not hasattr(torch.serialization, "add_safe_globals"):
++        return
++    original = torch.load
++    def _patched(*args, **kwargs):
++        kwargs.setdefault("weights_only", False)
++        return original(*args, **kwargs)
++    torch.load = _patched
++
++
++def load_model(model_name: str, dtype_str: str, device_map: str,
++               gpu_ids: list, gpu_memory_fraction: float):
++    """Load model và tokenizer, trả về (model, tokenizer)."""
++    from transformers import AutoModelForCausalLM, AutoTokenizer
++
++    dtype = torch.bfloat16 if dtype_str == "bfloat16" else torch.float16
++
++    print(json.dumps({"status": "loading", "model": model_name}), flush=True)
++
++    tokenizer = AutoTokenizer.from_pretrained(model_name)
++
++    if device_map == "pipeline" and len(gpu_ids) >= 2:
++        # Chia đôi layers: GPU 0 phần đầu, GPU 1 phần sau
++        # refinement_pipeline_pool.py làm điều này bằng cách split layers.
++        # Ở đây ta dùng device_map="balanced" để đơn giản hơn.
++        max_memory = {
++            i: int(torch.cuda.get_device_properties(i).total_memory
++                   * gpu_memory_fraction)
++            for i in gpu_ids
++        }
++        model = AutoModelForCausalLM.from_pretrained(
++            model_name,
++            torch_dtype=dtype,
++            device_map="balanced",
++            max_memory=max_memory,
++            low_cpu_mem_usage=True,
++        )
++    elif device_map == "auto" or len(gpu_ids) > 1:
++        max_memory = {
++            i: int(torch.cuda.get_device_properties(i).total_memory
++                   * gpu_memory_fraction)
++            for i in gpu_ids
++        }
++        model = AutoModelForCausalLM.from_pretrained(
++            model_name,
++            torch_dtype=dtype,
++            device_map="balanced",
++            max_memory=max_memory,
++            low_cpu_mem_usage=True,
++        )
++    else:
++        device = f"cuda:{gpu_ids[0]}" if gpu_ids else "cuda:0"
++        model = AutoModelForCausalLM.from_pretrained(
++            model_name,
++            torch_dtype=dtype,
++            low_cpu_mem_usage=True,
++        ).to(device)
++
++    model.eval()
++    print(json.dumps({"status": "ready", "model": model_name}), flush=True)
++    return model, tokenizer
++
++
++def _entry_device(model):
++    try:
++        return model.get_input_embeddings().weight.device
++    except Exception:
++        return model.device
++
++
++def generate(model, tokenizer, system_prompt: str, user_messages: list,
++             max_new_tokens: int = 512, thinking: bool = False) -> list:
++    """Chạy một batch chat requests, trả về list[str]."""
++    if not user_messages:
++        return []
++
++    # Tokenize
++    if tokenizer.pad_token_id is None:
++        tokenizer.pad_token = tokenizer.eos_token
++
++    tokenizer.padding_side = "left"
++    texts = []
++    for msg in user_messages:
++        try:
++            t = tokenizer.apply_chat_template(
++                [{"role": "system", "content": system_prompt},
++                 {"role": "user", "content": msg}],
++                tokenize=False,
++                add_generation_prompt=True,
++                enable_thinking=bool(thinking),
++            )
++        except TypeError:
++            # transformers cũ không có enable_thinking
++            t = tokenizer.apply_chat_template(
++                [{"role": "system", "content": system_prompt},
++                 {"role": "user", "content": msg}],
++                tokenize=False,
++                add_generation_prompt=True,
++            )
++        texts.append(t)
++
++    inputs = tokenizer(texts, return_tensors="pt", padding=True)
++    inputs = inputs.to(_entry_device(model))
++
++    with torch.inference_mode():
++        generated = model.generate(
++            **inputs,
++            max_new_tokens=max_new_tokens,
++            do_sample=False,
++            temperature=None,
++            top_p=None,
++            top_k=None,
++            repetition_penalty=1.0,
++            pad_token_id=tokenizer.pad_token_id,
++        )
++
++    # Cắt phần prompt
++    generated = generated[:, inputs.input_ids.size(1):]
++    decoded = tokenizer.batch_decode(generated, skip_special_tokens=True)
++    return decoded
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--model", default=os.environ.get(
++        "SOMMELIER_LLM", "Qwen/Qwen3-8B-Instruct"))
++    parser.add_argument("--dtype", default="bfloat16",
++                        choices=["bfloat16", "float16"])
++    parser.add_argument("--device-map", default="auto",
++                        choices=["auto", "pipeline", "single"])
++    parser.add_argument("--gpu-ids", default="0,1",
++                        help="Comma-separated GPU indices (CUDA_VISIBLE_DEVICES remaps)")
++    parser.add_argument("--gpu-memory-fraction", type=float, default=0.90)
++    args = parser.parse_args()
++
++    gpu_ids = [int(x) for x in args.gpu_ids.split(",") if x.strip()]
++
++    _patch_torch_load()
++
++    try:
++        model, tokenizer = load_model(
++            args.model, args.dtype, args.device_map,
++            gpu_ids, args.gpu_memory_fraction)
++    except Exception as e:
++        print(json.dumps({"status": "error", "error": str(e)}), flush=True)
++        sys.exit(1)
++
++    for line in sys.stdin:
++        line = line.strip()
++        if not line:
++            continue
++
++        try:
++            req = json.loads(line)
++        except json.JSONDecodeError:
++            print(json.dumps({"error": "invalid JSON"}), flush=True)
++            continue
++
++        cmd = req.get("cmd", "generate")
++
++        if cmd == "quit":
++            print(json.dumps({"status": "shutdown"}), flush=True)
++            break
++
++        if cmd == "ping":
++            print(json.dumps({"status": "ok"}), flush=True)
++            continue
++
++        # cmd == "generate"
++        req_id = req.get("id", "")
++        try:
++            texts = generate(
++                model, tokenizer,
++                system_prompt=req.get("system_prompt", ""),
++                user_messages=req.get("user_messages", []),
++                max_new_tokens=int(req.get("max_new_tokens", 512)),
++                thinking=bool(req.get("thinking", False)),
++            )
++            print(json.dumps({"id": req_id, "ok": True, "texts": texts}),
++                  flush=True)
++        except torch.cuda.OutOfMemoryError as e:
++            torch.cuda.empty_cache()
++            print(json.dumps({"id": req_id, "ok": False,
++                               "error": f"OOM: {e}"}), flush=True)
++        except Exception as e:
++            print(json.dumps({"id": req_id, "ok": False,
++                               "error": str(e)}), flush=True)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/podcast-pipeline/services/diarization_refinement_service.py b/podcast-pipeline/services/diarization_refinement_service.py
+index d38c99f..e101434 100644
+--- a/podcast-pipeline/services/diarization_refinement_service.py
++++ b/podcast-pipeline/services/diarization_refinement_service.py
+@@ -1,6 +1,7 @@
+ import os
+ from typing import List
+ from difflib import SequenceMatcher
++from utils.worker_env import resolve_worker_python
+ from algorithms.asr.hallucination import diacritic_ratio, foreign_script_ratio
+ from algorithms.asr.rover import normalize_token
+ from schemas.transcript import TranscriptSegment
+@@ -220,6 +221,39 @@ class DiarizationRefinementService:
+         self.model_name = (model_name or os.environ.get(
+             "SOMMELIER_LLM", "Qwen/Qwen2.5-3B-Instruct"))
+ 
++        # Nếu có refinement_env riêng → dùng subprocess worker để tránh
++        # xung đột transformers 4.53 (main env) vs 5.x (Qwen3.5/3.8).
++        self._worker = None
++        try:
++            import os as _os
++            _script = _os.path.join(
++                _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
++                "refinement_worker.py")
++            _python = resolve_worker_python("refinement", logger=logger)
++            from services.refinement_worker_service import RefinementWorkerService
++            self._worker = RefinementWorkerService(
++                python_env_path=_python,
++                worker_script_path=_script,
++                model_name=self.model_name,
++                logger=logger,
++            )
++            self._worker.start()
++            if logger:
++                logger.info(
++                    f"[refinement] subprocess worker started "
++                    f"(python={_python}, model={self.model_name})")
++        except FileNotFoundError:
++            if logger:
++                logger.info(
++                    "[refinement] no refinement_env found, "
++                    "loading model directly in main process")
++        except Exception as _e:
++            if logger:
++                logger.warning(
++                    f"[refinement] worker start failed ({_e}), "
++                    "falling back to direct load")
++            self._worker = None
++
+     def _activate_cpu_threads(self):
+         """Give refinement the cores released by earlier pipeline stages."""
+         if self._active_cpu_threads is not None:
+@@ -403,6 +437,13 @@ class DiarizationRefinementService:
+         files run back to back and every later stage competes for what this
+         stage is no longer using.
+         """
++        if self._worker is not None:
++            try:
++                self._worker.stop()
++            except Exception:
++                pass
++            self._worker = None
++            return
+         if self.model is None and self.tokenizer is None:
+             return
+         # The prefix cache holds tensors on the model's device; dropping the
+@@ -847,6 +888,8 @@ class DiarizationRefinementService:
+         judging) that run on the same model: `refine()` loads it itself, but
+         those passes must work with refinement switched off too.
+         """
++        if self._worker is not None:
++            return self._worker.ping()
+         self._load_model()
+         return self.model is not None
+ 
+@@ -872,6 +915,12 @@ class DiarizationRefinementService:
+         then starts with a `<think>` block, so `max_new_tokens` has to cover the
+         reasoning as well as the answer. A model with no thinking mode ignores it.
+         """
++        if self._worker is not None:
++            return self._worker.generate_texts(
++                system_prompt, user_messages,
++                max_new_tokens=max_new_tokens,
++                thinking=bool(thinking),
++            )
+         if not self.model:
+             return False, []
+         tag = (", ".join(str(label) for label in labels) if labels
+diff --git a/podcast-pipeline/services/refinement_worker_service.py b/podcast-pipeline/services/refinement_worker_service.py
+new file mode 100644
+index 0000000..aa45cd5
+--- /dev/null
++++ b/podcast-pipeline/services/refinement_worker_service.py
+@@ -0,0 +1,108 @@
++"""Client IPC cho refinement_worker subprocess.
++
++Thay thế việc load AutoModelForCausalLM trực tiếp trong main process.
++Worker chạy trong refinement_env có transformers>=5.2, tránh xung đột
++với transformers==4.53 của main env (pyannote, whisperx, DiariZen).
++
++Cách dùng:
++    Đặt trong config.json:
++        "worker_envs": {"refinement": "/path/to/refinement_env/bin/python"}
++    Hoặc env var:
++        export REFINEMENT_PYTHON=/path/to/refinement_env/bin/python
++
++    Nếu không tìm thấy refinement_env → fallback về load trực tiếp
++    (hành vi cũ, vẫn cảnh báo về xung đột).
++"""
++
++import json
++import threading
++import uuid
++from services.base_worker_service import BaseWorkerService
++
++
++class RefinementWorkerService(BaseWorkerService):
++    """Subprocess wrapper cho refinement LLM worker."""
++
++    def __init__(self, python_env_path: str, worker_script_path: str,
++                 model_name: str, dtype: str = "bfloat16",
++                 device_map: str = "auto", gpu_ids: str = "0,1",
++                 gpu_memory_fraction: float = 0.90,
++                 logger=None):
++        worker_args = [
++            "--model", model_name,
++            "--dtype", dtype,
++            "--device-map", device_map,
++            "--gpu-ids", gpu_ids,
++            "--gpu-memory-fraction", str(gpu_memory_fraction),
++        ]
++        super().__init__(
++            name="refinement",
++            python_bin=python_env_path,
++            script=worker_script_path,
++            extra_args=worker_args,
++            logger=logger,
++        )
++        self._lock = threading.Lock()
++        self.model_name = model_name
++
++    # ── IPC ────────────────────────────────────────────────────────────────
++
++    def generate_texts(self, system_prompt: str, user_messages: list,
++                       max_new_tokens: int = 512,
++                       thinking: bool = False) -> tuple[bool, list]:
++        """Gửi batch generate request, trả về (ok, texts).
++
++        Interface giống DiarizationRefinementService.generate_texts để
++        caller không cần biết đang dùng subprocess hay direct load.
++        """
++        if not user_messages or not self.process:
++            return False, []
++
++        req_id = str(uuid.uuid4())[:8]
++        req = {
++            "cmd": "generate",
++            "id": req_id,
++            "system_prompt": system_prompt,
++            "user_messages": user_messages,
++            "max_new_tokens": max_new_tokens,
++            "thinking": thinking,
++        }
++
++        try:
++            with self._lock:
++                self.process.stdin.write(json.dumps(req) + "\n")
++                self.process.stdin.flush()
++                line = self.process.stdout.readline()
++
++            if not line:
++                if self.logger:
++                    self.logger.warning("[refinement_worker] empty response")
++                return False, []
++
++            resp = json.loads(line.strip())
++            if resp.get("ok"):
++                return True, resp.get("texts", [])
++            else:
++                if self.logger:
++                    self.logger.warning(
++                        f"[refinement_worker] generate failed: "
++                        f"{resp.get('error', 'unknown')}")
++                return False, []
++
++        except Exception as e:
++            if self.logger:
++                self.logger.error(f"[refinement_worker] IPC error: {e}")
++            return False, []
++
++    def ping(self) -> bool:
++        """Kiểm tra worker còn sống không."""
++        if not self.process:
++            return False
++        try:
++            with self._lock:
++                self.process.stdin.write(json.dumps({"cmd": "ping"}) + "\n")
++                self.process.stdin.flush()
++                line = self.process.stdout.readline()
++            return json.loads(line.strip()).get("status") == "ok"
++        except Exception:
++            return False
