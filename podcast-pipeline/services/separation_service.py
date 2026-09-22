@@ -1179,10 +1179,22 @@ class SeparationService:
                             overlap_threshold: float = 0.1) -> "_OverlapPlan":
         """Every CPU-only step of process_overlaps: detect pairs, mine
         enrollments, group jobs, and materialize every window plan. No GPU
-        call happens here -- self.bss_model is never read -- so this is safe
-        to run on a fork_for_file() clone, from a background thread, for a
-        file whose diarization just finished while this SeparationService's
-        real instance may be handling a different file's actual separation."""
+        call happens here, so this is safe to run on a fork_for_file() clone,
+        from a background thread, for a file whose diarization just finished
+        while this SeparationService's real instance may be handling a
+        different file's actual separation.
+
+        One exception, not a GPU call but worth naming: the sequential
+        fallback below (fewer than BSS_WINDOW_POOL_MIN_JOBS jobs, or the pool
+        failed) reads self.bss_model._vad for its cut points. During a
+        prefetch (see prefetch_overlap_plan) the separator is not loaded yet,
+        so that clone's self.bss_model is None and `vad` comes through as
+        None -- WindowPlanner already treats that the same as the pool
+        path's use_vad=False, i.e. energy-based cuts instead of Silero. A
+        file with few enough jobs to skip the pool therefore gets slightly
+        less precise cuts when it happens to be prefetched, never a crash;
+        a call made after the separator has loaded (the non-prefetched path)
+        is unaffected."""
         seg_dicts = [{"start": s.start, "end": s.end, "speaker": s.speaker, "index": s.index}
                      for s in segments]
         pairs = detect_overlapping_segments(seg_dicts, overlap_threshold=0.0, logger=self.logger)
