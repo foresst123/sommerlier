@@ -78,7 +78,7 @@ from utils.llm_json import clean_reply, is_cut_in_thought, is_readable, objects_
 from utils.transcript_windows import line_number
 
 # Bump when the prompt or the acceptance rules change.
-CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v4-quality-aware-finder"
+CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v5-coverage-aware-finder"
 
 _TEMPLATE_SLACK_TOKENS = 64
 
@@ -101,52 +101,75 @@ def _topic_key(text) -> str:
 _EXAMPLE_TOPICS = {_topic_key(_EXAMPLE_GOOD["topic"]), _topic_key(_EXAMPLE_BAD["topic"])}
 
 CONVERSATION_FINDER_SYSTEM_PROMPT = (
-    "Bạn là bộ TÌM ĐOẠN hội thoại tiếng Việt để tạo dữ liệu huấn luyện full-duplex. "
-    "Bạn nhận một cửa sổ dài của transcript sau diarization/ASR. Cửa sổ có thể có nhiều người nói. "
-    "Nhiệm vụ của bạn là tìm TẤT CẢ các đoạn con đáng giữ, thay vì chấm một đoạn máy đã chọn sẵn.\n"
+    "Bạn là bộ PHÂN VÙNG + TÌM ĐOẠN hội thoại tiếng Việt để tạo dữ liệu huấn luyện full-duplex. "
+    "Bạn nhận một cửa sổ dài của transcript sau diarization/ASR. Cửa sổ có thể có nhiều người nói.\n"
     "\n"
+    "## NHIỆM VỤ BẮT BUỘC: PHỦ TOÀN BỘ CỬA SỔ\n"
+    "Hãy chia TOÀN BỘ các dòng 1..N thành các vùng liên tiếp theo mạch hội thoại/chủ đề, rồi quyết định keep=true/false cho từng vùng.\n"
+    "- Mọi dòng từ 1 đến N phải xuất hiện trong đúng MỘT vùng.\n"
+    "- Các vùng phải theo thứ tự, không chồng nhau, không để hở: vùng đầu start_line=1; vùng sau bắt đầu ngay sau vùng trước; "
+    "vùng cuối end_line=N.\n"
+    "- KHÔNG được trả [] khi cửa sổ có dòng. Nếu không có đoạn nào đáng giữ, vẫn phải chia vùng và đặt keep=false kèm lý do.\n"
+    "- Không chia vụn từng segment. Hãy chia theo chủ đề/mạch hội thoại và cố gắng tạo vùng có kích thước hữu ích.\n"
+    "- Nếu một vùng dài hơn {max_seconds}s hoặc đổi chủ đề rõ ràng, hãy tách thành nhiều vùng. Nếu các ý liền nhau và cùng mạch, "
+    "có thể gộp để đạt khoảng {min_seconds}-{max_seconds}s.\n"
+    "\n"
+    "## DỮ LIỆU MỖI DÒNG\n"
     "Mỗi dòng có dạng: [số dòng] start-end NGƯỜI {THÔNG_SỐ}: nội dung. "
     "NGƯỜI là nhãn A/B/C/... chỉ để phân biệt người nói.\n"
-    "THÔNG_SỐ là đo trực tiếp từ pipeline, không phải suy đoán của model:\n"
-    "- gap: khoảng cách với segment trước; số âm nghĩa là có overlap thời gian.\n"
+    "THÔNG_SỐ là đo trực tiếp từ pipeline:\n"
+    "- gap: khoảng cách với segment trước; số âm nghĩa là overlap thời gian.\n"
     "- ov: số giây segment này overlap với người nói khác.\n"
-    "- noise: combined p90; ns/ne/nr lần lượt là noise_speech/noise_env/noise_room; thấp hơn sạch hơn.\n"
-    "- noisy: tỷ lệ frame vượt ngưỡng noise; run: chuỗi noise liên tục dài nhất.\n"
-    "- music: tỷ lệ segment đã bị music-patch; 0 là không patch, càng thấp càng tốt.\n"
-    "- bss=1 nghĩa là segment có dùng separation; unsep là tỷ lệ chưa tách được.\n"
-    "- seam_before/seam_inside và flags là cảnh báo kỹ thuật; tránh đặt candidate xuyên seam hoặc chứa hard flag.\n"
-    "Ngưỡng validator: combined noise <= {noise_max}, noise_speech <= {noise_speech_max}, "
-    "noise_env <= {noise_env_max}, noise_room <= {noise_room_max}, music <= {music_patched_max}; "
-    "noisy_share khoảng {noisy_share_max} trở lên là rất xấu và noisy run >= {noisy_run_seconds}s sẽ bị loại.\n"
+    "- noise: combined p90; ns/ne/nr là noise_speech/noise_env/noise_room; thấp hơn sạch hơn.\n"
+    "- noisy: tỷ lệ frame vượt ngưỡng; run: chuỗi noise liên tục dài nhất.\n"
+    "- music: tỷ lệ segment bị music-patch; 0 là không patch, càng thấp càng tốt.\n"
+    "- bss=1: segment có dùng separation; unsep: tỷ lệ chưa tách được.\n"
+    "- seam_before/seam_inside và flags: cảnh báo kỹ thuật.\n"
+    "Ngưỡng validator: noise <= {noise_max}, ns <= {noise_speech_max}, ne <= {noise_env_max}, "
+    "nr <= {noise_room_max}, music <= {music_patched_max}; noisy khoảng {noisy_share_max} trở lên là rất xấu; "
+    "noisy run >= {noisy_run_seconds}s có thể bị validator loại.\n"
     "\n"
-    "Một đoạn đề xuất phải:\n"
+    "## KHI NÀO keep=true\n"
+    "Đặt keep=true khi vùng có TIỀM NĂNG làm một mẫu hội thoại tốt. Validator phía sau sẽ kiểm tra lại bằng số liệu, "
+    "vì vậy đừng quá bảo thủ chỉ vì noise/music hơi xấu hoặc một chỉ số gần ngưỡng.\n"
+    "Một vùng keep=true nên:\n"
     "- dài khoảng {min_seconds}-{max_seconds} giây;\n"
-    "- chứa đúng HAI người nói trong chính đoạn được chọn;\n"
+    "- từ start_line đến end_line chỉ có đúng HAI người nói;\n"
     "- mỗi người có ít nhất {min_turns_each} lượt nói thật;\n"
-    "- tự trọn nghĩa: mở đầu tự nhiên, theo được khi không biết phần trước, và kết thúc không bị cụt;\n"
-    "- có một chủ đề/câu chuyện tương đối liền mạch và có nội dung thực.\n"
+    "- mở đầu/kết thúc tự nhiên, nghe độc lập vẫn hiểu;\n"
+    "- có một chủ đề/câu chuyện tương đối liền mạch và có nội dung thực;\n"
+    "- ưu tiên tương tác full-duplex: nhiều lượt đổi người, hỏi-đáp, backchannel hoặc overlap tự nhiên, nhưng không bắt buộc phải có overlap.\n"
     "\n"
-    "RẤT QUAN TRỌNG:\n"
-    "- Đừng loại cả cửa sổ chỉ vì có người thứ ba, khoảng im lặng dài, quảng cáo, hoặc một đoạn dở. "
-    "Hãy đặt start_line/end_line để lấy phần tốt ở trước hoặc sau chúng.\n"
-    "- Một người thứ ba ở NGOÀI đoạn bạn chọn không sao. Nhưng từ start_line đến end_line phải chỉ có đúng hai nhãn người nói.\n"
-    "- Khoảng im lặng vài giây không tự động làm hỏng hội thoại nếu nội dung trước/sau vẫn cùng mạch.\n"
-    "- Không tạo nhiều biến thể gần như trùng nhau của cùng một đoạn; chọn biên tốt nhất.\n"
-    "- Nếu đoạn có vẻ bắt đầu trước cửa sổ hoặc còn tiếp sau cửa sổ, đừng chọn biên bị cụt đó.\n"
+    "## KHI NÀO keep=false\n"
+    "Đặt keep=false khi vùng chỉ là cầu nối/intro/outro/quảng cáo, quá ngắn, quá dài không thể chia hợp lý, một người nói gần như độc thoại, "
+    "nội dung bị cụt, có hơn hai người không thể tránh bằng đổi biên, hoặc chất lượng kỹ thuật rõ ràng quá xấu. "
+    "reason phải nói NGẮN GỌN nguyên nhân chính để người vận hành debug được.\n"
+    "\n"
+    "## CÁCH XỬ LÝ SEAM / NGƯỜI THỨ BA / ĐOẠN XẤU\n"
+    "- seam_inside=1: không được để keep=true chứa segment đó.\n"
+    "- seam_before=1: coi đó là biên rất mạnh; ưu tiên kết thúc vùng trước và bắt đầu vùng mới tại dòng đó.\n"
+    "- Nếu xuất hiện người thứ ba, hãy tách vùng tại đó hoặc co biên để cứu phần hai người ở trước/sau; đừng bỏ cả khoảng dài nếu còn phần tốt.\n"
+    "- Nếu vài dòng noise/music xấu nằm giữa, tách quanh chúng khi điều đó vẫn giữ được mạch nghĩa; nếu không thì keep=false vùng đó.\n"
+    "- Khoảng im lặng vài giây không tự động làm hỏng hội thoại nếu nội dung vẫn cùng mạch.\n"
     "- Transcript có thể sai vài từ; đừng loại chỉ vì lỗi ASR nhỏ.\n"
-    "- Khi có nhiều đoạn cùng tốt về nội dung, ƯU TIÊN đoạn có noise/noisy/music/unsep thấp hơn, ít hard flag hơn, "
-    "và có overlap hội thoại thật nếu chất lượng separation vẫn tốt.\n"
-    "- Đừng kéo candidate qua vài segment xấu chỉ để đạt thời lượng; hãy chọn biên sạch nhất vẫn giữ được một ý trọn vẹn.\n"
     "\n"
-    "self_contained: 5 = rất trọn vẹn, 4 = tốt, 3 = còn cụt/mơ hồ, 1-2 = không nên dùng. "
-    "Chỉ trả các đoạn có điểm từ {min_semantic} trở lên.\n"
+    "## self_contained\n"
+    "5 = xuất sắc, mở và kết rất tự nhiên, chủ đề rõ và hoàn chỉnh. Chỉ dùng 5 khi thực sự nổi bật.\n"
+    "4 = tốt, dùng được, có thể hơi thừa/thiếu nhẹ ở biên. Đây thường là mức của một đoạn tốt.\n"
+    "3 = theo dõi được nhưng còn cụt/mơ hồ hoặc biên chưa đẹp.\n"
+    "1-2 = không phù hợp khi tách riêng.\n"
+    "keep=true chỉ khi self_contained >= {min_semantic}. keep=false vẫn phải chấm self_contained để debug.\n"
     "\n"
-    "ĐẦU RA: chỉ một JSON ARRAY, không markdown, không giải thích ngoài JSON. "
-    "Mỗi phần tử đúng 5 khóa: "
-    "start_line, end_line, self_contained, topic, reason. "
-    "start_line/end_line là số dòng trong cửa sổ hiện tại. "
-    "topic tối đa 10 từ, reason tối đa 20 từ. "
-    "Tối đa {max_proposals} đoạn trong một cửa sổ. Nếu không có đoạn phù hợp, trả []."
+    "## ĐẦU RA\n"
+    "Chỉ trả MỘT JSON ARRAY, không markdown, không giải thích ngoài JSON. Mỗi phần tử đúng 6 khóa:\n"
+    "start_line, end_line, keep, self_contained, topic, reason.\n"
+    "- start_line/end_line: số dòng trong cửa sổ hiện tại.\n"
+    "- keep: boolean JSON true/false, không dùng chuỗi.\n"
+    "- self_contained: số nguyên 1..5.\n"
+    "- topic: tối đa 10 từ.\n"
+    "- reason: tối đa 20 từ, nêu lý do GIỮ hoặc LOẠI.\n"
+    "- Các vùng phải phủ đủ 1..N như quy tắc ở trên.\n"
+    "- Tối đa {max_proposals} vùng; nếu cần, gộp các vùng keep=false liền nhau có cùng lý do để vẫn phủ đủ cửa sổ."
 )
 
 CONVERSATION_EXPORT_SYSTEM_PROMPT = (
@@ -261,8 +284,36 @@ def parse_verdict(raw: Optional[str]) -> Optional[dict]:
 
 
 
+def _parse_keep(value) -> Tuple[bool, bool]:
+    """Return (keep, explicit).
+
+    v5 requires a JSON boolean.  Older cached replies did not have `keep`, so a
+    missing value falls back to True for backward compatibility instead of
+    silently throwing away a valid old proposal.
+    """
+    if isinstance(value, bool):
+        return value, True
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value), True
+    if isinstance(value, str):
+        folded = value.strip().lower()
+        if folded in {"true", "yes", "keep", "1"}:
+            return True, True
+        if folded in {"false", "no", "reject", "drop", "0"}:
+            return False, True
+    return True, False
+
+
 def parse_finder_reply(raw: Optional[str]) -> List[dict]:
-    """Parse the LLM finder's JSON array into safe line-range proposals."""
+    """Parse one coverage-finder reply.
+
+    The preferred v5 output is a JSON array of contiguous regions with the six
+    keys: start_line, end_line, keep, self_contained, topic and reason.  The
+    parser remains tolerant of the older {"candidates": [...]} wrapper and of v4
+    replies without `keep` so existing checkpoints do not crash the pipeline.
+    Coverage itself is checked separately in `_find_with_llm`; parsing never
+    fabricates missing regions.
+    """
     if raw is None:
         return []
     cleaned = clean_reply(raw).strip()
@@ -274,13 +325,16 @@ def parse_finder_reply(raw: Optional[str]) -> List[dict]:
         objs = objects_in(raw)
         if objs:
             data = objs
+
     if isinstance(data, dict):
-        nested = data.get("candidates")
+        nested = data.get("regions")
+        if not isinstance(nested, list):
+            nested = data.get("candidates")
         data = nested if isinstance(nested, list) else [data]
     if not isinstance(data, list):
         return []
 
-    out = []
+    out: List[dict] = []
     for obj in data:
         if not isinstance(obj, dict):
             continue
@@ -288,22 +342,74 @@ def parse_finder_reply(raw: Optional[str]) -> List[dict]:
         end, bad_end = _trim_line(obj.get("end_line"))
         if bad_start or bad_end or start is None or end is None:
             continue
+
+        keep, keep_explicit = _parse_keep(obj.get("keep"))
         score = obj.get("self_contained")
         try:
             score = int(round(float(score)))
         except (TypeError, ValueError):
-            continue
-        if not 1 <= score <= 5:
-            continue
+            score = None
+        if score is not None and not 1 <= score <= 5:
+            score = None
+
         out.append({
             "start_line": start,
             "end_line": end,
+            "keep": keep,
+            "keep_explicit": keep_explicit,
             "self_contained": score,
             "topic": str(obj.get("topic") or "").strip()[:120],
             "reason": str(obj.get("reason") or "").strip()[:240],
         })
     return out
 
+
+def _ranges_where(counts: List[int], predicate) -> List[List[int]]:
+    """1-based inclusive line ranges whose count satisfies `predicate`."""
+    out: List[List[int]] = []
+    start = None
+    for idx, value in enumerate(counts, start=1):
+        matched = bool(predicate(value))
+        if matched and start is None:
+            start = idx
+        elif not matched and start is not None:
+            out.append([start, idx - 1])
+            start = None
+    if start is not None:
+        out.append([start, len(counts)])
+    return out
+
+
+def coverage_of_regions(regions: List[dict], line_count: int) -> dict:
+    """How completely model regions partition a window.
+
+    Out-of-range regions are not clipped into validity for the validator, but
+    their in-range intersection is counted here so diagnostics explain what the
+    model actually covered.  A perfect v5 reply has fraction=1, no uncovered
+    ranges and no overlap ranges.
+    """
+    n = max(0, int(line_count))
+    if n == 0:
+        return {"covered_lines": 0, "coverage_fraction": 1.0,
+                "uncovered_ranges": [], "overlap_ranges": []}
+    counts = [0] * n
+    for region in regions:
+        try:
+            a, b = int(region["start_line"]), int(region["end_line"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        lo, hi = max(1, a), min(n, b)
+        if hi < lo:
+            continue
+        for line in range(lo, hi + 1):
+            counts[line - 1] += 1
+    covered = sum(1 for x in counts if x > 0)
+    return {
+        "covered_lines": covered,
+        "coverage_fraction": round(covered / n, 4),
+        "uncovered_ranges": _ranges_where(counts, lambda x: x == 0),
+        "overlap_ranges": _ranges_where(counts, lambda x: x > 1),
+    }
 
 # ---------------------------------------------------------------------------
 # Writing audio
@@ -579,7 +685,7 @@ class ConversationExportService:
         self.cfg = ConversationSelectionConfig.from_settings(settings)
         # A finder reply can contain many candidates, so never use the tiny budget
         # that was sufficient for the old one-candidate semantic judge.
-        self.max_new_tokens = reply_budget(max(768, self.cfg.max_new_tokens), self.cfg.thinking)
+        self.max_new_tokens = reply_budget(max(1536, self.cfg.max_new_tokens), self.cfg.thinking)
 
     # -- LLM candidate finder ------------------------------------------------------
     def _finder_system_prompt(self) -> str:
@@ -698,15 +804,17 @@ class ConversationExportService:
         first = str(finder.segs[start].index)
         last = str(finder.segs[stop - 1].index)
         limits = finder.finder_limits()
+        n = len(lines)
         return (
-            f"Cửa sổ transcript #{first}-#{last}, {len(lines)} dòng. "
-            f"Hãy tìm TẤT CẢ đoạn hội thoại tốt nằm bên trong cửa sổ này.\n"
-            f"Giới hạn kỹ thuật: noise<={limits['noise_combined_max']:g}, "
+            f"Cửa sổ transcript #{first}-#{last}, N={n} dòng. "
+            f"BẮT BUỘC phân vùng phủ đủ dòng 1..{n}; không được trả [] nếu N>0. "
+            f"Mỗi vùng phải có keep=true/false và reason.\n"
+            f"Giới hạn kỹ thuật để tham khảo khi đặt biên: noise<={limits['noise_combined_max']:g}, "
             f"ns<={limits['noise_speech_max']:g}, ne<={limits['noise_env_max']:g}, "
             f"nr<={limits['noise_room_max']:g}, music<={limits['music_patched_max']:g}, "
-            f"noisy_run<{limits['noisy_run_seconds']:g}s.\n\n"
-            + "\n".join(lines) + "\n\nJSON array:")
-
+            f"noisy_run<{limits['noisy_run_seconds']:g}s. Validator sẽ kiểm tra chính xác sau.\n\n"
+            + "\n".join(lines) +
+            f"\n\nHãy trả JSON array các vùng liên tiếp phủ chính xác 1..{n}:" )
     def _finder_per_call(self, messages: List[str]) -> int:
         batch = max(1, int(getattr(self.llm, "batch_size", 1) or 1))
         limit = int(getattr(self.llm, "max_batch_tokens", 0) or 0)
@@ -717,7 +825,7 @@ class ConversationExportService:
         return batch
 
     def _find_with_llm(self, finder: ConversationSelectionFinder, report: dict) -> List[_Judged]:
-        """Ask Qwen where the conversations are, then hard-validate every proposal."""
+        """Ask Qwen to partition every window, then validate only keep=true regions."""
         if not finder.segs:
             return []
         if not self.llm.ensure_loaded():
@@ -731,59 +839,171 @@ class ConversationExportService:
         replies, unanswered = ask_in_batches(
             self.llm, self._finder_system_prompt(), messages,
             per_call=self._finder_per_call(messages), max_new_tokens=self.max_new_tokens,
-            label="conversation finder window", logger=self.logger,
+            label="conversation coverage finder window", logger=self.logger,
             thinking=self.cfg.thinking)
         report["windows"] = len(windows)
         report["unanswered"] = unanswered
 
+        # One strict repair pass for the exact failure mode seen in practice:
+        # a readable reply such as [] or a partial partition that silently leaves
+        # much of the window unseen. Keep the retry only when it improves coverage.
+        retry_meta: Dict[int, dict] = {}
+
+        def partition_quality(raw_reply: Optional[str], line_count: int):
+            regions = parse_finder_reply(raw_reply) if raw_reply is not None else []
+            cov = coverage_of_regions(regions, line_count)
+            perfect = bool(regions) and cov["coverage_fraction"] == 1.0 and not cov["overlap_ranges"]
+            # Lexicographic: a perfect partition wins; then more coverage; then
+            # fewer overlapping ranges. The final term prefers an actual partition
+            # over [] when the preceding terms tie.
+            quality = (int(perfect), float(cov["coverage_fraction"]),
+                       -len(cov["overlap_ranges"]), int(bool(regions)))
+            return quality, regions, cov
+
+        bad_indexes = []
+        for idx, ((start, stop), raw) in enumerate(zip(windows, replies)):
+            quality, _regions, cov = partition_quality(raw, stop - start)
+            if quality[0] == 0:
+                bad_indexes.append(idx)
+                retry_meta[idx] = {"attempted": True, "improved": False,
+                                   "before_coverage": cov["coverage_fraction"]}
+
+        if bad_indexes:
+            retry_messages = []
+            for idx in bad_indexes:
+                n = windows[idx][1] - windows[idx][0]
+                retry_messages.append(
+                    messages[idx]
+                    + "\n\nPHẢN HỒI TRƯỚC KHÔNG ĐẠT YÊU CẦU PHỦ TOÀN BỘ. "
+                      f"Hãy làm lại: phải phủ chính xác dòng 1..{n}, không hở, không chồng, "
+                      "không trả [], mỗi vùng có keep true/false và reason. Chỉ trả JSON array.")
+            retry_replies, retry_unanswered = ask_in_batches(
+                self.llm, self._finder_system_prompt(), retry_messages,
+                per_call=self._finder_per_call(retry_messages),
+                max_new_tokens=self.max_new_tokens,
+                label="conversation coverage retry", logger=self.logger,
+                thinking=False)
+            report["coverage_retry_unanswered"] = retry_unanswered
+
+            for idx, retry_raw in zip(bad_indexes, retry_replies):
+                old_quality, _old_regions, old_cov = partition_quality(
+                    replies[idx], windows[idx][1] - windows[idx][0])
+                new_quality, _new_regions, new_cov = partition_quality(
+                    retry_raw, windows[idx][1] - windows[idx][0])
+                retry_meta[idx]["after_coverage"] = new_cov["coverage_fraction"]
+                if new_quality > old_quality:
+                    replies[idx] = retry_raw
+                    retry_meta[idx]["improved"] = True
+                else:
+                    retry_meta[idx]["after_coverage"] = old_cov["coverage_fraction"]
+
+        report["coverage_retries"] = len(bad_indexes)
+        report["coverage_retry_improved"] = sum(1 for x in retry_meta.values() if x["improved"])
+
         rejected: Dict[str, int] = {}
         rows = []
-        proposals_total = 0
+        regions_total = 0
+        model_kept_total = 0
+        model_rejected_total = 0
         accepted_by_range: Dict[Tuple[int, int], _Judged] = {}
+        coverage_values: List[float] = []
 
         def reject(reason: str):
             rejected[reason] = rejected.get(reason, 0) + 1
 
         for w_no, ((start, stop), raw) in enumerate(zip(windows, replies)):
-            proposals = parse_finder_reply(raw) if raw is not None else []
-            proposals_total += len(proposals)
+            regions = parse_finder_reply(raw) if raw is not None else []
+            line_count = stop - start
+            coverage = coverage_of_regions(regions, line_count)
+            coverage_values.append(float(coverage["coverage_fraction"]))
+
+            regions_total += len(regions)
+            model_kept = sum(1 for r in regions if r.get("keep", True))
+            model_rejected = len(regions) - model_kept
+            model_kept_total += model_kept
+            model_rejected_total += model_rejected
+
             first_index = str(finder.segs[start].index)
             last_index = str(finder.segs[stop - 1].index)
             row = {
-                "window": w_no, "first_index": first_index, "last_index": last_index,
-                "lines": stop - start, "answered": raw is not None,
+                "window": w_no,
+                "first_index": first_index,
+                "last_index": last_index,
+                "lines": line_count,
+                "answered": raw is not None,
                 "readable": raw is not None and is_readable(raw),
                 "cut_in_thought": raw is not None and is_cut_in_thought(raw),
-                "proposals": len(proposals), "proposal_results": [], "raw": raw,
+                # `proposals` is kept for old report readers; in v5 it means
+                # regions the model actually wants the validator to consider.
+                "regions": len(regions),
+                "proposals": model_kept,
+                "model_rejected": model_rejected,
+                **coverage,
+                "proposal_results": [],
+                "raw": raw,
+                "coverage_retry": retry_meta.get(w_no),
             }
             rows.append(row)
 
-            for proposal in proposals:
-                a, b = proposal["start_line"], proposal["end_line"]
+            if line_count > 0 and not regions:
+                # This is exactly the old failure mode: Qwen answered [] even
+                # though a non-empty window existed. It is visible separately
+                # from unreadable/unanswered responses.
+                row["coverage_error"] = "empty_partition"
+            elif coverage["coverage_fraction"] < 1.0:
+                row["coverage_error"] = "uncovered_lines"
+            elif coverage["overlap_ranges"]:
+                row["coverage_error"] = "overlapping_regions"
+
+            for region in regions:
+                a, b = region["start_line"], region["end_line"]
                 detail = {
-                    "start_line": a, "end_line": b,
-                    "self_contained": proposal["self_contained"],
-                    "topic": proposal["topic"], "reason": proposal["reason"],
+                    "start_line": a,
+                    "end_line": b,
+                    "keep": bool(region.get("keep", True)),
+                    "keep_explicit": bool(region.get("keep_explicit", False)),
+                    "self_contained": region.get("self_contained"),
+                    "topic": region.get("topic", ""),
+                    "reason": region.get("reason", ""),
                 }
-                if a < 1 or b < a or b > stop - start:
+
+                if a < 1 or b < a or b > line_count:
                     detail["validator"] = "proposal_out_of_range"
                     row["proposal_results"].append(detail)
-                    reject("proposal_out_of_range")
+                    if detail["keep"]:
+                        reject("proposal_out_of_range")
                     continue
+
                 i, j = start + a - 1, start + b - 1
                 detail["first_index"] = str(finder.segs[i].index)
                 detail["last_index"] = str(finder.segs[j].index)
-                if proposal["self_contained"] < self.cfg.min_semantic:
+
+                # Rejected regions are still logged with their model reason. They
+                # deliberately do not reach the deterministic validator.
+                if not detail["keep"]:
+                    detail["validator"] = "model_rejected"
+                    row["proposal_results"].append(detail)
+                    continue
+
+                score = region.get("self_contained")
+                if score is None:
+                    detail["validator"] = "invalid_self_contained"
+                    row["proposal_results"].append(detail)
+                    reject("invalid_self_contained")
+                    continue
+                if score < self.cfg.min_semantic:
                     detail["validator"] = "not_self_contained"
                     row["proposal_results"].append(detail)
                     reject("not_self_contained")
                     continue
+
                 cand, why = finder.evaluate(i, j)
                 if cand is None:
                     detail["validator"] = why or "validation_failed"
                     row["proposal_results"].append(detail)
                     reject(why or "validation_failed")
                     continue
+
                 detail.update({
                     "validator": "accepted",
                     "duration": cand.duration,
@@ -795,24 +1015,41 @@ class ConversationExportService:
                 })
                 row["proposal_results"].append(detail)
                 item = _Judged(
-                    original=cand, candidate=cand,
-                    semantic=proposal["self_contained"],
-                    topic=proposal["topic"], why=proposal["reason"])
+                    original=cand,
+                    candidate=cand,
+                    semantic=score,
+                    topic=region.get("topic", ""),
+                    why=region.get("reason", ""))
                 key = (i, j)
                 old = accepted_by_range.get(key)
                 if old is None or (item.semantic or 0) > (old.semantic or 0):
                     accepted_by_range[key] = item
 
-        # Do not pre-shortlist before Qwen. Every model proposal reaches the same
-        # validator. Exact duplicates caused by overlapping windows are merged here.
+        # Every keep=true model region reaches the same deterministic validator.
+        # Exact duplicates from overlapping transcript windows are merged here.
         judged = list(accepted_by_range.values())
         judged.sort(key=lambda x: (x.candidate.start if x.candidate else 0.0,
                                    -(x.semantic or 0)))
-        report["candidates"] = proposals_total
-        report["shortlisted"] = len(judged)   # kept for compatibility: now means validated unique proposals
+
+        report["regions"] = regions_total
+        report["model_kept"] = model_kept_total
+        report["model_rejected"] = model_rejected_total
+        # Backward-compatible meaning: candidates are now only keep=true regions,
+        # i.e. actual proposals sent to the validator.
+        report["candidates"] = model_kept_total
+        report["shortlisted"] = len(judged)
         report["validated"] = len(judged)
         report["judged_rejected"] = rejected
         report["replies"] = rows
+        report["coverage"] = {
+            "mean_fraction": round(sum(coverage_values) / len(coverage_values), 4)
+            if coverage_values else 0.0,
+            "min_fraction": round(min(coverage_values), 4) if coverage_values else 0.0,
+            "complete_windows": sum(1 for r in rows
+                                    if r.get("coverage_fraction") == 1.0
+                                    and not r.get("overlap_ranges")),
+            "total_windows": len(rows),
+        }
         report["unreadable"] = sum(1 for r in rows if r["answered"] and not r["readable"])
         report["cut_in_thought"] = sum(1 for r in rows if r["cut_in_thought"])
         report["trims_ignored"] = {}
@@ -1307,6 +1544,8 @@ class ConversationExportService:
         report = {"prompt_version": CONVERSATION_EXPORT_PROMPT_VERSION,
                   "thinking": cfg.thinking, "mode": "llm_finder_then_validator",
                   "skipped": None, "windows": 0,
+                  "coverage_retries": 0, "coverage_retry_improved": 0,
+                  "regions": 0, "model_kept": 0, "model_rejected": 0,
                   "candidates": 0, "shortlisted": 0, "validated": 0,
                   "judged_rejected": {}, "accepted": 0, "exported": 0,
                   "tiers": {}, "verification_failed": 0}
