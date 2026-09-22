@@ -347,6 +347,16 @@ def _discard_partial(ledger, args, audio_path, logger, pipeline=None):
             pass
     ledger.discard_partial_output(*targets, logger=logger)
 
+    # This file's diarization checkpoint is gone, so its next attempt
+    # recomputes diarization from scratch. Drop any window plan already
+    # prefetched for the attempt that just failed, so a retry cannot be
+    # handed a plan built for a checkpoint that no longer exists.
+    if pipeline is not None:
+        separation_svc = getattr(pipeline, "separation_svc", None)
+        drop = getattr(separation_svc, "drop_prefetched_plan", None)
+        if callable(drop):
+            drop(audio_path)
+
     # Release any worker subprocess that may be holding GPU memory after the
     # failure. _release_worker is a no-op when the worker is already gone.
     if pipeline is not None:
