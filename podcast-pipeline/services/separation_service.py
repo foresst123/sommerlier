@@ -172,21 +172,6 @@ REASONS = (
 SAFE_FAIL_REASONS = frozenset({"same_speaker"})
 
 
-@dataclass
-class _OverlapPlan:
-    """Every CPU-only step of process_overlaps, materialized ahead of any GPU
-    call: which windows to build and what each one produced. Safe to build on
-    a fork_for_file() clone from a background thread (see prefetch_overlap_plan)."""
-    speech: list
-    pairs: list
-    enrollments: dict
-    seg_by_index: dict
-    jobs: list                # the flattened (subjob, outcome) sequence expanded_window_iter() used to yield
-    stats_jobs: int
-    stats_pairs: int
-    overlap_durations: list
-
-
 class SeparationService:
     """Tách lời nói chồng bằng BSS và gán người nói bằng ECAPA.
     Mỗi vùng được xử lý phải có trong bss_spans hoặc bss_failed_spans với lý do.
@@ -2229,3 +2214,26 @@ class SeparationService:
                 f"[SDLM] limiter applied: track_0 x{g0:.3f}, track_1 x{g1:.3f} "
                 "(summed segments exceeded full scale)")
         return track_0, track_1
+
+
+@dataclass
+class _OverlapPlan:
+    """Every CPU-only step of process_overlaps, materialized ahead of any GPU
+    call: which windows to build and what each one produced. Safe to build on
+    a fork_for_file() clone from a background thread (see prefetch_overlap_plan).
+
+    Defined after SeparationService, not before: several structural tests
+    (tests/test_stage_boundary_state.py) assume the first top-level class in
+    this module is SeparationService itself. _build_overlap_plan's
+    `-> "_OverlapPlan"` return annotation is a string, so the forward
+    reference resolves fine regardless of definition order; the runtime
+    `return _OverlapPlan(...)` call resolves this name at call time, by
+    which point the whole module has already finished executing."""
+    speech: list
+    pairs: list
+    enrollments: dict
+    seg_by_index: dict
+    jobs: list                # the flattened (subjob, outcome) sequence expanded_window_iter() used to yield
+    stats_jobs: int
+    stats_pairs: int
+    overlap_durations: list
