@@ -223,25 +223,18 @@ class DiarizationRefinementService:
 
         # Nếu có refinement_env riêng → dùng subprocess worker để tránh
         # xung đột transformers 4.53 (main env) vs 5.x (Qwen3.5/3.8).
+        # KHÔNG start ở đây: worker chỉ spawn khi stage refinement thực sự
+        # chạy (lazy, giống qwen3/diarizen/sidon). __init__ chỉ kiểm tra
+        # xem refinement_env có tồn tại không để quyết định dùng worker
+        # hay fallback direct-load.
         self._worker = None
+        self._worker_python = None
         try:
-            import os as _os
-            _script = _os.path.join(
-                _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
-                "refinement_worker.py")
-            _python = resolve_worker_python("refinement", logger=logger)
-            from services.refinement_worker_service import RefinementWorkerService
-            self._worker = RefinementWorkerService(
-                python_env_path=_python,
-                worker_script_path=_script,
-                model_name=self.model_name,
-                logger=logger,
-            )
-            self._worker.start()
+            self._worker_python = resolve_worker_python("refinement", logger=logger)
             if logger:
                 logger.info(
-                    f"[refinement] subprocess worker started "
-                    f"(python={_python}, model={self.model_name})")
+                    f"[refinement] refinement_env found ({self._worker_python}); "
+                    f"worker will start when refinement stage begins")
         except FileNotFoundError:
             if logger:
                 logger.info(
@@ -250,9 +243,46 @@ class DiarizationRefinementService:
         except Exception as _e:
             if logger:
                 logger.warning(
+                    f"[refinement] worker env resolution failed ({_e}), "
+                    "falling back to direct load")
+            self._worker_python = None
+
+    def _ensure_worker_started(self):
+        """Spawn worker subprocess lần đầu cần dùng (lazy start).
+
+        Gọi từ ensure_loaded/generate_texts — tức khi stage refinement
+        thực sự chạy, không phải lúc pipeline khởi tạo service.
+        """
+        if self._worker is not None:
+            return True  # đã start
+        if self._worker_python is None:
+            return False  # không có refinement_env → dùng direct load
+        try:
+            import os as _os
+            _script = _os.path.join(
+                _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                "refinement_worker.py")
+            from services.refinement_worker_service import RefinementWorkerService
+            self._worker = RefinementWorkerService(
+                python_env_path=self._worker_python,
+                worker_script_path=_script,
+                model_name=self.model_name,
+                logger=self.logger,
+            )
+            self._worker.start()
+            if self.logger:
+                self.logger.info(
+                    f"[refinement] subprocess worker started "
+                    f"(python={self._worker_python}, model={self.model_name})")
+            return True
+        except Exception as _e:
+            if self.logger:
+                self.logger.warning(
                     f"[refinement] worker start failed ({_e}), "
                     "falling back to direct load")
             self._worker = None
+            self._worker_python = None
+            return False
 
     def _activate_cpu_threads(self):
         """Give refinement the cores released by earlier pipeline stages."""
@@ -888,7 +918,7 @@ class DiarizationRefinementService:
         judging) that run on the same model: `refine()` loads it itself, but
         those passes must work with refinement switched off too.
         """
-        if self._worker is not None:
+        if self._ensure_worker_started():
             return self._worker.ping()
         self._load_model()
         return self.model is not None
@@ -915,7 +945,7 @@ class DiarizationRefinementService:
         then starts with a `<think>` block, so `max_new_tokens` has to cover the
         reasoning as well as the answer. A model with no thinking mode ignores it.
         """
-        if self._worker is not None:
+        if self._ensure_worker_started():
             return self._worker.generate_texts(
                 system_prompt, user_messages,
                 max_new_tokens=max_new_tokens,

@@ -17,10 +17,10 @@ Cách dùng:
 import json
 import threading
 import uuid
-from services.base_worker_service import BaseWorkerService
+from services.base_worker_service import WorkerProcessService
 
 
-class RefinementWorkerService(BaseWorkerService):
+class RefinementWorkerService(WorkerProcessService):
     """Subprocess wrapper cho refinement LLM worker."""
 
     def __init__(self, python_env_path: str, worker_script_path: str,
@@ -38,7 +38,7 @@ class RefinementWorkerService(BaseWorkerService):
         super().__init__(
             name="refinement",
             python_bin=python_env_path,
-            script=worker_script_path,
+            worker_script=worker_script_path,
             extra_args=worker_args,
             logger=logger,
         )
