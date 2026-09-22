@@ -225,6 +225,15 @@ class SeparationService:
             "pool": None,
             "lock": threading.Lock(),
         }
+        # Overlap plans built ahead of time, on a background thread, the
+        # moment a file's diarization result exists (see
+        # prefetch_overlap_plan). Keyed by audio path; shared across every
+        # fork_for_file() clone the same way _window_pool_state is, since a
+        # plan is a finished snapshot -- there is no per-file mutable state
+        # left in it for two files to race on.
+        self._prefetch_cache = {}
+        self._prefetch_lock = threading.Lock()
+        self._prefetch_executor = None
         self.performance_config = dict(performance_config or {})
         self._async_state = {
             "gpu_executor": None,
@@ -276,8 +285,11 @@ class SeparationService:
         clone.memory._clips = {}
         clone.memory.added = 0
         clone.memory.rejected = 0
-        # _window_pool_state is intentionally shared: it owns stateless CPU
-        # workers, while each open_file call owns separate shared memory.
+        # _window_pool_state, _prefetch_cache/_prefetch_lock/_prefetch_executor
+        # are intentionally shared (copy.copy() above already does this,
+        # since these are mutable container objects copied by reference):
+        # they own stateless CPU workers and finished plan snapshots, not
+        # anything a clone needs its own copy of.
         return clone
 
     def _async_runtime(self):
@@ -370,6 +382,78 @@ class SeparationService:
                 self._window_pool = None
         if pool is not None:
             pool.close()
+
+    def _prefetch_pool(self) -> ThreadPoolExecutor:
+        """The shared coordinator pool for background overlap-plan building.
+
+        Small on purpose: each submitted task mostly waits on the process
+        pool in utils/window_pool.py (or runs the sequential planner
+        directly, for a file too small to pool) rather than doing CPU work
+        of its own."""
+        with self._prefetch_lock:
+            if self._prefetch_executor is None:
+                self._prefetch_executor = ThreadPoolExecutor(
+                    max_workers=4, thread_name_prefix="overlap-prefetch")
+            return self._prefetch_executor
+
+    def prefetch_overlap_plan(self, segments: List[Segment], audio: AudioData,
+                              audio_path: str) -> None:
+        """Start building this file's overlap windows now, on a background
+        thread, using only CPU. Call this the moment a file's diarization is
+        ready (see PipelineService.run(), right where it returns for
+        --stop_after diarization), so the work runs while DiariZen is still
+        busy with later files and before Sidon has even started loading.
+
+        Safe to call from the pipeline's main thread: fork_for_file() takes a
+        shallow copy of self synchronously, right here, which snapshots
+        self.music_map/self.timeline as they are for THIS file, before the
+        caller moves on and mutates them for the next one."""
+        if not segments or audio_path in self._prefetch_cache:
+            return
+        clone = self.fork_for_file()
+        future = self._prefetch_pool().submit(clone._build_overlap_plan, segments, audio)
+        with self._prefetch_lock:
+            self._prefetch_cache[audio_path] = future
+
+    def _take_prefetched_plan(self, audio_path: str) -> Optional["_OverlapPlan"]:
+        """The plan prefetch_overlap_plan started for this path, or None.
+
+        Blocks until that background build finishes if it has not already --
+        by separation-stage time this is normally instant, since the file's
+        diarization finished a whole stage-major pass earlier. A prefetch
+        that raised is logged and treated as a miss: process_overlaps then
+        builds the plan itself, exactly as it would with no prefetch at all."""
+        with self._prefetch_lock:
+            future = self._prefetch_cache.pop(audio_path, None)
+        if future is None:
+            return None
+        try:
+            return future.result()
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(
+                    f"[TSE] prefetch for {os.path.basename(audio_path)} failed "
+                    f"({type(exc).__name__}: {exc}); building its windows now")
+            return None
+
+    def drop_prefetched_plan(self, audio_path: str) -> None:
+        """Discard a prefetch that will never be consumed -- the file failed
+        and its checkpoint was wiped, so a retry must not be handed a plan
+        built for the attempt that no longer exists. Safe to call for a path
+        with nothing cached."""
+        with self._prefetch_lock:
+            self._prefetch_cache.pop(audio_path, None)
+
+    def close_prefetch_pool(self) -> None:
+        """Shut down the background coordinator pool, once, at the end of
+        the 'separation' stage's batch-wide scope -- not the 'diarization'
+        stage's, since a prefetch started there is only consumed once the
+        separation pass reaches this file. Mirrors close_window_pool()."""
+        with self._prefetch_lock:
+            executor = self._prefetch_executor
+            self._prefetch_executor = None
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=False)
 
     # ------------------------------------------------------------------
     def _fail(self, enh_seg, start, end, reason, detail=""):
