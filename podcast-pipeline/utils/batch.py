@@ -336,6 +336,11 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
     if callable(close_postprocess):
         close_postprocess()
 
+    music_svc = getattr(pipeline, "music_svc", None)
+    close_music_pools = getattr(music_svc, "close_async_pools", None)
+    if callable(close_music_pools):
+        close_music_pools()
+
     return list(failures.items())
 
 

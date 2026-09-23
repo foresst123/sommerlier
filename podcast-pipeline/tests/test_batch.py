@@ -470,3 +470,17 @@ def test_the_safety_net_also_closes_the_diarization_postprocess_pool():
     pipe.diarization_svc = _FakeDiarPool()
     run_batch_by_stage(pipe, _args(stop_after="diarization"), {}, ["f1"])
     assert pipe.diarization_svc.closed
+
+
+def test_the_safety_net_also_closes_the_music_async_pools():
+    class _FakeMusicPool:
+        def __init__(self):
+            self.closed = False
+
+        def close_async_pools(self):
+            self.closed = True
+
+    pipe = FakePipeline()
+    pipe.music_svc = _FakeMusicPool()
+    run_batch_by_stage(pipe, _args(stop_after="music"), {}, ["f1"])
+    assert pipe.music_svc.closed
