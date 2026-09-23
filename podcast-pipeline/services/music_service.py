@@ -1,5 +1,6 @@
 import queue
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 from schemas.audio import AudioData
@@ -12,7 +13,8 @@ class MusicService:
     the time segments exist the beds are already out of the waveform.
     """
 
-    def __init__(self, bs_roformer_model=None, logger=None, model_loader=None):
+    def __init__(self, bs_roformer_model=None, logger=None, model_loader=None,
+                 performance_config=None):
         self._bs_roformer = bs_roformer_model
         self.model_loader = model_loader
         self.logger = logger
@@ -27,6 +29,18 @@ class MusicService:
         # object but not a rebound attribute. With a plain `self._state = X`
         # every copy would assign its own and the queues would diverge again.
         self._checkout = {"lock": threading.Lock(), "key": None, "queue": None}
+        # Runs postprocess_separated()/separate_span_postprocess() in the
+        # background during strip_music_spans(), so a BS-RoFormer instance a
+        # raw call just freed is picked up by the next pending raw job
+        # immediately, not gated on that same thread finishing its own CPU
+        # work first. Mirrors SeparationService._async_state. Shared (not
+        # per-file) the same way self._checkout already is --
+        # parallel_stage_view("music") only shallow-copies MusicService.
+        self.performance_config = dict(performance_config or {})
+        self._async_state = {
+            "gpu_executor": None, "post_executor": None,
+            "lock": threading.Lock(),
+        }
 
     def _checkout_queue(self, models) -> "queue.Queue":
         """The one checkout queue for this exact set of model instances.
@@ -49,6 +63,44 @@ class MusicService:
                     built.put(model)
                 state["key"], state["queue"] = key, built
             return state["queue"]
+
+    def _async_runtime(self):
+        """Return shared (gpu_executor, post_executor), or None to use the
+        plain inline path (performance off, or a model in the pool predates
+        the raw/post split)."""
+        cfg = self.performance_config
+        if not cfg.get("enabled", False) or not cfg.get("ordered_postprocess", True):
+            return None
+        model = self.bs_roformer
+        if model is None:
+            return None
+        pool_models = getattr(model, "models", None) or [model]
+        if not pool_models or not all(
+                callable(getattr(m, "separate_raw", None)) for m in pool_models):
+            return None
+        state = self._async_state
+        with state["lock"]:
+            if state["gpu_executor"] is None:
+                state["gpu_executor"] = ThreadPoolExecutor(
+                    max_workers=len(pool_models), thread_name_prefix="music-gpu")
+                post_workers = max(1, int(cfg.get("postprocess_workers", 2)))
+                state["post_executor"] = ThreadPoolExecutor(
+                    max_workers=post_workers, thread_name_prefix="music-post")
+            return state["gpu_executor"], state["post_executor"]
+
+    def close_async_pools(self):
+        """Shut down the background pools. Safe to call with nothing ever
+        submitted, and safe to call twice."""
+        state = getattr(self, "_async_state", None)
+        if state is None:
+            return
+        with state["lock"]:
+            gpu_executor, state["gpu_executor"] = state["gpu_executor"], None
+            post_executor, state["post_executor"] = state["post_executor"], None
+        if gpu_executor is not None:
+            gpu_executor.shutdown(wait=True, cancel_futures=False)
+        if post_executor is not None:
+            post_executor.shutdown(wait=True, cancel_futures=False)
 
     # Models are fetched from the loader on use, not captured at construction.
     # PipelineService loads each stage's models when that stage runs, so a
@@ -135,13 +187,13 @@ class MusicService:
                 return ordinal, i, None, used_hi_res
             return ordinal, i, np.asarray(vocals, dtype=np.float32), used_hi_res
 
-        def separate_job(item):
+        def _raw_step(item):
             ordinal, (start, end) = item
             i, j = max(0, int(start * sr)), min(total, int(end * sr))
             if j - i < sr // 2:
                 # Under half a second there is not enough for the separator to
                 # work with, and the seams would cost more than the bed does.
-                return ordinal, i, None, False
+                return ordinal, i, j, None, None, False, None
             reference = np.asarray(waveform[i:j], dtype=np.float32).copy()
             model = available.get()
 
@@ -162,7 +214,7 @@ class MusicService:
                         vocals = model.separate_segment(reference, sr)
                 finally:
                     available.put(model)
-                return _finish_job(ordinal, i, j, vocals, used_hi_res)
+                return ordinal, i, j, reference, ("legacy", vocals), used_hi_res, model
 
             # The raw/post split is available: release the instance right
             # after its GPU work finishes, instead of holding it through
@@ -181,10 +233,19 @@ class MusicService:
                     raw_result = model.separate_raw(reference, sr)
             finally:
                 available.put(model)
+            return ordinal, i, j, reference, ("raw", raw_result), used_hi_res, model
+
+        def _post_step(step):
+            ordinal, i, j, reference, payload, used_hi_res, model = step
+            if reference is None:
+                return _finish_job(ordinal, i, j, None, False)
+            kind, data = payload
+            if kind == "legacy":
+                return _finish_job(ordinal, i, j, data, used_hi_res)
             if used_hi_res:
-                vocals = model.separate_span_postprocess(raw_result, reference, sr)
+                vocals = model.separate_span_postprocess(data, reference, sr)
             else:
-                vocals = model.postprocess_separated(raw_result, reference, sr)
+                vocals = model.postprocess_separated(data, reference, sr)
                 if vocals is None:
                     # separate_segment()'s own contract: stay mixture rather
                     # than go silent, since silence would enter the dataset
@@ -193,12 +254,25 @@ class MusicService:
             return _finish_job(ordinal, i, j, vocals, used_hi_res)
 
         indexed_jobs = list(enumerate(jobs))
-        if pool_models and len(indexed_jobs) > 1:
-            from concurrent.futures import ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=min(len(pool_models), len(indexed_jobs))) as executor:
-                separated = list(executor.map(separate_job, indexed_jobs))
+        async_runtime = self._async_runtime()
+        if async_runtime is not None and pool_models and len(indexed_jobs) > 1:
+            # A background gpu/post split: a raw call's model instance is
+            # released (see _raw_step's `finally`) before this thread ever
+            # reaches postprocessing, and postprocessing itself now runs on
+            # a different pool -- so the freed instance is available to
+            # whichever pending raw job is next, not gated on this job's own
+            # CPU work finishing first.
+            gpu_executor, post_executor = async_runtime
+            raw_futures = [gpu_executor.submit(_raw_step, item) for item in indexed_jobs]
+            post_futures = [post_executor.submit(_post_step, f.result()) for f in raw_futures]
+            separated = [f.result() for f in post_futures]
+        elif pool_models and len(indexed_jobs) > 1:
+            from concurrent.futures import ThreadPoolExecutor as _TPE
+            with _TPE(max_workers=min(len(pool_models), len(indexed_jobs))) as executor:
+                separated = list(executor.map(
+                    lambda item: _post_step(_raw_step(item)), indexed_jobs))
         else:
-            separated = [separate_job(item) for item in indexed_jobs]
+            separated = [_post_step(_raw_step(item)) for item in indexed_jobs]
 
         # Only this thread mutates the shared waveform, in source order.
         for _ordinal, start_sample, vocals, used_hi_res in sorted(separated):

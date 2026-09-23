@@ -432,3 +432,91 @@ def test_a_model_without_the_split_still_works_with_the_checkout_held_throughout
     assert patches, "the old-style fake must still produce a patch"
     start_sample, patch = patches[0]
     assert np.allclose(patch, 0.5)
+
+
+class _PoolFake:
+    """Looks like a BSRoformerPool: exposes `.models` so _async_runtime()'s
+    gate (getattr(model, "models", None)) treats it as a pool."""
+    def __init__(self, model):
+        self.models = [model]
+
+
+class _TrackedModel:
+    """separate_raw() is instant and counts its own calls; the FIRST
+    postprocess_separated() call blocks on `gate` until released, so a test
+    can observe whether a second job's raw call ran while it was blocked."""
+
+    def __init__(self, gate):
+        self.gate = gate
+        self._lock = threading.Lock()
+        self.raw_count = 0
+        self.first_post_started = threading.Event()
+        self.second_raw_started = threading.Event()
+
+    def separate_raw(self, audio, sr):
+        with self._lock:
+            self.raw_count += 1
+            count = self.raw_count
+        if count == 2:
+            self.second_raw_started.set()
+        return (np.asarray(audio, dtype=np.float32), sr, False)
+
+    def postprocess_separated(self, raw, audio_array, sample_rate):
+        if not self.first_post_started.is_set():
+            self.first_post_started.set()
+            self.gate.wait(timeout=5)
+        out, _out_sr, _stereo_in = raw
+        return np.asarray(out, dtype=np.float32)
+
+
+def test_a_second_raw_call_starts_while_the_first_jobs_postprocess_is_still_blocked():
+    """The whole point of a persistent gpu/post split: with the async runtime
+    enabled, the model instance the first span just freed must be picked up
+    by a SECOND span's raw call immediately, without waiting for the first
+    span's post-processing (now on a different thread) to finish."""
+    gate = threading.Event()
+    model = _TrackedModel(gate)
+    pool = _PoolFake(model)
+    svc = MusicService(pool, logger=None,
+                       performance_config={"enabled": True, "ordered_postprocess": True})
+    audio = _audio(seconds=20)
+    music_map = MusicMap([(2.0, 3.0, MUSIC), (10.0, 11.0, MUSIC)])
+
+    result_holder = {}
+
+    def run():
+        result_holder["patches"] = svc.strip_music_spans(audio, music_map, source_path=None)
+
+    t = threading.Thread(target=run)
+    t.start()
+    assert model.first_post_started.wait(timeout=2), \
+        "the first job's postprocess must have started"
+    assert model.second_raw_started.wait(timeout=2), (
+        "the second span's raw call never ran while the first job's "
+        "postprocess was still blocked -- the GPU instance was not freed "
+        "for new work")
+
+    gate.set()
+    t.join(timeout=5)
+    svc.close_async_pools()
+    assert result_holder["patches"], "both spans should still produce patches"
+
+
+def test_async_runtime_is_off_when_a_model_in_the_pool_lacks_the_split():
+    """A pool holding even one old-style model (no separate_raw) must not
+    turn the async path on -- there is no raw step to schedule for it."""
+    class _OldStyleFake:
+        def separate_segment(self, audio, sr):
+            return (np.asarray(audio) * 0.5).astype(np.float32)
+
+    pool = _PoolFake(_OldStyleFake())
+    svc = MusicService(pool, logger=None,
+                       performance_config={"enabled": True, "ordered_postprocess": True})
+    assert svc._async_runtime() is None
+
+
+def test_async_runtime_is_off_when_performance_config_is_not_enabled():
+    model = _TrackedModel(threading.Event())
+    pool = _PoolFake(model)
+    svc = MusicService(pool, logger=None)  # no performance_config at all
+    assert svc._async_runtime() is None
