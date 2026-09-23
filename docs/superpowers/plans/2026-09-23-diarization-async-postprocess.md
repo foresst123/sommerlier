@@ -45,9 +45,16 @@ import types
 
 import numpy as np
 import pytest
-from pyannote.core import Annotation, Segment as PyannoteSegment
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# pyannote.audio is a heavy real dependency (requirements.txt) not installed
+# in every dev sandbox; services/diarization_service.py imports it at module
+# scope, so this whole file skips cleanly here instead of erroring, and runs
+# for real wherever the dependency is actually present.
+pyannote_core = pytest.importorskip("pyannote.core")
+Annotation = pyannote_core.Annotation
+PyannoteSegment = pyannote_core.Segment
 
 from schemas.audio import AudioData
 from services.diarization_service import DiarizationService
