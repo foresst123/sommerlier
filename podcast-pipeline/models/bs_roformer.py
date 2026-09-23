@@ -197,6 +197,23 @@ class BSRoformerRemover:
         """Vocals for one array, or None when separation could not run.
 
         Accepts mono (n,) or interleaved stereo (n, 2); returns the same shape.
+
+        Thin wrapper over separate_raw()/postprocess_separated() -- kept so
+        every existing caller (separate_full, separate_segment) is unaffected
+        by the split. A pooled caller that wants to release this instance's
+        checkout before postprocessing runs should call the two halves
+        directly instead of this method.
+        """
+        return self.postprocess_separated(
+            self.separate_raw(audio_array, sample_rate), audio_array, sample_rate)
+
+    def separate_raw(self, audio_array: np.ndarray, sample_rate: int):
+        """GPU-only half of _run(): write the input, run the library
+        separator, and read the raw vocal stem back. Returns
+        (out, out_sr, stereo_in) at the library's own output rate, or None on
+        any failure. All temp-file lifecycle is self-contained in this one
+        call, so it is safe to return this instance to a shared checkout
+        queue as soon as this returns, before postprocess_separated() runs.
         """
         import soundfile as sf
 
@@ -235,11 +252,7 @@ class BSRoformerRemover:
                 return None
 
             out, out_sr = sf.read(vocals, dtype="float32", always_2d=stereo_in)
-            if not stereo_in and out.ndim > 1:
-                out = out.mean(axis=1)
-            if out_sr != sample_rate:
-                out = _resample(out, out_sr, sample_rate)
-            return _match_length(out, len(audio)).astype(np.float32)
+            return out, out_sr, stereo_in
         except Exception as exc:
             if self.logger:
                 self.logger.error(f"BS-RoFormer failed ({type(exc).__name__}: {exc}); "
@@ -252,6 +265,26 @@ class BSRoformerRemover:
                         os.remove(path)
                 except OSError:
                     pass
+
+    def postprocess_separated(self, raw, audio_array: np.ndarray, sample_rate: int):
+        """CPU-only half of _run(): mono-fold, resample, and length-match a
+        separate_raw() result against the original input array. Touches no
+        model or device state, so it is safe to call after this instance has
+        already been returned to a shared checkout queue -- including
+        concurrently with a different caller's separate_raw() on the same
+        instance.
+        """
+        if raw is None:
+            return None
+        out, out_sr, stereo_in = raw
+        audio = np.asarray(audio_array, dtype=np.float32)
+        if audio.ndim > 2:
+            audio = audio.reshape(len(audio), -1)
+        if not stereo_in and out.ndim > 1:
+            out = out.mean(axis=1)
+        if out_sr != sample_rate:
+            out = _resample(out, out_sr, sample_rate)
+        return _match_length(out, len(audio)).astype(np.float32)
 
     # ------------------------------------------------------------------
     def separate_full(self, audio_array: np.ndarray, sample_rate: int):
@@ -267,26 +300,18 @@ class BSRoformerRemover:
         result = self._run(segment_audio, sample_rate)
         return segment_audio if result is None else result
 
-    def separate_span(self, source_path: str, start: float, end: float,
-                      out_sr: int, reference: np.ndarray):
-        """One music span, separated at 44.1kHz, returned at `out_sr` mono.
-
-        `reference` is the pipeline's own 16kHz slice for the same span. It is
-        needed for two things: the exact output length, and the level. The
-        pipeline normalizes each recording to -20 dBFS at decode and does not
-        keep the gain it applied, so a span decoded fresh from the source is at
-        the *original* level -- writing it back unscaled would leave an audible
-        step at both seams and hand ASR a passage at the wrong loudness.
-        Recovering the gain as the RMS ratio of the two mixtures needs no
-        plumbing and stays correct if the normalization ever changes.
-
-        Returns None when the hi-res path is unavailable, so the caller can
-        fall back to separating the 16kHz slice it already has.
+    def separate_span_raw(self, source_path: str, start: float, end: float):
+        """Decode + GPU-only half of separate_span(): everything through the
+        raw separator call, before level-matching or resampling against the
+        caller's own reference. Returns a context dict for
+        separate_span_postprocess(), or None (hi-res unavailable, bad
+        decode, or the separator itself failed) so the caller can fall back
+        to separate_raw() on the 16kHz slice it already has.
         """
         if not self.hi_res or not source_path or not os.path.exists(source_path):
             return None
         duration = end - start
-        if duration <= 0 or reference is None or len(reference) == 0:
+        if duration <= 0:
             return None
         try:
             import librosa
@@ -300,12 +325,42 @@ class BSRoformerRemover:
             if mix.size == 0:
                 return None
 
-            vocals = self._run(mix, sr)
+            raw = self.separate_raw(mix, sr)
+            if raw is None:
+                return None
+            return {"raw": raw, "mix": mix, "sr": sr, "start": start, "end": end}
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(
+                    f"Hi-res separation of {start:.1f}-{end:.1f}s failed "
+                    f"({type(exc).__name__}: {exc}); falling back to the "
+                    "slice already held")
+            return None
+
+    def separate_span_postprocess(self, context, reference: np.ndarray, out_sr: int):
+        """CPU-only half of separate_span(): mono-fold, resample, level-match
+        and clip a separate_span_raw() context against `reference`. Touches
+        no model/device state -- safe to call after this instance has
+        already been returned to a shared checkout queue.
+
+        `reference` is the pipeline's own 16kHz slice for the same span. It is
+        needed for two things: the exact output length, and the level. The
+        pipeline normalizes each recording to -20 dBFS at decode and does not
+        keep the gain it applied, so a span decoded fresh from the source is at
+        the *original* level -- writing it back unscaled would leave an audible
+        step at both seams and hand ASR a passage at the wrong loudness.
+        Recovering the gain as the RMS ratio of the two mixtures needs no
+        plumbing and stays correct if the normalization ever changes.
+        """
+        if context is None or reference is None or len(reference) == 0:
+            return None
+        try:
+            vocals = self.postprocess_separated(context["raw"], context["mix"], context["sr"])
             if vocals is None:
                 return None
-
+            sr = context["sr"]
             vocals = _to_mono(vocals)
-            mix_mono = _to_mono(mix)
+            mix_mono = _to_mono(context["mix"])
             if sr != out_sr:
                 vocals = _resample(vocals, sr, out_sr)
                 mix_mono = _resample(mix_mono, sr, out_sr)
@@ -314,16 +369,33 @@ class BSRoformerRemover:
             out = _match_length(vocals * scale, len(reference))
             if self.logger:
                 self.logger.debug(
-                    f"Hi-res span {start:.1f}-{end:.1f}s separated at {sr}Hz "
-                    f"(level x{scale:.3f})")
+                    f"Hi-res span {context['start']:.1f}-{context['end']:.1f}s "
+                    f"separated at {sr}Hz (level x{scale:.3f})")
             return np.clip(out, -1.0, 1.0).astype(np.float32)
         except Exception as exc:
             if self.logger:
                 self.logger.warning(
-                    f"Hi-res separation of {start:.1f}-{end:.1f}s failed "
-                    f"({type(exc).__name__}: {exc}); falling back to the "
+                    f"Hi-res post-processing of {context['start']:.1f}-{context['end']:.1f}s "
+                    f"failed ({type(exc).__name__}: {exc}); falling back to the "
                     f"{out_sr}Hz slice")
             return None
+
+    def separate_span(self, source_path: str, start: float, end: float,
+                      out_sr: int, reference: np.ndarray):
+        """One music span, separated at 44.1kHz, returned at `out_sr` mono.
+
+        Returns None when the hi-res path is unavailable, so the caller can
+        fall back to separating the 16kHz slice it already has. Composed from
+        separate_span_raw()/separate_span_postprocess() so a pooled caller
+        can release this instance's checkout between the two -- see either
+        method's docstring for what each half does.
+        """
+        if reference is None or len(reference) == 0:
+            return None
+        context = self.separate_span_raw(source_path, start, end)
+        if context is None:
+            return None
+        return self.separate_span_postprocess(context, reference, out_sr)
 
     def unload(self):
         import shutil

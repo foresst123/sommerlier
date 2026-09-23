@@ -214,9 +214,11 @@ def test_empty_audio_is_refused_before_the_model_loads():
 
 def test_the_vocal_stem_is_picked_by_name_not_by_position():
     """Order is undocumented, and taking the instrumental stem would be a
-    total, silent failure -- speech replaced by backing track."""
+    total, silent failure -- speech replaced by backing track. The stem
+    selection lives in separate_raw() (the GPU half of the old _run()) since
+    the raw/post split -- _run() is now a thin wrapper over it."""
     import inspect
-    source = inspect.getsource(BSRoformerRemover._run)
+    source = inspect.getsource(BSRoformerRemover.separate_raw)
     assert '"vocal" in os.path.basename(p).lower()' in source
 
 
@@ -431,8 +433,11 @@ def test_a_hi_res_span_comes_back_at_the_pipeline_rate_length_and_level(tmp_path
     remover = _remover()
     # A perfect separator: whatever it is given is all vocals. That isolates
     # the resample / downmix / level / length arithmetic, which is what the
-    # caller depends on and what a real model would not change.
-    remover._run = lambda audio, sr: audio
+    # caller depends on and what a real model would not change. separate_span
+    # now calls separate_raw() (not _run()) internally -- stand in for it with
+    # the same (out, out_sr, stereo_in) shape postprocess_separated expects,
+    # matching sr and stereo-ness so its resample/mono-fold are both no-ops.
+    remover.separate_raw = lambda audio, sr: (audio, sr, audio.ndim == 2 and audio.shape[1] > 1)
 
     span = (0.25, 1.75)
     at16k, _ = librosa.load(str(src), sr=16000, mono=True,
@@ -460,10 +465,10 @@ def test_the_model_actually_sees_44_1khz_stereo(tmp_path):
 
     def spy(audio, sr):
         seen["sr"], seen["shape"] = sr, audio.shape
-        return audio
+        return audio, sr, audio.ndim == 2 and audio.shape[1] > 1
 
     remover = _remover()
-    remover._run = spy
+    remover.separate_raw = spy
     remover.separate_span(str(src), 0.25, 1.75, 16000,
                           np.ones(24000, dtype=np.float32))
     assert seen["sr"] == NATIVE_SAMPLE_RATE
@@ -474,6 +479,6 @@ def test_a_separator_that_fails_mid_span_falls_back_rather_than_silencing(tmp_pa
     src = tmp_path / "src.wav"
     _write_source(src)
     remover = _remover()
-    remover._run = lambda audio, sr: None
+    remover.separate_raw = lambda audio, sr: None
     assert remover.separate_span(str(src), 0.25, 1.75, 16000,
                                  np.ones(24000, dtype=np.float32)) is None
