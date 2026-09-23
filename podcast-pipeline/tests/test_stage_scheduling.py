@@ -80,6 +80,45 @@ def test_the_real_separation_call_passes_its_audio_path_to_the_prefetch_cache():
         "without the path, process_overlaps can never find what was prefetched for this file")
 
 
+def test_diarization_postprocessing_is_deferred_only_when_stopping_after_diarization():
+    """The fresh-compute branch must call diarize_raw() unconditionally, but
+    only defer diarize_postprocess() to the background pool inside the
+    stop_after == "diarization" block -- a file-major run or the final pass
+    needs the finished DiarizationResult before it can continue within the
+    same call, so it must stay synchronous there."""
+    src = _source("services/pipeline_service.py")
+    assert "self.diarization_svc.diarize_raw(" in src
+    stop = src.index('getattr(args, "stop_after", None) == "diarization"')
+    deferred_block = src[stop:src.index("return None", stop)]
+    assert "self.diarization_svc.submit_postprocess(" in deferred_block
+    assert "add_done_callback" in deferred_block
+    after_deferred_block = src[src.index("return None", stop):]
+    # The synchronous fallback (for every OTHER call to this section) must
+    # still call diarize_postprocess directly, outside the deferred block.
+    assert "self.diarization_svc.diarize_postprocess(" in after_deferred_block[:800]
+
+
+def test_the_diarization_done_callback_writes_checkpoint_and_output_before_prefetching():
+    src = _source("services/pipeline_service.py")
+    stop = src.index('getattr(args, "stop_after", None) == "diarization"')
+    deferred_block = src[stop:src.index("return None", stop)]
+    checkpoint_at = deferred_block.index('checkpoint.save("diarization"')
+    write_at = deferred_block.index("stage_out.write_diarization(")
+    prefetch_at = deferred_block.index("self.separation_svc.prefetch_overlap_plan(")
+    assert checkpoint_at < write_at < prefetch_at, (
+        "must checkpoint, then write stage-out, then prefetch -- in that order")
+
+
+def test_pending_diar_jobs_is_shared_across_parallel_stage_view_copies():
+    """parallel_stage_view() does copy.copy(self); _pending_diar_jobs must be
+    created once in __init__ (like _model_load_lock) so every concurrent
+    file's view shares the same dict, not one each."""
+    src = _source("services/pipeline_service.py")
+    init_src = src[src.index("def __init__"):src.index("def parallel_stage_view")]
+    assert "self._pending_diar_jobs" in init_src
+    assert "self._pending_diar_lock" in init_src
+
+
 def test_closing_the_prefetch_pool_is_deferred_like_the_window_pool():
     """A prefetch started during 'diarization' is only consumed during
     'separation'; close_prefetch_pool() must be deferred to that SAME stage

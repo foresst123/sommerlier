@@ -195,13 +195,38 @@ def test_stage_artifacts_are_written_once_not_once_per_stage():
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "services/pipeline_service.py"), encoding="utf-8").read()
 
-    for stage, writer in (("diarization", "write_diarization"),
-                          ("separation", "write_separation"),
+    for stage, writer in (("separation", "write_separation"),
                           ("asr", "write_asr")):
         call = re.search(rf".*stage_out\.{writer}\(.*", src).group(0)
         before = src[:src.index(call)]
         assert f'if "{stage}" in computed:' in before.rsplit("\n\n", 1)[-1], (
             f"{writer} runs even when {stage} came from a checkpoint")
+
+    # Diarization has two call sites: a deferred one inside _finish(), wired
+    # up only when this pass freshly computes diarization and stops right
+    # after it (see PipelineService.run()'s "diarization" stop-point), and a
+    # synchronous one used by every other entry into this section
+    # (checkpoint-loaded, disabled, or a file-major run). Each is guarded on
+    # its own terms rather than sharing one `if "diarization" in computed:`
+    # check -- both must still add up to "never on a checkpoint reload".
+    diar_calls = sorted(m.start() for m in
+                        re.finditer(r"stage_out\.write_diarization\(", src))
+    assert len(diar_calls) == 2, (
+        "expected exactly one deferred call (inside _finish) and one "
+        "synchronous call (guarded by `if \"diarization\" in computed:`), "
+        f"found {len(diar_calls)}")
+    deferred_call, synchronous_call = diar_calls
+
+    finish_def = src.index("def _finish(fut")
+    finish_end = src.index("future.add_done_callback(_finish)")
+    assert finish_def < deferred_call < finish_end, (
+        "the first write_diarization call must be the deferred one inside "
+        "_finish(), only ever wired up for a freshly-computed diarization")
+
+    before_synchronous = src[:synchronous_call]
+    assert 'if "diarization" in computed:' in before_synchronous.rsplit("\n\n", 1)[-1], (
+        "the synchronous write_diarization call must stay guarded by "
+        '`if "diarization" in computed:` for checkpoint-loaded/disabled runs')
 
 
 def test_the_manifest_accumulates_across_separate_service_instances(tmp_path):

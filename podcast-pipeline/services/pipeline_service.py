@@ -80,6 +80,15 @@ class PipelineService:
         # đây, chạy ở end_stage_scope() cùng lúc với defer_free/defer_workers.
         self.defer_callbacks = None
         self._model_load_lock = threading.RLock()
+        # Futures from a deferred diarize_postprocess() (see run()'s
+        # "diarization" stop-point). Created once here, not per file, so
+        # every parallel_stage_view("diarization") copy (a shallow
+        # copy.copy()) shares the same dict -- utils.batch.run_batch_by_stage
+        # drains it after the diarization stage's file loop, before
+        # "separation" can start reading checkpoints that might not be
+        # written yet.
+        self._pending_diar_jobs = {}
+        self._pending_diar_lock = threading.RLock()
 
     def parallel_stage_view(self, stage: str):
         """Return an isolated per-file view for a parallel pipeline stage.
@@ -839,7 +848,62 @@ class PipelineService:
             self._load("base")
             self._load("diarization")
             chunks, _ = self.diarization_svc.prepare_chunks(audio_data)
-            diarization_result = self.diarization_svc.run_diarization(chunks, audio_data, args)
+            raw = self.diarization_svc.diarize_raw(chunks, audio_data, args)
+            self._free(args, "diarizer", "vad")
+            self._release_worker(args, "diarizen")
+
+            if getattr(args, "stop_after", None) == "diarization":
+                # This is the one pass that sets stop_after == "diarization"
+                # -- a later pass re-enters this section of run() only to
+                # load the checkpoint on its way to another stage -- so this
+                # fires exactly once per file. Deferring diarize_postprocess()
+                # (pure CPU: filter/VAD/merge/split/write, see
+                # services/diarization_service.py) to the background means
+                # the DiariZen worker diarize_raw() just released is free for
+                # the NEXT file immediately, instead of waiting for this
+                # file's CPU-only tail. Window building is pure CPU too and
+                # does not need Sidon loaded, so prefetch_overlap_plan() can
+                # also run now, in the background, before the separation
+                # stage has even started the Sidon worker -- see
+                # services/separation_service.py:prefetch_overlap_plan.
+                # utils/batch.py's run_batch_by_stage drains
+                # self._pending_diar_jobs before "separation" starts, so no
+                # later stage can read a checkpoint this hasn't written yet.
+                future = self.diarization_svc.submit_postprocess(raw, audio_data, args)
+                with self._pending_diar_lock:
+                    self._pending_diar_jobs[audio_path] = future
+
+                def _finish(fut, audio_path=audio_path, checkpoint=checkpoint,
+                            stage_out=stage_out, audio_data=audio_data, args=args):
+                    try:
+                        result = fut.result()
+                    except Exception:
+                        # Surfaced to run_batch_by_stage's `failures` by the
+                        # drain step, which calls future.result() again on
+                        # this same future -- deliberately not handled here.
+                        return
+                    checkpoint.save("diarization", result)
+                    stage_out.write_diarization(
+                        result.segments,
+                        total_dur=audio_data.duration,
+                        raw_segments=getattr(result, "raw_segments", None),
+                        audio=audio_data.waveform,
+                        sample_rate=audio_data.sample_rate,
+                    )
+                    if self.step_enabled(args, "separation"):
+                        self.separation_svc.prefetch_overlap_plan(
+                            result.segments, audio_data, audio_path)
+
+                future.add_done_callback(_finish)
+                if self.logger:
+                    self.logger.info(
+                        "Stopping pipeline after diarization as requested by "
+                        "--stop_after (post-processing continues in the background).")
+                stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
+                                          "stopped_after": "diarization"})
+                return None
+
+            diarization_result = self.diarization_svc.diarize_postprocess(raw, audio_data, args)
             if self.logger: self.logger.info(f"[DEBUG] Diarization returned {len(diarization_result.segments)} segments via {diarization_result.method}")
 
             if not diarization_result.segments:
@@ -861,27 +925,6 @@ class PipelineService:
                 sample_rate=audio_data.sample_rate,
             )
 
-        self._free(args, "diarizer", "vad")
-        self._release_worker(args, "diarizen")
-
-        if getattr(args, "stop_after", None) == "diarization":
-            # This is the one pass that sets stop_after == "diarization" --
-            # a later pass re-enters this section of run() only to load the
-            # checkpoint on its way to another stage -- so this fires exactly
-            # once per file. Window building is pure CPU (utils/window_pool.py)
-            # and does not need Sidon loaded, so it can run now, in the
-            # background, while DiariZen is still busy with the rest of this
-            # stage-major pass and before the separation stage has even
-            # started the Sidon worker. See
-            # services/separation_service.py:prefetch_overlap_plan.
-            if diarization_result is not None and self.step_enabled(args, "separation"):
-                self.separation_svc.prefetch_overlap_plan(
-                    diarization_result.segments, audio_data, audio_path)
-            if self.logger: self.logger.info("Stopping pipeline after diarization as requested by --stop_after.")
-            stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
-                                      "stopped_after": "diarization"})
-            return None
-            
         # 4. Tách giọng tại vùng overlap
         speech_segments = None
         if not self.step_enabled(args, "separation"):
