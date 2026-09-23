@@ -173,6 +173,44 @@ def test_a_run_that_stops_after_music_runs_one_pass():
     assert {s for s, _ in pipe.calls} == {"music"}
 
 
+class _FakeSeparationPools:
+    """Records which close_* methods were called, without touching real pools."""
+
+    def __init__(self):
+        self.closed = []
+
+    def close_window_pool(self):
+        self.closed.append("close_window_pool")
+
+    def close_prefetch_pool(self):
+        self.closed.append("close_prefetch_pool")
+
+    def close_async_pools(self):
+        self.closed.append("close_async_pools")
+
+
+def test_a_run_that_stops_after_diarization_still_closes_the_prefetch_pools():
+    """The regression: prefetch_overlap_plan()/close_window_pool() are wired
+    into PipelineService.run()'s 'separation' section, which a --stop_after
+    diarization run never reaches -- the stage loop breaks right after the
+    diarization pass. Without a safety net, the window-build pool and the
+    prefetch coordinator pool a diarization-stage prefetch may have started
+    are never closed for the rest of the process."""
+    pipe = FakePipeline()
+    pipe.separation_svc = _FakeSeparationPools()
+    run_batch_by_stage(pipe, _args(stop_after="diarization"), {}, ["f1"])
+    stages = {s for s, _ in pipe.calls}
+    assert stages == {"music", "diarization"}, f"ran {stages}"
+    assert set(pipe.separation_svc.closed) == {
+        "close_window_pool", "close_prefetch_pool", "close_async_pools"}
+
+
+def test_the_safety_net_does_not_choke_on_a_pipeline_with_no_separation_svc():
+    """FakePipeline (and PipelineService.__new__ in other tests) may have no
+    separation_svc at all -- the safety net must be a no-op, not a crash."""
+    run_batch_by_stage(FakePipeline(), _args(stop_after="diarization"), {}, ["f1"])
+
+
 def test_a_stage_switched_off_still_gets_its_pass():
     """Only the load-bearing steps end the run. A pass whose own stage is off
     still carries the pipeline from the previous stage to the next."""

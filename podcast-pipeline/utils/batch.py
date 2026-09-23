@@ -304,6 +304,24 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
         if stage is not None and original_stop == stage:
             break
 
+    # Safety net for a run that stops before the 'separation' stage (most
+    # commonly --stop_after diarization): the pools separation_service.py's
+    # prefetch_overlap_plan()/close_window_pool() are documented to close
+    # "once, at the end of the separation stage's scope" never get their
+    # close callbacks registered when that stage is never reached, since
+    # they live inside PipelineService.run()'s separation section -- code
+    # this loop skips entirely by breaking out above. By the time this
+    # function returns, no further stage will run in this invocation
+    # either way, so closing here is always correct and, for the normal
+    # case where separation did run and already closed them, a no-op
+    # (close_window_pool/close_prefetch_pool/close_async_pools all check
+    # for "nothing to close" before doing anything).
+    separation_svc = getattr(pipeline, "separation_svc", None)
+    for close_name in ("close_window_pool", "close_prefetch_pool", "close_async_pools"):
+        close = getattr(separation_svc, close_name, None)
+        if callable(close):
+            close()
+
     return list(failures.items())
 
 
