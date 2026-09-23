@@ -54,10 +54,20 @@ length-match) is still running.
   is done, instead of holding it through post-processing — that alone lets
   a third (queued) file grab a now-free GPU instance sooner, without any
   new pool.
-- **Scope is `music_scope: "full"` only** (`MusicService.strip_full_recording`
-  → `BSRoformerRemover.separate_full`), since both shipped profiles use it.
-  `strip_music_spans` (the `"spans"` scope) is unused by any shipped profile
-  and is left untouched.
+- **Correction (post-approval):** both profiles' `music_scope` is actually
+  `"spans"` today, not `"full"` — a known, separate, not-yet-fixed regression
+  (commit `0148e4e`). The user chose to keep `spans` as-is for this branch
+  ("chỉ dùng span và mô hình hiện tại") rather than fix `music_scope`
+  alongside this feature. **Scope is therefore `MusicService.strip_music_spans`
+  → its `separate_job` closure, not `strip_full_recording`**, which is left
+  completely untouched (still dead code under the current, unfixed
+  `music_scope`). `strip_music_spans` already parallelizes multiple spans
+  within one file across the pool via its own `ThreadPoolExecutor`; the same
+  early-checkout-release idea applies inside `separate_job`, and the real
+  benefit shows up across files (two files' own `strip_music_spans()` calls
+  sharing the same checkout queue — see `_checkout_queue`'s own docstring),
+  not within one file's job executor (which already sizes itself to
+  `min(pool_size, job_count)` and so never contends with itself).
 
 ## Architecture
 
