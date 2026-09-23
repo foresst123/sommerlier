@@ -272,11 +272,11 @@
         "whisper": {
           "model_size": "large-v3",
           "compute_type": "float32",
-          "batch_size": 64
+          "batch_size": 16
         },
         "phowhisper": {
           "compute_type": "float32",
-          "batch_size": 32
+          "batch_size": 64
         },
         "qwen3": {
           "batch_size": 16,
@@ -316,7 +316,7 @@
         },
         "refinement": {
           "model_name": "Qwen/Qwen3.5-9B",
-          "batch_size": 32,
+          "batch_size": 40,
           "torch_dtype": "bfloat16",
           "prefix_cache": false
         },

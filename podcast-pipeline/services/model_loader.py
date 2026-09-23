@@ -224,18 +224,18 @@ class ModelLoader:
         # was diarization. It failed on chunk 0 with DiariZen reporting
         # "batch_size (12) is probably too large" -- a misleading message, since
         # that batch needs under 1GB. The card was simply already full.
-        if self.logger: self.logger.info(f"Loading PhoWhisper on {self.device_2}")
+        if self.logger: self.logger.info(f"Loading PhoWhisper on {self.device_1}")
         pho_cfg = self.config.get("environments", {}).get(
             self.args.env, {}).get("models", {}).get("phowhisper", {})
-        self.models["phowhisper"] = PhoWhisperASR(device=self.device_2, **pho_cfg)
+        self.models["phowhisper"] = PhoWhisperASR(device=self.device_1, **pho_cfg)
 
         
         if getattr(self.args, "ASRMoE", False) and getattr(self.args, "lang", "vi") == "vi":
-            if self.logger: self.logger.info(f"Loading Whisper on {self.device_1}")
+            if self.logger: self.logger.info(f"Loading Whisper on {self.device_2}")
             
             whisper_cfg = self.config.get("environments", {}).get(self.args.env, {}).get("models", {}).get("whisper", {})
             self.models["whisper"] = WhisperASR(
-                device=self.device_1,
+                device=self.device_2,
                 **whisper_cfg
             )
             if qwen3_service:
