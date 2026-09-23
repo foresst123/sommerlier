@@ -130,6 +130,11 @@ class MusicService:
         # strip_music_spans() call is running at the same time.
         available = self._checkout_queue(pool_models or [self.bs_roformer])
 
+        def _finish_job(ordinal, i, j, vocals, used_hi_res):
+            if vocals is None or len(vocals) != j - i:
+                return ordinal, i, None, used_hi_res
+            return ordinal, i, np.asarray(vocals, dtype=np.float32), used_hi_res
+
         def separate_job(item):
             ordinal, (start, end) = item
             i, j = max(0, int(start * sr)), min(total, int(end * sr))
@@ -139,24 +144,53 @@ class MusicService:
                 return ordinal, i, None, False
             reference = np.asarray(waveform[i:j], dtype=np.float32).copy()
             model = available.get()
-            try:
-                vocals = None
-                if source_path is not None:
-                    separate_span = getattr(model, "separate_span", None)
-                    if separate_span is not None:
-                        vocals = separate_span(source_path, start, end, sr, reference)
-                        used_hi_res = vocals is not None
-                    else:
-                        used_hi_res = False
-                else:
+
+            if not hasattr(model, "separate_raw"):
+                # Predates the raw/post split (a test double, or a custom
+                # separator plugin) -- run the old, single-call interface
+                # with the checkout held for the whole job, exactly as
+                # before the split.
+                try:
+                    vocals = None
                     used_hi_res = False
-                if vocals is None:
-                    vocals = model.separate_segment(reference, sr)
+                    if source_path is not None:
+                        separate_span = getattr(model, "separate_span", None)
+                        if separate_span is not None:
+                            vocals = separate_span(source_path, start, end, sr, reference)
+                            used_hi_res = vocals is not None
+                    if vocals is None:
+                        vocals = model.separate_segment(reference, sr)
+                finally:
+                    available.put(model)
+                return _finish_job(ordinal, i, j, vocals, used_hi_res)
+
+            # The raw/post split is available: release the instance right
+            # after its GPU work finishes, instead of holding it through
+            # CPU-only postprocessing too -- see _checkout_queue's own
+            # docstring for why this matters across concurrent files
+            # sharing this same queue.
+            used_hi_res = False
+            raw_result = None
+            try:
+                if source_path is not None:
+                    separate_span_raw = getattr(model, "separate_span_raw", None)
+                    if separate_span_raw is not None:
+                        raw_result = separate_span_raw(source_path, start, end)
+                        used_hi_res = raw_result is not None
+                if raw_result is None:
+                    raw_result = model.separate_raw(reference, sr)
             finally:
                 available.put(model)
-            if vocals is None or len(vocals) != j - i:
-                return ordinal, i, None, used_hi_res
-            return ordinal, i, np.asarray(vocals, dtype=np.float32), used_hi_res
+            if used_hi_res:
+                vocals = model.separate_span_postprocess(raw_result, reference, sr)
+            else:
+                vocals = model.postprocess_separated(raw_result, reference, sr)
+                if vocals is None:
+                    # separate_segment()'s own contract: stay mixture rather
+                    # than go silent, since silence would enter the dataset
+                    # labelled as speech.
+                    vocals = reference
+            return _finish_job(ordinal, i, j, vocals, used_hi_res)
 
         indexed_jobs = list(enumerate(jobs))
         if pool_models and len(indexed_jobs) > 1:

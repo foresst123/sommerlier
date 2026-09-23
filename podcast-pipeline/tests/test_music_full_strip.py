@@ -12,6 +12,7 @@ Run:  python -m pytest tests/test_music_full_strip.py -q     (from podcast-pipel
 """
 import os
 import sys
+import threading
 from types import SimpleNamespace
 
 import numpy as np
@@ -365,3 +366,69 @@ def test_an_empty_sweep_does_not_replace_a_real_measurement(tmp_path, monkeypatc
     pipe._measure_processed_noise(_args(), ckpt, _audio())
     assert float(pipe.noise_track.combined.max()) == pytest.approx(0.30)
     assert not ckpt.exists("noise_track_processed", fmt="json")
+
+
+# --- strip_music_spans: early checkout release -----------------------------
+
+class _SlowPostFake:
+    """separate_raw() is instant; postprocess_separated() blocks on `gate`,
+    so a test can observe whether the checkout came back before or after it
+    returns."""
+
+    def __init__(self, gate):
+        self.gate = gate
+        self.raw_done = threading.Event()
+
+    def separate_raw(self, audio, sr):
+        self.raw_done.set()
+        return (np.asarray(audio, dtype=np.float32), sr, False)
+
+    def postprocess_separated(self, raw, audio_array, sample_rate):
+        self.gate.wait(timeout=5)
+        out, _out_sr, _stereo_in = raw
+        return np.asarray(out, dtype=np.float32)
+
+
+def test_a_span_releases_its_checkout_before_postprocessing_finishes():
+    """The whole point of the split: a job queued behind this one must be
+    able to check out this instance while postprocess_separated() is still
+    running, not only after it returns -- otherwise a shared pool behaves
+    like a single instance whenever postprocessing is slow relative to the
+    GPU pass, or whenever two files' own strip_music_spans() calls overlap."""
+    gate = threading.Event()
+    model = _SlowPostFake(gate)
+    svc = MusicService(model, logger=None)
+    audio = _audio(seconds=20)
+    music_map = MusicMap([(5.0, 8.0, MUSIC)])
+
+    def run():
+        svc.strip_music_spans(audio, music_map, source_path=None)
+
+    t = threading.Thread(target=run)
+    t.start()
+    assert model.raw_done.wait(timeout=2), "separate_raw must run before postprocess blocks"
+
+    available = svc._checkout_queue([model])
+    got_back = available.get(timeout=2), "the checkout was not released until postprocess finished"
+    assert got_back[0] is model
+
+    available.put(model)
+    gate.set()
+    t.join(timeout=5)
+
+
+def test_a_model_without_the_split_still_works_with_the_checkout_held_throughout():
+    """A test double or a custom separator plugin that predates the raw/post
+    split (no separate_raw()) must fall back to the old single-call
+    interface, not crash on a missing attribute."""
+    class _OldStyleFake:
+        def separate_segment(self, audio, sr):
+            return (np.asarray(audio) * 0.5).astype(np.float32)
+
+    svc = MusicService(_OldStyleFake(), logger=None)
+    audio = _audio(seconds=20, value=1.0)
+    music_map = MusicMap([(5.0, 8.0, MUSIC)])
+    patches = svc.strip_music_spans(audio, music_map, source_path=None)
+    assert patches, "the old-style fake must still produce a patch"
+    start_sample, patch = patches[0]
+    assert np.allclose(patch, 0.5)
