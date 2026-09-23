@@ -5,6 +5,7 @@ import sys
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -92,3 +93,41 @@ def test_failed_final_alignment_cannot_leave_stale_asr_words_behind():
     })
     assert good.words[0]["word"] == "xin"
     assert bad.words is None
+
+
+class _RecordingLogger:
+    def __init__(self):
+        self.records = []
+
+    def info(self, msg, **kw):
+        self.records.append(("info", msg, kw))
+
+    def warning(self, msg, **kw):
+        self.records.append(("warning", msg, kw))
+
+    def error(self, msg, **kw):
+        self.records.append(("error", msg, kw))
+
+
+def test_total_alignment_failure_surfaces_the_underlying_error(monkeypatch):
+    class _WhisperX:
+        @staticmethod
+        def align(*args, **kwargs):
+            raise RuntimeError("No available kernel. Aborting execution.")
+
+    monkeypatch.setitem(sys.modules, "whisperx", _WhisperX)
+    logger = _RecordingLogger()
+    svc = WordAlignmentService(language="vi", device="cpu", logger=logger)
+    svc._model, svc._metadata = object(), {"language": "vi"}
+    audio = SimpleNamespace(
+        waveform=np.zeros(14 * 16000, dtype=np.float32), sample_rate=16000)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        svc.align([_segment()], audio)
+
+    assert "No available kernel" in str(excinfo.value)
+    warnings = [r for r in logger.records if r[0] == "warning"]
+    # batch failure and the per-segment retry failure are both logged with a traceback
+    assert len(warnings) >= 2
+    assert all(r[2].get("exc_info") for r in warnings)
+    assert any("segment 00001" in r[1] for r in warnings)

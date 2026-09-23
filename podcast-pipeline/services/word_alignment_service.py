@@ -108,7 +108,22 @@ class WordAlignmentService:
         if self.logger:
             chosen = self.model_name or "WhisperX language default"
             self.logger.info(
-                f"[word-align] loaded {chosen} for {self.language} on {self.device}")
+                f"[word-align] loaded {chosen} for {self.language} on {self.device} "
+                f"({self._environment_summary()})")
+
+    def _environment_summary(self) -> str:
+        """torch/GPU/dtype facts needed to diagnose kernel-availability errors."""
+        try:
+            import torch
+            parts = [f"torch {torch.__version__}"]
+            param = next(self._model.parameters(), None)
+            if param is not None:
+                parts.append(f"dtype {param.dtype}")
+            if str(self.device).startswith("cuda") and torch.cuda.is_available():
+                parts.append(torch.cuda.get_device_name(torch.device(self.device)))
+            return ", ".join(parts)
+        except Exception as exc:
+            return f"environment unavailable: {exc}"
 
     @staticmethod
     def _source_audio(segment, audio, speech_by_index) -> np.ndarray:
@@ -228,12 +243,18 @@ class WordAlignmentService:
                 # discard every other alignment in the carrier.
                 if self.logger:
                     self.logger.warning(
-                        f"[word-align] batch failed ({exc}); retrying segment by segment")
+                        f"[word-align] batch failed ({type(exc).__name__}: {exc}); "
+                        "retrying segment by segment", exc_info=True)
                 for item in current:
                     try:
                         words_by_index.update(self._align_batch([item]))
                     except Exception as item_exc:
-                        failed.append({"index": item["index"], "error": str(item_exc)})
+                        error = f"{type(item_exc).__name__}: {item_exc}"
+                        failed.append({"index": item["index"], "error": error})
+                        if self.logger:
+                            self.logger.warning(
+                                f"[word-align] segment {item['index']} failed ({error})",
+                                exc_info=True)
             current, current_seconds = [], 0.0
 
         for item in prepared:
@@ -267,7 +288,10 @@ class WordAlignmentService:
             if expected_words else 0.0,
         }
         if aligned_words == 0:
-            raise RuntimeError("Wav2Vec2 returned no timed words for the final transcript")
+            first_error = f" (first error: {failed[0]['error']})" if failed else ""
+            raise RuntimeError(
+                "Wav2Vec2 returned no timed words for the final transcript"
+                f"{first_error}")
         apply_word_alignments(transcripts, words_by_index)
         if self.logger:
             self.logger.info(
