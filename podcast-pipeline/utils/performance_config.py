@@ -71,6 +71,12 @@ _STAGES = {
         # max_separator_workers>1 -- both ask for the same second GPU in
         # different ways; ModelLoader picks this one and warns if both are set.
         "cross_file_overlap": (BOOL, False, None, None),
+        # Same meaning as separation's own keys of the same name: whether
+        # strip_music_spans() runs its raw GPU call and CPU postprocessing
+        # through persistent background pools (MusicService._async_runtime)
+        # instead of doing both inline on the same thread.
+        "postprocess_workers": (INT, 1, 1, 16),
+        "ordered_postprocess": (BOOL, True, None, None),
     },
 }
 

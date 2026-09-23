@@ -209,7 +209,9 @@
           "music": {
             "tagger_workers": 1,
             "max_separator_workers": 2,
-            "cross_file_overlap": false
+            "cross_file_overlap": false,
+            "ordered_postprocess": true,
+            "postprocess_workers": 2
           }
         }
       },
@@ -407,7 +409,9 @@
           "music": {
             "tagger_workers": 1,
             "max_separator_workers": 2,
-            "cross_file_overlap": false
+            "cross_file_overlap": false,
+            "ordered_postprocess": true,
+            "postprocess_workers": 2
           }
         }
       },

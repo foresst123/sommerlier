@@ -389,3 +389,13 @@ def test_a_file_that_failed_twice_is_reported_once_with_its_last_error():
     still, recovered = split_final_failures(failures, is_done=lambda p: False)
     assert still == [("b.mp3", "second")]
     assert recovered == []
+
+
+def test_music_service_is_constructed_with_a_performance_config():
+    src = _source("main.py")
+    start = src.index("music_svc = MusicService(")
+    call = src[start:src.index(")", start)]
+    assert "performance_config" in call, (
+        "MusicService must receive performance_config the same way "
+        "SeparationService/ASRService already do, or the async runtime "
+        "can never turn on in production")

@@ -633,7 +633,11 @@ def main():
         )
         music_svc = MusicService(
             model_loader=model_loader,
-            logger=logger
+            logger=logger,
+            performance_config={
+                **perf_cfg["stages"]["music"],
+                "enabled": perf_cfg["enabled"],
+            },
         )
         asr_svc = ASRService(
             logger=logger,
