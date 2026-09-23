@@ -323,6 +323,42 @@ def test_music_runs_two_files_concurrently_when_cross_file_overlap_is_on():
     assert pipe.max_inside == 2
 
 
+def test_music_runs_two_files_concurrently_when_max_separator_workers_is_two():
+    """A 2-instance BS-RoFormer pool (one per GPU) is exactly the condition
+    under which two files' own strip_music_spans() calls sharing the same
+    checkout queue (see music_service.py) benefit from running at once --
+    same as cross_file_overlap, just via two instances of one model instead
+    of two model types on two cards."""
+    class ConcurrentPipeline(FakePipeline):
+        def __init__(self):
+            super().__init__()
+            self.inside = 0
+            self.max_inside = 0
+            self.lock = threading.Lock()
+
+        def parallel_stage_view(self, stage):
+            return self
+
+        def run(self, args, config, path):
+            with self.lock:
+                self.inside += 1
+                self.max_inside = max(self.max_inside, self.inside)
+            time.sleep(0.03)
+            with self.lock:
+                self.inside -= 1
+
+    perf = {
+        "enabled": True,
+        "stages": {"music": {"cross_file_overlap": False, "max_separator_workers": 2}},
+    }
+    pipe = ConcurrentPipeline()
+    run_batch_by_stage(
+        pipe, _args(performance_config=perf), {},
+        ["f1", "f2", "f3"], stages=("music",))
+
+    assert pipe.max_inside == 2
+
+
 def test_music_stays_sequential_when_cross_file_overlap_is_off():
     """The flag is opt-in: a profile that never set it must see no change."""
     class ConcurrentPipeline(FakePipeline):

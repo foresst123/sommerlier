@@ -340,11 +340,19 @@ def _stage_parallelism(args, stage) -> int:
         if str(separator).strip().lower() == "sidon":
             return max(1, min(2, int(
                 stages.get("separation", {}).get("max_workers", 1))))
-    if stage == "music" and stages.get("music", {}).get("cross_file_overlap", False):
-        # SSLAM and BS-RoFormer are two model TYPES on two GPUs, not multiple
-        # instances of one -- a third file gains nothing further, since the
-        # first two already keep both cards busy (file N removing music while
-        # file N+1 is classified).
+    music_perf = stages.get("music", {})
+    if stage == "music" and (
+            music_perf.get("cross_file_overlap", False)
+            or int(music_perf.get("max_separator_workers", 1)) >= 2):
+        # Two different reasons both cap out at 2, not more: cross_file_overlap
+        # keeps SSLAM and BS-RoFormer -- two model TYPES -- on two GPUs, so a
+        # third file gains nothing further (the first two already keep both
+        # cards busy). max_separator_workers>=2 instead puts two BS-RoFormer
+        # INSTANCES on the two GPUs; a third file gains nothing further there
+        # either, since strip_music_spans()'s checkout queue (see
+        # music_service.py) already lets any pending job take an instance the
+        # moment its GPU work frees up, without needing a third file's worth
+        # of extra concurrency at this level.
         return 2
     return 1
 
