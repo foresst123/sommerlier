@@ -386,3 +386,87 @@ def test_music_stays_sequential_when_cross_file_overlap_is_off():
         ["f1", "f2", "f3"], stages=("music",))
 
     assert pipe.max_inside == 1
+
+
+def test_the_next_stage_waits_for_a_slow_diarization_postprocess_future():
+    """The drain barrier: 'separation' must not start for ANY file until
+    every diarization postprocess future from the previous pass has
+    resolved, even though run_one() already returned for that file."""
+    release = threading.Event()
+
+    class DeferredPipeline(FakePipeline):
+        def __init__(self):
+            super().__init__()
+            self._pending_diar_jobs = {}
+            self._pending_diar_lock = threading.Lock()
+
+        def run(self, args, config, path):
+            stage = getattr(args, "stop_after", None)
+            self.calls.append((stage, path))
+            if stage == "diarization":
+                from concurrent.futures import ThreadPoolExecutor
+
+                def _slow():
+                    release.wait(timeout=5)
+                    return "done"
+
+                future = ThreadPoolExecutor(max_workers=1).submit(_slow)
+                self._pending_diar_jobs[path] = future
+
+    pipe = DeferredPipeline()
+    result_holder = {}
+
+    def _run():
+        result_holder["failures"] = run_batch_by_stage(
+            pipe, _args(stop_after="separation"), {}, ["f1"])
+
+    thread = threading.Thread(target=_run)
+    thread.start()
+    thread.join(timeout=0.3)
+    assert thread.is_alive(), "separation must not start before the drain releases it"
+    assert "separation" not in {s for s, _ in pipe.calls}
+
+    release.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert "separation" in {s for s, _ in pipe.calls}
+
+
+def test_a_failing_diarization_postprocess_future_is_reported_and_excludes_the_file():
+    class DeferredFailPipeline(FakePipeline):
+        def __init__(self):
+            super().__init__()
+            self._pending_diar_jobs = {}
+            self._pending_diar_lock = threading.Lock()
+
+        def run(self, args, config, path):
+            stage = getattr(args, "stop_after", None)
+            self.calls.append((stage, path))
+            if stage == "diarization" and path == "bad":
+                from concurrent.futures import ThreadPoolExecutor
+
+                def _boom():
+                    raise RuntimeError("no segments")
+
+                self._pending_diar_jobs[path] = ThreadPoolExecutor(max_workers=1).submit(_boom)
+
+    pipe = DeferredFailPipeline()
+    failures = run_batch_by_stage(pipe, _args(), {}, ["good", "bad"])
+
+    assert [p for p, _ in failures] == ["bad"]
+    later = [p for s, p in pipe.calls if s == "separation"]
+    assert later == ["good"], "the file whose postprocess failed must not reach separation"
+
+
+def test_the_safety_net_also_closes_the_diarization_postprocess_pool():
+    class _FakeDiarPool:
+        def __init__(self):
+            self.closed = False
+
+        def close_postprocess_pool(self):
+            self.closed = True
+
+    pipe = FakePipeline()
+    pipe.diarization_svc = _FakeDiarPool()
+    run_batch_by_stage(pipe, _args(stop_after="diarization"), {}, ["f1"])
+    assert pipe.diarization_svc.closed

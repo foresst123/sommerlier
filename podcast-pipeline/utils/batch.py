@@ -293,6 +293,15 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
                                 f"Failed on {path} during {label}: "
                                 f"{type(e).__name__}: {e}")
                         failures[path] = f"{label}: {type(e).__name__}: {e}"
+
+            # Block here until every diarize_postprocess() future this
+            # stage's files deferred (see PipelineService.run()'s
+            # "diarization" stop-point) has actually resolved. A no-op for
+            # any stage but "diarization" -- pipeline._pending_diar_jobs is
+            # only ever populated there. Without this, the next stage
+            # ("separation") could start reading a diarization checkpoint a
+            # still-running background thread has not written yet.
+            _drain_pending_diarization(pipeline, failures)
         finally:
             if end:
                 end()
@@ -322,7 +331,34 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
         if callable(close):
             close()
 
+    diarization_svc = getattr(pipeline, "diarization_svc", None)
+    close_postprocess = getattr(diarization_svc, "close_postprocess_pool", None)
+    if callable(close_postprocess):
+        close_postprocess()
+
     return list(failures.items())
+
+
+def _drain_pending_diarization(pipeline, failures):
+    """Block until every deferred diarize_postprocess() future has resolved,
+    routing a failure into `failures` exactly like a synchronous one.
+
+    A no-op for any stage but 'diarization' (pipeline._pending_diar_jobs is
+    only ever populated by PipelineService.run()'s diarization stop-point).
+    Must run before the stage loop is allowed to move on, so 'separation'
+    never reads a checkpoint that a still-running background thread has not
+    written yet.
+    """
+    pending = getattr(pipeline, "_pending_diar_jobs", None)
+    if not pending:
+        return
+    for path, future in list(pending.items()):
+        try:
+            future.result()
+        except Exception as e:
+            failures[path] = f"diarization: {type(e).__name__}: {e}"
+        finally:
+            pending.pop(path, None)
 
 
 def _stage_parallelism(args, stage) -> int:
