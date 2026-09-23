@@ -13,6 +13,10 @@ from services.speaker_relabel_service import apply_relabels
 from services.word_alignment_service import apply_word_alignments
 from services.stage_output_service import StageOutputService
 from schemas.audio import AudioData
+from utils.sdpa_guard import capture_baseline, restore_if_changed
+
+# Taken at import, before any stage can run a third-party sdpa_kernel().
+_SDPA_BASELINE = capture_baseline()
 
 # Nếu tỷ lệ bản ghi bị đánh dấu xóa quá lớn, không tin bản đồ nhạc.
 # Có thể ngưỡng sai hoặc chọn nhầm file; không để toàn bộ âm thanh biến mất.
@@ -255,6 +259,7 @@ class PipelineService:
         card và trượt. Đây là con số thật để đối chiếu, không phải giả định.
         """
         free = {}
+        restore_if_changed(_SDPA_BASELINE, self.logger, "the next stage")
         try:
             import gc
             import torch
