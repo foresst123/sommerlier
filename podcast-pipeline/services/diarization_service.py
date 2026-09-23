@@ -1,6 +1,8 @@
 import os
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 import pandas as pd
 from typing import List, Tuple, Any
 from pyannote.core import Annotation
@@ -26,6 +28,15 @@ from utils.acoustic_boundary import AcousticBoundaryFinder
 
 ENABLE_GHOST_MERGE = False
 
+
+@dataclass
+class _RawDiarization:
+    """The GPU half's output: the raw per-track dataframe, nothing filtered,
+    merged or split yet. Consumed by diarize_postprocess()."""
+    combined_df: "pd.DataFrame"
+    method: str
+
+
 class DiarizationService:
     """Handles audio chunking, model inference (Pyannote/Sortformer), and cross-chunk fusion."""
     
@@ -40,6 +51,15 @@ class DiarizationService:
         # Silero's stateful ONNX wrapper is shared by the lightweight per-file
         # service copies used by the two-file diarization scheduler.
         self._vad_lock = threading.Lock()
+        # Runs diarize_postprocess() in the background during the diarization
+        # stage-major pass, so the GPU worker diarize_raw() just freed can
+        # take the next file immediately instead of waiting for this file's
+        # CPU-only filter/VAD/merge/split/write tail. Mirrors
+        # SeparationService._async_state. parallel_stage_view("diarization")
+        # only shallow-copies DiarizationService, so this dict/lock (and the
+        # executor built from them) are shared across every concurrent
+        # file's view, not one each.
+        self._postprocess_state = {"executor": None, "lock": threading.Lock()}
 
     # Models are fetched from the loader on use, not captured at construction.
     # PipelineService loads each stage's models when that stage runs, so a
@@ -96,21 +116,25 @@ class DiarizationService:
             self.logger.info("Chunking bypassed. Diarization will process the full audio natively.")
         return [DiarizationChunk(path="memory", offset=0.0, duration=audio.duration)], ""
         
-    def run_diarization(self, chunks: List[DiarizationChunk], audio: AudioData, args: Any) -> DiarizationResult:
-        """Run diarization model on the full audio natively."""
+    def diarize_raw(self, chunks: List[DiarizationChunk], audio: AudioData, args: Any) -> "_RawDiarization":
+        """GPU-only half of diarization: the model call and building the raw
+        per-track dataframe. No filtering, merging or splitting happens here
+        -- see diarize_postprocess(). Safe to call from the thread that will
+        hand the GPU worker straight back to the next file; postprocessing
+        can then run in the background (see submit_postprocess)."""
         is_diarizen = not getattr(args, "dia3", False)
         import pandas as pd
         import torch
-        
+
         # Prepare memory tensor for pipeline
         audio_input = {
             "waveform": torch.from_numpy(audio.waveform).unsqueeze(0),
             "sample_rate": audio.sample_rate
         }
-        
+
         if self.logger:
             self.logger.info(f"Running diarization on the full audio file natively (Duration: {audio.duration:.2f}s)...")
-            
+
         # Both backends read the same bounds from config, but they take them at
         # different points: DiariZen applies them to its clustering config when
         # the worker loads the model, so passing them again per call makes the
@@ -135,14 +159,14 @@ class DiarizationService:
                 min_speakers=min_speakers,
                 max_speakers=max_speakers,
             )
-            
+
         data = []
         annotation = (
             diar_out.speaker_diarization
             if hasattr(diar_out, "speaker_diarization")
             else diar_out
         )
-        
+
         if annotation is not None:
             try:
                 for turn, _, speaker in annotation.itertracks(yield_label=True):
@@ -153,7 +177,7 @@ class DiarizationService:
                     })
             except Exception as e:
                 if self.logger: self.logger.error(f"Error iterating diarization result: {e}")
-                
+
         combined_df = pd.DataFrame(data) if data else pd.DataFrame(columns=["start", "end", "speaker"])
         combined_df = combined_df.sort_values("start").reset_index(drop=True)
 
@@ -161,6 +185,18 @@ class DiarizationService:
         # and split, so it cannot show whether a low segment count came from the
         # diarizer or from cut_by_speaker_label. Log both ends.
         self._log_segment_stats("raw", df_to_list(combined_df))
+
+        return _RawDiarization(combined_df=combined_df, method="diarizen" if is_diarizen else "pyannote")
+
+    def diarize_postprocess(self, raw: "_RawDiarization", audio: AudioData, args: Any) -> DiarizationResult:
+        """CPU-only half: filter, seam-split, VAD, merge, bridge,
+        length-split, and build the final DiarizationResult. No GPU call
+        happens here, so this is safe to run on a background thread (see
+        submit_postprocess) while the GPU worker diarize_raw() used is
+        already free for the next file."""
+        import pandas as pd
+        combined_df = raw.combined_df
+        is_diarizen = raw.method == "diarizen"
 
         # Drop clustering-jitter blips before anything else touches the list.
         # Must run first, on the RAW diarizer output: filtering after merging
@@ -305,3 +341,40 @@ class DiarizationService:
             method="diarizen" if is_diarizen else "pyannote",
             raw_segments=raw_snapshot,
         )
+
+    def run_diarization(self, chunks: List[DiarizationChunk], audio: AudioData, args: Any) -> DiarizationResult:
+        """Run diarization model on the full audio natively.
+
+        Thin wrapper kept for callers that want the whole thing synchronously
+        (file-major runs, tests). See diarize_raw()/diarize_postprocess() for
+        the split this composes -- PipelineService.run() calls those directly
+        so it can defer the CPU half during the diarization stage-major pass."""
+        return self.diarize_postprocess(self.diarize_raw(chunks, audio, args), audio, args)
+
+    def _postprocess_pool(self):
+        state = self._postprocess_state
+        with state["lock"]:
+            if state["executor"] is None:
+                workers = int((self.diarizer_config or {}).get("postprocess_workers", 2))
+                state["executor"] = ThreadPoolExecutor(
+                    max_workers=max(1, workers), thread_name_prefix="diar-post")
+            return state["executor"]
+
+    def submit_postprocess(self, raw: "_RawDiarization", audio: AudioData, args: Any):
+        """Run diarize_postprocess() on the shared background pool. Shared
+        (not per-file) the same way SeparationService's gpu/post executors
+        are -- parallel_stage_view("diarization") only shallow-copies
+        DiarizationService, so every concurrent file's view submits to the
+        same pool."""
+        return self._postprocess_pool().submit(self.diarize_postprocess, raw, audio, args)
+
+    def close_postprocess_pool(self):
+        """Shut down the background pool. Safe to call with nothing ever
+        submitted, and safe to call twice."""
+        state = getattr(self, "_postprocess_state", None)
+        if state is None:
+            return
+        with state["lock"]:
+            executor, state["executor"] = state["executor"], None
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=False)
