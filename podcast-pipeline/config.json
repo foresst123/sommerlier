@@ -208,8 +208,8 @@
           },
           "music": {
             "tagger_workers": 1,
-            "max_separator_workers": 1,
-            "cross_file_overlap": true
+            "max_separator_workers": 2,
+            "cross_file_overlap": false
           }
         }
       },
@@ -406,8 +406,8 @@
           },
           "music": {
             "tagger_workers": 1,
-            "max_separator_workers": 1,
-            "cross_file_overlap": true
+            "max_separator_workers": 2,
+            "cross_file_overlap": false
           }
         }
       },
