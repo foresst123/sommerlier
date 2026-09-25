@@ -33,6 +33,11 @@ _NO_MEMORY = EnrollmentMemory(enabled=False)
 # sổ ưu tiên clean padding vì đó là bằng chứng trực tiếp để gán hai track.
 BSS_STITCH_EDGE_PAD = float(os.environ.get("BSS_STITCH_EDGE_PAD", "2.0"))
 BSS_STITCH_EDGE_MAX = float(os.environ.get("BSS_STITCH_EDGE_MAX", "2.2"))
+# Ghép trả không chỉ đúng vùng overlap: mở rộng thêm ngần này vào phần CHỈ CÓ MỘT
+# NGƯỜI nói ở mỗi bên, rồi crossfade ngay ở đó (giọng thật và giọng đã tách là
+# cùng một người, không có người kia chen vào). Crossfade sát biên overlap làm hai
+# tín hiệu lệch pha trộn vào nhau đúng chỗ người kia bắt đầu nói. 0 = như cũ.
+BSS_SPLICE_MARGIN = float(os.environ.get("BSS_SPLICE_MARGIN", "0.10"))
 BSS_PADDING_MIN_PER_SPEAKER = float(
     os.environ.get("BSS_PADDING_MIN_PER_SPEAKER", "1.0")
 )
@@ -220,6 +225,7 @@ class SeparationService:
         self._prefetch_lock = threading.Lock()
         self._prefetch_executor = None
         self.performance_config = dict(performance_config or {})
+        self.splice_margin = BSS_SPLICE_MARGIN
         self._async_state = {
             "gpu_executor": None,
             "post_executor": None,
@@ -545,6 +551,7 @@ class SeparationService:
                 "support_min_seconds": 1.5,
                 "secondary_edge_margin_seconds": 0.0,
                 "crossfade_seconds": 0.02,
+                "splice_margin_seconds": getattr(self, "splice_margin", 0.0),
                 "window_max": 15.0,
                 "context_per_side_seconds": BSS_STITCH_EDGE_PAD,
                 "context_max_per_side_seconds": BSS_STITCH_EDGE_MAX,
@@ -810,6 +817,64 @@ class SeparationService:
             "reason": "ok",
         })
         return gain, info
+
+    def _splice_margins(self, sr, src, dst, limit, track_len, audio_len,
+                        sample_lo, sample_hi, spans, internal_left, internal_right):
+        """How many samples the replaced stretch may grow on each side (left, right).
+
+        Only into solo speech of the same segment: never across a boundary that
+        belongs to another patch, never past the segment's or the window's audio,
+        and half the gap at most towards a neighbouring overlap so two margins
+        never meet. Under 5 ms it is not worth a separate fade, so it is dropped.
+        """
+        margin = int(round(getattr(self, "splice_margin", 0.0) * sr))
+        if margin <= 0:
+            return 0, 0
+        left = 0 if internal_left else min(margin, src, dst)
+        right = 0 if internal_right else min(
+            margin, track_len - src - limit, audio_len - dst - limit)
+        for a, b in spans:
+            if b <= sample_lo:
+                left = min(left, (sample_lo - b) // 2)
+            elif a >= sample_hi:
+                right = min(right, (a - sample_hi) // 2)
+        floor = int(0.005 * sr)
+        return (left if left >= floor else 0), (right if right >= floor else 0)
+
+    @staticmethod
+    def _margin_usable(original, patch, silence_rms=BSS_SILENCE_RMS):
+        """Is the separated margin the same speech as the original one, at a similar level?
+
+        Silence from the separator (or a wildly different level) would punch a hole in
+        real speech, so such a margin is left as it was.
+        """
+        if len(original) == 0 or len(patch) == 0:
+            return False
+        rms_original = float(np.sqrt(np.mean(np.square(original, dtype=np.float64))))
+        rms_patch = float(np.sqrt(np.mean(np.square(patch, dtype=np.float64))))
+        if rms_original < silence_rms or rms_patch < silence_rms:
+            return False
+        return 0.25 <= rms_patch / rms_original <= 4.0
+
+    @staticmethod
+    def _blend(orig_audio: np.ndarray, new_audio: np.ndarray,
+               left_fade: int, right_fade: int) -> np.ndarray:
+        """Replace `orig_audio` by `new_audio`, fading over the first `left_fade` and the
+        last `right_fade` samples (0 = a hard switch on that side). Linear, so the
+        weights always sum to 1, like _cross_fade."""
+        result = orig_audio.copy()
+        n = min(len(orig_audio), len(new_audio))
+        if n == 0:
+            return result
+        result[:n] = new_audio[:n]
+        if left_fade > 0:
+            t = np.linspace(0.0, 1.0, left_fade, endpoint=False, dtype=np.float32)
+            result[:left_fade] = orig_audio[:left_fade] * (1.0 - t) + new_audio[:left_fade] * t
+        if right_fade > 0:
+            t = np.linspace(0.0, 1.0, right_fade, endpoint=False, dtype=np.float32)
+            result[n - right_fade:n] = (orig_audio[n - right_fade:n] * t
+                                        + new_audio[n - right_fade:n] * (1.0 - t))
+        return result
 
     def _cross_fade(self, orig_audio: np.ndarray, new_audio: np.ndarray,
                     fade_samples: int, sr: int, fade_left=True, fade_right=True) -> np.ndarray:
@@ -2073,14 +2138,33 @@ class SeparationService:
                             f"seg={sd['index']} spk={spk} "
                             f"gain={20.0*np.log10(level_gain + 1e-12):+.2f}dB")
 
-                    patch = (
-                        np.asarray(track[src:src + limit], dtype=np.float32).copy()
-                        * level_gain
-                    )
                     spans = [(round(a * sr), round(b * sr)) for original, a, b in original_targets
                              if original["index"] == sd["index"]]
                     internal_left = any(a < sample_lo < b for a, b in spans)
                     internal_right = any(a < sample_hi < b for a, b in spans)
+                    # Widen the replaced stretch into the solo speech on each side
+                    # (the window already holds that context) so the crossfade happens
+                    # there, not inside the overlap. A side falls back to the plain
+                    # fade when widening is not possible or the separated margin does
+                    # not look like the same speech.
+                    margin_left, margin_right = self._splice_margins(
+                        sr, src, dst, limit, len(track), len(enh.audio),
+                        sample_lo, sample_hi, spans, internal_left, internal_right)
+                    if margin_left or margin_right:
+                        wide = np.asarray(
+                            track[src - margin_left:src + limit + margin_right],
+                            dtype=np.float32) * level_gain
+                        if margin_left and not self._margin_usable(
+                                enh.audio[dst - margin_left:dst], wide[:margin_left]):
+                            margin_left = 0
+                        if margin_right and not self._margin_usable(
+                                enh.audio[dst + limit:dst + limit + margin_right],
+                                wide[len(wide) - margin_right:]):
+                            margin_right = 0
+                    patch = (
+                        np.asarray(track[src - margin_left:src + limit + margin_right],
+                                   dtype=np.float32).copy() * level_gain
+                    )
                     # Crossfade only separated sources at internal boundaries.
                     # Never reintroduce the original two-speaker mixture there.
                     if (internal_left and previous is not None
@@ -2104,9 +2188,19 @@ class SeparationService:
                             f"x{patch_limit_gain:.3f}"
                         )
 
-                    enh.audio[dst:dst + limit] = self._cross_fade(
-                        enh.audio[dst:dst + limit], patch, fade_samples, sr,
-                        fade_left=not internal_left, fade_right=not internal_right)
+                    if margin_left or margin_right:
+                        # Fade across the whole widened part; a side that could not
+                        # widen keeps the plain fade inside the overlap.
+                        plain = min(fade_samples, max(int(0.005 * sr), limit // 8))
+                        left_fade = margin_left or (0 if internal_left else plain)
+                        right_fade = margin_right or (0 if internal_right else plain)
+                        span = slice(dst - margin_left, dst + limit + margin_right)
+                        enh.audio[span] = self._blend(
+                            enh.audio[span], patch, left_fade, right_fade)
+                    else:
+                        enh.audio[dst:dst + limit] = self._cross_fade(
+                            enh.audio[dst:dst + limit], patch, fade_samples, sr,
+                            fade_left=not internal_left, fade_right=not internal_right)
                     enh.bss = True
                     enh.bss_spans.append((sample_lo / sr, (sample_lo + limit) / sr,
                                           float(sim) if sim is not None else -1.0))
