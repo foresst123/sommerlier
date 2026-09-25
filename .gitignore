@@ -88,3 +88,8 @@ results/
 /performance_summary.json
 /scheduler_events.jsonl
 /resource_samples.jsonl
+
+# Pipeline stdout logs saved from a run (main_GPU<ids>-<time>.log), repo root only.
+/main_GPU*.log
+# Loose patch files kept at the repo root while porting changes; not part of the code.
+/*.patch
