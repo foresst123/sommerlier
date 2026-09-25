@@ -312,7 +312,8 @@
           "normalization_threshold": 0.7,
           "native_fp16": false,
           "torch_compile": false,
-          "hi_res": true
+          "hi_res": true,
+          "isolate_process": true
         },
         "refinement": {
           "model_name": "Qwen/Qwen3.5-9B",

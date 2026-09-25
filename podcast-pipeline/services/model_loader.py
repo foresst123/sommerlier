@@ -183,7 +183,8 @@ class ModelLoader:
             if checkpoint:
                 bs_roformer_cfg["model_filename"] = checkpoint
 
-            from models.bs_roformer import BSRoformerPool, BSRoformerRemover
+            from models.bs_roformer import BSRoformerPool
+            from models.bs_roformer_process import build_bs_roformers
             perf = (self.config.get("environments", {}).get(self.args.env, {})
                     .get("performance", {}))
             music_perf = perf.get("stages", {}).get("music", {})
@@ -197,9 +198,7 @@ class ModelLoader:
                 self.logger.info(
                     f"Loading {len(devices)} BS-RoFormer worker(s) on "
                     f"{', '.join(map(str, devices))}")
-            models = [BSRoformerRemover(
-                device=str(device), logger=self.logger, **bs_roformer_cfg)
-                for device in devices]
+            models = build_bs_roformers(devices, bs_roformer_cfg, self.logger)
             self.models["bs_roformer"] = (
                 BSRoformerPool(models) if len(models) > 1 else models[0])
             

@@ -381,9 +381,13 @@ def test_every_profile_key_is_a_constructor_argument():
     other than `model` has to be a parameter the wrapper actually reads."""
     import inspect
     params = set(inspect.signature(BSRoformerRemover.__init__).parameters)
+    # Consumed by the loader before the constructor is called: `model` names the
+    # checkpoint, `isolate_process` picks the worker-process variant
+    # (models.bs_roformer_process.build_bs_roformers).
+    loader_keys = {"model", "isolate_process"}
     for name, profile in _profiles().items():
         for key in profile["models"]["bs_roformer"]:
-            if key == "model":
+            if key in loader_keys:
                 continue
             assert key in params, f"{name}.{key} is swallowed by **_ignored"
 
