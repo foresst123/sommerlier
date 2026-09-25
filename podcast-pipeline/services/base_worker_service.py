@@ -1,6 +1,8 @@
+import atexit
 import collections
 import json
 import os
+import signal
 import subprocess
 import threading
 import time
@@ -29,6 +31,63 @@ def foreign_library_paths_removed(ld_library_path, python_bin) -> str:
         if not foreign:
             kept.append(entry)
     return ":".join(kept)
+
+
+# Process groups of workers that are running. A worker gets a group of its own so that
+# everything it starts (vLLM's engine process, which holds the GPU memory) can be
+# stopped with it; this set lets the exit hook do that for any still alive.
+_LIVE_GROUPS = set()
+_LIVE_GROUPS_LOCK = threading.Lock()
+
+
+def _signal_group(group, sig):
+    """Send `sig` to every process of `group`; False when none is left."""
+    try:
+        os.killpg(group, sig)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _group_alive(group):
+    return _signal_group(group, 0)
+
+
+def stop_group(process, grace: float = 15.0, children_grace: float = 10.0):
+    """Stop a worker and everything in its process group.
+
+    SIGTERM to the group, wait for the worker itself, then give the processes it started
+    a moment to go and SIGKILL whatever is left. The worker is waited on here because an
+    unreaped worker would keep the group looking alive.
+    """
+    group = process.pid
+    _signal_group(group, signal.SIGTERM)
+    try:
+        process.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        _signal_group(group, signal.SIGKILL)
+        process.wait(timeout=grace)
+    deadline = time.monotonic() + children_grace
+    while time.monotonic() < deadline and _group_alive(group):
+        time.sleep(0.1)
+    _signal_group(group, signal.SIGKILL)
+
+
+def _stop_live_groups():
+    with _LIVE_GROUPS_LOCK:
+        groups = list(_LIVE_GROUPS)
+    for group in groups:
+        _signal_group(group, signal.SIGTERM)
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and any(_group_alive(g) for g in groups):
+        time.sleep(0.1)
+    for group in groups:
+        _signal_group(group, signal.SIGKILL)
+
+
+atexit.register(_stop_live_groups)
 
 
 class WorkerProcessService:
@@ -69,6 +128,7 @@ class WorkerProcessService:
         self._stderr_thread = None
         self._io_lock = threading.Lock()
         self._ready_lock = threading.Lock()
+        self._stop_lock = threading.Lock()
         self._ready = False
         self._ready_error = None
 
@@ -217,7 +277,14 @@ class WorkerProcessService:
             text=True,
             bufsize=1,
             env=env,
+            # Its own process group: stop() then reaches the processes the worker
+            # starts too. vLLM's engine is one, and it neither exits when its parent
+            # is killed nor releases its GPU memory until it does.
+            start_new_session=(os.name == "posix"),
         )
+        if os.name == "posix":
+            with _LIVE_GROUPS_LOCK:
+                _LIVE_GROUPS.add(self.process.pid)
 
         self._stderr_thread = threading.Thread(
             target=self._drain_stderr, args=(self.process.stderr,), daemon=True
@@ -248,6 +315,7 @@ class WorkerProcessService:
     def _wait_for_ready(self):
         deadline = time.monotonic() + self.ready_timeout
         last_stdout = collections.deque(maxlen=5)
+        process = self.process
 
         while True:
             if time.monotonic() > deadline:
@@ -256,13 +324,13 @@ class WorkerProcessService:
                     last_stdout,
                 )
 
-            if self.process.poll() is not None:
+            if process.poll() is not None:
                 self._fail_start(
-                    f"exited with code {self.process.returncode} before signalling ready",
+                    f"exited with code {process.returncode} before signalling ready",
                     last_stdout,
                 )
 
-            line = self.process.stdout.readline()
+            line = process.stdout.readline()
             if not line:
                 self._fail_start("closed stdout before signalling ready", last_stdout)
 
@@ -295,24 +363,40 @@ class WorkerProcessService:
         raise RuntimeError(detail)
 
     def stop(self):
+        with self._stop_lock:
+            self._stop_unlocked()
+
+    def _stop_unlocked(self):
         if not self.process:
             return
 
+        process = self.process
         try:
-            if self.process.stdin and not self.process.stdin.closed:
-                self.process.stdin.close()
+            if process.stdin and not process.stdin.closed:
+                process.stdin.close()
         except Exception:
             pass
 
         try:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                if self.logger:
-                    self.logger.warning(f"{self.name} worker ignored terminate; killing.")
-                self.process.kill()
-                self.process.wait(timeout=15)
+            if os.name == "posix":
+                # The whole group, from the worker's own pid: also stops a vLLM engine,
+                # whether the worker was serving or still loading its model.
+                try:
+                    stop_group(process)
+                except subprocess.TimeoutExpired:
+                    if self.logger:
+                        self.logger.warning(f"{self.name} worker would not die.")
+                with _LIVE_GROUPS_LOCK:
+                    _LIVE_GROUPS.discard(process.pid)
+            else:
+                process.terminate()
+                try:
+                    process.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    if self.logger:
+                        self.logger.warning(f"{self.name} worker ignored terminate; killing.")
+                    process.kill()
+                    process.wait(timeout=15)
         except Exception as e:
             if self.logger:
                 self.logger.warning(f"Error stopping {self.name} worker: {e}")
@@ -322,8 +406,8 @@ class WorkerProcessService:
             self._stderr_thread = None
 
         try:
-            if self.process.stdout and not self.process.stdout.closed:
-                self.process.stdout.close()
+            if process.stdout and not process.stdout.closed:
+                process.stdout.close()
         except Exception:
             pass
 
