@@ -266,6 +266,9 @@ class _Stub:
     def rate(self):
         return self._rate
 
+    def serving(self):
+        return True
+
 
 CFG = {"replica_load_seconds": 30.0, "replica_speed_ratio": 0.5,
        "replica_min_gain_seconds": 15.0, "replica_min_pending_jobs": 12}
@@ -426,3 +429,51 @@ def test_a_lane_keeps_going_when_only_one_of_its_workers_fails_to_start():
         assert ticket.wait(5)["m"] == ["m:1", "m:2", "m:3", "m:4"]
     finally:
         sched.shutdown()
+
+
+# --- a replica must not be opened for a lane that has not started, or outlive the stage ---
+
+def test_no_replica_is_opened_for_a_lane_whose_own_worker_is_still_loading():
+    gate = threading.Event()               # never opened: the primary is "loading"
+    loading = _gated_lane("q", 0, gate, replica_factory=lambda gpu, batch: None)
+    finished = _lane("done", 1)
+    loading.queue.extend(range(60))        # a lot of work waiting, speed unknown
+
+    action = choose_rebalance(finished, [loading], {"replica_min_pending_jobs": 12})
+
+    assert action == ("none",)
+
+
+def test_a_lane_that_is_up_can_still_get_a_replica():
+    ready = threading.Event()
+    ready.set()
+    lane = _gated_lane("q", 0, ready, replica_factory=lambda gpu, batch: None)
+    lane.primary.became_ready = True
+    lane.queue.extend(range(60))
+    action = choose_rebalance(_lane("done", 1), [lane], {"replica_min_pending_jobs": 12})
+    assert action[0] == "replica"
+
+
+def test_shutdown_waits_for_a_replica_that_is_still_starting_and_releases_it():
+    started, released = threading.Event(), []
+
+    def slow_factory(gpu, batch):
+        started.set()
+        time.sleep(0.4)                    # loading a model
+        worker = LaneWorker("m", gpu, _tag("m"), batch, release=lambda: released.append(1))
+        return worker
+
+    def slow_batch(payloads, size):
+        time.sleep(0.05)                   # the lane that is still busy when `f` ends
+        return [f"m:{p}" for p in payloads]
+
+    lane = _lane("m", 0, slow_batch, batch=1, replica_factory=slow_factory)
+    finisher = _lane("f", 1, batch=1)
+    sched = _scheduler([lane, finisher])
+    sched.expect_files(1)
+    ticket = sched.submit("a", {"f": [1], "m": list(range(80))})
+    # The `f` lane finishes at once and (speed unknown, plenty waiting) opens a replica.
+    assert started.wait(3)
+    sched.shutdown()
+
+    assert released == [1], "the stage ended while a replica was still loading onto a GPU"

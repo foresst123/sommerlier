@@ -103,8 +103,9 @@ class WorkerProcessService:
     _ERROR_MARKERS = ("error", "exception", "traceback", "critical", "fatal",
                       "out of memory", "killed", "segmentation")
     # Warnings printed by libraries at import that do not affect a worker: pyannote's
-    # torchcodec notice mentions "Error message was" and would look like a failure.
-    _NOISE_MARKERS = ("torchcodec",)
+    # torchcodec notice mentions "Error message was", and vLLM logs each optional
+    # import it could not do ("Traceback", "AssertionError") from import_utils.py.
+    _NOISE_MARKERS = ("torchcodec", "[import_utils.py")
 
     @classmethod
     def is_error_line(cls, line: str) -> bool:

@@ -37,6 +37,7 @@ class LaneWorker:
         self.release = release
         self.released = False
         self.ready: Optional[Callable] = None
+        self.became_ready = False
         self.failed = False
 
 
@@ -64,6 +65,11 @@ class Lane:
 
     def remaining(self) -> int:
         return len(self.queue) + self.inflight
+
+    def serving(self) -> bool:
+        """Whether some worker of this lane is up (a model still loading is not)."""
+        return any(not w.failed and not w.released
+                   and (w.ready is None or w.became_ready) for w in self.workers)
 
     def rate(self) -> float:
         """Jobs per second for the whole lane, measured on busy time only."""
@@ -154,6 +160,10 @@ def choose_rebalance(finished, remaining, cfg) -> tuple:
     if slowest.gpu == finished.gpu:
         return ("boost", slowest) if slowest.boostable else ("none",)
     if slowest.replica_factory is None or slowest.replica_started:
+        return ("none",)
+    if not slowest.serving():
+        # Its own model is still loading: a replica would load beside it, not help it,
+        # and the speed it would be judged on is not known yet.
         return ("none",)
 
     rate = slowest.rate()
@@ -271,6 +281,7 @@ class AsrScheduler:
             except Exception as exc:
                 self._lane_failed(lane, worker, exc)
                 return
+            worker.became_ready = True
             self.progress.lane_ready(lane.name)
         while True:
             with self._cond:
@@ -399,8 +410,11 @@ class AsrScheduler:
             self._cond.notify_all()
             threads = list(self._threads) + list(self._helpers)
         for thread in threads:
-            if thread is not threading.current_thread():
-                thread.join(timeout=30)
+            if thread is threading.current_thread():
+                continue
+            # A replica still loading holds a GPU, and the next stage would start on
+            # top of it: wait for it to finish and be released rather than give up.
+            thread.join(timeout=1800 if thread.name.startswith("asr-rebalance") else 30)
         self.progress.stop()
         for lane in self.lanes.values():
             self._release_workers(lane, lane.workers[1:])

@@ -198,3 +198,18 @@ def test_a_lane_that_could_not_start_says_so_and_stays_failed():
     progress.lane_finished("pho")           # the scheduler releases it afterwards
 
     assert "pho 0/3" in progress.render()[1] and "FAILED" in progress.render()[1]
+
+
+def test_a_finished_lanes_rate_stops_falling_after_it_finished():
+    progress, clock = _progress()
+    progress.expect_files(1)
+    progress.queued("a", "m", 60)
+    progress.lane_started("m")
+    clock.now += 10
+    progress.done("m", 60)
+    progress.lane_finished("m")
+    at_finish = progress.render()[1]
+
+    clock.now += 500                      # the stage goes on without this lane
+
+    assert progress.render()[1] == at_finish and "6.0/s" in at_finish

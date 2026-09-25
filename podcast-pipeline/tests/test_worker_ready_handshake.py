@@ -135,3 +135,14 @@ def test_the_torchcodec_import_notice_is_not_an_error_line():
     assert not WorkerProcessService.is_error_line(
         "* fix torchcodec installation. Error message was:")
     assert WorkerProcessService.is_error_line("AssertionError: Error in memory profiling.")
+
+
+def test_vllms_optional_import_warnings_are_not_error_lines():
+    from services.base_worker_service import WorkerProcessService
+    for line in (
+        "(EngineCore pid=1) WARNING 09-25 16:48:14 [import_utils.py:408] Traceback (most recent call last):",
+        "(EngineCore pid=1) WARNING 09-25 16:48:14 [import_utils.py:408] AssertionError",
+    ):
+        assert not WorkerProcessService.is_error_line(line)
+    assert WorkerProcessService.is_error_line(
+        "(EngineCore pid=1) ERROR 09-25 16:33:01 [core.py:1195] EngineCore failed to start.")

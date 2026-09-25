@@ -75,6 +75,8 @@ class AsrProgress:
             entry = self._lane(lane)
             if entry["state"] != "failed":
                 entry["state"] = "finished"
+            if entry.get("finished_at") is None:
+                entry["finished_at"] = self._clock()
 
     def lane_failed(self, lane):
         with self._lock:
@@ -128,8 +130,11 @@ class AsrProgress:
         elif total:
             details.append(f"{100 * done // total}% so far")
         started = lane["started_at"]
-        if started is not None and done > 0 and now > started:
-            rate = done / (now - started)
+        # A finished lane's rate is frozen at the moment it finished; measured against
+        # the clock it would keep falling for as long as the stage goes on.
+        until = lane.get("finished_at") or now
+        if started is not None and done > 0 and until > started:
+            rate = done / (until - started)
             details.append(f"{rate:.1f}/s")
             if not growing and done < total:
                 details.append(f"~{int((total - done) / rate)}s")
