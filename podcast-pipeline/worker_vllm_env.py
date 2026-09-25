@@ -18,7 +18,7 @@ vLLM starts its engine process with fork by default. Forking a process that has
 already run an OpenMP parallel region leaves the child with a thread pool whose
 threads do not exist, and the child's first parallel torch op waits for them
 forever. On the A100 host the engine hung exactly like that, in
-InputBatch.__init__ (a torch.zeros of 8 MB, py-spy'd by worker_trace), with the
+InputBatch.__init__ (a torch.zeros of 8 MB, found with py-spy), with the
 GPU idle and 5% CPU. Spawning a fresh interpreter instead does not inherit that
 state; the cost is a few seconds of imports.
 """
@@ -34,3 +34,6 @@ os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 # client reads one line per reply and json.loads it, so a log line landing between
 # request and reply broke the protocol. stderr is drained into the pipeline log.
 os.environ.setdefault("VLLM_LOGGING_STREAM", "ext://sys.stderr")
+# Only problems belong in the pipeline log; vLLM's INFO/DEBUG output is thousands
+# of lines per engine start. Set VLLM_LOGGING_LEVEL=DEBUG to investigate a hang.
+os.environ.setdefault("VLLM_LOGGING_LEVEL", "WARNING")

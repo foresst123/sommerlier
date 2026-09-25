@@ -87,8 +87,8 @@ class WorkerProcessService:
                 line = line.rstrip("\n")
                 if line:
                     self._stderr_tail.append(line)
-                    if self.logger:
-                        self.logger.debug(f"[{self.name} worker stderr] {line}")
+                    if self.logger and self.is_error_line(line):
+                        self.logger.warning(f"[{self.name} worker stderr] {line}")
         except Exception:
             pass
         finally:
@@ -96,6 +96,19 @@ class WorkerProcessService:
                 stream.close()
             except Exception:
                 pass
+
+    _ERROR_MARKERS = ("error", "exception", "traceback", "critical", "fatal",
+                      "out of memory", "killed", "segmentation")
+
+    @classmethod
+    def is_error_line(cls, line: str) -> bool:
+        """Whether a worker's stderr line reports a problem.
+
+        Everything else (progress bars, vLLM's start-up chatter, stack dumps of
+        healthy threads) still lands in the tail kept for a failed start, but is
+        not written to the pipeline log."""
+        lowered = line.lower()
+        return any(marker in lowered for marker in cls._ERROR_MARKERS)
 
     def stderr_tail(self, lines: int = 10) -> str:
         return " | ".join(list(self._stderr_tail)[-lines:])
@@ -241,8 +254,7 @@ class WorkerProcessService:
             except RuntimeError as e:
                 self._fail_start(str(e), last_stdout)
 
-            if self.logger:
-                self.logger.debug(f"[{self.name} worker] {stripped}")
+            # Not the handshake: kept in last_stdout for a failed start, not logged.
 
     def _fail_start(self, reason: str, last_stdout):
         stdout_log = " | ".join(last_stdout)

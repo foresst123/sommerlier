@@ -53,3 +53,34 @@ def test_vllm_logs_go_to_stderr_so_stdout_carries_only_the_protocol():
          "import worker_vllm_env, os; print(os.environ.get('VLLM_LOGGING_STREAM'))"],
         cwd=ROOT, env=env, capture_output=True, text=True, check=True).stdout.strip()
     assert out == "ext://sys.stderr"
+
+
+def test_only_error_lines_from_worker_stderr_reach_the_log():
+    import logging
+    from services.base_worker_service import WorkerProcessService
+
+    class Capture(logging.Handler):
+        def __init__(self):
+            super().__init__(level=logging.DEBUG)
+            self.records = []
+
+        def emit(self, record):
+            self.records.append(record)
+
+    logger = logging.getLogger("stderr-filter-test")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    handler = Capture()
+    logger.addHandler(handler)
+    service = WorkerProcessService("w", "/usr/bin/python3", "x.py", logger=logger)
+
+    import io
+    service._drain_stderr(io.StringIO(
+        "INFO 09-25 15:26:52 Graph capturing finished in 35 secs\n"
+        "Capturing CUDA graphs:  75%|███\n"
+        "Traceback (most recent call last):\n"
+        "TypeError: Unsupported audio input type\n"))
+
+    logged = [r.getMessage() for r in handler.records]
+    assert len(logged) == 2 and all("Traceback" in m or "TypeError" in m for m in logged)
+    assert "Graph capturing" in service.stderr_tail(10)   # still kept for a failed start
