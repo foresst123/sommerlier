@@ -13,6 +13,8 @@ import numpy as np
 from algorithms.asr.hallucination import filter_short_segment_outputs
 from utils.audio_normalize import normalize_for_asr, remove_dc, measure
 from services.asr_scheduler import AsrScheduler, Lane, LaneWorker
+from utils import profiling
+from utils.asr_progress import AsrProgress
 
 # Segments shorter than this are padded with surrounding audio before ASR.
 CONTEXT_PAD_BELOW = 2.0
@@ -485,32 +487,36 @@ class ASRService:
     def _transcribe_per_file(self, audios_16k, core_audios_16k, dummy_vads,
                              chunk_indices, tmp_dir):
         """The original path: three models for one file, then wait for all three."""
-        import threading
-        import sys
         import time
-        
+
         progress = {"whisper": 0, "pho": 0, "qwen": 0}
         total = len(audios_16k)
-        stop_event = threading.Event()
         whisper_released = threading.Event()
-        
-        def monitor_progress():
-            while not stop_event.is_set():
-                w, p, q = progress["whisper"], progress["pho"], progress["qwen"]
-                sys.stdout.write(f"\r[ASR] Whisper: {w}/{total} | PhoWhisper: {p}/{total} | Qwen3: {q}/{total}")
-                sys.stdout.flush()
-                time.sleep(1.0)
-            w, p, q = progress["whisper"], progress["pho"], progress["qwen"]
-            sys.stdout.write(f"\r[ASR] Whisper: {w}/{total} | PhoWhisper: {p}/{total} | Qwen3: {q}/{total}\n")
-            sys.stdout.flush()
-            
-        monitor_thread = threading.Thread(target=monitor_progress)
-        monitor_thread.start()
-        
-        def cb_whisper(): progress["whisper"] += 1
-        def cb_pho(): progress["pho"] += 1
-        def cb_qwen(): progress["qwen"] += 1
-        
+
+        # The same reporter the cross-file scheduler uses: plain log lines, one
+        # writer, numbers that only move forward. It replaces a `\r` line per file
+        # that files in flight overwrote each other on.
+        view = AsrProgress(self.logger, interval=10.0,
+                           label=profiling.current_file())
+        view.expect_files(1)
+        present = {"whisper": bool(self.whisper), "pho": bool(self.phowhisper),
+                   "qwen": bool(self.qwen3)}
+        lane_names = {"whisper": "whisper", "pho": "phowhisper", "qwen": "qwen3"}
+        for key, name in lane_names.items():
+            if present[key]:
+                view.queued("file", name, total)
+                view.lane_started(name)
+        view.start()
+
+        def bump(key):
+            progress[key] += 1
+            if present[key]:
+                view.done(lane_names[key])
+
+        def cb_whisper(): bump("whisper")
+        def cb_pho(): bump("pho")
+        def cb_qwen(): bump("qwen")
+
         pho_started = time.time()
 
         def pho_remaining():
@@ -524,27 +530,29 @@ class ASRService:
                 return None
             return (total - finished) * (time.time() - pho_started) / finished
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-            fw = executor.submit(self._run_whisper_batch, audios_16k, dummy_vads,
-                                 cb_whisper, whisper_released)
-            fp = executor.submit(self._run_phowhisper_batch, core_audios_16k, cb_pho)
-            fq = executor.submit(
-                self._run_qwen3_batch, core_audios_16k, chunk_indices,
-                tmp_dir, cb_qwen, whisper_released, pho_remaining)
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+                fw = executor.submit(self._run_whisper_batch, audios_16k, dummy_vads,
+                                     cb_whisper, whisper_released)
+                fp = executor.submit(self._run_phowhisper_batch, core_audios_16k, cb_pho)
+                fq = executor.submit(
+                    self._run_qwen3_batch, core_audios_16k, chunk_indices,
+                    tmp_dir, cb_qwen, whisper_released, pho_remaining)
 
-            try:
-                whisper_results = fw.result()
-            finally:
-                # A Whisper that died still holds nothing, but the flag is what
-                # the Qwen replica waits on; leaving it clear on the failure
-                # path would just deny the card to the model still working.
-                if not self.keep_models:
-                    whisper_released.set()
-            pho_results = fp.result()
-            qwen_results = fq.result()
+                try:
+                    whisper_results = fw.result()
+                finally:
+                    # A Whisper that died still holds nothing, but the flag is what
+                    # the Qwen replica waits on; leaving it clear on the failure
+                    # path would just deny the card to the model still working.
+                    if not self.keep_models:
+                        whisper_released.set()
+                pho_results = fp.result()
+                qwen_results = fq.result()
             
-        stop_event.set()
-        monitor_thread.join()
+            view.lanes_done("file")
+        finally:
+            view.stop()
 
         return whisper_results, pho_results, qwen_results
 
@@ -622,11 +630,25 @@ class ASRService:
             else:
                 batch = int(getattr(model, "batch_size", 0) or shared)
             holder = {"model": model}
-            worker = LaneWorker(kind, gpus[kind], self._runner_for(kind, holder, tmp_dir),
-                                batch, release=self._release_fn(kind, holder))
-            lanes.append(Lane(kind, gpus[kind], worker, empty=_EMPTY_RESULT[kind],
-                              replica_factory=self._replica_factory(kind, tmp_dir),
-                              boostable=(kind != "qwen3")))
+            worker_service = self.asr_workers.get(kind)
+            # A pool of worker processes is served by one lane worker per process, so
+            # the lane's threads lease distinct processes and run side by side.
+            copies = max(1, len(getattr(worker_service, "services", ()) or ()))
+            ready = (worker_service.wait_ready
+                     if worker_service is not None
+                     and hasattr(worker_service, "wait_ready") else None)
+            runner = self._runner_for(kind, holder, tmp_dir)
+            release = self._release_fn(kind, holder)
+            made = []
+            for _ in range(copies):
+                worker = LaneWorker(kind, gpus[kind], runner, batch, release=release)
+                worker.ready = ready
+                made.append(worker)
+            lane = Lane(kind, gpus[kind], made[0], empty=_EMPTY_RESULT[kind],
+                        replica_factory=self._replica_factory(kind, tmp_dir),
+                        boostable=(kind != "qwen3"))
+            lane.workers.extend(made[1:])
+            lanes.append(lane)
         return AsrScheduler(lanes, boost_batch=boost, config=cfg, logger=self.logger,
                             monitor=self.performance_monitor)
 
@@ -748,8 +770,10 @@ class ASRService:
             payloads["phowhisper"] = list(core_audios_16k)
         if self.qwen3:
             payloads["qwen3"] = list(zip(chunk_indices, core_audios_16k))
-        ticket = scheduler.submit(f"file-{next(self._file_counter)}", payloads)
+        file_id = f"file-{next(self._file_counter)}"
+        ticket = scheduler.submit(file_id, payloads)
         self._local.submitted = True
+        self._local.progress = (scheduler.progress, file_id)
         results = ticket.wait()
         count = len(audios_16k)
         return (results.get("whisper") or [("", None, [])] * count,
@@ -882,9 +906,14 @@ class ASRService:
                 audios_16k, core_audios_16k, dummy_vads, chunk_indices, tmp_dir)
 
         # 3. Zip and vote
-        from tqdm import tqdm
+        import time as _time
+        vote_started = _time.monotonic()
+        tracker = getattr(self._local, "progress", None) if self.cross_file_enabled else None
+        self._local.progress = None
+        if tracker:
+            tracker[0].voting(tracker[1])
         hallucinations_dropped = 0
-        for i, seg in enumerate(tqdm(valid_segments, desc="[ROVER] Bầu chọn", leave=True)):
+        for i, seg in enumerate(valid_segments):
             t_whisper, lang, words = whisper_results[i]
             t_pho = pho_results[i]
             t_qwen = qwen_results[i]
@@ -949,7 +978,12 @@ class ASRService:
                 words=words if enable_word_timestamps else None
             ))
 
+        if tracker:
+            tracker[0].voted(tracker[1])
         if self.logger:
+            self.logger.info(
+                f"[ASR] {profiling.current_file() or 'file'}: {len(results)} transcripts "
+                f"voted in {_time.monotonic() - vote_started:.1f}s")
             self.logger.info(f"ASR completed: {len(results)} transcripts produced")
             if hallucinations_dropped:
                 self.logger.info(

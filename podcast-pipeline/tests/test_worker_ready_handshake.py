@@ -84,3 +84,47 @@ def test_only_error_lines_from_worker_stderr_reach_the_log():
     logged = [r.getMessage() for r in handler.records]
     assert len(logged) == 2 and all("Traceback" in m or "TypeError" in m for m in logged)
     assert "Graph capturing" in service.stderr_tail(10)   # still kept for a failed start
+
+
+# --- waiting for ready is idempotent and safe from several threads -----------------
+
+class _ScriptedService:
+    """A WorkerProcessService whose handshake is a counter, not a subprocess."""
+
+    def __new__(cls, fail=False):
+        from services.base_worker_service import WorkerProcessService
+
+        class Service(WorkerProcessService):
+            waits = 0
+
+            def _wait_for_ready(self):
+                Service.waits += 1
+                import time
+                time.sleep(0.05)
+                if fail:
+                    raise RuntimeError("boom")
+
+        service = Service("s", "/usr/bin/python3", "x.py")
+        service.process = object()
+        return service
+
+
+def test_wait_ready_runs_the_handshake_once_for_any_number_of_threads():
+    import threading
+    service = _ScriptedService()
+    threads = [threading.Thread(target=service.wait_ready) for _ in range(6)]
+    [t.start() for t in threads]
+    [t.join(5) for t in threads]
+
+    assert type(service).waits == 1
+    service.wait_ready()                       # and a later call is a no-op
+    assert type(service).waits == 1
+
+
+def test_a_failed_start_is_raised_to_every_caller():
+    import pytest
+    service = _ScriptedService(fail=True)
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="boom"):
+            service.wait_ready()
+    assert type(service).waits == 1

@@ -297,3 +297,65 @@ def test_a_replica_release_drops_the_replica_model_too():
     assert released == [0]
     with pytest.raises(RuntimeError, match="released"):
         worker.run_batch([np.zeros(10, np.float32)], 48)
+
+
+class FakePool:
+    """A worker pool of two processes, as main.py builds for PhoWhisper."""
+
+    def __init__(self, workers=2, ready_error=None):
+        self.services = [object() for _ in range(workers)]
+        self.process = object()
+        self.ready_calls = 0
+        self.ready_error = ready_error
+        self.stopped = 0
+
+    def wait_ready(self):
+        self.ready_calls += 1
+        if self.ready_error:
+            raise RuntimeError(self.ready_error)
+
+    def stop(self):
+        self.stopped += 1
+
+
+def _lanes(svc):
+    import tempfile
+    scheduler = svc._build_scheduler(tempfile.mkdtemp())
+    return scheduler, scheduler.lanes
+
+
+def test_a_pooled_model_gets_one_lane_worker_per_process_and_waits_for_its_own_readiness():
+    pool = FakePool(workers=2)
+    svc = _service(cross_file=True, workers={"phowhisper": pool})
+    scheduler, lanes = _lanes(svc)
+    try:
+        assert len(lanes["phowhisper"].workers) == 2
+        assert len(lanes["whisper"].workers) == 1 and lanes["whisper"].primary.ready is None
+        assert all(w.ready is not None for w in lanes["phowhisper"].workers)
+        lanes["phowhisper"].workers[0].ready()
+        assert pool.ready_calls == 1
+    finally:
+        scheduler.shutdown()
+
+
+def test_releasing_a_pooled_lane_stops_the_pool_and_is_safe_to_repeat():
+    pool = FakePool(workers=2)
+    svc = _service(cross_file=True, workers={"phowhisper": pool})
+    scheduler, lanes = _lanes(svc)
+    try:
+        for worker in lanes["phowhisper"].workers:
+            worker.release()
+    finally:
+        scheduler.shutdown()
+    assert pool.stopped >= 1
+
+
+def test_a_pool_that_never_comes_up_fails_the_file_instead_of_voting_on_nothing():
+    pool = FakePool(workers=1, ready_error="no GPU")
+    svc = _service(cross_file=True, workers={"phowhisper": pool})
+    svc.begin_cross_file_stage(1)
+    try:
+        with pytest.raises(RuntimeError, match="phowhisper.*no GPU"):
+            svc.process(_segments(3), _audio())
+    finally:
+        svc.end_cross_file_stage()

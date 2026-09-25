@@ -301,3 +301,128 @@ def test_an_unmeasured_model_gets_a_replica_only_with_enough_jobs_left():
     few = _Stub("few", 1, 5, factory=lambda gpu, batch: None)
     assert choose_rebalance(finished, [many], CFG) == ("replica", many, 0)
     assert choose_rebalance(finished, [few], CFG) == ("none",)
+
+
+# --- progress and completion hooks ------------------------------------------------
+
+def test_a_ticket_reports_completion_once_every_lane_has_delivered():
+    from services.asr_scheduler import FileTicket
+    ticket = FileTicket("a", {"x": 2, "y": 1})
+    calls = []
+    ticket.when_complete(lambda: calls.append("done"))
+
+    ticket._deliver("x", 0, 1)
+    ticket._deliver("x", 1, 2)
+    assert calls == []
+    ticket._deliver("y", 0, 3)
+    assert calls == ["done"]
+
+
+def test_a_callback_registered_after_completion_runs_at_once():
+    from services.asr_scheduler import FileTicket
+    ticket = FileTicket("a", {"x": 1})
+    ticket._deliver("x", 0, 1)
+    calls = []
+    ticket.when_complete(lambda: calls.append(1))
+    assert calls == [1]
+
+
+def test_the_scheduler_feeds_the_progress_report_and_writes_a_final_line():
+    import logging
+    records = []
+
+    class Handler(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    logger = logging.getLogger("sched-progress-test")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    logger.addHandler(Handler())
+
+    sched = _scheduler([_lane("m", 0, batch=2), _lane("n", 1, batch=2)], logger=logger)
+    sched.expect_files(2)
+    a = sched.submit("a", {"m": [1, 2, 3], "n": [1, 2, 3]})
+    b = sched.submit("b", {"m": [4], "n": [4]})
+    a.wait(5), b.wait(5)
+    sched.shutdown()
+
+    snap = sched.progress.snapshot()
+    assert snap["lanes"]["m"]["done"] == snap["lanes"]["m"]["total"] == 4
+    assert snap["lanes"]["n"]["done"] == snap["lanes"]["n"]["total"] == 4
+    assert set(snap["files"].values()) == {"lanes_done"}
+    final = [m for m in records if m.startswith("[ASR]")][-2:]
+    assert "files 2/2 queued" in final[0] and "m 4/4" in final[1] and "n 4/4" in final[1]
+    assert all("\r" not in m for m in records)
+
+
+# --- lanes that wait for their own worker to be ready --------------------------------
+
+def _gated_lane(name, gpu, gate, batch=2, error=None, **kwargs):
+    def ready():
+        gate.wait(5)
+        if error:
+            raise RuntimeError(error)
+
+    worker = LaneWorker(name, gpu, _tag(name), batch)
+    worker.ready = ready
+    return Lane(name, gpu, worker, empty="", **kwargs)
+
+
+def test_a_lane_whose_worker_is_ready_runs_while_another_is_still_loading():
+    open_gate, closed_gate = threading.Event(), threading.Event()
+    open_gate.set()
+    sched = _scheduler([_gated_lane("fast", 0, open_gate),
+                        _gated_lane("slow", 1, closed_gate)])
+    sched.expect_files(1)
+    ticket = sched.submit("a", {"fast": [1, 2], "slow": [1, 2]})
+    try:
+        assert wait_until(lambda: sched.progress.snapshot()["lanes"]["fast"]["done"] == 2)
+        assert sched.progress.snapshot()["lanes"]["slow"]["done"] == 0
+        assert sched.progress.snapshot()["lanes"]["slow"]["state"] == "loading"
+        closed_gate.set()
+        results = ticket.wait(5)
+    finally:
+        closed_gate.set()
+        sched.shutdown()
+
+    assert results["fast"] == ["fast:1", "fast:2"] and results["slow"] == ["slow:1", "slow:2"]
+    assert sched.progress.snapshot()["lanes"]["slow"]["state"] != "loading"
+
+
+def test_a_worker_that_cannot_start_fails_the_files_that_need_it_loudly():
+    gate = threading.Event()
+    gate.set()
+    sched = _scheduler([_gated_lane("m", 0, gate, error="model missing")])
+    sched.expect_files(2)
+    first = sched.submit("a", {"m": [1, 2]})
+    try:
+        with pytest.raises(RuntimeError, match="m.*model missing"):
+            first.wait(5)
+        late = sched.submit("b", {"m": [3]})          # the lane is dead: fail at once
+        with pytest.raises(RuntimeError, match="model missing"):
+            late.wait(5)
+    finally:
+        sched.shutdown()
+
+
+def test_a_lane_keeps_going_when_only_one_of_its_workers_fails_to_start():
+    gate = threading.Event()
+    gate.set()
+    good = LaneWorker("m", 0, _tag("m"), 2)
+    good.ready = gate.wait
+    bad = LaneWorker("m", 1, _tag("m"), 2)
+
+    def broken():
+        raise RuntimeError("gpu 1 is full")
+
+    bad.ready = broken
+    lane = Lane("m", 0, good, empty="")
+    lane.workers.append(bad)
+    sched = _scheduler([lane])
+    sched.expect_files(1)
+    ticket = sched.submit("a", {"m": [1, 2, 3, 4]})
+    try:
+        assert ticket.wait(5)["m"] == ["m:1", "m:2", "m:3", "m:4"]
+    finally:
+        sched.shutdown()

@@ -68,6 +68,9 @@ class WorkerProcessService:
         self._stderr_tail = collections.deque(maxlen=self.STDERR_TAIL_LINES)
         self._stderr_thread = None
         self._io_lock = threading.Lock()
+        self._ready_lock = threading.Lock()
+        self._ready = False
+        self._ready_error = None
 
     @property
     def cuda_visible_devices(self) -> Optional[str]:
@@ -166,6 +169,7 @@ class WorkerProcessService:
         """
         if self.process is not None:
             return
+        self._ready, self._ready_error = False, None
 
         # The interpreter may be given as a callable, resolved here rather than
         # at construction. Finding it can fail -- a missing venv raises -- and
@@ -215,10 +219,25 @@ class WorkerProcessService:
         self._stderr_thread.start()
 
     def wait_ready(self):
-        """Block until the worker signals ready. Safe to call once per spawn."""
-        if self.process is None:
-            raise RuntimeError(f"{self.name} worker was never spawned")
-        self._wait_for_ready()
+        """Block until the worker signals ready.
+
+        The handshake is read from stdout, so it must happen once per spawn: the
+        first caller performs it and every other caller, from any thread, waits for
+        that result. A failed start is raised to all of them.
+        """
+        with self._ready_lock:
+            if self._ready_error is not None:
+                raise self._ready_error
+            if self._ready:
+                return
+            if self.process is None:
+                raise RuntimeError(f"{self.name} worker was never spawned")
+            try:
+                self._wait_for_ready()
+            except Exception as exc:
+                self._ready_error = exc
+                raise
+            self._ready = True
 
     def _wait_for_ready(self):
         deadline = time.monotonic() + self.ready_timeout
@@ -303,6 +322,7 @@ class WorkerProcessService:
             pass
 
         self.process = None
+        self._ready, self._ready_error = False, None
         if self.logger:
             self.logger.info(f"{self.name} worker terminated.")
 

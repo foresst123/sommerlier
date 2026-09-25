@@ -13,6 +13,8 @@ import time
 from collections import deque
 from typing import Callable, Dict, List, Optional
 
+from utils.asr_progress import AsrProgress
+
 
 class LaneWorker:
     """One running consumer of a lane: a model instance on a GPU.
@@ -20,6 +22,10 @@ class LaneWorker:
     ``run_batch(payloads, batch_size) -> list`` returns one result per payload;
     ``release()`` frees the model's VRAM. ``batch_size`` may be raised while the
     lane is running -- the next pull uses the new value.
+
+    ``ready()``, when given, blocks until the model can serve and raises if it never
+    will. The worker's thread calls it before its first batch, so a lane starts the
+    moment its own model is up instead of waiting for the slowest one.
     """
 
     def __init__(self, name, gpu, run_batch: Callable, batch_size: int,
@@ -30,6 +36,8 @@ class LaneWorker:
         self.batch_size = max(1, int(batch_size))
         self.release = release
         self.released = False
+        self.ready: Optional[Callable] = None
+        self.failed = False
 
 
 class Lane:
@@ -51,6 +59,8 @@ class Lane:
         self.total = 0
         self.busy_seconds = 0.0
         self.finished = False
+        self.failed = False
+        self.error: Optional[Exception] = None
 
     def remaining(self) -> int:
         return len(self.queue) + self.inflight
@@ -79,19 +89,48 @@ class FileTicket:
         self._pending = sum(counts.values())
         self._lock = threading.Lock()
         self._event = threading.Event()
+        self._callbacks = []
+        self._error = None
         if self._pending == 0:
             self._event.set()
 
+    def when_complete(self, callback):
+        """Run `callback()` once every lane has delivered this file's results.
+
+        Runs at once if that already happened. It runs on the thread that delivered
+        the last result, outside the ticket's lock, so it must not block.
+        """
+        with self._lock:
+            if not self._event.is_set():
+                self._callbacks.append(callback)
+                return
+        callback()
+
     def _deliver(self, lane, position, value):
+        callbacks = []
         with self._lock:
             self._results[lane][position] = value
             self._pending -= 1
             if self._pending == 0:
                 self._event.set()
+                callbacks, self._callbacks = self._callbacks, []
+        for callback in callbacks:
+            callback()
+
+    def _fail(self, lane, error):
+        """A lane this file needs cannot run: end the wait with that reason."""
+        with self._lock:
+            if self._error is None:
+                self._error = RuntimeError(
+                    f"ASR lane '{lane}' could not start: {error}")
+            self._callbacks = []
+            self._event.set()
 
     def wait(self, timeout=None) -> Dict[str, list]:
         if not self._event.wait(timeout):
             raise TimeoutError(f"ASR results for {self.file_id} did not arrive")
+        if self._error is not None:
+            raise self._error
         return self._results
 
 
@@ -134,13 +173,13 @@ def choose_rebalance(finished, remaining, cfg) -> tuple:
 
 class AsrScheduler:
     def __init__(self, lanes: List[Lane], boost_batch: int = 48, config=None,
-                 logger=None, monitor=None, log_interval: float = 30.0):
+                 logger=None, monitor=None, log_interval: float = 15.0,
+                 progress: Optional[AsrProgress] = None):
         self.lanes: Dict[str, Lane] = {lane.name: lane for lane in lanes}
         self.boost_batch = max(1, int(boost_batch))
         self.config = dict(config or {})
         self.logger = logger
         self.monitor = monitor
-        self._log_interval = float(log_interval)
         self._cond = threading.Condition()
         self._expected: Optional[int] = None
         self._intake = 0
@@ -148,12 +187,13 @@ class AsrScheduler:
         self._started = False
         self._threads: List[threading.Thread] = []
         self._helpers: List[threading.Thread] = []
-        self._stop_log = threading.Event()
+        self.progress = progress or AsrProgress(logger, interval=log_interval)
 
     # -- intake ---------------------------------------------------------------
     def expect_files(self, total: int):
         with self._cond:
             self._expected = int(total)
+            self.progress.expect_files(total)
             self._maybe_finish_locked()
 
     def add_intake(self, count: int = 1):
@@ -166,6 +206,7 @@ class AsrScheduler:
         counts = {name: len(items) for name, items in payloads_by_lane.items()
                   if name in self.lanes}
         ticket = FileTicket(file_id, counts)
+        ticket.when_complete(lambda: self.progress.lanes_done(file_id))
         with self._cond:
             if self._closed:
                 raise RuntimeError("the ASR scheduler has been shut down")
@@ -174,9 +215,13 @@ class AsrScheduler:
                 lane = self.lanes.get(name)
                 if lane is None:
                     continue
+                if lane.failed:
+                    ticket._fail(name, lane.error)
+                    continue
                 for position, payload in enumerate(items):
                     lane.queue.append(_Job(ticket, position, payload))
                 lane.total += len(items)
+                self.progress.queued(file_id, name, len(items))
             self._intake += 1
             self._maybe_finish_locked()
             self._cond.notify_all()
@@ -188,13 +233,11 @@ class AsrScheduler:
             return
         self._started = True
         for lane in self.lanes.values():
+            if any(worker.ready is not None for worker in lane.workers):
+                self.progress.lane_loading(lane.name)
             for worker in lane.workers:
                 self._spawn_locked(lane, worker)
-        if self._log_interval > 0:
-            thread = threading.Thread(target=self._progress_loop, daemon=True,
-                                      name="asr-progress")
-            thread.start()
-            self._helpers.append(thread)
+        self.progress.start()
 
     def _spawn_locked(self, lane, worker):
         thread = threading.Thread(target=self._run_worker, args=(lane, worker),
@@ -202,7 +245,33 @@ class AsrScheduler:
         thread.start()
         self._threads.append(thread)
 
+    def _lane_failed(self, lane: Lane, worker: LaneWorker, error):
+        """`worker` never became ready. The lane goes on with its other workers; with
+        none left, every file waiting on it fails with the reason rather than
+        carrying empty transcripts into the vote."""
+        self._log("error", f"[ASR scheduler] a {lane.name} worker could not start: "
+                           f"{type(error).__name__}: {error}")
+        self._record("asr_worker_failed", lane=lane.name, error=str(error))
+        with self._cond:
+            worker.failed = True
+            if any(not w.failed for w in lane.workers):
+                return
+            lane.failed, lane.error = True, error
+            self.progress.lane_failed(lane.name)
+            stranded = list(lane.queue)
+            lane.queue.clear()
+            self._cond.notify_all()
+        for job in stranded:
+            job.ticket._fail(lane.name, error)
+
     def _run_worker(self, lane: Lane, worker: LaneWorker):
+        if worker.ready is not None:
+            try:
+                worker.ready()
+            except Exception as exc:
+                self._lane_failed(lane, worker, exc)
+                return
+            self.progress.lane_ready(lane.name)
         while True:
             with self._cond:
                 while not lane.queue:
@@ -213,6 +282,7 @@ class AsrScheduler:
                 jobs = [lane.queue.popleft()
                         for _ in range(min(size, len(lane.queue)))]
                 lane.inflight += len(jobs)
+            self.progress.lane_started(lane.name)
             began = time.monotonic()
             try:
                 results = list(worker.run_batch([job.payload for job in jobs], size))
@@ -225,6 +295,7 @@ class AsrScheduler:
             for job, value in zip(jobs, results):
                 job.ticket._deliver(lane.name, job.position, value)
             elapsed = time.monotonic() - began
+            self.progress.done(lane.name, len(jobs))
             with self._cond:
                 lane.inflight -= len(jobs)
                 lane.done += len(jobs)
@@ -262,6 +333,7 @@ class AsrScheduler:
             self._log("info", f"[ASR scheduler] {finished.name} finished "
                               f"({finished.done} jobs); releasing its VRAM")
             self._record("asr_lane_finished", lane=finished.name, jobs=finished.done)
+            self.progress.lane_finished(finished.name)
             self._release_workers(finished, finished.workers)
             with self._cond:
                 remaining = [lane for lane in self.lanes.values()
@@ -309,14 +381,6 @@ class AsrScheduler:
             self._record("asr_replica_started", lane=lane.name, gpu=gpu)
 
     # -- reporting and shutdown ---------------------------------------------------
-    def _progress_loop(self):
-        while not self._stop_log.wait(self._log_interval):
-            with self._cond:
-                parts = [f"{lane.name} {lane.done}/{lane.total} "
-                         f"({len([w for w in lane.workers if not w.released])}w)"
-                         for lane in self.lanes.values()]
-            self._log("info", "[ASR scheduler] " + " | ".join(parts))
-
     def _log(self, level, message):
         if self.logger:
             getattr(self.logger, level)(message)
@@ -334,9 +398,9 @@ class AsrScheduler:
                     job.ticket._deliver(lane.name, job.position, lane.empty)
             self._cond.notify_all()
             threads = list(self._threads) + list(self._helpers)
-        self._stop_log.set()
         for thread in threads:
             if thread is not threading.current_thread():
                 thread.join(timeout=30)
+        self.progress.stop()
         for lane in self.lanes.values():
             self._release_workers(lane, lane.workers[1:])

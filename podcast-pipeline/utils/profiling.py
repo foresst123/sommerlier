@@ -110,13 +110,19 @@ def _wrap(function, name):
     return timed
 
 
+def current_file():
+    """Basename of the file this thread is working on, or None."""
+    return _context().file
+
+
 @contextlib.contextmanager
 def file_stage(stage, path):
-    """Mark this thread as running `stage` on `path`; records one span for it."""
+    """Mark this thread as running `stage` on `path`; records one span for it.
+
+    The marker is set even when no monitor is installed, so `current_file()`
+    (used to label progress lines) works without profiling.
+    """
     monitor = _monitor
-    if monitor is None:
-        yield
-        return
     ctx = _context()
     previous = (ctx.stage, ctx.file, ctx.depth)
     ctx.stage, ctx.file, ctx.depth = stage, os.path.basename(str(path)), 0
@@ -128,9 +134,11 @@ def file_stage(stage, path):
         error = True
         raise
     finally:
-        fields = {"error": True} if error else {}
-        monitor.record_span("file_stage", time.perf_counter() - started, stage=stage,
-                            file=ctx.file, thread=threading.current_thread().name, **fields)
+        if monitor is not None:
+            fields = {"error": True} if error else {}
+            monitor.record_span("file_stage", time.perf_counter() - started, stage=stage,
+                                file=ctx.file, thread=threading.current_thread().name,
+                                **fields)
         ctx.stage, ctx.file, ctx.depth = previous
 
 
