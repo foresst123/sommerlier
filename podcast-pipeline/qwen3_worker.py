@@ -21,6 +21,8 @@ import torch
 import soundfile as sf
 import argparse
 
+from worker_errors import describe_exception
+
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -59,11 +61,15 @@ def load_model(config_path=None, env_name="kaggle", batch_size=None):
 
     if backend == "vllm":
         try:
+            # qwen-asr swallows the real reason vllm fails to import and reports
+            # a generic "vLLM is not available"; import it here first so the
+            # actual error (a missing library, a version clash) is what surfaces.
+            import vllm  # noqa: F401
             from qwen_asr import Qwen3ASRModel
         except ImportError as exc:
             raise RuntimeError(
-                "qwen-asr vLLM support is missing; install podcast-pipeline/"
-                "requirements-vllm.txt in the VLLM_PYTHON environment") from exc
+                "vllm / qwen-asr cannot be imported in this environment "
+                "(see requirements-vllm.txt): " + describe_exception(exc)) from exc
         kwargs = {
             "model": model_name,
             "max_inference_batch_size": int(qwen_cfg.get("batch_size", 16)),
@@ -248,7 +254,13 @@ def main():
                         help="Override models.qwen3.batch_size (used by replicas).")
     args = parser.parse_args()
 
-    model, processor, device, backend = load_model(args.config, args.env, args.batch_size)
+    try:
+        model, processor, device, backend = load_model(
+            args.config, args.env, args.batch_size)
+    except Exception as exc:
+        print(json.dumps({"status": "error", "message": describe_exception(exc)}),
+              flush=True)
+        raise
 
     # Read commands from stdin, one JSON per line
     for line in sys.stdin:

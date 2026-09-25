@@ -284,7 +284,9 @@ def main():
             args.tensor_parallel_size, args.max_model_len,
             not args.disable_prefix_caching)
     except Exception as e:
-        print(json.dumps({"status": "error", "error": str(e)}), flush=True)
+        from worker_errors import describe_exception
+        print(json.dumps({"status": "error", "error": describe_exception(e)}),
+              flush=True)
         sys.exit(1)
 
     for line in sys.stdin:

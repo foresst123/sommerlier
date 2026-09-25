@@ -7,6 +7,30 @@ import time
 from typing import Callable, List, Optional, Sequence, Union
 
 
+def foreign_library_paths_removed(ld_library_path, python_bin) -> str:
+    """LD_LIBRARY_PATH without entries that live in another environment.
+
+    The launcher points LD_LIBRARY_PATH at the main environment's CUDA libraries
+    (cuDNN, cuBLAS, torch/lib), and every worker inherits it. A worker running a
+    different torch/CUDA build then loads the main environment's libraries first
+    and fails on import. Entries that are not inside some site-packages
+    directory (a system CUDA, say) and entries inside the worker's own
+    environment are kept.
+    """
+    if not ld_library_path:
+        return ""
+    prefix = os.path.dirname(os.path.dirname(os.path.abspath(str(python_bin))))
+    kept = []
+    for entry in str(ld_library_path).split(":"):
+        if not entry:
+            continue
+        foreign = "site-packages" in entry and not (
+            entry == prefix or entry.startswith(prefix + os.sep))
+        if not foreign:
+            kept.append(entry)
+    return ":".join(kept)
+
+
 class WorkerProcessService:
     """Lifecycle manager for a worker subprocess that speaks line JSON over stdio.
 
@@ -28,8 +52,11 @@ class WorkerProcessService:
         device_id: Optional[Union[int, Sequence[int]]] = None,
         ready_timeout: float = 900.0,
         logger=None,
+        isolate_library_path: bool = False,
     ):
         self.name = name
+        # True for workers whose interpreter has its own torch/CUDA (vLLM).
+        self.isolate_library_path = bool(isolate_library_path)
         self.python_bin = python_bin
         self.worker_script = worker_script
         self.extra_args = list(extra_args or [])
@@ -132,6 +159,12 @@ class WorkerProcessService:
             )
 
         env = os.environ.copy()
+        if self.isolate_library_path and env.get("LD_LIBRARY_PATH"):
+            cleaned = foreign_library_paths_removed(env["LD_LIBRARY_PATH"], self.python_bin)
+            if cleaned:
+                env["LD_LIBRARY_PATH"] = cleaned
+            else:
+                env.pop("LD_LIBRARY_PATH", None)
         visible_devices = self.cuda_visible_devices
         if visible_devices is not None:
             env["CUDA_VISIBLE_DEVICES"] = visible_devices
@@ -205,7 +238,7 @@ class WorkerProcessService:
 
     def _fail_start(self, reason: str, last_stdout):
         stdout_log = " | ".join(last_stdout)
-        stderr_log = self.stderr_tail(10)
+        stderr_log = self.stderr_tail(self.STDERR_TAIL_LINES)
         detail = f"{self.name} worker did not start: {reason}."
         if stdout_log:
             detail += f" stdout: {stdout_log}."

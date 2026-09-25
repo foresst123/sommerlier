@@ -27,4 +27,5 @@ def test_the_worker_script_applies_the_override_before_building_the_engine():
     source = open(os.path.join(ROOT, "qwen3_worker.py"), encoding="utf-8").read()
     assert '"--batch-size"' in source
     assert 'qwen_cfg["batch_size"] = int(batch_size)' in source
-    assert "load_model(args.config, args.env, args.batch_size)" in source
+    import re
+    assert re.search(r"load_model\(\s*args\.config, args\.env, args\.batch_size\)", source)

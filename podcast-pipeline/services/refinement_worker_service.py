@@ -51,6 +51,7 @@ class RefinementWorkerService(WorkerProcessService):
             extra_args=worker_args,
             device_id=device_id,
             logger=logger,
+            isolate_library_path=(backend == "vllm"),
         )
         self._lock = threading.Lock()
         self.model_name = model_name

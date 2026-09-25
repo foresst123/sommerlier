@@ -12,6 +12,8 @@ import sys
 
 import numpy as np
 
+from worker_errors import describe_exception
+
 
 def _profile(config_path, env_name):
     with open(config_path, encoding="utf-8") as handle:
@@ -85,7 +87,8 @@ def main():
     try:
         llm, sampling = load_model(args.config, args.env)
     except Exception as exc:
-        print(json.dumps({"status": "error", "message": str(exc)}), flush=True)
+        print(json.dumps({"status": "error", "message": describe_exception(exc)}),
+              flush=True)
         raise
 
     for line in sys.stdin:

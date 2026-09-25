@@ -481,7 +481,8 @@ def main():
             lambda: resolve_worker_python(qwen_env, config=config,
                                           env_profile=env_profile, logger=logger),
             qwen3_worker_script, device_id=asr_placement["qwen3"], logger=logger,
-            env_name=args.env, config_path=args.config))
+            env_name=args.env, config_path=args.config,
+            isolate_library_path=(qwen_env == "vllm")))
         if (perf_cfg["enabled"]
                 and asr_perf["dynamic_replicas"]
                 and not asr_cross_file      # the scheduler makes its own replicas
@@ -493,7 +494,8 @@ def main():
                     qwen_env, config=config, env_profile=env_profile,
                     logger=logger),
                 qwen3_worker_script, device_id=replica_gpu, logger=logger,
-                env_name=args.env, config_path=args.config)
+                env_name=args.env, config_path=args.config,
+                isolate_library_path=(qwen_env == "vllm"))
 
         whisper_cfg = env_profile.get("models", {}).get("whisper", {})
         if str(whisper_cfg.get("backend", "ctranslate2")).lower() == "vllm":
@@ -668,7 +670,8 @@ def main():
                             logger=logger),
                         qwen3_worker_script, device_id=gpu, logger=logger,
                         env_name=args.env, config_path=args.config,
-                        batch_size=batch)
+                        batch_size=batch,
+                        isolate_library_path=(qwen_env == "vllm"))
                     service.spawn()
                     service.wait_ready()
                     return Qwen3ASRClient(service.process), service.stop

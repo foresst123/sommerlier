@@ -14,4 +14,5 @@ class WhisperVLLMWorkerService(WorkerProcessService):
             extra_args=["--config", config_path, "--env", env_name],
             device_id=device_id,
             logger=logger,
+            isolate_library_path=True,      # its own torch/CUDA build (vllm_env)
         )
