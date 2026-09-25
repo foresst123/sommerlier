@@ -45,8 +45,10 @@ def _build_parser():
     parser.add_argument("--audio", help="Path to a single input audio file")
     parser.add_argument("--audio_dir",
                         help="Directory of audio files to process in one run. Files are "
-                             "run as one corpus snapshot with --by_stage (the default "
-                             "profile setting); each writes its own output folder.")
+                             "split into duration-bounded groups; with --by_stage (the "
+                             "default profile setting), every stage runs across one "
+                             "group before the next stage. Each file writes its own "
+                             "output folder.")
     parser.add_argument("--max_hours", type=float,
                         help="Override batch.max_hours_per_run for this run.")
     parser.add_argument("--config", default="config.json", help="Path to config file")
@@ -78,9 +80,9 @@ def _build_parser():
     parser.add_argument("--initprompt", action="store_true", help="Use initial prompt for LLM")
     parser.add_argument("--env", default="kaggle", type=str, help="Environment profile name in config.json")
     parser.add_argument("--by_stage", action="store_true",
-                        help="Run each stage across the whole pending corpus before the next "
+                        help="Run each stage across one duration-bounded group before the next "
                              "stage, instead of the whole pipeline per file. Loads "
-                             "each model once per corpus snapshot rather than once per file.")
+                             "each model once per group rather than once per file.")
     parser.add_argument("--only_batch", type=int, default=None,
                         help="Stop after one pass instead of working through the "
                              "whole directory. Lets a corpus larger than a session "
@@ -736,10 +738,9 @@ def main():
             logger.error("Rename them or move them apart, then re-run.")
             return
 
-        # File-major runs remain duration-bounded. A stage-major run freezes a
-        # pending-corpus snapshot, so it completes ASR for every file before it
-        # ever loads the refinement LLM. Files copied in during the run wait
-        # for the next invocation instead of causing an ASR reload afterwards.
+        # Freeze the files visible at startup. Every full-pipeline pass below is
+        # duration-bounded, including stage-major passes. Files copied in during
+        # the run wait for the next invocation instead of extending this run.
         ledger = ProgressLedger(args.audio_dir, logger=logger)
         if ledger.done or ledger.failed:
             logger.info(f"Resuming: {ledger.summary(len(paths))} "
@@ -747,27 +748,22 @@ def main():
 
         failures = []
         pass_no = 0
+        run_snapshot = list(paths)
         while True:
             pass_no += 1
-            # Re-scan every pass, not once at the top: this is the only reason
-            # newly-copied files get picked up without restarting the run.
-            current = find_audio_files(args.audio_dir, exts)
-            todo = ledger.pending(current)
+            todo = ledger.pending(run_snapshot)
             if not todo:
                 break
 
-            # Stage-major is a corpus snapshot, not a duration-bounded group:
-            # every file finishes ASR before the refinement model is loaded.
-            # --only_batch deliberately keeps the old bounded behaviour for a
-            # session that cannot finish the whole snapshot in one allocation.
-            if args.only_batch is not None or not args.by_stage:
-                group = plan_batches(todo, max_hours, logger=logger)[0]
-            else:
-                group = list(todo)
+            # The max-hours contract applies to every full-pipeline pass. In
+            # stage-major mode this group completes ASR before its refinement
+            # model is loaded, then finishes every remaining stage before the
+            # next duration-bounded group starts.
+            group = plan_batches(todo, max_hours, logger=logger)[0]
             group_hours = sum(audio_duration(p) for p in group) / 3600.0
             logger.info(
                 f"--- Pass {pass_no}: {len(group)} file(s), {group_hours:.2f}h "
-                f"({len(todo)} of {len(current)} still to do) ---")
+                f"({len(todo)} of {len(run_snapshot)} still to do) ---")
 
             started = time.time()
             if args.by_stage:
@@ -807,14 +803,6 @@ def main():
 
             if args.only_batch is not None:
                 logger.info("--only_batch was given; stopping after this pass")
-                break
-            if args.by_stage:
-                # Freeze the snapshot. Files copied in while a long stage-major
-                # run was active are left for the next invocation; immediately
-                # starting them would load ASR again after refinement.
-                logger.info(
-                    "Stage-major corpus snapshot complete; newly added files "
-                    "will run on the next invocation")
                 break
 
         logger.info(f"Corpus complete: {ledger.summary()}")

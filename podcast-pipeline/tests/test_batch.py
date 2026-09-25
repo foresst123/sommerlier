@@ -54,6 +54,13 @@ def test_batch_total_stays_within_the_limit():
         assert sum(durs[p] for p in b) <= 5 * HOUR + 1e-6
 
 
+def test_forty_hours_becomes_two_full_pipeline_groups_at_twenty_hours():
+    durs = {f"f{i:02d}": HOUR for i in range(40)}
+    with _durations(durs):
+        batches = plan_batches(list(durs), 20.0)
+    assert [len(batch) for batch in batches] == [20, 20]
+
+
 def test_a_batch_may_reach_the_limit_exactly():
     durs = {"a": 2 * HOUR, "b": 3 * HOUR, "c": HOUR}
     with _durations(durs):
@@ -74,6 +81,17 @@ def test_unreadable_duration_is_isolated():
     with _durations(durs):
         batches = plan_batches(list(durs), 5.0)
     assert ["bad"] in batches
+
+
+def test_main_never_bypasses_the_duration_limit_for_stage_major_runs():
+    """--by_stage changes ordering, not which files fit in one pass."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "main.py"), encoding="utf-8") as f:
+        source = f.read()
+
+    assert "group = plan_batches(todo, max_hours, logger=logger)[0]" in source
+    assert "group = list(todo)" not in source
+    assert "if args.only_batch is not None or not args.by_stage" not in source
 
 
 # --- stage-major execution ----------------------------------------------

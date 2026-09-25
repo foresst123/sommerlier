@@ -7,9 +7,9 @@ wrong; moving breaks any path recorded in an earlier run's output and races
 with whatever is copying new files in. A ledger beside the corpus leaves the
 audio exactly where it was and can be deleted to force a full re-run.
 
-Files can be added to the input directory while a run is in progress: the
-directory is re-scanned between passes, so anything that appeared since the
-last scan simply joins the next one.
+The caller freezes the input snapshot at startup. Files added while a run is
+in progress are therefore picked up on the next invocation, keeping the
+duration budget for the current run stable.
 """
 
 import json
