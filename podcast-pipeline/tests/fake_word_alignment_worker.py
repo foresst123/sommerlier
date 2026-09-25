@@ -33,6 +33,11 @@ for line in sys.stdin:
         continue
     req = json.loads(line)
     time.sleep(delay)
+    if mode == "oom":
+        print(json.dumps({"id": req["id"], "error":
+                          "OutOfMemoryError: CUDA out of memory. Tried to allocate 2 GiB"}),
+              flush=True)
+        continue
     if mode == "error" or (mode == "fail_multi" and len(req["items"]) > 1):
         print(json.dumps({"id": req["id"], "error": "boom"}), flush=True)
         continue

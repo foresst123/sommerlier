@@ -65,6 +65,8 @@ import json
 import os
 import re
 import shutil
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -680,6 +682,7 @@ class _Plan:
     overlap_reasons: List[str] = field(default_factory=list)   # why "bad"
     separated_share: Optional[float] = None   # share of the overlap the separator covered
     min_similarity: Optional[float] = None    # the weakest separated span in the overlap
+    render: Optional[_Render] = None          # the cut made while planning, reused by the write
 
 
 class ConversationExportService:
@@ -690,9 +693,23 @@ class ConversationExportService:
     and are validated by `ConversationSelectionConfig`: an unknown key raises here.
     """
 
-    def __init__(self, llm, logger=None, **settings):
+    # Cuts kept between planning and writing (see `render_workers`), so a long
+    # recording never holds more than this in RAM; the rest are cut again.
+    RENDER_CACHE_BYTES = 512 * 1024 * 1024
+
+    def __init__(self, llm, logger=None, render_workers: int = 1,
+                 reuse_render: bool = False, **settings):
         self.llm = llm
         self.logger = logger
+        # CPU threads that cut and write excerpts (numpy and soundfile release the
+        # GIL). 1 keeps the sequential order; results are always reported in the
+        # same order whatever the width.
+        self.render_workers = max(1, int(render_workers))
+        self._render_lock = threading.Lock()
+        self._render_bytes = 0
+        # Reuse the planning cut for the write instead of cutting twice. Same
+        # arrays either way; off keeps the earlier behaviour.
+        self.reuse_render = bool(reuse_render)
         self.cfg = ConversationSelectionConfig.from_settings(settings)
         # A finder reply can contain many candidates, so never use the tiny budget
         # that was sufficient for the old one-candidate semantic judge.
@@ -1278,11 +1295,34 @@ class ConversationExportService:
         overlaps = cross_speaker_overlaps(finder.segs[cand.first:cand.last + 1])
         seconds = sum(b - a for a, b in overlaps)
         plan = _Plan(cand, item, render.method, overlaps, seconds, cand.tier)
+        if self._keep_render(render):
+            plan.render = render
         if seconds >= self.cfg.overlap_min_seconds:
             self._judge_overlap(plan, speech_segments)
             if self.cfg.overlap_first:
                 plan.tier = OVERLAP_GOOD if plan.overlap_quality == "good" else OVERLAP_BAD
         return plan
+
+    def _keep_render(self, render: _Render) -> bool:
+        """Whether this cut may wait in RAM for the write (bounded by RENDER_CACHE_BYTES)."""
+        if not self.reuse_render:
+            return False
+        size = sum(a.nbytes for a in (render.mixture, render.left, render.right)
+                   if a is not None)
+        with self._render_lock:
+            if self._render_bytes + size > self.RENDER_CACHE_BYTES:
+                return False
+            self._render_bytes += size
+        return True
+
+    def _release_render(self, plan: _Plan) -> Optional[_Render]:
+        render, plan.render = plan.render, None
+        if render is not None:
+            size = sum(a.nbytes for a in (render.mixture, render.left, render.right)
+                       if a is not None)
+            with self._render_lock:
+                self._render_bytes -= size
+        return render
 
     def _judge_overlap(self, plan: _Plan, speech_segments) -> None:
         """Say whether the overlap in this excerpt was captured cleanly, and if not, why.
@@ -1380,8 +1420,8 @@ class ConversationExportService:
         """Write one conversation folder and return its conversation.json content."""
         import soundfile as sf
         cand = plan.cand
-        render = self._render(finder, cand, waveform, sample_rate,
-                              speech_segments, separation_service)
+        render = self._release_render(plan) or self._render(
+            finder, cand, waveform, sample_rate, speech_segments, separation_service)
         os.makedirs(directory, exist_ok=True)
         files = {"mixture": MIXTURE_FILE}
         sf.write(os.path.join(directory, MIXTURE_FILE), render.mixture,
@@ -1587,10 +1627,36 @@ class ConversationExportService:
             report["skipped"] = "no_audio"
             return result
 
-        plans = []
-        for cand in final:
-            plan = self._plan(finder, cand, kept[id(cand)], waveform, sample_rate,
+        self._plan_and_write(finder, final, kept, result, report, waveform, sample_rate,
+                             out_dir, base_name, speech_segments, separation_service)
+        return result
+
+    def _plan_and_write(self, finder, final, kept, result, report, waveform, sample_rate,
+                        out_dir, base_name, speech_segments, separation_service) -> None:
+        """Cut, file and write every accepted excerpt on a bounded CPU pool.
+
+        Decisions were all made before this point; here each excerpt is
+        independent CPU/disk work. Numbering, tier counts and the result rows
+        follow the sorted plan order whatever order the workers finish in, and
+        the pool is drained before this returns.
+        """
+        from utils.cpu_plan import usable_cores
+        workers = min(self.render_workers, max(1, usable_cores() - 1))
+        self._render_bytes = 0
+
+        def plan_one(cand):
+            return self._plan(finder, cand, kept[id(cand)], waveform, sample_rate,
                               speech_segments, separation_service)
+
+        if workers > 1 and len(final) > 1:
+            with ThreadPoolExecutor(max_workers=workers,
+                                    thread_name_prefix="conv-plan") as pool:
+                planned = list(pool.map(plan_one, final))
+        else:
+            planned = [plan_one(cand) for cand in final]
+
+        plans = []
+        for plan in planned:
             if plan is None:
                 self._log(f"[conversation-exports] {base_name}: an excerpt shorter "
                           "than a second was skipped")
@@ -1604,20 +1670,35 @@ class ConversationExportService:
 
         safe = re.sub(r"[^A-Za-z0-9._-]+", "_", base_name)
         filed: Dict[str, int] = {}
+        jobs = []
         for global_number, plan in enumerate(plans, start=1):
-            cand, item = plan.cand, plan.item
             tier_dir = tier_folder(plan.tier)
             filed[tier_dir] = filed.get(tier_dir, 0) + 1
             name = f"conversation_{filed[tier_dir]}"
-            folder = f"{tier_dir}/{name}"
-            export_id = f"{safe}_conversation_{global_number:06d}"
+            jobs.append((plan, tier_dir, name, f"{tier_dir}/{name}",
+                         f"{safe}_conversation_{global_number:06d}"))
+
+        def write_one(job):
+            plan, tier_dir, name, folder, export_id = job
             try:
-                meta = self._write_conversation(
+                return self._write_conversation(
                     finder, plan, os.path.join(out_dir, tier_dir, name), folder, export_id,
-                    waveform, sample_rate, speech_segments, separation_service)
+                    waveform, sample_rate, speech_segments, separation_service), None
             except Exception as exc:                       # pragma: no cover - disk problems
+                return None, exc
+
+        if workers > 1 and len(jobs) > 1:
+            with ThreadPoolExecutor(max_workers=workers,
+                                    thread_name_prefix="conv-write") as pool:
+                written = list(pool.map(write_one, jobs))
+        else:
+            written = [write_one(job) for job in jobs]
+
+        for (plan, tier_dir, _name, folder, export_id), (meta, error) in zip(jobs, written):
+            cand, item = plan.cand, plan.item
+            if error is not None:
                 if self.logger:
-                    self.logger.warning(f"[conversation-exports] could not write {export_id}: {exc}")
+                    self.logger.warning(f"[conversation-exports] could not write {export_id}: {error}")
                 continue
             if not meta["verification"]["ok"]:
                 report["verification_failed"] += 1
@@ -1642,7 +1723,6 @@ class ConversationExportService:
         report["exported"] = len(result.exports)
         self._log(
             f"[conversation-exports] {base_name}: {len(result.exports)} item(s) written to {out_dir}")
-        return result
 
     def _log(self, message: str):
         if self.logger:

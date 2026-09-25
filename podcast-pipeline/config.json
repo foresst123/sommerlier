@@ -346,9 +346,12 @@
           "device": "auto",
           "interpolate_method": "nearest",
           "batch_seconds": 180,
-          "workers_per_gpu": 2
+          "workers_per_gpu": 2,
+          "prefetch_batches": 2
         },
         "conversation_selection": {
+          "render_workers": 4,
+          "reuse_render": true,
           "min_seconds": 30,
           "max_seconds": 240,
           "max_silence": 3.0,
@@ -565,9 +568,12 @@
           "device": "auto",
           "interpolate_method": "nearest",
           "batch_seconds": 180,
-          "workers_per_gpu": 2
+          "workers_per_gpu": 2,
+          "prefetch_batches": 2
         },
         "conversation_selection": {
+          "render_workers": 4,
+          "reuse_render": true,
           "min_seconds": 30,
           "max_seconds": 240,
           "max_silence": 3.0,

@@ -172,3 +172,42 @@ def test_export_writes_aligned_clean_tracks_and_stable_source_id(tmp_path):
     assert metadata["failed_separation_spans"] == []
     assert metadata["speakers"] == {
         "SP1": A, "SP2": B, "left": "SP1", "right": "SP2"}
+
+
+def test_pooled_export_matches_sequential_tree(tmp_path, monkeypatch):
+    import services.clean_two_channel_dataset_service as mod
+
+    def cand(k):
+        return SimpleNamespace(
+            speakers=(A, B), pad_start=k * 4.0, pad_end=k * 4.0 + 3.0, tier="S",
+            score=90 - k, metrics={}, components={}, noise=None,
+            music_patched_share=0.0)
+
+    speech = [_speech(2 * k, A, k * 4.0, k * 4.0 + 1.5, 0.2) for k in range(5)]
+    speech += [_speech(2 * k + 1, B, k * 4.0 + 1.5, k * 4.0 + 3.0, 0.4) for k in range(5)]
+    speech.append(_speech(99, A, 30.0, 33.0, 0.2))     # candidate 6 has no B voice
+    monkeypatch.setattr(mod, "pick_non_overlapping", lambda c: [cand(k) for k in range(6)])
+    monkeypatch.setattr(CleanTwoChannelDatasetService, "_conversation",
+                        staticmethod(lambda finder, candidate: []))
+
+    def run(workers, name):
+        source = tmp_path / f"{name}.wav"
+        source.write_bytes(b"x")
+        root = tmp_path / name
+        out = CleanTwoChannelDatasetService(workers=workers).export(
+            root=str(root), source_path=str(source), transcripts=[], speech_segments=speech,
+            separation_service=SeparationService(logger=None), timeline=TimelineMap(),
+            noise=None, music_map=None, sample_rate=SR, audio_duration=40.0,
+            selection_settings=_settings())
+        files = {}
+        for path in sorted((root / "000001").rglob("*")):
+            if path.is_file():
+                files[str(path.relative_to(root))] = path.read_bytes()
+        return out, files
+
+    seq, seq_files = run(1, "seq")
+    par, par_files = run(4, "par")
+    assert seq["item_count"] == par["item_count"] == 5
+    assert seq["skipped_empty_channel"] == par["skipped_empty_channel"]
+    assert seq_files.keys() == par_files.keys()
+    assert all(seq_files[k] == par_files[k] for k in seq_files if not k.endswith("source.json"))

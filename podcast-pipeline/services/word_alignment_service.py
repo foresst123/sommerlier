@@ -17,7 +17,9 @@ import json
 import os
 import shutil
 import sys
+import queue
 import tempfile
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -31,6 +33,97 @@ TARGET_SAMPLE_RATE = 16000
 MAX_WORKER_CPU_THREADS = 8
 _WORKER_SCRIPT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "word_alignment_worker.py")
+
+
+class WordAlignmentOutOfMemory(RuntimeError):
+    """The alignment GPU ran out of memory; retrying smaller pieces cannot help."""
+
+
+def is_out_of_memory(exc: BaseException) -> bool:
+    """True for CUDA/host OOM, including errors relayed as text by a worker."""
+    if isinstance(exc, MemoryError):
+        return True
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return "outofmemory" in text or "out of memory" in text
+
+
+def _short(exc: BaseException, limit: int = 160) -> str:
+    line = (str(exc).strip().splitlines() or [""])[0]
+    return f"{type(exc).__name__}: {line[:limit]}"
+
+
+class _BatchFeed:
+    """Hands numbered batches to alignment threads.
+
+    With ``prefetch > 0`` a CPU thread resamples and packs batches while the
+    GPU aligns earlier ones, holding at most ``prefetch`` ready batches. With 0
+    everything is prepared first, as before.
+    """
+
+    _END = object()
+
+    def __init__(self, produce, prefetch: int):
+        self._produce = produce
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._done = False
+        self._error = None
+        self._peeked = []
+        self._thread = None
+        if prefetch > 0:
+            self._queue = queue.Queue(maxsize=int(prefetch))
+            self._thread = threading.Thread(
+                target=self._run, name="word-align-prep", daemon=True)
+            self._thread.start()
+        else:
+            self._queue = queue.Queue()
+            self._run()
+
+    def _put(self, item):
+        while not self._stop.is_set():
+            try:
+                self._queue.put(item, timeout=0.1)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def _run(self):
+        try:
+            for seq, batch in enumerate(self._produce()):
+                if not self._put((seq, batch)):
+                    return
+        except BaseException as exc:  # surfaced to the consumer
+            self._error = exc
+        self._put(self._END)
+
+    def take(self):
+        """Next (seq, batch), or None when the feed is exhausted."""
+        with self._lock:
+            if self._peeked:
+                return self._peeked.pop()
+            if self._done:
+                return None
+            item = self._queue.get()
+            if item is self._END:
+                self._done = True
+                if self._error is not None:
+                    raise self._error
+                return None
+            return item
+
+    def peek(self) -> bool:
+        """Wait for the first batch; False when there is none at all."""
+        item = self.take()
+        if item is None:
+            return False
+        self._peeked.append(item)
+        return True
+
+    def close(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
 
 
 @dataclass
@@ -116,6 +209,7 @@ class WordAlignmentService:
                  model_name: Optional[str] = None, model_dir: Optional[str] = None,
                  model_cache_only: bool = False, interpolate_method: str = "nearest",
                  batch_seconds: float = 180.0, workers_per_gpu: int = 0,
+                 prefetch_batches: int = 0,
                  worker_gpus=None, worker_python: Optional[str] = None,
                  worker_script: Optional[str] = None, logger=None):
         if interpolate_method not in {"nearest", "linear", "ignore"}:
@@ -135,6 +229,9 @@ class WordAlignmentService:
         # spreads a file's batches over them.
         self.workers_per_gpu = int(workers_per_gpu)
         self.worker_gpus = list(worker_gpus) if worker_gpus else None
+        # CPU thread that prepares batches while the GPU aligns earlier ones;
+        # 0 prepares every batch before the first one is aligned.
+        self.prefetch_batches = max(0, int(prefetch_batches))
         self._worker_python = worker_python or sys.executable
         self._worker_script = worker_script or _WORKER_SCRIPT
         self.logger = logger
@@ -304,71 +401,119 @@ class WordAlignmentService:
         }
         prepared, skipped = [], []
         source_rate = int(audio.sample_rate)
-        for segment in transcripts:
-            text = str(getattr(segment, "text", "") or "").strip()
-            if not text:
-                skipped.append(str(segment.index))
-                continue
-            source = self._source_audio(segment, audio, speech_by_index)
-            if not len(source):
-                skipped.append(str(segment.index))
-                continue
-            prepared.append({
-                "index": str(segment.index),
-                "start": float(segment.start),
-                "end": float(segment.end),
-                "text": text,
-                "audio": self._resample(source, source_rate),
-            })
 
-        if not prepared:
-            raise RuntimeError("Word alignment has no non-empty transcript/audio segments")
-        self._ensure_loaded()
+        def produce():
+            """Resample segments and pack them into batches, in segment order."""
+            current, current_seconds = [], 0.0
+            for segment in transcripts:
+                text = str(getattr(segment, "text", "") or "").strip()
+                if not text:
+                    skipped.append(str(segment.index))
+                    continue
+                source = self._source_audio(segment, audio, speech_by_index)
+                if not len(source):
+                    skipped.append(str(segment.index))
+                    continue
+                item = {
+                    "index": str(segment.index),
+                    "start": float(segment.start),
+                    "end": float(segment.end),
+                    "text": text,
+                    "audio": self._resample(source, source_rate),
+                }
+                prepared.append(item)
+                seconds = len(item["audio"]) / TARGET_SAMPLE_RATE
+                if current and current_seconds + seconds > self.batch_seconds:
+                    yield current
+                    current, current_seconds = [], 0.0
+                current.append(item)
+                current_seconds += seconds
+            if current:
+                yield current
 
-        words_by_index: Dict[str, List[dict]] = {}
+        feed = _BatchFeed(produce, self.prefetch_batches)
         failed = []
-        batches, current, current_seconds = [], [], 0.0
-        for item in prepared:
-            seconds = len(item["audio"]) / TARGET_SAMPLE_RATE
-            if current and current_seconds + seconds > self.batch_seconds:
-                batches.append(current)
-                current, current_seconds = [], 0.0
-            current.append(item)
-            current_seconds += seconds
-        if current:
-            batches.append(current)
+        oom = []
+        results = {}
+        abort = threading.Event()
+        try:
+            if not feed.peek():
+                raise RuntimeError(
+                    "Word alignment has no non-empty transcript/audio segments")
+            # The model loads while the producer keeps preparing later batches.
+            self._ensure_loaded()
 
-        def align_isolated(batch):
-            words, failures = {}, []
-            try:
-                words.update(self._align_batch(batch))
-            except Exception as exc:
-                # Isolate a bad segment so one malformed transcript does not
-                # discard every other alignment in the carrier.
-                if self.logger:
-                    self.logger.warning(
-                        f"[word-align] batch failed ({type(exc).__name__}: {exc}); "
-                        "retrying segment by segment", exc_info=True)
-                for item in batch:
-                    try:
-                        words.update(self._align_batch([item]))
-                    except Exception as item_exc:
-                        error = f"{type(item_exc).__name__}: {item_exc}"
-                        failures.append({"index": item["index"], "error": error})
-                        if self.logger:
-                            self.logger.warning(
-                                f"[word-align] segment {item['index']} failed ({error})",
-                                exc_info=True)
-            return words, failures
+            def align_isolated(batch):
+                words, failures = {}, []
+                try:
+                    words.update(self._align_batch(batch))
+                except Exception as exc:
+                    if is_out_of_memory(exc):
+                        # Smaller pieces cannot free a card another process holds.
+                        if not oom:
+                            oom.append(_short(exc))
+                            if self.logger:
+                                self.logger.error(
+                                    f"[word-align] out of memory ({oom[0]}); "
+                                    "not retrying segments, stopping alignment")
+                        abort.set()
+                        return words, failures
+                    # Isolate a bad segment so one malformed transcript does not
+                    # discard every other alignment in the carrier.
+                    if self.logger:
+                        self.logger.warning(
+                            f"[word-align] batch failed ({type(exc).__name__}: {exc}); "
+                            "retrying segment by segment", exc_info=True)
+                    for item in batch:
+                        if abort.is_set():
+                            break
+                        try:
+                            words.update(self._align_batch([item]))
+                        except Exception as item_exc:
+                            if is_out_of_memory(item_exc):
+                                if not oom:
+                                    oom.append(_short(item_exc))
+                                    if self.logger:
+                                        self.logger.error(
+                                            f"[word-align] out of memory ({oom[0]}); "
+                                            "stopping alignment")
+                                abort.set()
+                                break
+                            error = f"{type(item_exc).__name__}: {item_exc}"
+                            failures.append({"index": item["index"], "error": error})
+                            if self.logger:
+                                self.logger.warning(
+                                    f"[word-align] segment {item['index']} failed ({error})",
+                                    exc_info=True)
+                return words, failures
 
-        if self._pool is not None and len(batches) > 1:
+            def consume():
+                while not abort.is_set():
+                    item = feed.take()
+                    if item is None:
+                        return
+                    seq, batch = item
+                    results[seq] = align_isolated(batch)
+
             # Threads only wait on worker pipes; the alignment runs in the workers.
-            with ThreadPoolExecutor(max_workers=len(self._pool.services),
-                                    thread_name_prefix="word-align") as executor:
-                results = list(executor.map(align_isolated, batches))
-        else:
-            results = [align_isolated(batch) for batch in batches]
-        for words, failures in results:
+            threads = len(self._pool.services) if self._pool is not None else 1
+            if threads > 1:
+                with ThreadPoolExecutor(max_workers=threads,
+                                        thread_name_prefix="word-align") as executor:
+                    for future in [executor.submit(consume) for _ in range(threads)]:
+                        future.result()
+            else:
+                consume()
+        finally:
+            feed.close()
+
+        if oom:
+            raise WordAlignmentOutOfMemory(
+                f"Word alignment ran out of GPU memory ({oom[0]}); free the card "
+                "(a resident vLLM engine is the usual cause) and rerun")
+        words_by_index: Dict[str, List[dict]] = {}
+        for seq in sorted(results):
+            words, failures = results[seq]
             words_by_index.update(words)
             failed.extend(failures)
 

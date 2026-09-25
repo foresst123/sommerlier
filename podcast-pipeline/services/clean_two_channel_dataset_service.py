@@ -11,6 +11,7 @@ import os
 import shutil
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Iterable, List, Tuple
 
 import numpy as np
@@ -40,8 +41,11 @@ def _write_json(path: str, payload: dict) -> None:
 class CleanTwoChannelDatasetService:
     """Write a separate numeric, tiered corpus when an output root is set."""
 
-    def __init__(self, logger=None):
+    def __init__(self, logger=None, workers: int = 1):
         self.logger = logger
+        # Threads that cut and write items (numpy/soundfile release the GIL);
+        # 1 is the sequential path. Item ids and output are the same at any width.
+        self.workers = max(1, int(workers))
 
     @staticmethod
     def resolve_root(value: Any) -> str:
@@ -207,6 +211,85 @@ class CleanTwoChannelDatasetService:
         if had_old:
             shutil.rmtree(backup, ignore_errors=True)
 
+    def _export_item(self, finder, candidate, item_number, *, source_id, staging,
+                     total_samples, audio_duration, sample_rate, speech_segments,
+                     separation_service):
+        """Write one item; returns (summary row, False) or (None, True) when a channel is empty."""
+        import soundfile as sf
+
+        pair = tuple(candidate.speakers)
+        lo = max(0, round(candidate.pad_start * sample_rate))
+        hi = min(total_samples, round(candidate.pad_end * sample_rate))
+        if hi <= lo:
+            return None, True
+        left, right = separation_service.export_sdlm_dual_channel(
+            speech_segments, audio_duration, sample_rate,
+            strict=True, speakers=pair,
+            time_range=(lo / sample_rate, hi / sample_rate),
+            log_stats=False)
+        sp1 = np.asarray(left, dtype=np.float32)
+        sp2 = np.asarray(right, dtype=np.float32)
+        if (not np.any(np.abs(sp1) > 1e-7)
+                or not np.any(np.abs(sp2) > 1e-7)):
+            return None, True
+
+        item_id = f"{item_number:06d}"
+        rel_dir = os.path.join(f"tier_{candidate.tier}", item_id)
+        item_dir = os.path.join(staging, rel_dir)
+        os.makedirs(item_dir, exist_ok=True)
+        sf.write(os.path.join(item_dir, "sp1_clean.wav"), sp1,
+                 sample_rate, subtype="PCM_16")
+        sf.write(os.path.join(item_dir, "sp2_clean.wav"), sp2,
+                 sample_rate, subtype="PCM_16")
+        sf.write(os.path.join(item_dir, "audio_2ch.wav"),
+                 np.column_stack((sp1, sp2)), sample_rate,
+                 subtype="PCM_16")
+
+        failures = self._failure_rows(speech_segments, candidate)
+        separated = self._separated_rows(speech_segments, candidate)
+        metadata = {
+            "schema_version": SCHEMA_VERSION,
+            "source_id": source_id,
+            "item_id": item_id,
+            "tier": candidate.tier,
+            "score": candidate.score,
+            "source_start": round(lo / sample_rate, 6),
+            "source_end": round(hi / sample_rate, 6),
+            "duration": round((hi - lo) / sample_rate, 6),
+            "orig_spans": [
+                {"start": round(a, 6), "end": round(b, 6)}
+                for a, b in finder.timeline.spans_to_original(
+                    lo / sample_rate, hi / sample_rate)
+            ],
+            "sample_rate": sample_rate,
+            "num_samples": hi - lo,
+            "speakers": {
+                "SP1": pair[0], "SP2": pair[1],
+                "left": "SP1", "right": "SP2",
+            },
+            "audio": {
+                "sp1": "sp1_clean.wav",
+                "sp2": "sp2_clean.wav",
+                "stereo": "audio_2ch.wav",
+                "method": "strict_separation_tracks",
+            },
+            "metrics": candidate.metrics,
+            "components": candidate.components,
+            "noise": candidate.noise,
+            "music_patched_share": candidate.music_patched_share,
+            "separated_spans": separated,
+            "failed_separation_spans": failures,
+            "conversation": self._conversation(finder, candidate),
+        }
+        _write_json(os.path.join(item_dir, "metadata.json"), metadata)
+        return {
+            "id": item_id, "tier": candidate.tier,
+            "score": candidate.score,
+            "folder": rel_dir,
+            "speaker_ids": {"SP1": pair[0], "SP2": pair[1]},
+            "duration": metadata["duration"],
+        }, False
+
     def export(self, *, root: str, source_path: str, transcripts: list,
                speech_segments: list, separation_service, timeline, noise,
                music_map, sample_rate: int, audio_duration: float,
@@ -232,84 +315,28 @@ class CleanTwoChannelDatasetService:
 
         items, skipped_silent = [], 0
         try:
-            import soundfile as sf
-
             total_samples = round(audio_duration * sample_rate)
-            for item_number, candidate in enumerate(candidates, start=1):
-                pair = tuple(candidate.speakers)
-                lo = max(0, round(candidate.pad_start * sample_rate))
-                hi = min(total_samples, round(candidate.pad_end * sample_rate))
-                if hi <= lo:
-                    skipped_silent += 1
-                    continue
-                left, right = separation_service.export_sdlm_dual_channel(
-                    speech_segments, audio_duration, sample_rate,
-                    strict=True, speakers=pair,
-                    time_range=(lo / sample_rate, hi / sample_rate),
-                    log_stats=False)
-                sp1 = np.asarray(left, dtype=np.float32)
-                sp2 = np.asarray(right, dtype=np.float32)
-                if (not np.any(np.abs(sp1) > 1e-7)
-                        or not np.any(np.abs(sp2) > 1e-7)):
-                    skipped_silent += 1
-                    continue
 
-                item_id = f"{item_number:06d}"
-                rel_dir = os.path.join(f"tier_{candidate.tier}", item_id)
-                item_dir = os.path.join(staging, rel_dir)
-                os.makedirs(item_dir, exist_ok=True)
-                sf.write(os.path.join(item_dir, "sp1_clean.wav"), sp1,
-                         sample_rate, subtype="PCM_16")
-                sf.write(os.path.join(item_dir, "sp2_clean.wav"), sp2,
-                         sample_rate, subtype="PCM_16")
-                sf.write(os.path.join(item_dir, "audio_2ch.wav"),
-                         np.column_stack((sp1, sp2)), sample_rate,
-                         subtype="PCM_16")
+            def export_one(numbered):
+                item_number, candidate = numbered
+                return self._export_item(
+                    finder, candidate, item_number, source_id=source_id, staging=staging,
+                    total_samples=total_samples, audio_duration=audio_duration,
+                    sample_rate=sample_rate, speech_segments=speech_segments,
+                    separation_service=separation_service)
 
-                failures = self._failure_rows(speech_segments, candidate)
-                separated = self._separated_rows(speech_segments, candidate)
-                metadata = {
-                    "schema_version": SCHEMA_VERSION,
-                    "source_id": source_id,
-                    "item_id": item_id,
-                    "tier": candidate.tier,
-                    "score": candidate.score,
-                    "source_start": round(lo / sample_rate, 6),
-                    "source_end": round(hi / sample_rate, 6),
-                    "duration": round((hi - lo) / sample_rate, 6),
-                    "orig_spans": [
-                        {"start": round(a, 6), "end": round(b, 6)}
-                        for a, b in finder.timeline.spans_to_original(
-                            lo / sample_rate, hi / sample_rate)
-                    ],
-                    "sample_rate": sample_rate,
-                    "num_samples": hi - lo,
-                    "speakers": {
-                        "SP1": pair[0], "SP2": pair[1],
-                        "left": "SP1", "right": "SP2",
-                    },
-                    "audio": {
-                        "sp1": "sp1_clean.wav",
-                        "sp2": "sp2_clean.wav",
-                        "stereo": "audio_2ch.wav",
-                        "method": "strict_separation_tracks",
-                    },
-                    "metrics": candidate.metrics,
-                    "components": candidate.components,
-                    "noise": candidate.noise,
-                    "music_patched_share": candidate.music_patched_share,
-                    "separated_spans": separated,
-                    "failed_separation_spans": failures,
-                    "conversation": self._conversation(finder, candidate),
-                }
-                _write_json(os.path.join(item_dir, "metadata.json"), metadata)
-                items.append({
-                    "id": item_id, "tier": candidate.tier,
-                    "score": candidate.score,
-                    "folder": rel_dir,
-                    "speaker_ids": {"SP1": pair[0], "SP2": pair[1]},
-                    "duration": metadata["duration"],
-                })
+            numbered = list(enumerate(candidates, start=1))
+            if self.workers > 1 and len(numbered) > 1:
+                with ThreadPoolExecutor(max_workers=self.workers,
+                                        thread_name_prefix="clean2ch") as pool:
+                    outcomes = list(pool.map(export_one, numbered))
+            else:
+                outcomes = [export_one(entry) for entry in numbered]
+            for row, silent in outcomes:
+                if silent:
+                    skipped_silent += 1
+                else:
+                    items.append(row)
 
             items.sort(key=lambda item: item["id"])
             tiers: Dict[str, int] = {}
