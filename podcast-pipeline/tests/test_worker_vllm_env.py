@@ -92,3 +92,26 @@ def test_a_forked_child_does_not_hang_while_the_parent_is_being_traced():
     out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True,
                          text=True, timeout=30).stdout
     assert "exited" in out and "hung" not in out
+
+
+def test_the_engine_process_is_spawned_not_forked_unless_someone_asks():
+    # A forked EngineCore hung in its first OpenMP torch op (InputBatch.__init__).
+    env = {k: v for k, v in os.environ.items() if k != "VLLM_WORKER_MULTIPROC_METHOD"}
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "import worker_vllm_env, os; print(os.environ.get('VLLM_WORKER_MULTIPROC_METHOD'))"],
+        cwd=ROOT, env=env, capture_output=True, text=True, check=True).stdout.strip()
+    assert out == "spawn"
+    env["VLLM_WORKER_MULTIPROC_METHOD"] = "fork"
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "import worker_vllm_env, os; print(os.environ.get('VLLM_WORKER_MULTIPROC_METHOD'))"],
+        cwd=ROOT, env=env, capture_output=True, text=True, check=True).stdout.strip()
+    assert out == "fork"
+
+
+def test_a_spawned_engine_can_reimport_every_vllm_worker_module():
+    # spawn re-imports __main__ in the child: each worker must guard its entry point.
+    for name in WORKERS:
+        source = open(os.path.join(ROOT, name), encoding="utf-8").read()
+        assert 'if __name__ == "__main__":' in source, name
