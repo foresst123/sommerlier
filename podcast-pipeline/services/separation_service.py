@@ -5,7 +5,7 @@ import os
 import threading
 import time as _time
 import traceback
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 
 # Set BSS_TIMING=1 để bật log thời gian chi tiết từng bước trong separation loop.
@@ -1626,6 +1626,25 @@ class SeparationService:
                         return
                     yield job, outcome, 0
 
+        def enrollments_for(built, spk_a, spk_b):
+            """(source A, source B, enrollment A, enrollment B) for one window.
+
+            Used by the scheduler (to assign ahead) and by the consumer, so both see
+            the same enrollment. With enrollment memory off it depends on this window
+            alone.
+            """
+            memory = getattr(self, "memory", None) or _NO_MEMORY
+            source_a = enrollments.get(spk_a, [])
+            source_b = enrollments.get(spk_b, [])
+            if not source_a:
+                source_a = self._window_probe_enrollment(
+                    built.audio, built.probes[spk_a], sr)
+            if not source_b:
+                source_b = self._window_probe_enrollment(
+                    built.audio, built.probes[spk_b], sr)
+            return (source_a, source_b,
+                    memory.extend(spk_a, source_a, sr), memory.extend(spk_b, source_b, sr))
+
         async_runtime = self._async_runtime()
 
         def scheduled_processing_iter():
@@ -1637,16 +1656,27 @@ class SeparationService:
             """
             if async_runtime is None:
                 for item in processing_iter():
-                    yield item, None, None
+                    yield item, None, None, None
                 return
 
-            gpu_executor, _post_executor, model = async_runtime
-            prefetch_per_worker = max(
-                1, int(self.performance_config.get("gpu_prefetch_per_worker", 1)))
-            prefetch_limit = max(
-                1, int(self.performance_config.get(
-                    "gpu_workers", self.performance_config.get("max_workers", 1)))
-                * prefetch_per_worker)
+            gpu_executor, post_executor, model = async_runtime
+            # Speaker assignment of a window needs only that window's own raw tracks
+            # and enrollment, so it can start the moment Sidon returns it instead of
+            # when the ordered consumer gets there. Enrollment memory is the exception:
+            # it feeds each accepted window into the next one's enrollment.
+            assign_ahead = (bool(self.performance_config.get("postprocess_ahead", True))
+                            and not getattr(getattr(self, "memory", None), "enabled", False))
+            prefetch_per_worker = int(
+                self.performance_config.get("gpu_prefetch_per_worker", 1))
+            if prefetch_per_worker <= 0:
+                # 0 = no limit: Sidon takes every window as soon as it has a free
+                # worker, whatever the stages after it are doing.
+                prefetch_limit = float("inf")
+            else:
+                prefetch_limit = max(
+                    1, int(self.performance_config.get(
+                        "gpu_workers", self.performance_config.get("max_workers", 1)))
+                    * prefetch_per_worker)
             initial = iter(expanded_window_iter())
             scheduled = collections.deque()
             initial_done = False
@@ -1666,6 +1696,39 @@ class SeparationService:
                         self.stats["t_gpu_run"] += ended - started
                         self.stats["t_gpu_calls"] += 1
 
+            def assign_when_raw_is_done(raw_future, built, spk_a, spk_b):
+                """Run this window's speaker assignment as soon as Sidon has finished it.
+
+                Returns a future for postprocess_separated's result. Nothing blocks
+                here: the assignment is queued from the GPU thread's completion
+                callback, so the pool threads only ever wait on assignment work.
+                """
+                assigned = Future()
+                _sa, _sb, enroll_a, enroll_b = enrollments_for(built, spk_a, spk_b)
+
+                def start(_done):
+                    try:
+                        raw = raw_future.result()
+                        inner = post_executor.submit(
+                            model.postprocess_separated, built.audio, raw,
+                            enroll_A=enroll_a, enroll_B=enroll_b, sample_rate=sr,
+                            id_A=spk_a, id_B=spk_b,
+                            probe_A=built.probes[spk_a], probe_B=built.probes[spk_b],
+                            core_range=built.core)
+                    except BaseException as exc:
+                        assigned.set_exception(exc)
+                        return
+
+                    def relay(finished):
+                        try:
+                            assigned.set_result(finished.result())
+                        except BaseException as exc:
+                            assigned.set_exception(exc)
+                    inner.add_done_callback(relay)
+
+                raw_future.add_done_callback(start)
+                return assigned
+
             def schedule(item):
                 nonlocal next_sequence
                 job, outcome, attempt = item
@@ -1673,12 +1736,15 @@ class SeparationService:
                 sequence_id = next_sequence
                 next_sequence += 1
                 future = None
+                assigned = None
                 if built is not None:
                     # The future owns only immutable window audio. All mutable
                     # state stays in this file's ordered consumer.
                     future = gpu_executor.submit(
                         timed_raw, built.audio, sr, _time.perf_counter())
-                return item, future, sequence_id
+                    if assign_ahead:
+                        assigned = assign_when_raw_is_done(future, built, job[0], job[1])
+                return item, future, sequence_id, assigned
 
             while True:
                 if pending_retries:
@@ -1705,7 +1771,7 @@ class SeparationService:
         try:
             for ((spk_a, spk_b, plist, targets), (
                 built, reason, detail, planner_actions
-            ), attempt), raw_future, sequence_id in scheduled_processing_iter():
+            ), attempt), raw_future, sequence_id, assigned in scheduled_processing_iter():
                 pbar.update(1)
                 _t_job = _time.perf_counter()
                 uncovered = []
@@ -1799,18 +1865,8 @@ class SeparationService:
                 # Nếu bật bộ nhớ, bổ sung mẫu từ các kết quả tốt trước đó trong cùng file.
                 # Mẫu sạch khai thác ban đầu luôn ở đầu danh sách và không bị thay thế.
                 memory = getattr(self, "memory", None) or _NO_MEMORY
-                source_enroll_a = enrollments.get(spk_a, [])
-                source_enroll_b = enrollments.get(spk_b, [])
-                if not source_enroll_a:
-                    source_enroll_a = self._window_probe_enrollment(
-                        window_audio, probe_a_s, sr
-                    )
-                if not source_enroll_b:
-                    source_enroll_b = self._window_probe_enrollment(
-                        window_audio, probe_b_s, sr
-                    )
-                enroll_a = memory.extend(spk_a, source_enroll_a, sr)
-                enroll_b = memory.extend(spk_b, source_enroll_b, sr)
+                source_enroll_a, source_enroll_b, enroll_a, enroll_b = enrollments_for(
+                    built, spk_a, spk_b)
                 layout["enrollment_source"] = {
                     str(spk_a): (
                         "global" if enrollments.get(spk_a) else
@@ -1848,7 +1904,7 @@ class SeparationService:
                         raw_tracks = raw_future.result()
                         _t_raw_done = _time.perf_counter()
                         self.stats["t_raw_wait"] += _t_raw_done - _t_raw
-                        post_future = async_runtime[1].submit(
+                        post_future = assigned or async_runtime[1].submit(
                             async_runtime[2].postprocess_separated,
                             window_audio, raw_tracks,
                             enroll_A=enroll_a, enroll_B=enroll_b,

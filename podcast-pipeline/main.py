@@ -669,7 +669,9 @@ def main():
         _assign_script = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "assignment_worker.py")
         _assign_workers = [AssignmentWorkerService(
-            _sys.executable, _assign_script, device_id=g, threads=2, logger=logger)
+            _sys.executable, _assign_script, device_id=g,
+            threads=int(perf_cfg["stages"]["separation"]["assignment_worker_threads"]),
+            logger=logger)
             for _ in range(_assign_per_gpu) for g in _assign_gpus]
         if _assign_workers:
             assignment_service = (WorkerPoolService(_assign_workers, name="Assignment")

@@ -78,10 +78,21 @@ _STAGES = {
         # GPUs). Sidon runs one small diffusion job at a time, so a card often
         # waits on kernel launches; a second process can use those gaps.
         "workers_per_gpu": (INT, 1, 1, 4),
-        "gpu_prefetch_per_worker": (INT, 1, 1, 8),
+        # How many windows each Sidon worker may run ahead of the ordered consumer.
+        # workers x this is the whole lookahead: once that many windows are finished
+        # and waiting, Sidon stops until the consumer takes one. Each waiting window
+        # holds a few MB (its audio and the two raw tracks), so a deep lookahead is
+        # cheap and keeps the GPUs busy while speaker assignment catches up.
+        # 0 removes the limit: Sidon runs through every window of the file.
+        "gpu_prefetch_per_worker": (INT, 1, 0, 64),
         "postprocess_workers": (INT, 1, 1, 16),
         "postprocess_device": (STR, "cpu", None, None),
         "ordered_postprocess": (BOOL, True, None, None),
+        # Start a window's speaker assignment as soon as Sidon returns it rather than
+        # when the ordered consumer reaches it. Without it a file assigns one window
+        # at a time and the Sidon workers wait behind that. Ignored (off) while
+        # enrollment memory is on, which makes each window depend on the previous one.
+        "postprocess_ahead": (BOOL, True, None, None),
         # Speaker assignment (WeSpeaker on the CPU) runs after every Sidon
         # window, in order, and can be slower than the Sidon workers -- which then
         # sit idle. assignment_threads is the ONNX Runtime thread count for it
@@ -89,6 +100,9 @@ _STAGES = {
         # probe embeddings of a window at the same time.
         "assignment_threads": (INT, 0, 0, 64),
         "assignment_parallel": (INT, 1, 1, 4),
+        # CPU threads inside each assignment worker process (ONNX Runtime and the
+        # BLAS libraries). Each worker handles one probe at a time.
+        "assignment_worker_threads": (INT, 2, 1, 32),
         # Worker processes per GPU running Silero VAD + WeSpeaker for speaker
         # assignment (assignment_worker.py). 0 keeps both models in the main
         # process; with workers, assignment_parallel is how many probes of one

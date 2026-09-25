@@ -171,3 +171,167 @@ def test_the_profile_includes_the_assignment_and_sidon_counters_of_the_model():
     profile = svc.profile_snapshot()
     assert profile["probe_vad"] == 3.0 and profile["wespeaker_calls"] == 8.0
     assert profile["sidon_infer"] == 6.0
+
+
+# --- speaker assignment of later windows runs while the consumer handles earlier ones ---
+
+def _many_overlaps(count=6):
+    """One long speaker with `count` short interjections, each its own overlap."""
+    segments = [Segment(index="00000", start=0.0, end=count * 10.0 + 10.0,
+                        speaker="SPEAKER_00")]
+    for i in range(count):
+        start = 10.0 * (i + 1)
+        segments.append(Segment(index=f"{i + 1:05d}", start=start, end=start + 0.6,
+                                speaker="SPEAKER_01"))
+    return segments
+
+
+class _ConcurrencyModel(_AsyncModel):
+    """Counts how many windows are in speaker assignment at the same moment."""
+
+    def __init__(self):
+        super().__init__()
+        import threading
+        self.lock = threading.Lock()
+        self.active = 0
+        self.peak = 0
+        self.order = []
+
+    def postprocess_separated(self, mixture_audio, raw_tracks, enroll_A, enroll_B,
+                              sample_rate, id_A, id_B, probe_A=None, probe_B=None,
+                              core_range=None):
+        import time
+        with self.lock:
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            self.order.append(len(mixture_audio))
+        try:
+            time.sleep(0.15)          # the assignment step: mostly waiting on workers
+            return super().postprocess_separated(
+                mixture_audio, raw_tracks, enroll_A, enroll_B, sample_rate, id_A, id_B,
+                probe_A, probe_B, core_range)
+        finally:
+            with self.lock:
+                self.active -= 1
+
+
+def _run(model, **config):
+    svc = SeparationService(
+        model, logger=None,
+        performance_config={"enabled": True, "gpu_workers": 3, "postprocess_workers": 4,
+                            "gpu_prefetch_per_worker": 2, "ordered_postprocess": True,
+                            **config})
+    try:
+        out = svc.process_overlaps(_many_overlaps(), _audio(80.0), overlap_threshold=0.1)
+    finally:
+        svc.close_async_pools()
+    return svc, out
+
+
+def test_assignment_of_later_windows_starts_before_the_consumer_reaches_them():
+    """The consumer used to submit each window's assignment and wait for it before
+    touching the next, so one file never had two windows in assignment at once and
+    the GPU workers sat idle behind it."""
+    model = _ConcurrencyModel()
+    _svc, out = _run(model)
+
+    assert len(model.order) >= 4
+    assert model.peak >= 3, f"windows were assigned one at a time (peak {model.peak})"
+
+
+def test_assigning_ahead_changes_nothing_in_the_result():
+    ahead_model, plain_model = _ConcurrencyModel(), _ConcurrencyModel()
+    _ahead_svc, ahead = _run(ahead_model)
+    _plain_svc, plain = _run(plain_model, postprocess_ahead=False)
+
+    assert plain_model.peak == 1                    # the old behaviour, still selectable
+    assert [(s.index, s.bss_spans) for s in ahead] == [
+        (s.index, s.bss_spans) for s in plain]
+    for a, b in zip(ahead, plain):
+        assert np.array_equal(a.audio, b.audio)
+
+
+def test_windows_whose_enrollment_depends_on_earlier_ones_are_still_assigned_in_order():
+    """Enrollment memory feeds each window's accepted output into the next window's
+    enrollment, so nothing may be assigned ahead when it is on."""
+    from utils.enrollment_memory import EnrollmentMemory
+    model = _ConcurrencyModel()
+    svc = SeparationService(
+        model, logger=None,
+        performance_config={"enabled": True, "gpu_workers": 3, "postprocess_workers": 4,
+                            "gpu_prefetch_per_worker": 2, "ordered_postprocess": True})
+    svc.memory = EnrollmentMemory(enabled=True)
+    try:
+        svc.process_overlaps(_many_overlaps(), _audio(80.0), overlap_threshold=0.1)
+    finally:
+        svc.close_async_pools()
+    assert model.peak == 1
+
+
+def test_a_failing_assignment_still_fails_only_its_own_window():
+    class Flaky(_ConcurrencyModel):
+        calls = 0
+
+        def postprocess_separated(self, *args, **kwargs):
+            Flaky.calls += 1
+            if Flaky.calls == 2:
+                raise RuntimeError("worker died")
+            return super().postprocess_separated(*args, **kwargs)
+
+    Flaky.calls = 0
+    svc, out = _run(Flaky())
+    assert len(out) == len(_many_overlaps())        # nothing lost, nothing raised
+
+
+# --- Sidon keeps going while what follows it is behind -----------------------------------
+
+class _StalledDownstream(_AsyncModel):
+    """Sidon returns at once; speaker assignment of the first window does not."""
+
+    def __init__(self):
+        super().__init__()
+        import threading
+        self.raw_done = 0
+        self.lock = threading.Lock()
+        self.release = threading.Event()
+
+    def separate_raw(self, audio, sample_rate):
+        with self.lock:
+            self.raw_done += 1
+        return super().separate_raw(audio, sample_rate)
+
+    def postprocess_separated(self, *args, **kwargs):
+        self.release.wait(10)
+        return super().postprocess_separated(*args, **kwargs)
+
+
+def _sidon_runs_ahead(prefetch_per_worker):
+    import threading
+    import time
+    model = _StalledDownstream()
+    svc = SeparationService(
+        model, logger=None,
+        performance_config={"enabled": True, "gpu_workers": 1, "postprocess_workers": 1,
+                            "gpu_prefetch_per_worker": prefetch_per_worker,
+                            "ordered_postprocess": True})
+    worker = threading.Thread(target=lambda: svc.process_overlaps(
+        _many_overlaps(8), _audio(120.0), overlap_threshold=0.1))
+    worker.start()
+    time.sleep(1.0)                 # everything Sidon can do while downstream is stuck
+    ahead = model.raw_done
+    model.release.set()
+    worker.join(30)
+    svc.close_async_pools()
+    return ahead
+
+
+def test_sidon_is_only_held_back_by_the_configured_lookahead():
+    assert _sidon_runs_ahead(2) == 2
+
+
+def test_with_a_deep_lookahead_sidon_finishes_every_window_while_downstream_is_stuck():
+    assert _sidon_runs_ahead(64) == 8
+
+
+def test_a_lookahead_of_zero_means_no_limit_at_all():
+    assert _sidon_runs_ahead(0) == 8

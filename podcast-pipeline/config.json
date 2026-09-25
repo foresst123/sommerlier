@@ -424,10 +424,11 @@
           "separation": {
             "max_workers": 2,
             "workers_per_gpu": 3,
-            "gpu_prefetch_per_worker": 2,
-            "postprocess_workers": 2,
+            "gpu_prefetch_per_worker": 0,
+            "postprocess_workers": 8,
             "postprocess_device": "cpu",
-            "assignment_threads": 12,
+            "assignment_threads": 24,
+            "assignment_worker_threads": 4,
             "assignment_parallel": 4,
             "assignment_workers_per_gpu": 2,
             "ordered_postprocess": true
@@ -639,10 +640,11 @@
           "separation": {
             "max_workers": 2,
             "workers_per_gpu": 3,
-            "gpu_prefetch_per_worker": 2,
-            "postprocess_workers": 2,
+            "gpu_prefetch_per_worker": 0,
+            "postprocess_workers": 8,
             "postprocess_device": "cpu",
-            "assignment_threads": 12,
+            "assignment_threads": 24,
+            "assignment_worker_threads": 4,
             "assignment_parallel": 4,
             "assignment_workers_per_gpu": 2,
             "ordered_postprocess": true

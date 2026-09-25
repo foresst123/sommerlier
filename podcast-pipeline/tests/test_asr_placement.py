@@ -72,3 +72,43 @@ def test_pho_workers_start_on_its_own_gpu_and_alternate_across_the_cards():
 def test_pho_workers_use_only_the_cards_that_exist():
     assert pc.pho_worker_devices(1, [1], 2) == [1, 1]
     assert pc.pho_worker_devices(5, [0, 1], 2) == [0, 1]     # placement not available
+
+
+def test_assigning_windows_ahead_is_on_unless_switched_off():
+    sep = pc.resolve({"performance": {"enabled": True, "stages": {}}})["stages"]["separation"]
+    assert sep["postprocess_ahead"] is True
+    off = pc.resolve({"performance": {"enabled": True, "stages": {
+        "separation": {"postprocess_ahead": False}}}})["stages"]["separation"]
+    assert off["postprocess_ahead"] is False
+
+
+def test_sidon_lookahead_can_be_deep_enough_to_never_wait_on_what_follows():
+    sep = pc.resolve({"performance": {"enabled": True, "stages": {
+        "separation": {"gpu_prefetch_per_worker": 16}}}})["stages"]["separation"]
+    assert sep["gpu_prefetch_per_worker"] == 16
+
+
+def test_zero_lookahead_is_accepted_as_unlimited():
+    sep = pc.resolve({"performance": {"enabled": True, "stages": {
+        "separation": {"gpu_prefetch_per_worker": 0}}}})
+    assert sep["stages"]["separation"]["gpu_prefetch_per_worker"] == 0
+    assert not any("gpu_prefetch_per_worker" in p for p in sep["_problems"])
+
+
+def test_assignment_worker_threads_default_to_two_and_are_configurable():
+    sep = pc.resolve({"performance": {"enabled": True, "stages": {}}})["stages"]["separation"]
+    assert sep["assignment_worker_threads"] == 2
+    more = pc.resolve({"performance": {"enabled": True, "stages": {
+        "separation": {"assignment_worker_threads": 4, "postprocess_workers": 8}}}})
+    assert more["stages"]["separation"]["assignment_worker_threads"] == 4
+    assert more["stages"]["separation"]["postprocess_workers"] == 8
+
+
+def test_the_a100_profile_gives_assignment_twice_the_threads_and_eight_post_workers():
+    import json
+    cfg = json.load(open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "config.json"), encoding="utf-8"))
+    for env in ("a100", "a100_hf"):
+        sep = cfg["environments"][env]["performance"]["stages"]["separation"]
+        assert sep["assignment_threads"] == 24 and sep["assignment_worker_threads"] == 4
+        assert sep["postprocess_workers"] == 8
