@@ -50,12 +50,75 @@ process, sai ngay khi pairs/group đi qua pickle (id() đổi, build() tưởng 
 cặp của chính mình là cặp lạ, tự chặn mọi job). Module này không hoạt động
 đúng nếu bản vá đó bị revert.
 """
+import os
 import pickle
+import threading
 import traceback
 from concurrent.futures import ProcessPoolExecutor, wait
 from multiprocessing import shared_memory
 
 import numpy as np
+
+
+# Rough bytes a window holds while in flight: its audio, the two raw Sidon
+# tracks, and the two assigned tracks of the result waiting for the consumer.
+ADMISSION_COST_FACTOR = 5.0
+# Share of the soft RAM limit the separation lookahead may use when the budget
+# is derived (admission_bytes = 0).
+ADMISSION_RAM_SHARE = 0.25
+
+
+def window_cost_bytes(built) -> int:
+    """Estimated in-flight bytes of one built window (0 when it failed to build)."""
+    audio = getattr(built, "audio", None)
+    nbytes = getattr(audio, "nbytes", None)
+    if nbytes is None:
+        return 0
+    return int(nbytes * ADMISSION_COST_FACTOR)
+
+
+def total_ram_bytes() -> int:
+    """Physical RAM, or 0 when it cannot be read."""
+    try:
+        return int(os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE"))
+    except (AttributeError, ValueError, OSError):
+        return 0
+
+
+def resolve_admission_bytes(configured, ram_soft_fraction=0.75) -> int:
+    """Byte budget for windows in flight. <0 = off (0 returned), 0 = derive from
+    ram_soft_fraction x physical RAM x ADMISSION_RAM_SHARE, >0 = as given."""
+    configured = int(configured)
+    if configured < 0:
+        return 0
+    if configured > 0:
+        return configured
+    return int(total_ram_bytes() * float(ram_soft_fraction) * ADMISSION_RAM_SHARE)
+
+
+class ByteBudget:
+    """Admission ledger, not a blocker: fits() says whether one more item may be
+    taken now, charge()/release() move the bytes. limit <= 0 means unlimited.
+    An item is always allowed when nothing is in flight, so one oversized
+    window cannot stall the stream."""
+
+    def __init__(self, limit=0):
+        self.limit = max(0, int(limit))
+        self.in_flight = 0
+        self._lock = threading.Lock()
+
+    def fits(self, cost) -> bool:
+        with self._lock:
+            return (self.limit == 0 or self.in_flight == 0
+                    or self.in_flight + cost <= self.limit)
+
+    def charge(self, cost):
+        with self._lock:
+            self.in_flight += int(cost)
+
+    def release(self, cost):
+        with self._lock:
+            self.in_flight = max(0, self.in_flight - int(cost))
 
 
 def _load_cpu_vad():

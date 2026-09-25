@@ -65,6 +65,30 @@ def thread_plan(n_workers: int = 3, reserve_for_main: bool = True) -> dict:
     }
 
 
+def separation_thread_budget(cores: int, sidon_workers: int, assignment_workers: int,
+                             assignment_worker_threads: int) -> dict:
+    """Split the cores of the separation stage between its CPU consumers.
+
+    Sidon workers mostly wait on the GPU and each need about one core to feed
+    it; the main process needs one. Assignment (WeSpeaker/ONNX) takes at most
+    60% of what is left, shrinking its per-worker threads to fit, and the
+    window-build pool gets the rest (never below a quarter of what is left, so
+    building cannot starve). A heuristic split, not measured; it only changes
+    thread counts, never results.
+    """
+    cores = max(1, int(cores))
+    left = max(1, cores - 1 - max(0, int(sidon_workers)))
+    workers = max(0, int(assignment_workers))
+    per_worker = max(1, int(assignment_worker_threads))
+    if workers:
+        per_worker = max(1, min(per_worker, int(left * 0.6) // workers))
+    assignment_total = workers * per_worker
+    pool = max(1, left // 4, left - assignment_total)
+    return {"cores": cores, "window_pool_workers": pool,
+            "assignment_worker_threads": per_worker,
+            "assignment_total_threads": assignment_total}
+
+
 def apply_to_env(env: dict, per_process: int) -> dict:
     """Write the thread limits into `env`, leaving anything already set alone."""
     for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",

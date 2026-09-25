@@ -12,7 +12,7 @@ from dataclasses import dataclass
 # Tắt mặc định vì mỗi job log thêm ~4 dòng, với 55 job sẽ rất dài.
 _BSS_TIMING = os.environ.get("BSS_TIMING", "0") == "1"
 import numpy as np
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from schemas.audio import AudioData
 from schemas.segment import Segment, SpeechSegment
 from algorithms.diarization.overlap import detect_overlapping_segments
@@ -20,7 +20,8 @@ from utils.audio_normalize import safe_limit
 from utils.separation_window import POLICY_VERSION, WindowPlanner, clean_segments, merge_ranges, subtract
 from utils.window_pool import WindowBuildPool
 from utils.separation_quality import track_quality, base_view, continuity_evidence
-from utils.cpu_plan import usable_cores
+from utils.cpu_plan import separation_thread_budget, usable_cores
+from utils.window_pool import ByteBudget, window_cost_bytes, resolve_admission_bytes
 from utils.music_map import MusicMap
 from utils.enrollment_memory import EnrollmentMemory, ENABLED as BSS_MEMORY
 
@@ -1276,6 +1277,143 @@ class SeparationService:
             e.audio = audio.waveform[round(e.start * sr):round(e.end * sr)].copy()
         return speech
 
+    def _budgeted_pool_size(self, pool_size: int) -> int:
+        """With performance.cpu_budget on, cap the window pool so it shares the
+        cores with Sidon and assignment (utils/cpu_plan.separation_thread_budget).
+        An explicit BSS_WINDOW_WORKERS or a disabled pool (0) is left alone."""
+        cfg = self.performance_config
+        if (not cfg.get("cpu_budget", False) or pool_size <= 0
+                or _BSS_WINDOW_WORKERS_ENV is not None):
+            return pool_size
+        gpus = max(1, int(cfg.get("max_workers", 1)))
+        budget = separation_thread_budget(
+            usable_cores(), int(cfg.get("gpu_workers", gpus)),
+            int(cfg.get("assignment_workers_per_gpu", 0)) * gpus,
+            int(cfg.get("assignment_worker_threads", 2)))
+        return min(pool_size, budget["window_pool_workers"])
+
+    def _window_job_stream(self, segments, pairs, waveform, sr, buildable):
+        """Yield the flattened (subjob, outcome) sequence of one file, building each
+        window when it is pulled. The pool build runs a bounded number of jobs ahead
+        (window_pool max_pending); this file's shared memory closes when the stream
+        is exhausted or closed, so a consumer that stops early must close() it."""
+        # Dựng cửa sổ song song khi file này đủ job bù chi phí dùng pool; job
+        # build (CPU) không phụ thuộc lượt tách (GPU) trước nó nên chồng lấp
+        # được -- xem utils/window_pool.py. Pool bản thân SỐNG SUỐT CẢ BATCH
+        # (self._window_pool, tạo lười ở đây lần đầu, đóng bởi
+        # close_window_pool() ở cuối stage 'separation' của cả batch) -- chỉ
+        # phần shared memory của RIÊNG FILE NÀY (FileWindows) mở/đóng ở đây.
+        # Lý do tách hai tầng: pool tạo lại mỗi file từng trả chi phí spawn
+        # (~22.87s đo được trên Kaggle thật, 8 worker/4 core) N lần cho N file
+        # trong một batch, thay vì trả một lần.
+        #
+        # Lỗi lúc mở file trên pool (môi trường không cho fork/spawn, hết RAM
+        # cho shared_memory, ...) thì rơi về tuần tự cho file này thay vì làm
+        # hỏng cả lượt chạy.
+        #
+        # use_vad=False: nhiều worker mới spawn cùng lúc tự tải Silero VAD gây
+        # crash tầng native thật (libc++abi recursive_mutex, không phải
+        # exception Python bắt được) khi cache torch.hub còn rỗng -- xem
+        # window_pool.py. Cửa sổ dựng song song dùng energy-based cut thay vì
+        # Silero, kém chính xác hơn một chút so với nhánh tuần tự (vốn dùng
+        # Silero GPU của chính bss_model); đổi lấy không crash cả lượt chạy.
+        file_windows = None
+        if buildable and _worth_pooling(len(buildable)):
+            pool_size = self._budgeted_pool_size(_resolve_pool_size())
+            if pool_size > 0:
+                try:
+                    state = self._window_pool_state
+                    with state["lock"]:
+                        if state["pool"] is None:
+                            state["pool"] = WindowBuildPool(
+                                n_workers=pool_size,
+                                max_pending=min(BSS_WINDOW_MAX_PENDING,
+                                                max(1, pool_size * 2)))
+                            if self.logger:
+                                self.logger.info(
+                                    f"[TSE] window pool started with {pool_size} worker "
+                                    "process(es) (persists for the rest of this batch)")
+                        self._window_pool = state["pool"]
+                    file_windows = self._window_pool.open_file(
+                        segments, pairs, waveform, sr, music_map=self.music_map,
+                        seams=self.seams(), context_seconds=BSS_STITCH_EDGE_PAD,
+                        max_context_seconds=BSS_STITCH_EDGE_MAX,
+                        padding_min_seconds=BSS_PADDING_MIN_PER_SPEAKER,
+                        search_seconds=BSS_STITCH_SEARCH, use_vad=False)
+                    if self.logger:
+                        self.logger.info("[TSE] building windows for this file in parallel")
+                except Exception as e:
+                    if self.logger:
+                        self.logger.warning(
+                            f"[TSE] window pool failed for this file ({type(e).__name__}: {e}); "
+                            "falling back to sequential build")
+                    file_windows = None
+
+        if file_windows is not None:
+            window_iter = file_windows.build_all([plist for _a, _b, plist, _t in buildable])
+        else:
+            planner = WindowPlanner(
+                segments, pairs, waveform, sr, music_map=self.music_map,
+                seams=self.seams(), vad=getattr(self.bss_model, "_vad", None),
+                context_seconds=BSS_STITCH_EDGE_PAD,
+                max_context_seconds=BSS_STITCH_EDGE_MAX,
+                padding_min_seconds=BSS_PADDING_MIN_PER_SPEAKER,
+                search_seconds=BSS_STITCH_SEARCH)
+
+            def window_iter():
+                for _a, _b, plist, _t in buildable:
+                    try:
+                        r = planner.build_many(plist)
+                        yield r, planner.reason, planner.detail, list(planner.actions)
+                    except Exception as exc:
+                        actions = list(getattr(planner, "actions", []))
+                        actions.append({
+                            "step": len(actions) + 1,
+                            "action": "window_builder_exception",
+                            "detail": f"{type(exc).__name__}: {exc}",
+                            "traceback": traceback.format_exc(),
+                        })
+                        yield None, "window_error", actions[-1]["detail"], actions
+            window_iter = window_iter()
+
+        def expanded_window_iter():
+            """Flatten one group into non-overlapping per-core model jobs."""
+            for job, outcome in zip(buildable, window_iter):
+                spk_a, spk_b, plist, targets = job
+                plans, reason, detail, actions = outcome
+                if plans is None:
+                    yield job, (None, reason, detail, actions)
+                    continue
+
+                emitted = False
+                for plan in plans:
+                    core_lo, core_hi = plan.core_source_samples
+                    if core_hi <= core_lo:
+                        clipped_targets = list(targets)
+                    else:
+                        lo_seconds, hi_seconds = core_lo / sr, core_hi / sr
+                        clipped_targets = [
+                            (sd, max(lo, lo_seconds), min(hi, hi_seconds))
+                            for sd, lo, hi in targets
+                            if min(hi, hi_seconds) > max(lo, lo_seconds)
+                        ]
+                    if not clipped_targets:
+                        continue
+                    emitted = True
+                    subjob = (spk_a, spk_b, plist, clipped_targets)
+                    yield subjob, (
+                        plan.window, plan.reason, plan.detail, plan.actions
+                    )
+
+                if not emitted:
+                    yield job, (None, reason, detail or "no_core_targets", actions)
+
+        try:
+            yield from expanded_window_iter()
+        finally:
+            if file_windows is not None:
+                file_windows.close()
+
     def _build_overlap_plan(self, segments: List[Segment], audio: AudioData,
                             overlap_threshold: float = 0.1) -> "_OverlapPlan":
         """Every CPU-only step of process_overlaps: detect pairs, mine
@@ -1371,129 +1509,18 @@ class SeparationService:
                 "(missing enrollment uses best-effort/complement assignment)"
             )
 
-        # Dựng cửa sổ song song khi file này đủ job bù chi phí dùng pool; job
-        # build (CPU) không phụ thuộc lượt tách (GPU) trước nó nên chồng lấp
-        # được -- xem utils/window_pool.py. Pool bản thân SỐNG SUỐT CẢ BATCH
-        # (self._window_pool, tạo lười ở đây lần đầu, đóng bởi
-        # close_window_pool() ở cuối stage 'separation' của cả batch) -- chỉ
-        # phần shared memory của RIÊNG FILE NÀY (FileWindows) mở/đóng ở đây.
-        # Lý do tách hai tầng: pool tạo lại mỗi file từng trả chi phí spawn
-        # (~22.87s đo được trên Kaggle thật, 8 worker/4 core) N lần cho N file
-        # trong một batch, thay vì trả một lần.
-        #
-        # Lỗi lúc mở file trên pool (môi trường không cho fork/spawn, hết RAM
-        # cho shared_memory, ...) thì rơi về tuần tự cho file này thay vì làm
-        # hỏng cả lượt chạy.
-        #
-        # use_vad=False: nhiều worker mới spawn cùng lúc tự tải Silero VAD gây
-        # crash tầng native thật (libc++abi recursive_mutex, không phải
-        # exception Python bắt được) khi cache torch.hub còn rỗng -- xem
-        # window_pool.py. Cửa sổ dựng song song dùng energy-based cut thay vì
-        # Silero, kém chính xác hơn một chút so với nhánh tuần tự (vốn dùng
-        # Silero GPU của chính bss_model); đổi lấy không crash cả lượt chạy.
-        file_windows = None
-        if buildable and _worth_pooling(len(buildable)):
-            pool_size = _resolve_pool_size()
-            if pool_size > 0:
-                try:
-                    state = self._window_pool_state
-                    with state["lock"]:
-                        if state["pool"] is None:
-                            state["pool"] = WindowBuildPool(
-                                n_workers=pool_size,
-                                max_pending=min(BSS_WINDOW_MAX_PENDING,
-                                                max(1, pool_size * 2)))
-                            if self.logger:
-                                self.logger.info(
-                                    f"[TSE] window pool started with {pool_size} worker "
-                                    "process(es) (persists for the rest of this batch)")
-                        self._window_pool = state["pool"]
-                    file_windows = self._window_pool.open_file(
-                        segments, pairs, waveform, sr, music_map=self.music_map,
-                        seams=self.seams(), context_seconds=BSS_STITCH_EDGE_PAD,
-                        max_context_seconds=BSS_STITCH_EDGE_MAX,
-                        padding_min_seconds=BSS_PADDING_MIN_PER_SPEAKER,
-                        search_seconds=BSS_STITCH_SEARCH, use_vad=False)
-                    if self.logger:
-                        self.logger.info("[TSE] building windows for this file in parallel")
-                except Exception as e:
-                    if self.logger:
-                        self.logger.warning(
-                            f"[TSE] window pool failed for this file ({type(e).__name__}: {e}); "
-                            "falling back to sequential build")
-                    file_windows = None
-
-        if file_windows is not None:
-            window_iter = file_windows.build_all([plist for _a, _b, plist, _t in buildable])
-        else:
-            planner = WindowPlanner(
-                segments, pairs, waveform, sr, music_map=self.music_map,
-                seams=self.seams(), vad=getattr(self.bss_model, "_vad", None),
-                context_seconds=BSS_STITCH_EDGE_PAD,
-                max_context_seconds=BSS_STITCH_EDGE_MAX,
-                padding_min_seconds=BSS_PADDING_MIN_PER_SPEAKER,
-                search_seconds=BSS_STITCH_SEARCH)
-
-            def window_iter():
-                for _a, _b, plist, _t in buildable:
-                    try:
-                        r = planner.build_many(plist)
-                        yield r, planner.reason, planner.detail, list(planner.actions)
-                    except Exception as exc:
-                        actions = list(getattr(planner, "actions", []))
-                        actions.append({
-                            "step": len(actions) + 1,
-                            "action": "window_builder_exception",
-                            "detail": f"{type(exc).__name__}: {exc}",
-                            "traceback": traceback.format_exc(),
-                        })
-                        yield None, "window_error", actions[-1]["detail"], actions
-            window_iter = window_iter()
-
-        def expanded_window_iter():
-            """Flatten one group into non-overlapping per-core model jobs."""
-            for job, outcome in zip(buildable, window_iter):
-                spk_a, spk_b, plist, targets = job
-                plans, reason, detail, actions = outcome
-                if plans is None:
-                    yield job, (None, reason, detail, actions)
-                    continue
-
-                emitted = False
-                for plan in plans:
-                    core_lo, core_hi = plan.core_source_samples
-                    if core_hi <= core_lo:
-                        clipped_targets = list(targets)
-                    else:
-                        lo_seconds, hi_seconds = core_lo / sr, core_hi / sr
-                        clipped_targets = [
-                            (sd, max(lo, lo_seconds), min(hi, hi_seconds))
-                            for sd, lo, hi in targets
-                            if min(hi, hi_seconds) > max(lo, lo_seconds)
-                        ]
-                    if not clipped_targets:
-                        continue
-                    emitted = True
-                    subjob = (spk_a, spk_b, plist, clipped_targets)
-                    yield subjob, (
-                        plan.window, plan.reason, plan.detail, plan.actions
-                    )
-
-                if not emitted:
-                    yield job, (None, reason, detail or "no_core_targets", actions)
-
-        # Drained eagerly: by the time this list exists, every pool job for
-        # this file has finished, so file_windows' shared memory can close
-        # now instead of waiting for the (separate) GPU consumption loop in
-        # process_overlaps.
-        jobs = list(expanded_window_iter())
-        if file_windows is not None:
-            file_windows.close()
+        # Eager (default): drained now, so file_windows' shared memory closes here.
+        # Lazy: the plan keeps only the factory and windows are built as the
+        # separation loop pulls them, so RAM does not grow with the window count.
+        lazy = bool(self.performance_config.get("lazy_windows", False))
+        stream = lambda: self._window_job_stream(segments, pairs, waveform, sr, buildable)
+        jobs = [] if lazy else list(stream())
 
         return _OverlapPlan(
             speech=speech, pairs=pairs, enrollments=enrollments, seg_by_index=seg_by_index,
             jobs=jobs, stats_jobs=stats_jobs, stats_pairs=stats_pairs,
-            overlap_durations=overlap_durations)
+            overlap_durations=overlap_durations,
+            job_factory=stream if lazy else None)
 
     def process_overlaps(self, segments: List[Segment], audio: AudioData,
                          overlap_threshold: float = 0.1,
@@ -1546,8 +1573,14 @@ class SeparationService:
             padding_min_seconds=BSS_PADDING_MIN_PER_SPEAKER,
             search_seconds=BSS_STITCH_SEARCH)
 
+        opened_streams = []
+
         def expanded_window_iter():
-            return iter(plan.jobs)
+            if plan.job_factory is None:
+                return iter(plan.jobs)
+            stream = plan.job_factory()
+            opened_streams.append(stream)
+            return stream
 
         pending_retries = collections.deque()
         previous_outputs = {}
@@ -1681,6 +1714,14 @@ class SeparationService:
             scheduled = collections.deque()
             initial_done = False
             next_sequence = 0
+            # Byte admission: the window count above stays as configured (0 = no
+            # limit); this only stops taking new windows while the audio, raw
+            # tracks, pending assignments and retry buffers already in flight
+            # exceed the budget. Nothing is dropped: the next window waits.
+            budget = ByteBudget(resolve_admission_bytes(
+                self.performance_config.get("admission_bytes", -1),
+                self.performance_config.get("ram_soft_fraction", 0.75)))
+            held = None
 
             gpu_stats_lock = threading.Lock()
 
@@ -1752,19 +1793,40 @@ class SeparationService:
                     while pending_retries:
                         retries.append(pending_retries.popleft())
                     for retry in reversed(retries):
+                        # Retries are never held back (that could deadlock the
+                        # consumer that is waiting on them); they are charged.
+                        budget.charge(window_cost_bytes(retry[1][0]))
                         scheduled.appendleft(schedule(retry))
 
                 while len(scheduled) < prefetch_limit and not initial_done:
-                    try:
-                        job, outcome = next(initial)
-                    except StopIteration:
-                        initial_done = True
+                    if held is None:
+                        try:
+                            held = next(initial)
+                        except StopIteration:
+                            initial_done = True
+                            break
+                    cost = window_cost_bytes(held[1][0])
+                    if not budget.fits(cost):
+                        self.stats["admission_waits"] += 1
                         break
-                    scheduled.append(schedule((job, outcome, 0)))
+                    budget.charge(cost)
+                    scheduled.append(schedule((held[0], held[1], 0)))
+                    held = None
 
                 if not scheduled:
-                    return
-                yield scheduled.popleft()
+                    if held is None:
+                        return
+                    # Nothing in flight can free bytes any more: take the held
+                    # window regardless, so the stream always makes progress.
+                    budget.charge(window_cost_bytes(held[1][0]))
+                    scheduled.append(schedule((held[0], held[1], 0)))
+                    held = None
+                self.stats["admission_peak_bytes"] = max(
+                    self.stats["admission_peak_bytes"], budget.in_flight)
+                entry = scheduled.popleft()
+                yield entry
+                # The consumer is done with this window: its bytes are free.
+                budget.release(window_cost_bytes(entry[0][1][0]))
 
         from tqdm import tqdm
         pbar = tqdm(desc="[TSE Extractor]", unit="window", leave=True)
@@ -2304,6 +2366,10 @@ class SeparationService:
                         f"splice={_t_end-_t_splice:.3f}s")
         finally:
             pbar.close()
+            # A lazy stream owns its file's shared memory; close it even when
+            # the loop above stopped early (exception or cancellation).
+            for stream in opened_streams:
+                stream.close()
             # file_windows (this file's shared memory, if the pool path was
             # used) is now closed inside _build_overlap_plan right after its
             # window list is drained -- by the time process_overlaps runs,
@@ -2456,3 +2522,6 @@ class _OverlapPlan:
     stats_jobs: int
     stats_pairs: int
     overlap_durations: list
+    # Lazy plans (performance.lazy_windows): a zero-argument callable returning
+    # a stream of the same (subjob, outcome) pairs; `jobs` is then empty.
+    job_factory: Optional[Callable] = None

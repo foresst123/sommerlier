@@ -85,6 +85,18 @@ _STAGES = {
         # cheap and keeps the GPUs busy while speaker assignment catches up.
         # 0 removes the limit: Sidon runs through every window of the file.
         "gpu_prefetch_per_worker": (INT, 1, 0, 64),
+        # Build windows as the loop pulls them instead of all at once, so RAM does
+        # not grow with the number of windows in a file. Same windows, same order.
+        "lazy_windows": (BOOL, False, None, None),
+        # Cap the window-build pool so it shares the cores with the Sidon and
+        # assignment workers (cpu_plan.separation_thread_budget). Thread counts
+        # only; off keeps the pool at usable cores - 2.
+        "cpu_budget": (BOOL, False, None, None),
+        # Byte budget over the windows Sidon has taken and the consumer has not
+        # finished (audio, raw tracks, pending assignments, retries). Reaching it
+        # pauses intake, never drops a job; the count limit above is unchanged.
+        # -1 = off, 0 = derive from ram_soft_fraction, >0 = bytes.
+        "admission_bytes": (INT, -1, -1, 1 << 42),
         "postprocess_workers": (INT, 1, 1, 16),
         "postprocess_device": (STR, "cpu", None, None),
         "ordered_postprocess": (BOOL, True, None, None),
