@@ -9,10 +9,12 @@ import argparse
 import json
 import os
 import sys
+import time
 
 import numpy as np
 
 import worker_vllm_env  # noqa: F401  (sets VLLM_* defaults before vllm loads)
+import worker_trace  # TEMPORARY tracing, see worker_trace.py
 from worker_errors import describe_exception
 
 
@@ -30,8 +32,13 @@ def _language_token(language):
 
 
 def load_model(config_path, env_name):
+    worker_trace.watch()
+    worker_trace.step(f"whisper start: cuda_visible={os.environ.get('CUDA_VISIBLE_DEVICES')} "
+                      f"host_ip={os.environ.get('VLLM_HOST_IP')}")
     try:
+        worker_trace.step("importing vllm")
         from vllm import LLM, SamplingParams
+        worker_trace.step("vllm imported")
     except ImportError as exc:
         raise RuntimeError(
             "vLLM audio support is missing; install podcast-pipeline/"
@@ -52,7 +59,11 @@ def load_model(config_path, env_name):
         kwargs["max_model_len"] = int(cfg["max_model_len"])
     print(json.dumps({"status": "loading", "model": model_name,
                       "backend": "vllm"}), flush=True)
+    worker_trace.step(f"starting the engine (weights, memory profiling, compile, "
+                      f"cuda graphs) with {kwargs}")
     llm = LLM(**kwargs)
+    worker_trace.step("engine is up")
+    worker_trace.done()
     sampling = SamplingParams(
         temperature=0.0,
         max_tokens=int(cfg.get("max_new_tokens", 256)),
@@ -72,7 +83,10 @@ def transcribe_batch(llm, sampling, jobs, language):
             "prompt": prompt,
             "multi_modal_data": {"audio": (audio, 16000)},
         })
+    _t = time.monotonic()
     outputs = llm.generate(inputs, sampling_params=sampling, use_tqdm=False)
+    worker_trace.note(f"whisper batch of {len(inputs)} clips generated in "
+                      f"{time.monotonic() - _t:.2f}s")
     return [{
         "id": str(job["id"]),
         "text": output.outputs[0].text.strip(),

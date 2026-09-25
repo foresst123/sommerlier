@@ -36,3 +36,28 @@ def test_every_vllm_worker_sets_it_before_vllm_can_be_imported():
         first_vllm = re.search(r"^\s*(from vllm|import vllm)", source, re.MULTILINE)
         assert first_vllm is None or (
             source.index("import worker_vllm_env") < first_vllm.start()), name
+
+
+def _env_after_import(overrides=None):
+    keys = ("VLLM_HOST_IP", "GLOO_SOCKET_IFNAME", "NCCL_SOCKET_IFNAME")
+    env = {k: v for k, v in os.environ.items() if k not in keys}
+    env.update(overrides or {})
+    result = subprocess.run(
+        [sys.executable, "-c",
+         "import worker_vllm_env, os; print(*[os.environ.get(k) for k in "
+         "('VLLM_HOST_IP','GLOO_SOCKET_IFNAME','NCCL_SOCKET_IFNAME')])"],
+        cwd=ROOT, env=env, capture_output=True, text=True, check=True)
+    return result.stdout.split()
+
+
+def test_the_engine_talks_over_loopback_unless_told_otherwise():
+    # The engine hung on tcp://<host ip> on the A100 host; one GPU needs no network.
+    assert _env_after_import() == ["127.0.0.1", "lo", "lo"]
+    assert _env_after_import({"VLLM_HOST_IP": "10.0.0.5"})[0] == "10.0.0.5"
+
+
+def test_the_qwen3_profile_bounds_the_context_so_the_kv_cache_fits():
+    import json
+    cfg = json.load(open(os.path.join(ROOT, "config.json"), encoding="utf-8"))
+    qwen = cfg["environments"]["a100"]["models"]["qwen3"]
+    assert qwen["backend"] == "vllm" and 0 < qwen["max_model_len"] <= 16384

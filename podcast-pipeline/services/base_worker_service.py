@@ -87,6 +87,8 @@ class WorkerProcessService:
                 line = line.rstrip("\n")
                 if line:
                     self._stderr_tail.append(line)
+                    if self.logger:
+                        self.logger.debug(f"[{self.name} worker stderr] {line}")
         except Exception:
             pass
         finally:
