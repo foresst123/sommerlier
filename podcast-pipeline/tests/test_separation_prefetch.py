@@ -106,3 +106,43 @@ def test_close_prefetch_pool_is_idempotent():
     svc.close_prefetch_pool()
     assert svc._prefetch_executor is None
     svc.close_prefetch_pool()  # must not raise when called twice
+
+
+class _Logger:
+    def __init__(self):
+        self.lines = []
+
+    def info(self, message, *a, **k):
+        self.lines.append(message)
+
+    debug = warning = error = info
+
+
+class _AsyncModel(FakeTSE):
+    """Split model: separate_raw runs on the GPU pool, postprocess_separated in the consumer."""
+
+    def separate_raw(self, audio, sample_rate):
+        return [audio, audio]
+
+    def postprocess_separated(self, mixture_audio, raw_tracks, enroll_A, enroll_B,
+                              sample_rate, id_A, id_B, probe_A=None, probe_B=None,
+                              core_range=None):
+        return self.separate_two_speakers(mixture_audio, enroll_A, enroll_B,
+                                          sample_rate, id_A, id_B, probe_A, probe_B,
+                                          core_range)
+
+
+def test_the_stage_reports_whether_it_waits_for_sidon_or_for_speaker_assignment():
+    logger = _Logger()
+    svc = SeparationService(
+        _AsyncModel(), logger=logger,
+        performance_config={"enabled": True, "gpu_workers": 2, "postprocess_workers": 1,
+                            "ordered_postprocess": True})
+    try:
+        svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
+    finally:
+        svc.close_async_pools()
+    timing = [line for line in logger.lines if "[TSE:timing]" in line]
+    assert len(timing) == 1
+    assert "waiting for Sidon" in timing[0] and "speaker assignment" in timing[0]
+    assert timing[0].split("]")[1].split()[0].isdigit() and " 0 window" not in timing[0]

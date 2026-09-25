@@ -26,6 +26,7 @@ import os
 import sys
 import copy
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import torch
 import numpy as np
 import librosa
@@ -84,7 +85,7 @@ class BssSeparator:
     def __init__(self, device: torch.device, process=None, checkpoint_path: str = None,
                  separator: str = None, embedding_repository: str = None,
                  embedding_filename: str = None, embedding_revision: str = None,
-                 logger=None):
+                 logger=None, embedding_threads: int = None, score_workers: int = 1):
         import tempfile
 
         from models.separation_backends import make_backend
@@ -96,6 +97,13 @@ class BssSeparator:
         self._temp_dir = tempfile.mkdtemp(prefix="bss_exchange_")
         self._req_counter = 0
         self._logger = logger
+        self._embedding_threads = embedding_threads or None
+        # The four probe embeddings that score a window are independent of each
+        # other; with score_workers > 1 they run at the same time.
+        self.score_workers = max(1, int(score_workers or 1))
+        self._score_pool = (ThreadPoolExecutor(
+            max_workers=self.score_workers, thread_name_prefix="bss-score")
+            if self.score_workers > 1 else None)
 
         # Which separator produces the two tracks. Everything else in this
         # class -- enrollment embeddings, QC scoring, the not-A test -- is the
@@ -185,6 +193,8 @@ class BssSeparator:
         try:
             from models.wespeaker_embedding import WeSpeakerONNXEmbedder
             kwargs = {"device": self.device}
+            if getattr(self, "_embedding_threads", None):
+                kwargs["threads"] = self._embedding_threads
             if repository:
                 kwargs["repository"] = repository
             if filename:
@@ -196,6 +206,16 @@ class BssSeparator:
         except Exception as e:
             raise RuntimeError(f"Failed to initialize WeSpeaker: {e}")
             
+    def _run_scores(self, tasks):
+        """Call every task and return the results in task order.
+
+        Concurrent when score_workers > 1; the outcome never depends on it.
+        """
+        if self._score_pool is None or len(tasks) < 2:
+            return [task() for task in tasks]
+        futures = [self._score_pool.submit(task) for task in tasks]
+        return [future.result() for future in futures]
+
     def _get_embedding(self, audio_array: np.ndarray, sample_rate: int = 16000) -> torch.Tensor:
         """Helper to get speaker embedding from 1D numpy array."""
         if sample_rate != 16000:
@@ -493,10 +513,16 @@ class BssSeparator:
             return None
 
         # Chỉ chấm điểm nếu có embedding
-        s_1A = _score(track_1_np, span_A, embed_A, "track1_A") if embed_A is not None else None
-        s_2A = _score(track_2_np, span_A, embed_A, "track2_A") if embed_A is not None else None
-        s_1B = _score(track_1_np, span_B, embed_B, "track1_B") if embed_B is not None else None
-        s_2B = _score(track_2_np, span_B, embed_B, "track2_B") if embed_B is not None else None
+        def _later(track_np, spans, embed, key):
+            return (lambda: _score(track_np, spans, embed, key)
+                    if embed is not None else None)
+
+        s_1A, s_2A, s_1B, s_2B = self._run_scores([
+            _later(track_1_np, span_A, embed_A, "track1_A"),
+            _later(track_2_np, span_A, embed_A, "track2_A"),
+            _later(track_1_np, span_B, embed_B, "track1_B"),
+            _later(track_2_np, span_B, embed_B, "track2_B"),
+        ])
 
         def _probe_rms(track, spans):
             pieces = [

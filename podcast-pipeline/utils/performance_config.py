@@ -78,6 +78,13 @@ _STAGES = {
         "postprocess_workers": (INT, 1, 1, 16),
         "postprocess_device": (STR, "cpu", None, None),
         "ordered_postprocess": (BOOL, True, None, None),
+        # Speaker assignment (WeSpeaker on the CPU) runs after every Sidon
+        # window, in order, and can be slower than the Sidon workers -- which then
+        # sit idle. assignment_threads is the ONNX Runtime thread count for it
+        # (0 = the process's CPU budget); assignment_parallel scores the four
+        # probe embeddings of a window at the same time.
+        "assignment_threads": (INT, 0, 0, 64),
+        "assignment_parallel": (INT, 1, 1, 4),
     },
     "music": {
         "tagger_workers": (INT, 1, 1, 2),

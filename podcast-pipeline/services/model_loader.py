@@ -140,6 +140,10 @@ class ModelLoader:
                 embedding_filename=bss_cfg.get("embedding_filename"),
                 embedding_revision=bss_cfg.get("embedding_revision"),
                 logger=self.logger,
+                embedding_threads=(sep_perf.get("assignment_threads") or None
+                                   if perf.get("enabled", False) else None),
+                score_workers=(sep_perf.get("assignment_parallel", 1)
+                               if perf.get("enabled", False) else 1),
             )
             
     @_serialized

@@ -476,6 +476,17 @@ class SeparationService:
             f"[TSE] jobs={s['jobs']} pairs={s['pairs']} spliced={s['spliced']} "
             f"retried={s['retried']}"
         )
+        if s["t_windows"]:
+            # Which side is the bottleneck: the workers (the consumer waits for the
+            # raw separation) or the ordered CPU work after them.
+            other = s["t_consumer"] - s["t_raw_wait"] - s["t_post"]
+            self.logger.info(
+                f"[TSE:timing] {int(s['t_windows'])} window(s) in "
+                f"{s['t_consumer']:.1f}s: waiting for Sidon {s['t_raw_wait']:.1f}s "
+                f"({100 * s['t_raw_wait'] / max(s['t_consumer'], 1e-9):.0f}%), "
+                f"speaker assignment {s['t_post']:.1f}s "
+                f"({100 * s['t_post'] / max(s['t_consumer'], 1e-9):.0f}%), "
+                f"the rest {other:.1f}s")
         fails = {r: s[f"fail_{r}"] for r in REASONS if s[f"fail_{r}"]}
         self.logger.info(f"[TSE] failures: {fails or 'none'}")
         if self.overlap_durations:
@@ -1746,7 +1757,10 @@ class SeparationService:
                             )
                         )
                     else:
+                        _t_raw = _time.perf_counter()
                         raw_tracks = raw_future.result()
+                        _t_raw_done = _time.perf_counter()
+                        self.stats["t_raw_wait"] += _t_raw_done - _t_raw
                         post_future = async_runtime[1].submit(
                             async_runtime[2].postprocess_separated,
                             window_audio, raw_tracks,
@@ -1756,6 +1770,7 @@ class SeparationService:
                             core_range=core,
                         )
                         track_A, track_B, sim_A, sim_B, diag = post_future.result()
+                        self.stats["t_post"] += _time.perf_counter() - _t_raw_done
                 except Exception as exc:
                     error_detail = f"{type(exc).__name__}: {exc}"
                     retry_failed([(sd, lo, hi, "model_error", error_detail)
@@ -2101,8 +2116,10 @@ class SeparationService:
                 retry_failed(failed_targets, attempt, plist, (spk_a, spk_b),
                              planner_actions)
 
+                _t_end = _time.perf_counter()
+                self.stats["t_windows"] += 1
+                self.stats["t_consumer"] += _t_end - _t_job
                 if _BSS_TIMING and self.logger:
-                    _t_end = _time.perf_counter()
                     self.logger.debug(
                         f"[TIMING] {job_lo:.2f}s: ← splice loop {_t_end - _t_splice:.3f}s")
                     self.logger.debug(

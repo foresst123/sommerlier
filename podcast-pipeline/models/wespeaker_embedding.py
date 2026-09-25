@@ -26,8 +26,10 @@ class WeSpeakerONNXEmbedder:
     """Extract ResNet293-LM speaker embeddings from mono waveform arrays."""
 
     def __init__(self, device, repository=DEFAULT_REPOSITORY,
-                 filename=DEFAULT_FILENAME, revision=None):
+                 filename=DEFAULT_FILENAME, revision=None, threads=None):
         self.device = torch.device(device)
+        # ONNX Runtime intra-op threads; None keeps the process's CPU budget.
+        self.threads = threads
         self.repository = repository
         self.filename = filename
         self.revision = revision
@@ -63,7 +65,7 @@ class WeSpeakerONNXEmbedder:
                     # sess_options caps ORT's intra-op thread pool; see cpu_plan.
                     self._session = ort.InferenceSession(
                         self._model_path(),
-                        sess_options=onnx_session_options(),
+                        sess_options=onnx_session_options(self.threads),
                         providers=providers,
                     )
         return self._session

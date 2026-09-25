@@ -424,6 +424,8 @@
             "gpu_prefetch_per_worker": 2,
             "postprocess_workers": 2,
             "postprocess_device": "cpu",
+            "assignment_threads": 12,
+            "assignment_parallel": 4,
             "ordered_postprocess": true
           },
           "music": {
@@ -635,6 +637,8 @@
             "gpu_prefetch_per_worker": 2,
             "postprocess_workers": 2,
             "postprocess_device": "cpu",
+            "assignment_threads": 12,
+            "assignment_parallel": 4,
             "ordered_postprocess": true
           },
           "music": {
