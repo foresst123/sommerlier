@@ -149,8 +149,7 @@ class PipelineService:
             # Bảo đảm worker đang chạy khi bước thực sự bắt đầu. main() có thể khởi
             # động sớm để làm nóng, nhưng tại đây lỗi phải được báo; worker đang chạy
             # thì không cần khởi động thêm.
-            for worker in self.WORKERS_FOR_STAGE.get(group, ()):
-                self._ensure_worker(worker)
+            self._ensure_workers(self.WORKERS_FOR_STAGE.get(group, ()))
 
             {
                 "base":        lambda: self.model_loader.load_base_models(),
@@ -392,30 +391,50 @@ class PipelineService:
         """Khởi động worker chưa chạy và trả tiến trình của nó.
         _load gọi khi bước bắt đầu; _rebind_worker dùng để cập nhật client đã có.
         Trả None nếu bước không cấu hình worker riêng."""
-        service = self.worker_services.get(name)
-        if service is None:
-            return None
-        if getattr(service, "process", None) is not None:
-            self._register_worker_pids(name, service)
-            return service.process
-        if self.logger:
-            self.logger.info(f"Starting {name} worker for this stage")
+        return self._ensure_workers([name]).get(name)
+
+    def _ensure_workers(self, names) -> dict:
+        """Khởi động các worker của một bước cùng lúc rồi chờ tất cả sẵn sàng.
+        Khởi động lần lượt (spawn rồi chờ, từng cái một) làm thời gian nạp model
+        của vLLM cộng dồn; spawn hết trước rồi mới chờ thì chỉ tốn bằng cái chậm nhất.
+        Trả {tên: tiến trình}, bỏ qua tên không có worker."""
         monitor = getattr(self, "performance_monitor", None)
-        if monitor:
-            monitor.record("worker_loading", worker=name)
-        try:
-            service.spawn()
-            service.wait_ready()
-            pids = self._register_worker_pids(name, service)
-            if monitor:
-                monitor.record("worker_ready", worker=name, pids=pids)
-        except Exception as e:
-            # Báo lỗi thay vì trả None: bước sắp chạy không thể dùng client thiếu
-            # worker. Nuốt lỗi ở đây từng dẫn đến đầu ra rỗng ở bước phía sau.
+        processes, spawned = {}, []
+        for name in names:
+            service = self.worker_services.get(name)
+            if service is None:
+                continue
+            if getattr(service, "process", None) is not None:
+                self._register_worker_pids(name, service)
+                processes[name] = service.process
+                continue
             if self.logger:
-                self.logger.error(f"Could not start the {name} worker: {e}")
-            raise
-        return getattr(service, "process", None)
+                self.logger.info(f"Starting {name} worker for this stage")
+            if monitor:
+                monitor.record("worker_loading", worker=name)
+            try:
+                service.spawn()
+            except Exception as e:
+                self._worker_start_failed(name, e)
+            spawned.append((name, service))
+
+        for name, service in spawned:
+            try:
+                service.wait_ready()
+                pids = self._register_worker_pids(name, service)
+                if monitor:
+                    monitor.record("worker_ready", worker=name, pids=pids)
+            except Exception as e:
+                self._worker_start_failed(name, e)
+            processes[name] = getattr(service, "process", None)
+        return processes
+
+    def _worker_start_failed(self, name: str, error: Exception):
+        # Báo lỗi thay vì trả None: bước sắp chạy không thể dùng client thiếu
+        # worker. Nuốt lỗi ở đây từng dẫn đến đầu ra rỗng ở bước phía sau.
+        if self.logger:
+            self.logger.error(f"Could not start the {name} worker: {error}")
+        raise error
 
     def _export_conversation_exports(self, stage_out, transcripts, audio_data, music_map,
                                      output_dir, audio_path, speech_segments=None):

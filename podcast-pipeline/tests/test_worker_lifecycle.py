@@ -403,7 +403,7 @@ def test_the_lazy_path_is_the_one_that_already_existed():
         encoding="utf-8").read()
     load = source.index("def _load(self, group: str):")
     body = source[load:source.index("def ", load + 10)]
-    assert "self._ensure_worker(worker)" in body, (
+    assert "self._ensure_workers(" in body, (
         "_load must start the stage's worker before loading its models")
 
 
@@ -435,3 +435,24 @@ def test_the_tagger_is_released_when_the_music_stage_ends():
 
     assert "# 5. Background Music Removal" not in source, (
         "the per-segment fallback is gone; nothing should re-introduce it")
+
+
+def test_workers_of_one_stage_are_spawned_before_any_is_waited_on():
+    events = []
+
+    class Service:
+        def __init__(self, name):
+            self.name, self.process = name, None
+
+        def spawn(self):
+            events.append(f"spawn {self.name}")
+            self.process = object()
+
+        def wait_ready(self):
+            events.append(f"ready {self.name}")
+
+    pipe = _pipeline(None)
+    pipe.worker_services = {"qwen3": Service("qwen3"), "whisper": Service("whisper")}
+    pipe._register_worker_pids = lambda name, service: []
+    pipe._ensure_workers(("qwen3", "whisper"))
+    assert events == ["spawn qwen3", "spawn whisper", "ready qwen3", "ready whisper"]
