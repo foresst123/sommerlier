@@ -326,6 +326,24 @@ class PipelineService:
         except Exception:
             pass
 
+    def _release_llm_before(self, args, next_step: str):
+        """Stop the refinement LLM and wait for its GPU memory before `next_step`.
+
+        The engine claims 95% of each card, so any step that loads a model after it -- word
+        alignment ran out of memory for every segment -- must not start while it is still
+        there. Whatever the profile's flags say, an engine that is resident is released;
+        only --keep_models keeps it. No-op when nothing is loaded.
+        """
+        if getattr(args, "keep_models", False):
+            return
+        service = self.refinement_svc
+        resident = getattr(service, "is_resident", None)
+        if not callable(resident) or not resident():
+            return
+        if self.logger:
+            self.logger.info(f"Releasing the refinement LLM before {next_step} (frees VRAM)")
+        service.unload()
+
     def _release_worker(self, args, name: str):
         """Dừng worker khi xong bước, tuân theo --keep_models.
         File tiếp theo cần khởi động lại nếu worker đã dừng, nếu không client
@@ -1218,9 +1236,8 @@ class PipelineService:
             checkpoint.namespaces["word_alignment"] = (
                 self.word_alignment_svc.checkpoint_namespace_for(transcripts))
             alignment_cached = checkpoint.exists("word_alignment")
-            if (not alignment_cached and not getattr(args, "keep_models", False)
-                    and (self.step_enabled(args, "refinement") or relabel_on)):
-                self.refinement_svc.unload()
+            if not alignment_cached:
+                self._release_llm_before(args, "word alignment")
             try:
                 transcripts = self._align_words(
                     checkpoint, stage_out, transcripts, audio_data, speech_segments)

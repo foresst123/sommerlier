@@ -131,3 +131,13 @@ def test_the_a100_profiles_run_diarizen_with_a_batch_of_72():
         os.path.abspath(__file__))), "config.json"), encoding="utf-8"))
     for env in ("a100", "a100_hf"):
         assert cfg["environments"][env]["models"]["diarizen"]["batch_size"] == 72
+
+
+def test_the_a100_profiles_send_refinement_to_vllm_in_large_chunks():
+    # vLLM queues what does not fit and 95% of the card is KV cache, so a small client
+    # batch only left it idle between batches.
+    import json
+    cfg = json.load(open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "config.json"), encoding="utf-8"))
+    for env in ("a100", "a100_hf"):
+        assert cfg["environments"][env]["models"]["refinement"]["batch_size"] == 384

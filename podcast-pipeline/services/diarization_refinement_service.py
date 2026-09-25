@@ -314,6 +314,7 @@ class DiarizationRefinementService:
             ) for index in range(replica_count)]
             self._worker = (RefinementWorkerPoolService(services, self.logger)
                             if len(services) > 1 else services[0])
+            self._worker_devices = list(devices[:replica_count])
             if self.backend == "vllm":
                 # The engine refuses to start unless its share of the card is free, and
                 # a model stopped a moment ago may not have given its memory back yet.
@@ -535,6 +536,7 @@ class DiarizationRefinementService:
             except Exception:
                 pass
             self._worker = None
+            self._wait_until_vram_is_back()
             return
         if self.model is None and self.tokenizer is None:
             return
@@ -552,6 +554,36 @@ class DiarizationRefinementService:
             pass
         if self.logger:
             self.logger.info("Unloaded refinement LLM from VRAM")
+
+    # The share of each card that must be free again before the next step may start. What
+    # stays behind is this process's CUDA context and small caches, a few GiB at most.
+    VRAM_FREE_AFTER_UNLOAD = 0.90
+
+    def _wait_until_vram_is_back(self):
+        """Do not return until the engine's cards are free again (or say they are not).
+
+        Stopping the engine process is not the same as its memory being back: the driver
+        takes a moment, and an engine process that survived would hold it indefinitely.
+        The step that follows (word alignment, a second model) starts on what is free.
+        """
+        devices = list(getattr(self, "_worker_devices", None) or [])
+        if not devices:
+            return
+        from utils import gpu_memory
+        free = gpu_memory.wait_for_free_vram(
+            devices, self.VRAM_FREE_AFTER_UNLOAD, timeout=60.0, logger=self.logger)
+        if self.logger:
+            if free:
+                self.logger.info("Refinement LLM released; the GPU memory is free again")
+            else:
+                self.logger.warning(
+                    "Refinement LLM was stopped but its GPU memory is still not free "
+                    "(see the line above); a step that needs it may run out of memory")
+
+    def is_resident(self) -> bool:
+        """Whether an engine or model of this service is still loaded."""
+        return (self._worker is not None or self.model is not None
+                or self.tokenizer is not None)
 
     def _accept(self, seg, refined: str) -> bool:
         """Whether the model's output is a fusion of this segment's transcripts.
