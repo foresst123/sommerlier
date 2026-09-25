@@ -112,3 +112,22 @@ def test_the_a100_profile_gives_assignment_twice_the_threads_and_eight_post_work
         sep = cfg["environments"][env]["performance"]["stages"]["separation"]
         assert sep["assignment_threads"] == 24 and sep["assignment_worker_threads"] == 4
         assert sep["postprocess_workers"] == 8
+
+
+def test_the_a100_profiles_run_four_bs_roformer_instances_two_on_each_card():
+    import json
+    cfg = json.load(open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "config.json"), encoding="utf-8"))
+    for env in ("a100", "a100_hf"):
+        music = cfg["environments"][env]["performance"]["stages"]["music"]
+        assert music["max_separator_workers"] == 2 and music["workers_per_gpu"] == 2
+        assert pc.resolve_music_worker_devices([0, 1], music["workers_per_gpu"], True) == [
+            0, 1, 0, 1]
+
+
+def test_the_a100_profiles_run_diarizen_with_a_batch_of_72():
+    import json
+    cfg = json.load(open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "config.json"), encoding="utf-8"))
+    for env in ("a100", "a100_hf"):
+        assert cfg["environments"][env]["models"]["diarizen"]["batch_size"] == 72

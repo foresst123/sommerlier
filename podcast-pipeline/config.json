@@ -294,7 +294,7 @@
           "max_new_tokens": 256
         },
         "diarizen": {
-          "batch_size": 64,
+          "batch_size": 72,
           "seg_duration": 16,
           "segmentation_step": 0.05,
           "apply_median_filtering": true,
@@ -436,7 +436,7 @@
           "music": {
             "tagger_workers": 1,
             "max_separator_workers": 2,
-            "workers_per_gpu": 3,
+            "workers_per_gpu": 2,
             "cross_file_overlap": false,
             "ordered_postprocess": true,
             "postprocess_workers": 2
@@ -512,7 +512,7 @@
           "torch_dtype": "bfloat16"
         },
         "diarizen": {
-          "batch_size": 64,
+          "batch_size": 72,
           "seg_duration": 16,
           "segmentation_step": 0.05,
           "apply_median_filtering": true,
@@ -652,7 +652,7 @@
           "music": {
             "tagger_workers": 1,
             "max_separator_workers": 2,
-            "workers_per_gpu": 3,
+            "workers_per_gpu": 2,
             "cross_file_overlap": false,
             "ordered_postprocess": true,
             "postprocess_workers": 2
