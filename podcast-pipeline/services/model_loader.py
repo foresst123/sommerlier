@@ -10,6 +10,8 @@ from utils.performance_config import resolve_music_devices
 
 from models.whisper_wrapper import WhisperASR
 from models.whisper_vllm import WhisperVLLMClient
+from utils.asr_model_config import (
+    asr_device, phowhisper_kwargs, whisper_backend, whisper_ct2_kwargs)
 from models.phowhisper import PhoWhisperASR
 from models.silero_vad import SileroVAD
 from models.pyannote import PyannoteDiarizer
@@ -59,6 +61,9 @@ class ModelLoader:
         self.logger = logger
         self.models = {}
         self._load_lock = threading.RLock()
+        # {"qwen3"|"whisper"|"phowhisper": gpu id}; None keeps the legacy layout
+        # (PhoWhisper on device_1, Whisper on device_2). Set by main.py.
+        self.asr_placement = None
         
         self.device_1 = torch.device(f"cuda:{args.gpu_1}" if torch.cuda.is_available() else "cpu")
         self.device_2 = torch.device(f"cuda:{args.gpu_2}" if torch.cuda.is_available() else "cpu")
@@ -225,18 +230,15 @@ class ModelLoader:
         # was diarization. It failed on chunk 0 with DiariZen reporting
         # "batch_size (12) is probably too large" -- a misleading message, since
         # that batch needs under 1GB. The card was simply already full.
-        if self.logger: self.logger.info(f"Loading PhoWhisper on {self.device_1}")
-        pho_cfg = self.config.get("environments", {}).get(
-            self.args.env, {}).get("models", {}).get("phowhisper", {})
-        self.models["phowhisper"] = PhoWhisperASR(device=self.device_1, **pho_cfg)
+        pho_device = self._asr_device("phowhisper", self.device_1)
+        if self.logger: self.logger.info(f"Loading PhoWhisper on {pho_device}")
+        self.models["phowhisper"] = self.make_phowhisper(pho_device)
 
         
         if getattr(self.args, "ASRMoE", False) and getattr(self.args, "lang", "vi") == "vi":
-            whisper_cfg = dict(self.config.get("environments", {}).get(
-                self.args.env, {}).get("models", {}).get("whisper", {}))
-            whisper_backend = str(
-                whisper_cfg.pop("backend", "ctranslate2")).lower()
-            if whisper_backend == "vllm":
+            models_cfg = self._models_cfg()
+            whisper_cfg = dict(models_cfg.get("whisper", {}))
+            if whisper_backend(models_cfg) == "vllm":
                 if whisper_service is None:
                     raise RuntimeError(
                         "models.whisper.backend=vllm requires a Whisper vLLM worker")
@@ -246,16 +248,10 @@ class ModelLoader:
                     whisper_service,
                     batch_size=whisper_cfg.get("batch_size", 16))
             else:
+                whisper_device = self._asr_device("whisper", self.device_2)
                 if self.logger:
-                    self.logger.info(f"Loading Whisper on {self.device_2}")
-                # vLLM-only settings must not leak into the CTranslate2 wrapper.
-                for key in ("model_name", "gpu_memory_utilization",
-                            "max_model_len", "max_new_tokens", "torch_dtype"):
-                    whisper_cfg.pop(key, None)
-                self.models["whisper"] = WhisperASR(
-                    device=self.device_2,
-                    **whisper_cfg
-                )
+                    self.logger.info(f"Loading Whisper on {whisper_device}")
+                self.models["whisper"] = self.make_whisper_ct2(whisper_device)
             if qwen3_service:
                 if self.logger: self.logger.info("Connecting to Qwen3 worker")
                 self.models["qwen3"] = Qwen3ASRClient(qwen3_service.process)
@@ -269,6 +265,23 @@ class ModelLoader:
             if self.logger: self.logger.info("Initializing Qwen3-Omni Client")
             self.models["captioner"] = Qwen3OmniCaptioner()
             
+    def _models_cfg(self) -> dict:
+        return self.config.get("environments", {}).get(
+            self.args.env, {}).get("models", {})
+
+    def _asr_device(self, kind, default):
+        return asr_device(self.asr_placement, kind, default, torch.cuda.is_available())
+
+    def make_phowhisper(self, device, batch_size=None):
+        """A PhoWhisper on `device`; a replica passes the boost batch size."""
+        return PhoWhisperASR(
+            device=device, **phowhisper_kwargs(self._models_cfg(), batch_size))
+
+    def make_whisper_ct2(self, device, batch_size=None):
+        """A CTranslate2 Whisper on `device`, without the vLLM-only settings."""
+        return WhisperASR(
+            device=device, **whisper_ct2_kwargs(self._models_cfg(), batch_size))
+
     def get(self, model_name: str):
         return self.models.get(model_name)
         

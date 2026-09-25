@@ -274,13 +274,13 @@
         "model_size": "large-v3",
         "model_name": "openai/whisper-large-v3",
         "torch_dtype": "bfloat16",
-        "batch_size": 32,
+        "batch_size": 16,
         "gpu_memory_utilization": 0.4,
         "max_new_tokens": 256
         },
         "phowhisper": {
           "compute_type": "float32",
-          "batch_size": 64
+          "batch_size": 16
         },
       "qwen3": {
         "backend": "vllm",
@@ -395,7 +395,14 @@
             "replica_min_pending_jobs": 32,
             "replica_min_gain_seconds": 15.0,
             "replica_load_seconds": 30.0,
-            "replica_speed_ratio": 0.5
+            "replica_speed_ratio": 0.5,
+            "cross_file": true,
+            "files_in_flight": 3,
+            "shared_batch_size": 16,
+            "boost_batch_size": 48,
+            "qwen3_gpu": "gpu_1",
+            "whisper_gpu": "gpu_2",
+            "phowhisper_gpu": "gpu_2"
           },
           "refinement": {
             "workers": 2,

@@ -40,6 +40,20 @@ _STAGES = {
         "replica_min_gain_seconds": (FLOAT, 15.0, 0.0, 3600.0),
         "replica_load_seconds": (FLOAT, 30.0, 1.0, 1800.0),
         "replica_speed_ratio": (FLOAT, 0.5, 0.0, 1.0),
+        # Cross-file scheduling (services/asr_scheduler.py): models consume a
+        # queue spanning `files_in_flight` files instead of meeting at a
+        # per-file barrier. Off by default, which keeps the per-file path.
+        "cross_file": (BOOL, False, None, None),
+        "files_in_flight": (INT, 3, 1, 8),
+        # Batch size while two models share a GPU, and the larger one a model
+        # gets when its GPU peer has finished or when a replica starts.
+        "shared_batch_size": (INT, 16, 1, 256),
+        "boost_batch_size": (INT, 48, 1, 512),
+        # Which of the two configured GPUs each model sits on. The defaults are
+        # the layout before these keys existed.
+        "qwen3_gpu": (STR, "gpu_2", None, None),
+        "whisper_gpu": (STR, "gpu_2", None, None),
+        "phowhisper_gpu": (STR, "gpu_1", None, None),
     },
     "refinement": {
         "workers": (INT, 1, 1, 2),
@@ -80,7 +94,12 @@ _STAGES = {
     },
 }
 
+_GPU_NAMES = ("gpu_1", "gpu_2")
+
 _ENUMS = {
+    ("asr", "qwen3_gpu"): _GPU_NAMES,
+    ("asr", "whisper_gpu"): _GPU_NAMES,
+    ("asr", "phowhisper_gpu"): _GPU_NAMES,
     ("refinement", "placement"): ("auto", "balanced", "sharded", "pipelined"),
     ("diarization", "placement"): ("single", "split_components", "replicated"),
     ("separation", "postprocess_device"): ("cpu", "cuda"),
@@ -257,3 +276,13 @@ def resolve_music_devices(device_1, device_2, *, perf_enabled: bool,
     if max_separator_workers > 1:
         return [device_1, device_2]
     return [device_1]
+
+
+def resolve_asr_placement(asr_cfg, gpu_1: int, gpu_2: int) -> dict:
+    """Physical GPU id for each ASR model, from the resolved `stages.asr` table."""
+    ids = {"gpu_1": int(gpu_1), "gpu_2": int(gpu_2)}
+    return {
+        "qwen3": ids[asr_cfg["qwen3_gpu"]],
+        "whisper": ids[asr_cfg["whisper_gpu"]],
+        "phowhisper": ids[asr_cfg["phowhisper_gpu"]],
+    }

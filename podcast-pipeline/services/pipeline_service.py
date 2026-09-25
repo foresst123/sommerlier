@@ -102,7 +102,12 @@ class PipelineService:
         while their DiariZen requests are in flight.
         """
         if stage not in ("music", "diarization", "separation"):
-            return self
+            # ASR shares its scheduler across files, but each file still needs
+            # its own timeline and noise track while it runs concurrently.
+            cross_file = (stage == "asr" and getattr(
+                getattr(self, "asr_svc", None), "cross_file_enabled", False))
+            if not cross_file:
+                return self
         view = copy.copy(self)
         view.diarization_svc = copy.copy(self.diarization_svc)
         if stage == "separation" and hasattr(self.separation_svc, "fork_for_file"):
@@ -215,6 +220,13 @@ class PipelineService:
         asr_keep_models = getattr(self, "_stage_asr_keep_models", None)
         self._stage_scope_name = None
         self._stage_asr_keep_models = None
+        if stage == "asr":
+            # Stops the scheduler's threads and any replica before the models
+            # it did not release itself are unloaded below.
+            end_cross_file = getattr(
+                getattr(self, "asr_svc", None), "end_cross_file_stage", None)
+            if end_cross_file:
+                end_cross_file()
         names = getattr(self, "defer_free", None)
         workers = getattr(self, "defer_workers", None)
         callbacks = getattr(self, "defer_callbacks", None)

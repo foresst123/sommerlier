@@ -252,6 +252,16 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
         try:
             parallelism = _stage_parallelism(stage_args, stage)
 
+            # Cross-file ASR: the service must know how many files will pass
+            # through, and hear about every one -- including files that fail or
+            # were checkpointed -- to know when no more work is coming.
+            asr_svc = (getattr(pipeline, "asr_svc", None)
+                       if stage == "asr" and _asr_cross_file(stage_args) else None)
+            begin_asr = getattr(asr_svc, "begin_cross_file_stage", None)
+            settle_asr = getattr(asr_svc, "settle_file", None)
+            if begin_asr:
+                begin_asr(len(pending))
+
             def run_one(i, path):
                 if logger:
                     logger.info(
@@ -260,7 +270,11 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
                     pipeline.parallel_stage_view(stage)
                     if parallelism > 1 and hasattr(pipeline, "parallel_stage_view")
                     else pipeline)
-                stage_pipeline.run(copy.copy(stage_args), config, path)
+                try:
+                    stage_pipeline.run(copy.copy(stage_args), config, path)
+                finally:
+                    if settle_asr:
+                        settle_asr()
 
             if parallelism > 1 and len(pending) > 1:
                 from concurrent.futures import ThreadPoolExecutor
@@ -366,12 +380,22 @@ def _drain_pending_diarization(pipeline, failures):
             pending.pop(path, None)
 
 
+def _asr_cross_file(args) -> bool:
+    perf = getattr(args, "performance_config", None) or {}
+    return bool(perf.get("enabled", False)
+                and perf.get("stages", {}).get("asr", {}).get("cross_file", False))
+
+
 def _stage_parallelism(args, stage) -> int:
     """Concurrent files allowed for stages with independent GPU workers."""
     perf = getattr(args, "performance_config", None) or {}
     if not perf.get("enabled", False):
         return 1
     stages = perf.get("stages", {})
+    if stage == "asr" and _asr_cross_file(args):
+        # Files in flight keep every ASR model's queue fed while another file
+        # waits for its slowest model (services/asr_scheduler.py).
+        return max(1, int(stages["asr"].get("files_in_flight", 3)))
     if stage == "diarization" and not getattr(args, "dia3", False):
         return max(1, min(2, int(
             stages.get("diarization", {}).get("workers", 1))))

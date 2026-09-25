@@ -1,4 +1,8 @@
 import concurrent.futures
+import itertools
+import shutil
+import tempfile
+import threading
 import librosa
 from typing import List
 from schemas.audio import AudioData
@@ -8,6 +12,7 @@ from algorithms.asr.rover import RoverEnsembler
 import numpy as np
 from algorithms.asr.hallucination import filter_short_segment_outputs
 from utils.audio_normalize import normalize_for_asr, remove_dc, measure
+from services.asr_scheduler import AsrScheduler, Lane, LaneWorker
 
 # Segments shorter than this are padded with surrounding audio before ASR.
 CONTEXT_PAD_BELOW = 2.0
@@ -43,6 +48,9 @@ def estimate_replica_gain(remaining, rate, load_seconds, replica_rate,
     return max(0.0, gain), t_old, t_new
 
 
+_EMPTY_RESULT = {"whisper": ("", None, []), "phowhisper": "", "qwen3": ""}
+
+
 class ASRService:
     """Coordinates MoE ASR models and ROVER ensemble."""
     
@@ -51,7 +59,8 @@ class ASRService:
                  qwen3_replica_service=None, performance_config=None,
                  performance_monitor=None,
                  language: str = "vi", batch_size: int = 4,
-                 keep_models: bool = False, edge_pad: float = EDGE_PAD_SECONDS):
+                 keep_models: bool = False, edge_pad: float = EDGE_PAD_SECONDS,
+                 replica_factories=None, asr_workers=None, asr_placement=None):
         self._whisper = whisper
         self._phowhisper = phowhisper
         self._qwen3 = qwen3
@@ -68,8 +77,26 @@ class ASRService:
         self.language = language
         self.batch_size = batch_size
         self.keep_models = keep_models
+        # PipelineService turns keep_models on for the whole ASR stage; what the
+        # user asked for is what decides whether a finished model is released.
+        self._user_keep_models = bool(keep_models)
         self.edge_pad = max(0.0, float(edge_pad))
         self._warned = False
+        # Cross-file scheduling (see services/asr_scheduler.py).
+        # replica_factories: {"qwen3"|"whisper"|"phowhisper": f(gpu, batch) -> (model, release)}
+        # asr_workers: {"qwen3"|"whisper": worker service whose process is stopped on release}
+        # asr_placement: {"qwen3"|"whisper"|"phowhisper": physical GPU id}
+        self.replica_factories = dict(replica_factories or {})
+        self.asr_workers = dict(asr_workers or {})
+        self.asr_placement = dict(asr_placement or {})
+        self._cross_active = False
+        self._scheduler = None
+        self._scheduler_lock = threading.Lock()
+        self._expected_files = None
+        self._skipped_before_start = 0
+        self._tmp_dir = None
+        self._local = threading.local()
+        self._file_counter = itertools.count(1)
 
     # Models are fetched from the loader on use, not captured at construction.
     # PipelineService loads each stage's models when that stage runs, so a
@@ -455,6 +482,280 @@ class ASRService:
         # leave a dead Popen behind that a second process() call would write to.
         return results
 
+    def _transcribe_per_file(self, audios_16k, core_audios_16k, dummy_vads,
+                             chunk_indices, tmp_dir):
+        """The original path: three models for one file, then wait for all three."""
+        import threading
+        import sys
+        import time
+        
+        progress = {"whisper": 0, "pho": 0, "qwen": 0}
+        total = len(audios_16k)
+        stop_event = threading.Event()
+        whisper_released = threading.Event()
+        
+        def monitor_progress():
+            while not stop_event.is_set():
+                w, p, q = progress["whisper"], progress["pho"], progress["qwen"]
+                sys.stdout.write(f"\r[ASR] Whisper: {w}/{total} | PhoWhisper: {p}/{total} | Qwen3: {q}/{total}")
+                sys.stdout.flush()
+                time.sleep(1.0)
+            w, p, q = progress["whisper"], progress["pho"], progress["qwen"]
+            sys.stdout.write(f"\r[ASR] Whisper: {w}/{total} | PhoWhisper: {p}/{total} | Qwen3: {q}/{total}\n")
+            sys.stdout.flush()
+            
+        monitor_thread = threading.Thread(target=monitor_progress)
+        monitor_thread.start()
+        
+        def cb_whisper(): progress["whisper"] += 1
+        def cb_pho(): progress["pho"] += 1
+        def cb_qwen(): progress["qwen"] += 1
+        
+        pho_started = time.time()
+
+        def pho_remaining():
+            """PhoWhisper's projected seconds left; None until it has reported."""
+            if not self.phowhisper:
+                return 0.0
+            finished = progress["pho"]
+            if finished >= total:
+                return 0.0
+            if finished == 0:
+                return None
+            return (total - finished) * (time.time() - pho_started) / finished
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            fw = executor.submit(self._run_whisper_batch, audios_16k, dummy_vads,
+                                 cb_whisper, whisper_released)
+            fp = executor.submit(self._run_phowhisper_batch, core_audios_16k, cb_pho)
+            fq = executor.submit(
+                self._run_qwen3_batch, core_audios_16k, chunk_indices,
+                tmp_dir, cb_qwen, whisper_released, pho_remaining)
+
+            try:
+                whisper_results = fw.result()
+            finally:
+                # A Whisper that died still holds nothing, but the flag is what
+                # the Qwen replica waits on; leaving it clear on the failure
+                # path would just deny the card to the model still working.
+                if not self.keep_models:
+                    whisper_released.set()
+            pho_results = fp.result()
+            qwen_results = fq.result()
+            
+        stop_event.set()
+        monitor_thread.join()
+
+        return whisper_results, pho_results, qwen_results
+
+    # -- cross-file scheduling ---------------------------------------------------
+    @property
+    def cross_file_enabled(self) -> bool:
+        return self._cross_active
+
+    def begin_cross_file_stage(self, total_files: int):
+        """Open a stage in which `total_files` files will flow through shared lanes."""
+        if not self.performance_config.get("cross_file"):
+            return
+        with self._scheduler_lock:
+            self._cross_active = True
+            self._expected_files = int(total_files)
+            self._skipped_before_start = 0
+            self._scheduler = None
+
+    def settle_file(self):
+        """Call once when a file's ASR turn is over.
+
+        A file that never submitted (checkpointed, failed, or without segments)
+        must still count, or the scheduler would wait for it forever before
+        releasing the models that have run out of work.
+        """
+        submitted = getattr(self._local, "submitted", False)
+        self._local.submitted = False
+        if submitted or not self._cross_active:
+            return
+        with self._scheduler_lock:
+            if self._scheduler is not None:
+                self._scheduler.add_intake(1)
+            else:
+                self._skipped_before_start += 1
+
+    def end_cross_file_stage(self):
+        with self._scheduler_lock:
+            scheduler, self._scheduler = self._scheduler, None
+            tmp_dir, self._tmp_dir = self._tmp_dir, None
+            self._cross_active = False
+        if scheduler is not None:
+            scheduler.shutdown()
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def _get_scheduler(self):
+        with self._scheduler_lock:
+            if self._scheduler is None:
+                self._tmp_dir = tempfile.mkdtemp(prefix="asr_lanes_")
+                scheduler = self._build_scheduler(self._tmp_dir)
+                if self._expected_files is not None:
+                    scheduler.expect_files(self._expected_files)
+                if self._skipped_before_start:
+                    scheduler.add_intake(self._skipped_before_start)
+                    self._skipped_before_start = 0
+                self._scheduler = scheduler
+            return self._scheduler
+
+    def _build_scheduler(self, tmp_dir):
+        cfg = self.performance_config
+        shared = int(cfg.get("shared_batch_size", 16))
+        boost = int(cfg.get("boost_batch_size", 48))
+        models = {"whisper": self.whisper, "phowhisper": self.phowhisper,
+                  "qwen3": self.qwen3}
+        models = {kind: model for kind, model in models.items() if model}
+        gpus = {kind: self.asr_placement.get(kind) for kind in models}
+        lanes = []
+        for kind, model in models.items():
+            shares = gpus[kind] is not None and any(
+                other != kind and gpus[other] == gpus[kind] for other in models)
+            if kind == "qwen3":
+                batch = self.batch_size          # the engine's own size is fixed
+            elif shares:
+                batch = shared
+            else:
+                batch = int(getattr(model, "batch_size", 0) or shared)
+            holder = {"model": model}
+            worker = LaneWorker(kind, gpus[kind], self._runner_for(kind, holder, tmp_dir),
+                                batch, release=self._release_fn(kind, holder))
+            lanes.append(Lane(kind, gpus[kind], worker, empty=_EMPTY_RESULT[kind],
+                              replica_factory=self._replica_factory(kind, tmp_dir),
+                              boostable=(kind != "qwen3")))
+        return AsrScheduler(lanes, boost_batch=boost, config=cfg, logger=self.logger,
+                            monitor=self.performance_monitor)
+
+    def _release_fn(self, kind, holder):
+        """Frees a finished model. The holder is cleared first: the runner reads
+        the model through it, so nothing here keeps the weights alive."""
+        if self._user_keep_models:
+            return None
+
+        def release():
+            holder["model"] = None
+            if self.model_loader:
+                self.model_loader.unload(kind)
+            worker = self.asr_workers.get(kind)
+            if worker is not None and getattr(worker, "process", None) is not None:
+                worker.stop()
+        return release
+
+    def _replica_factory(self, kind, tmp_dir):
+        factory = self.replica_factories.get(kind)
+        if factory is None:
+            return None
+
+        def make(gpu, batch):
+            model, release_model = factory(gpu, batch)
+            holder = {"model": model}
+
+            def release():
+                holder["model"] = None
+                release_model()
+            return LaneWorker(kind, gpu, self._runner_for(kind, holder, tmp_dir),
+                              batch, release=release)
+        return make
+
+    def _runner_for(self, kind, holder, tmp_dir):
+        if kind == "whisper":
+            return self._whisper_runner(holder)
+        if kind == "phowhisper":
+            return self._phowhisper_runner(holder)
+        return self._qwen3_runner(holder, tmp_dir)
+
+    @staticmethod
+    def _held(holder):
+        model = holder["model"]
+        if model is None:
+            raise RuntimeError("this ASR model was released")
+        return model
+
+    def _whisper_runner(self, holder):
+        def run(payloads, batch_size):
+            model = self._held(holder)
+            audios = [audio for audio, _vad in payloads]
+            vads = [vad for _audio, vad in payloads]
+            try:
+                batch = model.transcribe_batch(
+                    audios, vads, language=self.language, batch_size=batch_size)
+                return [(item.get("text", ""), item.get("language", self.language),
+                         item.get("words", [])) for item in batch]
+            except Exception as e:
+                if self.logger:
+                    self.logger.error(f"Whisper batch error: {e}; retrying individually")
+                rows = []
+                for audio, vad in payloads:
+                    try:
+                        res = model.transcribe(audio, vad, language=self.language)
+                        rows.append((res.get("text", ""),
+                                     res.get("language", self.language),
+                                     res.get("words", [])))
+                    except Exception as inner:
+                        if self.logger:
+                            self.logger.error(f"Whisper error: {inner}")
+                        rows.append(("", None, []))
+                return rows
+        return run
+
+    def _phowhisper_runner(self, holder):
+        def run(payloads, batch_size):
+            model = self._held(holder)
+            try:
+                return list(model.transcribe_batch(
+                    list(payloads), batch_size=batch_size, logger=self.logger))
+            except Exception as e:
+                if self.logger:
+                    self.logger.error(f"PhoWhisper batch error: {e}")
+                return [""] * len(payloads)
+        return run
+
+    def _qwen3_runner(self, holder, tmp_dir):
+        import os
+        import uuid
+
+        def run(payloads, batch_size):
+            client = self._held(holder)
+            paths, jobs = [], []
+            try:
+                for position, (_index, audio) in enumerate(payloads):
+                    path = os.path.join(tmp_dir, f"qwen3_{uuid.uuid4().hex}.npy")
+                    np.save(path, np.ascontiguousarray(audio, dtype=np.float32))
+                    paths.append(path)
+                    jobs.append((str(position), path))
+                values = client.transcribe_batch(jobs, language=self.language)
+                if len(values) < len(jobs):
+                    values = list(values) + [""] * (len(jobs) - len(values))
+                return list(values)
+            finally:
+                for path in paths:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+        return run
+
+    def _transcribe_cross_file(self, audios_16k, core_audios_16k, dummy_vads, chunk_indices):
+        scheduler = self._get_scheduler()
+        payloads = {}
+        if self.whisper:
+            payloads["whisper"] = list(zip(audios_16k, dummy_vads))
+        if self.phowhisper:
+            payloads["phowhisper"] = list(core_audios_16k)
+        if self.qwen3:
+            payloads["qwen3"] = list(zip(chunk_indices, core_audios_16k))
+        ticket = scheduler.submit(f"file-{next(self._file_counter)}", payloads)
+        self._local.submitted = True
+        results = ticket.wait()
+        count = len(audios_16k)
+        return (results.get("whisper") or [("", None, [])] * count,
+                results.get("phowhisper") or [""] * count,
+                results.get("qwen3") or [""] * count)
+
     def process(self, segments: List[SpeechSegment], audio: AudioData, enable_word_timestamps: bool = False) -> List[TranscriptSegment]:
         self._warn_missing()
         import tempfile
@@ -570,67 +871,15 @@ class ASRService:
         if not valid_segments:
             return []
 
-        # 2. Run batched inference in parallel
-        import threading
-        import sys
-        import time
-        
-        progress = {"whisper": 0, "pho": 0, "qwen": 0}
-        total = len(audios_16k)
-        stop_event = threading.Event()
-        whisper_released = threading.Event()
-        
-        def monitor_progress():
-            while not stop_event.is_set():
-                w, p, q = progress["whisper"], progress["pho"], progress["qwen"]
-                sys.stdout.write(f"\r[ASR] Whisper: {w}/{total} | PhoWhisper: {p}/{total} | Qwen3: {q}/{total}")
-                sys.stdout.flush()
-                time.sleep(1.0)
-            w, p, q = progress["whisper"], progress["pho"], progress["qwen"]
-            sys.stdout.write(f"\r[ASR] Whisper: {w}/{total} | PhoWhisper: {p}/{total} | Qwen3: {q}/{total}\n")
-            sys.stdout.flush()
-            
-        monitor_thread = threading.Thread(target=monitor_progress)
-        monitor_thread.start()
-        
-        def cb_whisper(): progress["whisper"] += 1
-        def cb_pho(): progress["pho"] += 1
-        def cb_qwen(): progress["qwen"] += 1
-        
-        pho_started = time.time()
-
-        def pho_remaining():
-            """PhoWhisper's projected seconds left; None until it has reported."""
-            if not self.phowhisper:
-                return 0.0
-            finished = progress["pho"]
-            if finished >= total:
-                return 0.0
-            if finished == 0:
-                return None
-            return (total - finished) * (time.time() - pho_started) / finished
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-            fw = executor.submit(self._run_whisper_batch, audios_16k, dummy_vads,
-                                 cb_whisper, whisper_released)
-            fp = executor.submit(self._run_phowhisper_batch, core_audios_16k, cb_pho)
-            fq = executor.submit(
-                self._run_qwen3_batch, core_audios_16k, chunk_indices,
-                tmp_dir, cb_qwen, whisper_released, pho_remaining)
-
-            try:
-                whisper_results = fw.result()
-            finally:
-                # A Whisper that died still holds nothing, but the flag is what
-                # the Qwen replica waits on; leaving it clear on the failure
-                # path would just deny the card to the model still working.
-                if not self.keep_models:
-                    whisper_released.set()
-            pho_results = fp.result()
-            qwen_results = fq.result()
-            
-        stop_event.set()
-        monitor_thread.join()
+        # 2. Run the three models. Cross-file mode queues this file's clips on
+        # lanes shared with the other files in flight; otherwise the three
+        # models run for this file alone and meet at a barrier.
+        if self.cross_file_enabled:
+            whisper_results, pho_results, qwen_results = self._transcribe_cross_file(
+                audios_16k, core_audios_16k, dummy_vads, chunk_indices)
+        else:
+            whisper_results, pho_results, qwen_results = self._transcribe_per_file(
+                audios_16k, core_audios_16k, dummy_vads, chunk_indices, tmp_dir)
 
         # 3. Zip and vote
         from tqdm import tqdm

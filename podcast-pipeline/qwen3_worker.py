@@ -45,9 +45,11 @@ def _model_config(config_path=None, env_name="kaggle"):
     return qwen_cfg
 
 
-def load_model(config_path=None, env_name="kaggle"):
+def load_model(config_path=None, env_name="kaggle", batch_size=None):
     """Load the configured Transformers or vLLM Qwen3-ASR backend."""
-    qwen_cfg = _model_config(config_path, env_name)
+    qwen_cfg = dict(_model_config(config_path, env_name))
+    if batch_size:
+        qwen_cfg["batch_size"] = int(batch_size)
     backend = str(qwen_cfg.get("backend", "transformers")).lower()
     default_model = ("Qwen/Qwen3-ASR-1.7B" if backend == "vllm"
                      else "Qwen/Qwen3-ASR-1.7B-hf")
@@ -242,9 +244,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config.json")
     parser.add_argument("--env", default="kaggle")
+    parser.add_argument("--batch-size", type=int, default=None,
+                        help="Override models.qwen3.batch_size (used by replicas).")
     args = parser.parse_args()
 
-    model, processor, device, backend = load_model(args.config, args.env)
+    model, processor, device, backend = load_model(args.config, args.env, args.batch_size)
 
     # Read commands from stdin, one JSON per line
     for line in sys.stdin:

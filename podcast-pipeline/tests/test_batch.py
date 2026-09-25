@@ -502,3 +502,71 @@ def test_the_safety_net_also_closes_the_music_async_pools():
     pipe.music_svc = _FakeMusicPool()
     run_batch_by_stage(pipe, _args(stop_after="music"), {}, ["f1"])
     assert pipe.music_svc.closed
+
+
+# --- ASR cross-file stage -------------------------------------------------
+
+class _AsrService:
+    def __init__(self):
+        self.begun = None
+        self.settled = 0
+        self.lock = threading.Lock()
+
+    def begin_cross_file_stage(self, total):
+        self.begun = total
+
+    def settle_file(self):
+        with self.lock:
+            self.settled += 1
+
+
+class _AsrPipeline(FakePipeline):
+    def __init__(self, fail_on=None):
+        super().__init__(fail_on=fail_on, fail_stage="asr")
+        self.asr_svc = _AsrService()
+        self.inside = 0
+        self.max_inside = 0
+        self.lock = threading.Lock()
+
+    def parallel_stage_view(self, stage):
+        return self
+
+    def run(self, args, config, path):
+        with self.lock:
+            self.inside += 1
+            self.max_inside = max(self.max_inside, self.inside)
+        try:
+            time.sleep(0.03)
+            super().run(args, config, path)
+        finally:
+            with self.lock:
+                self.inside -= 1
+
+
+def _asr_perf(cross_file, in_flight=3):
+    return {"enabled": True,
+            "stages": {"asr": {"cross_file": cross_file, "files_in_flight": in_flight}}}
+
+
+def test_asr_runs_several_files_at_once_and_tells_the_service_about_them():
+    pipe = _AsrPipeline()
+    run_batch_by_stage(pipe, _args(performance_config=_asr_perf(True)), {},
+                       ["f1", "f2", "f3", "f4"], stages=("asr",))
+    assert pipe.max_inside == 3
+    assert pipe.asr_svc.begun == 4
+    assert pipe.asr_svc.settled == 4
+
+
+def test_a_failing_asr_file_is_still_settled_so_the_scheduler_can_finish():
+    pipe = _AsrPipeline(fail_on="f2")
+    run_batch_by_stage(pipe, _args(performance_config=_asr_perf(True)), {},
+                       ["f1", "f2", "f3"], stages=("asr",))
+    assert pipe.asr_svc.settled == 3
+
+
+def test_asr_stays_one_file_at_a_time_when_cross_file_is_off():
+    pipe = _AsrPipeline()
+    run_batch_by_stage(pipe, _args(performance_config=_asr_perf(False)), {},
+                       ["f1", "f2", "f3"], stages=("asr",))
+    assert pipe.max_inside == 1
+    assert pipe.asr_svc.begun is None

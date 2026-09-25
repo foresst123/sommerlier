@@ -322,6 +322,8 @@ from services.export_service import ExportService
 from services.pipeline_service import PipelineService
 from services.qwen3_worker_service import Qwen3WorkerService
 from services.whisper_vllm_worker_service import WhisperVLLMWorkerService
+from models.qwen3_asr import Qwen3ASRClient
+from models.whisper_vllm import WhisperVLLMClient
 from services.diarizen_worker_service import DiarizenWorkerService
 from services.sidon_worker_service import SidonWorkerService
 from services.worker_pool_service import WorkerPoolService
@@ -419,7 +421,16 @@ def main():
         logger.info(f"Only 1 GPU detected. Overriding gpu_2 ({args.gpu_2}) to use gpu_1 ({args.gpu_1}).")
         args.gpu_2 = args.gpu_1
 
-
+    # Which GPU each ASR model sits on. Without the performance block this is
+    # the layout from before placement was configurable.
+    asr_perf = perf_cfg["stages"]["asr"]
+    asr_cross_file = bool(perf_cfg["enabled"] and asr_perf["cross_file"])
+    if perf_cfg["enabled"]:
+        asr_placement = performance_config.resolve_asr_placement(
+            asr_perf, args.gpu_1, args.gpu_2)
+    else:
+        asr_placement = {"qwen3": args.gpu_2, "whisper": args.gpu_2,
+                         "phowhisper": args.gpu_1}
 
     # 1. Workers, built here and started here only as a head start.
     #
@@ -469,17 +480,19 @@ def main():
         qwen3_service = _prefetch(Qwen3WorkerService(
             lambda: resolve_worker_python(qwen_env, config=config,
                                           env_profile=env_profile, logger=logger),
-            qwen3_worker_script, device_id=args.gpu_2, logger=logger,
+            qwen3_worker_script, device_id=asr_placement["qwen3"], logger=logger,
             env_name=args.env, config_path=args.config))
-        asr_perf = perf_cfg["stages"]["asr"]
         if (perf_cfg["enabled"]
                 and asr_perf["dynamic_replicas"]
+                and not asr_cross_file      # the scheduler makes its own replicas
                 and args.gpu_1 != args.gpu_2):
+            replica_gpu = (args.gpu_1 if asr_placement["qwen3"] == args.gpu_2
+                           else args.gpu_2)
             qwen3_replica_service = Qwen3WorkerService(
                 lambda: resolve_worker_python(
                     qwen_env, config=config, env_profile=env_profile,
                     logger=logger),
-                qwen3_worker_script, device_id=args.gpu_1, logger=logger,
+                qwen3_worker_script, device_id=replica_gpu, logger=logger,
                 env_name=args.env, config_path=args.config)
 
         whisper_cfg = env_profile.get("models", {}).get("whisper", {})
@@ -491,8 +504,8 @@ def main():
                 lambda: resolve_worker_python(
                     "vllm", config=config, env_profile=env_profile,
                     logger=logger),
-                whisper_worker_script, device_id=args.gpu_2, logger=logger,
-                env_name=args.env, config_path=args.config))
+                whisper_worker_script, device_id=asr_placement["whisper"],
+                logger=logger, env_name=args.env, config_path=args.config))
 
     # 1b. Start DiariZen workers (if dia3 is not used)
     #
@@ -634,6 +647,51 @@ def main():
         # card before the first stage had produced anything -- and a run that
         # resumes from a checkpoint paid for models it never called.
         model_loader = ModelLoader(config, args, logger=logger)
+        model_loader.asr_placement = asr_placement
+
+        # Replicas the ASR scheduler may start on a GPU that has just been freed.
+        # Each factory returns (model, release); the scheduler chooses the GPU
+        # and the batch size.
+        def _free_cuda():
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        asr_replica_factories = {}
+        if asr_cross_file and args.ASRMoE and will_run(args, "asr"):
+            if qwen3_service is not None:
+                def _qwen3_replica(gpu, batch):
+                    service = Qwen3WorkerService(
+                        lambda: resolve_worker_python(
+                            qwen_env, config=config, env_profile=env_profile,
+                            logger=logger),
+                        qwen3_worker_script, device_id=gpu, logger=logger,
+                        env_name=args.env, config_path=args.config,
+                        batch_size=batch)
+                    service.spawn()
+                    service.wait_ready()
+                    return Qwen3ASRClient(service.process), service.stop
+                asr_replica_factories["qwen3"] = _qwen3_replica
+            if whisper_service is not None:
+                def _whisper_replica(gpu, batch):
+                    service = WhisperVLLMWorkerService(
+                        lambda: resolve_worker_python(
+                            "vllm", config=config, env_profile=env_profile,
+                            logger=logger),
+                        whisper_worker_script, device_id=gpu, logger=logger,
+                        env_name=args.env, config_path=args.config)
+                    service.spawn()
+                    service.wait_ready()
+                    return WhisperVLLMClient(service, batch_size=batch), service.stop
+                asr_replica_factories["whisper"] = _whisper_replica
+            else:
+                asr_replica_factories["whisper"] = lambda gpu, batch: (
+                    model_loader.make_whisper_ct2(torch.device(f"cuda:{gpu}"), batch),
+                    _free_cuda)
+            asr_replica_factories["phowhisper"] = lambda gpu, batch: (
+                model_loader.make_phowhisper(torch.device(f"cuda:{gpu}"), batch),
+                _free_cuda)
 
         # 3. Initialize Services
         audio_svc = AudioService(logger=logger)
@@ -667,7 +725,12 @@ def main():
             performance_monitor=performance_monitor,
             language=args.lang,
             batch_size=env_profile.get("models", {}).get("qwen3", {}).get("batch_size", 4),
-            keep_models=args.keep_models
+            keep_models=args.keep_models,
+            replica_factories=asr_replica_factories,
+            asr_workers={name: service for name, service in
+                         (("qwen3", qwen3_service), ("whisper", whisper_service))
+                         if service is not None},
+            asr_placement=asr_placement,
         )
         caption_svc = CaptionService(
             model_loader=model_loader,
