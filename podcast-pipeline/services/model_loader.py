@@ -9,6 +9,7 @@ from utils.steps import step_enabled
 from utils.performance_config import resolve_music_devices
 
 from models.whisper_wrapper import WhisperASR
+from models.whisper_vllm import WhisperVLLMClient
 from models.phowhisper import PhoWhisperASR
 from models.silero_vad import SileroVAD
 from models.pyannote import PyannoteDiarizer
@@ -203,7 +204,8 @@ class ModelLoader:
                 BSRoformerPool(models) if len(models) > 1 else models[0])
             
     @_serialized
-    def load_asr_models(self, qwen3_service: Qwen3WorkerService = None):
+    def load_asr_models(self, qwen3_service: Qwen3WorkerService = None,
+                        whisper_service=None):
         """Load ASR models (Whisper, PhoWhisper, Qwen3)."""
         if "phowhisper" in self.models:
             return
@@ -230,13 +232,30 @@ class ModelLoader:
 
         
         if getattr(self.args, "ASRMoE", False) and getattr(self.args, "lang", "vi") == "vi":
-            if self.logger: self.logger.info(f"Loading Whisper on {self.device_2}")
-            
-            whisper_cfg = self.config.get("environments", {}).get(self.args.env, {}).get("models", {}).get("whisper", {})
-            self.models["whisper"] = WhisperASR(
-                device=self.device_2,
-                **whisper_cfg
-            )
+            whisper_cfg = dict(self.config.get("environments", {}).get(
+                self.args.env, {}).get("models", {}).get("whisper", {}))
+            whisper_backend = str(
+                whisper_cfg.pop("backend", "ctranslate2")).lower()
+            if whisper_backend == "vllm":
+                if whisper_service is None:
+                    raise RuntimeError(
+                        "models.whisper.backend=vllm requires a Whisper vLLM worker")
+                if self.logger:
+                    self.logger.info("Connecting to Whisper large-v3 vLLM worker")
+                self.models["whisper"] = WhisperVLLMClient(
+                    whisper_service,
+                    batch_size=whisper_cfg.get("batch_size", 16))
+            else:
+                if self.logger:
+                    self.logger.info(f"Loading Whisper on {self.device_2}")
+                # vLLM-only settings must not leak into the CTranslate2 wrapper.
+                for key in ("model_name", "gpu_memory_utilization",
+                            "max_model_len", "max_new_tokens", "torch_dtype"):
+                    whisper_cfg.pop(key, None)
+                self.models["whisper"] = WhisperASR(
+                    device=self.device_2,
+                    **whisper_cfg
+                )
             if qwen3_service:
                 if self.logger: self.logger.info("Connecting to Qwen3 worker")
                 self.models["qwen3"] = Qwen3ASRClient(qwen3_service.process)

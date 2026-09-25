@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Qwen3-ASR Worker — runs in a separate environment (qwen3_env) on GPU 1.
+Qwen3-ASR Worker — runs in an isolated qwen3_env or vllm_env.
 
 Usage:
     CUDA_VISIBLE_DEVICES=1 /path/to/qwen3_env/bin/python qwen3_worker.py
@@ -33,15 +33,7 @@ def _patched_load(*args, **kwargs):
     return _original_load(*args, **kwargs)
 torch.load = _patched_load
 
-def load_model(config_path=None, env_name="kaggle"):
-    """Load Qwen3-ASR model and processor."""
-    from transformers import AutoProcessor, AutoModelForMultimodalLM
-
-    model_name = "Qwen/Qwen3-ASR-1.7B-hf"
-    device = torch.device("cuda:0")  # CUDA_VISIBLE_DEVICES remaps physical GPU 1 → cuda:0
-
-    print(json.dumps({"status": "loading", "model": model_name}), flush=True)
-
+def _model_config(config_path=None, env_name="kaggle"):
     qwen_cfg = {}
     if config_path and os.path.exists(config_path):
         try:
@@ -50,6 +42,43 @@ def load_model(config_path=None, env_name="kaggle"):
             qwen_cfg = cfg.get("environments", {}).get(env_name, {}).get("models", {}).get("qwen3", {})
         except Exception as e:
             print(json.dumps({"error": f"Failed to parse config: {str(e)}"}), flush=True)
+    return qwen_cfg
+
+
+def load_model(config_path=None, env_name="kaggle"):
+    """Load the configured Transformers or vLLM Qwen3-ASR backend."""
+    qwen_cfg = _model_config(config_path, env_name)
+    backend = str(qwen_cfg.get("backend", "transformers")).lower()
+    default_model = ("Qwen/Qwen3-ASR-1.7B" if backend == "vllm"
+                     else "Qwen/Qwen3-ASR-1.7B-hf")
+    model_name = qwen_cfg.get("model_name", default_model)
+    print(json.dumps({"status": "loading", "model": model_name,
+                      "backend": backend}), flush=True)
+
+    if backend == "vllm":
+        try:
+            from qwen_asr import Qwen3ASRModel
+        except ImportError as exc:
+            raise RuntimeError(
+                "qwen-asr vLLM support is missing; install podcast-pipeline/"
+                "requirements-vllm.txt in the VLLM_PYTHON environment") from exc
+        kwargs = {
+            "model": model_name,
+            "max_inference_batch_size": int(qwen_cfg.get("batch_size", 16)),
+            "max_new_tokens": int(qwen_cfg.get("max_new_tokens", 256)),
+            "gpu_memory_utilization": float(qwen_cfg.get(
+                "gpu_memory_utilization", 0.40)),
+            "dtype": qwen_cfg.get("torch_dtype", "bfloat16"),
+        }
+        if qwen_cfg.get("max_model_len"):
+            kwargs["max_model_len"] = int(qwen_cfg["max_model_len"])
+        model = Qwen3ASRModel.LLM(**kwargs)
+        print(json.dumps({"status": "ready", "device": "cuda:0",
+                          "backend": backend}), flush=True)
+        return model, None, None, backend
+
+    from transformers import AutoProcessor, AutoModelForMultimodalLM
+    device = torch.device("cuda:0")  # CUDA_VISIBLE_DEVICES remaps the physical GPU
 
     dtype_str = qwen_cfg.get("torch_dtype", "float16")
     use_bf16 = dtype_str == "bfloat16" or os.environ.get("SOMMELIER_USE_BF16") == "1"
@@ -74,8 +103,9 @@ def load_model(config_path=None, env_name="kaggle"):
     
     model.eval()
 
-    print(json.dumps({"status": "ready", "device": str(device)}), flush=True)
-    return model, processor, device
+    print(json.dumps({"status": "ready", "device": str(device),
+                      "backend": backend}), flush=True)
+    return model, processor, device, backend
 
 
 def _read_audio(audio_path):
@@ -89,13 +119,29 @@ def _read_audio(audio_path):
     return sf.read(audio_path, dtype="float32")
 
 
-def transcribe(model, processor, device, audio_path, language="vi"):
+def _qwen_language(language):
+    aliases = {
+        "vi": "Vietnamese", "vietnamese": "Vietnamese",
+        "en": "English", "english": "English",
+    }
+    return aliases.get(str(language or "").strip().lower())
+
+
+def transcribe(model, processor, device, audio_path, language="vi",
+               backend="transformers"):
     """Run Qwen3-ASR inference on an audio file."""
     try:
         audio_data, sr = _read_audio(audio_path)
         if sr != 16000:
             import librosa
             audio_data = librosa.resample(audio_data, orig_sr=sr, target_sr=16000)
+
+        if backend == "vllm":
+            result = model.transcribe(
+                audio=audio_data,
+                language=_qwen_language(language),
+            )[0]
+            return result.text.strip()
 
         conversation = [
             {"role": "system", "content": "You are a highly accurate Vietnamese ASR system. Transcribe the audio precisely. Maintain natural punctuation and capitalization. Ignore background noise, music, and do not hallucinate content if the audio is silent or unintelligible."},
@@ -130,7 +176,8 @@ def transcribe(model, processor, device, audio_path, language="vi"):
         return f"[ERROR] {e}"
 
 
-def transcribe_batch(model, processor, device, jobs, language="vi"):
+def transcribe_batch(model, processor, device, jobs, language="vi",
+                     backend="transformers"):
     """Run one padded generation batch, with a compatibility fallback."""
     if not jobs:
         return []
@@ -144,6 +191,16 @@ def transcribe_batch(model, processor, device, jobs, language="vi"):
                 audio_data = librosa.resample(
                     audio_data, orig_sr=sr, target_sr=16000)
             audio_arrays.append(audio_data)
+        if backend == "vllm":
+            forced_language = _qwen_language(language)
+            outputs = model.transcribe(
+                audio=audio_arrays,
+                language=[forced_language] * len(audio_arrays),
+            )
+            return [{"id": str(job["id"]), "text": output.text.strip()}
+                    for job, output in zip(jobs, outputs)]
+
+        for job in jobs:
             conversation = [
                 {"role": "system", "content": "You are a highly accurate Vietnamese ASR system. Transcribe the audio precisely. Maintain natural punctuation and capitalization. Ignore background noise, music, and do not hallucinate content if the audio is silent or unintelligible."},
                 {"role": "user", "content": [
@@ -177,7 +234,7 @@ def transcribe_batch(model, processor, device, jobs, language="vi"):
               file=sys.stderr, flush=True)
         return [{"id": str(job["id"]),
                  "text": transcribe(model, processor, device,
-                                    job["audio_path"], language)}
+                                    job["audio_path"], language, backend)}
                 for job in jobs]
 
 
@@ -187,7 +244,7 @@ def main():
     parser.add_argument("--env", default="kaggle")
     args = parser.parse_args()
 
-    model, processor, device = load_model(args.config, args.env)
+    model, processor, device, backend = load_model(args.config, args.env)
 
     # Read commands from stdin, one JSON per line
     for line in sys.stdin:
@@ -221,7 +278,7 @@ def main():
             else:
                 print(json.dumps({"results": transcribe_batch(
                     model, processor, device, jobs,
-                    request.get("language", "vi"))}), flush=True)
+                    request.get("language", "vi"), backend)}), flush=True)
             continue
 
         # Transcribe
@@ -232,7 +289,7 @@ def main():
             print(json.dumps({"error": f"audio file not found: {audio_path}"}), flush=True)
             continue
 
-        text = transcribe(model, processor, device, audio_path, language)
+        text = transcribe(model, processor, device, audio_path, language, backend)
         print(json.dumps({"text": text}), flush=True)
 
 

@@ -269,19 +269,26 @@
           "vad_threshold": 2.0,
           "max_segment": 20.0
         },
-        "whisper": {
-          "model_size": "large-v3",
-          "compute_type": "float32",
-          "batch_size": 16
+      "whisper": {
+        "backend": "vllm",
+        "model_size": "large-v3",
+        "model_name": "openai/whisper-large-v3",
+        "torch_dtype": "bfloat16",
+        "batch_size": 32,
+        "gpu_memory_utilization": 0.4,
+        "max_new_tokens": 256
         },
         "phowhisper": {
           "compute_type": "float32",
           "batch_size": 64
         },
-        "qwen3": {
-          "batch_size": 16,
-          "use_flash_attention": false,
-          "torch_dtype": "float32"
+      "qwen3": {
+        "backend": "vllm",
+        "model_name": "Qwen/Qwen3-ASR-1.7B",
+        "batch_size": 32,
+        "torch_dtype": "bfloat16",
+        "gpu_memory_utilization": 0.4,
+        "max_new_tokens": 256
         },
         "diarizen": {
           "batch_size": 64,
@@ -315,11 +322,13 @@
           "hi_res": true,
           "isolate_process": true
         },
-        "refinement": {
-          "model_name": "Qwen/Qwen3.5-9B",
-          "batch_size": 40,
-          "torch_dtype": "bfloat16",
-          "prefix_cache": false
+      "refinement": {
+        "backend": "vllm",
+        "model_name": "Qwen/Qwen3.5-9B",
+        "batch_size": 40,
+        "torch_dtype": "bfloat16",
+        "prefix_cache": true,
+        "max_model_len": 49152
         },
         "relabel": {
           "window_tokens": 32000,

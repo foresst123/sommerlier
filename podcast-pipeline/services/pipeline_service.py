@@ -144,8 +144,7 @@ class PipelineService:
             # Bảo đảm worker đang chạy khi bước thực sự bắt đầu. main() có thể khởi
             # động sớm để làm nóng, nhưng tại đây lỗi phải được báo; worker đang chạy
             # thì không cần khởi động thêm.
-            worker = self.WORKER_FOR_STAGE.get(group)
-            if worker:
+            for worker in self.WORKERS_FOR_STAGE.get(group, ()):
                 self._ensure_worker(worker)
 
             {
@@ -154,16 +153,17 @@ class PipelineService:
                 "separation":  lambda: self.model_loader.load_separation_models(w.get("sidon")),
                 "music":       lambda: self.model_loader.load_music_models(),
                 "tagger":      lambda: self.model_loader.load_tagger(),
-                "asr":         lambda: self.model_loader.load_asr_models(w.get("qwen3")),
+                "asr":         lambda: self.model_loader.load_asr_models(
+                    w.get("qwen3"), w.get("whisper")),
                 "caption":     lambda: self.model_loader.load_caption_model(),
             }[group]()
 
     # Worker cần cho mỗi bước. Loader đọc service.process nên phải có tiến
     # trình thật trước khi dựng client kết nối.
-    WORKER_FOR_STAGE = {
-        "diarization": "diarizen",
-        "separation": "sidon",
-        "asr": "qwen3",
+    WORKERS_FOR_STAGE = {
+        "diarization": ("diarizen",),
+        "separation": ("sidon",),
+        "asr": ("qwen3", "whisper"),
     }
 
     # Công tắc bước lấy từ profile, dự phòng bằng cờ cũ. Dùng chung utils.steps
@@ -1047,6 +1047,7 @@ class PipelineService:
             stage_out.write_asr(transcripts)
 
         self._release_worker(args, "qwen3")
+        self._release_worker(args, "whisper")
 
         if getattr(args, "stop_after", None) == "asr":
             if self.logger: self.logger.info("Stopping pipeline after asr as requested by --stop_after.")

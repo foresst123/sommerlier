@@ -173,7 +173,9 @@ class DiarizationRefinementService:
                  placement: str = "auto", gpu_memory_utilization: float = 0.82,
                  max_batch_tokens: int = 0,
                  pipeline_devices=None, micro_batch_size: int = 1,
-                 pipeline_split_ratio: float = 0.5, cpu_threads: int = 0):
+                 pipeline_split_ratio: float = 0.5, cpu_threads: int = 0,
+                 backend: str = "transformers", workers: int = 1,
+                 max_model_len: int = 0, config=None, env_profile=None):
         self.logger = logger
         self.model = None
         self.tokenizer = None
@@ -193,6 +195,11 @@ class DiarizationRefinementService:
         self.pipeline_split_ratio = min(
             0.80, max(0.20, float(pipeline_split_ratio)))
         self.cpu_threads = max(0, int(cpu_threads))
+        self.backend = str(backend).strip().lower()
+        self.worker_count = max(1, int(workers))
+        self.max_model_len = max(0, int(max_model_len))
+        self._worker_config = config
+        self._worker_env_profile = env_profile
         self._active_cpu_threads = None
         self.pipeline_pool = None
         # Every request repeats the same ~1200-token system prompt, and without
@@ -229,17 +236,27 @@ class DiarizationRefinementService:
         # hay fallback direct-load.
         self._worker = None
         self._worker_python = None
+        self._worker_env_error = None
         try:
-            self._worker_python = resolve_worker_python("refinement", logger=logger)
+            worker_env = "vllm" if self.backend == "vllm" else "refinement"
+            self._worker_python = resolve_worker_python(
+                worker_env, config=config, env_profile=env_profile, logger=logger)
             if logger:
                 logger.info(
-                    f"[refinement] refinement_env found ({self._worker_python}); "
+                    f"[refinement] {worker_env}_env found ({self._worker_python}); "
                     f"worker will start when refinement stage begins")
-        except FileNotFoundError:
+        except FileNotFoundError as _e:
+            if self.backend == "vllm":
+                self._worker_env_error = _e
             if logger:
-                logger.info(
-                    "[refinement] no refinement_env found, "
-                    "loading model directly in main process")
+                if self.backend == "vllm":
+                    logger.warning(
+                        "[refinement] vllm_env is required but was not found; "
+                        "the refinement stage will stop with setup instructions")
+                else:
+                    logger.info(
+                        "[refinement] no refinement_env found, "
+                        "loading model directly in main process")
         except Exception as _e:
             if logger:
                 logger.warning(
@@ -255,6 +272,12 @@ class DiarizationRefinementService:
         """
         if self._worker is not None:
             return True  # đã start
+        if self._worker_env_error is not None:
+            raise RuntimeError(
+                "A separate vllm_env is required for Qwen3-ASR, Whisper "
+                "large-v3 and Qwen3.5. Run scripts/create_vllm_env.sh, then "
+                "export VLLM_PYTHON=/path/to/vllm_env/bin/python. "
+                f"Resolver detail: {self._worker_env_error}")
         if self._worker_python is None:
             return False  # không có refinement_env → dùng direct load
         try:
@@ -262,20 +285,53 @@ class DiarizationRefinementService:
             _script = _os.path.join(
                 _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
                 "refinement_worker.py")
-            from services.refinement_worker_service import RefinementWorkerService
-            self._worker = RefinementWorkerService(
+            from services.refinement_worker_service import (
+                RefinementWorkerPoolService, RefinementWorkerService)
+            devices = list(dict.fromkeys(self.pipeline_devices))
+            if not devices:
+                try:
+                    devices = [int(str(self.device).split(":")[-1])]
+                except (TypeError, ValueError):
+                    devices = [0]
+            replica_count = (min(self.worker_count, len(devices))
+                             if self.backend == "vllm" else 1)
+            services = [RefinementWorkerService(
                 python_env_path=self._worker_python,
                 worker_script_path=_script,
                 model_name=self.model_name,
+                dtype=self.torch_dtype,
+                device_map="single" if self.backend == "vllm" else self.placement,
+                gpu_ids="0" if self.backend == "vllm" else ",".join(
+                    str(value) for value in devices),
+                gpu_memory_fraction=self.gpu_memory_utilization,
+                backend=self.backend,
+                device_id=devices[index] if self.backend == "vllm" else None,
+                tensor_parallel_size=1,
+                max_model_len=self.max_model_len,
+                enable_prefix_caching=(self.prefix_cache
+                                       or self.backend == "vllm"),
                 logger=self.logger,
-            )
+            ) for index in range(replica_count)]
+            self._worker = (RefinementWorkerPoolService(services, self.logger)
+                            if len(services) > 1 else services[0])
             self._worker.start()
             if self.logger:
                 self.logger.info(
                     f"[refinement] subprocess worker started "
-                    f"(python={self._worker_python}, model={self.model_name})")
+                    f"(python={self._worker_python}, model={self.model_name}, "
+                    f"backend={self.backend}, replicas={len(services)})")
             return True
         except Exception as _e:
+            if self.backend == "vllm":
+                if self._worker is not None:
+                    try:
+                        self._worker.stop()
+                    except Exception:
+                        pass
+                self._worker = None
+                raise RuntimeError(
+                    f"Failed to start vLLM refinement workers for "
+                    f"{self.model_name}: {_e}") from _e
             if self.logger:
                 self.logger.warning(
                     f"[refinement] worker start failed ({_e}), "

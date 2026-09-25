@@ -321,6 +321,7 @@ from services.clean_two_channel_dataset_service import CleanTwoChannelDatasetSer
 from services.export_service import ExportService
 from services.pipeline_service import PipelineService
 from services.qwen3_worker_service import Qwen3WorkerService
+from services.whisper_vllm_worker_service import WhisperVLLMWorkerService
 from services.diarizen_worker_service import DiarizenWorkerService
 from services.sidon_worker_service import SidonWorkerService
 from services.worker_pool_service import WorkerPoolService
@@ -459,10 +460,14 @@ def main():
 
     qwen3_service = None
     qwen3_replica_service = None
+    whisper_service = None
     if args.ASRMoE and will_run(args, "asr"):
+        qwen_cfg = env_profile.get("models", {}).get("qwen3", {})
+        qwen_env = ("vllm" if str(qwen_cfg.get("backend", "transformers")).lower()
+                    == "vllm" else "qwen3")
         qwen3_worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qwen3_worker.py")
         qwen3_service = _prefetch(Qwen3WorkerService(
-            lambda: resolve_worker_python("qwen3", config=config,
+            lambda: resolve_worker_python(qwen_env, config=config,
                                           env_profile=env_profile, logger=logger),
             qwen3_worker_script, device_id=args.gpu_2, logger=logger,
             env_name=args.env, config_path=args.config))
@@ -472,10 +477,22 @@ def main():
                 and args.gpu_1 != args.gpu_2):
             qwen3_replica_service = Qwen3WorkerService(
                 lambda: resolve_worker_python(
-                    "qwen3", config=config, env_profile=env_profile,
+                    qwen_env, config=config, env_profile=env_profile,
                     logger=logger),
                 qwen3_worker_script, device_id=args.gpu_1, logger=logger,
                 env_name=args.env, config_path=args.config)
+
+        whisper_cfg = env_profile.get("models", {}).get("whisper", {})
+        if str(whisper_cfg.get("backend", "ctranslate2")).lower() == "vllm":
+            whisper_worker_script = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "whisper_vllm_worker.py")
+            whisper_service = _prefetch(WhisperVLLMWorkerService(
+                lambda: resolve_worker_python(
+                    "vllm", config=config, env_profile=env_profile,
+                    logger=logger),
+                whisper_worker_script, device_id=args.gpu_2, logger=logger,
+                env_name=args.env, config_path=args.config))
 
     # 1b. Start DiariZen workers (if dia3 is not used)
     #
@@ -663,11 +680,14 @@ def main():
         if perf_cfg["enabled"]:
             refinement_perf = perf_cfg["stages"]["refinement"]
             for key in ("placement", "gpu_memory_utilization", "max_batch_tokens",
-                        "micro_batch_size", "pipeline_split_ratio", "cpu_threads"):
+                        "micro_batch_size", "pipeline_split_ratio", "cpu_threads",
+                        "workers"):
                 refinement_cfg[key] = refinement_perf[key]
             refinement_cfg["pipeline_devices"] = [args.gpu_1, args.gpu_2]
             refinement_cfg["device"] = f"cuda:{args.gpu_1}"
-        refinement_svc = DiarizationRefinementService(logger=logger, **refinement_cfg)
+        refinement_svc = DiarizationRefinementService(
+            logger=logger, config=config, env_profile=env_profile,
+            **refinement_cfg)
         # Passes over the same resident LLM. Building them loads nothing and
         # switches nothing on: `steps.speaker_relabel` decides whether it runs.
         # An unknown key in `models.relabel` raises here, so a typo is an error
@@ -701,6 +721,7 @@ def main():
             worker_services={
                 "diarizen": diarizen_service,
                 "qwen3": qwen3_service,
+                "whisper": whisper_service,
                 "sidon": sidon_service,
             },
             performance_monitor=performance_monitor,

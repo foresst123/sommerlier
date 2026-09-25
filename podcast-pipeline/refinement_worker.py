@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refinement LLM Worker — chạy trong venv riêng có transformers>=5.2.
+"""Refinement LLM worker for either Transformers or vLLM.
 
 Mục đích: tách refinement LLM (Qwen3.5/3.8) ra khỏi main env để tránh
 xung đột transformers 4.53 (cần cho pyannote/whisperx) vs 5.x (cần cho
@@ -58,7 +58,37 @@ def _patch_torch_load():
 
 
 def load_model(model_name: str, dtype_str: str, device_map: str,
-               gpu_ids: list, gpu_memory_fraction: float):
+               gpu_ids: list, gpu_memory_fraction: float,
+               backend: str = "transformers", tensor_parallel_size: int = 1,
+               max_model_len: int = 0, enable_prefix_caching: bool = True):
+
+    if backend == "vllm":
+        try:
+            from vllm import LLM
+        except ImportError as exc:
+            raise RuntimeError(
+                "vLLM is missing; install podcast-pipeline/requirements-vllm.txt "
+                "in the VLLM_PYTHON environment") from exc
+        print(json.dumps({"status": "loading", "model": model_name,
+                          "backend": backend}), flush=True)
+        kwargs = {
+            "model": model_name,
+            "dtype": dtype_str,
+            "tensor_parallel_size": max(1, int(tensor_parallel_size)),
+            "gpu_memory_utilization": min(
+                0.95, max(0.1, float(gpu_memory_fraction))),
+            "enable_prefix_caching": bool(enable_prefix_caching),
+            "trust_remote_code": True,
+        }
+        if max_model_len:
+            kwargs["max_model_len"] = int(max_model_len)
+        model = LLM(**kwargs)
+        tokenizer = model.get_tokenizer()
+        print(json.dumps({"status": "ready", "model": model_name,
+                          "backend": backend,
+                          "tensor_parallel_size": kwargs["tensor_parallel_size"]}),
+              flush=True)
+        return model, tokenizer
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -159,8 +189,27 @@ def _entry_device(model):
         return model.device
 
 
+def _render_prompts(tokenizer, system_prompt, user_messages, thinking):
+    texts = []
+    for msg in user_messages:
+        try:
+            text = tokenizer.apply_chat_template(
+                [{"role": "system", "content": system_prompt},
+                 {"role": "user", "content": msg}],
+                tokenize=False, add_generation_prompt=True,
+                enable_thinking=bool(thinking))
+        except TypeError:
+            text = tokenizer.apply_chat_template(
+                [{"role": "system", "content": system_prompt},
+                 {"role": "user", "content": msg}],
+                tokenize=False, add_generation_prompt=True)
+        texts.append(text)
+    return texts
+
+
 def generate(model, tokenizer, system_prompt: str, user_messages: list,
-             max_new_tokens: int = 512, thinking: bool = False) -> list:
+             max_new_tokens: int = 512, thinking: bool = False,
+             backend: str = "transformers") -> list:
     """Chạy một batch chat requests, trả về list[str]."""
     if not user_messages:
         return []
@@ -170,25 +219,20 @@ def generate(model, tokenizer, system_prompt: str, user_messages: list,
         tokenizer.pad_token = tokenizer.eos_token
 
     tokenizer.padding_side = "left"
-    texts = []
-    for msg in user_messages:
-        try:
-            t = tokenizer.apply_chat_template(
-                [{"role": "system", "content": system_prompt},
-                 {"role": "user", "content": msg}],
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=bool(thinking),
-            )
-        except TypeError:
-            # transformers cũ không có enable_thinking
-            t = tokenizer.apply_chat_template(
-                [{"role": "system", "content": system_prompt},
-                 {"role": "user", "content": msg}],
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-        texts.append(t)
+    texts = _render_prompts(tokenizer, system_prompt, user_messages, thinking)
+
+    if backend == "vllm":
+        from vllm import SamplingParams
+        outputs = model.generate(
+            texts,
+            sampling_params=SamplingParams(
+                temperature=0.0,
+                max_tokens=max_new_tokens,
+                repetition_penalty=1.0,
+            ),
+            use_tqdm=False,
+        )
+        return [output.outputs[0].text for output in outputs]
 
     inputs = tokenizer(texts, return_tensors="pt", padding=True)
     inputs = inputs.to(_entry_device(model))
@@ -222,6 +266,11 @@ def main():
     parser.add_argument("--gpu-ids", default="0,1",
                         help="Comma-separated GPU indices (CUDA_VISIBLE_DEVICES remaps)")
     parser.add_argument("--gpu-memory-fraction", type=float, default=0.90)
+    parser.add_argument("--backend", choices=["transformers", "vllm"],
+                        default="transformers")
+    parser.add_argument("--tensor-parallel-size", type=int, default=1)
+    parser.add_argument("--max-model-len", type=int, default=0)
+    parser.add_argument("--disable-prefix-caching", action="store_true")
     args = parser.parse_args()
 
     gpu_ids = [int(x) for x in args.gpu_ids.split(",") if x.strip()]
@@ -231,7 +280,9 @@ def main():
     try:
         model, tokenizer = load_model(
             args.model, args.dtype, args.device_map,
-            gpu_ids, args.gpu_memory_fraction)
+            gpu_ids, args.gpu_memory_fraction, args.backend,
+            args.tensor_parallel_size, args.max_model_len,
+            not args.disable_prefix_caching)
     except Exception as e:
         print(json.dumps({"status": "error", "error": str(e)}), flush=True)
         sys.exit(1)
@@ -266,6 +317,7 @@ def main():
                 user_messages=req.get("user_messages", []),
                 max_new_tokens=int(req.get("max_new_tokens", 512)),
                 thinking=bool(req.get("thinking", False)),
+                backend=args.backend,
             )
             print(json.dumps({"id": req_id, "ok": True, "texts": texts}),
                   flush=True)
