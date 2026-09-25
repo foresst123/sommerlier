@@ -314,6 +314,12 @@ class DiarizationRefinementService:
             ) for index in range(replica_count)]
             self._worker = (RefinementWorkerPoolService(services, self.logger)
                             if len(services) > 1 else services[0])
+            if self.backend == "vllm":
+                # The engine refuses to start unless its share of the card is free, and
+                # a model stopped a moment ago may not have given its memory back yet.
+                from utils.gpu_memory import wait_for_free_vram
+                wait_for_free_vram(devices[:replica_count],
+                                   self.gpu_memory_utilization, logger=self.logger)
             self._worker.start()
             if self.logger:
                 self.logger.info(
