@@ -582,6 +582,7 @@ def main():
     # needs no worker at all, and spawning one for it would download the
     # DialogueSidon weights and hold a GPU for a process nothing talks to.
     sidon_service = None
+    sidon_worker_count = 1
     _separator = (getattr(args, "separator", None)
                   or env_profile.get("models", {}).get("bss", {}).get("separator")
                   or "sidon")
@@ -600,8 +601,6 @@ def main():
             sidon_devices = configured_devices[:1]
         requested_sidon_workers = (
             max_sidon_workers if perf_cfg["enabled"] else 1)
-        sidon_devices = sidon_devices[:min(
-            requested_sidon_workers, int(perf_cfg["max_gpus"]))]
         if not sidon_devices:
             raise RuntimeError(
                 "No configured separation GPU is visible: requested "
@@ -609,7 +608,12 @@ def main():
         if requested_sidon_workers > len(sidon_devices):
             logger.warning(
                 f"[performance] separation requested {requested_sidon_workers} "
-                f"workers but only {len(sidon_devices)} GPU(s) are available")
+                f"GPU(s) but only {len(sidon_devices)} are available")
+        # One entry per worker process; a GPU repeats when workers_per_gpu > 1.
+        sidon_devices = performance_config.sidon_worker_devices(
+            sidon_devices, requested_sidon_workers, sep_perf["workers_per_gpu"],
+            int(perf_cfg["max_gpus"]), perf_cfg["enabled"])
+        sidon_worker_count = len(sidon_devices)
         sidon_workers = [SidonWorkerService(
             resolve_worker_python("sidon", config=config,
                                   env_profile=env_profile, logger=logger),
@@ -709,6 +713,9 @@ def main():
             performance_config={
                 **perf_cfg["stages"]["separation"],
                 "enabled": perf_cfg["enabled"],
+                # How many Sidon processes can serve a window at once.
+                "gpu_workers": max(sidon_worker_count,
+                                   perf_cfg["stages"]["separation"]["max_workers"]),
             },
         )
         music_svc = MusicService(

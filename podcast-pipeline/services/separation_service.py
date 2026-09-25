@@ -288,7 +288,7 @@ class SeparationService:
                 and callable(getattr(model, "postprocess_separated", None))):
             return None
 
-        gpu_workers = max(1, int(cfg.get("max_workers", 1)))
+        gpu_workers = max(1, int(cfg.get("gpu_workers", cfg.get("max_workers", 1))))
         post_workers = max(1, int(cfg.get("postprocess_workers", 1)))
         state = self._async_state
         with state["lock"]:
@@ -1560,7 +1560,8 @@ class SeparationService:
             prefetch_per_worker = max(
                 1, int(self.performance_config.get("gpu_prefetch_per_worker", 1)))
             prefetch_limit = max(
-                1, int(self.performance_config.get("max_workers", 1))
+                1, int(self.performance_config.get(
+                    "gpu_workers", self.performance_config.get("max_workers", 1)))
                 * prefetch_per_worker)
             initial = iter(expanded_window_iter())
             scheduled = collections.deque()

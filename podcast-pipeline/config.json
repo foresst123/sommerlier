@@ -419,6 +419,7 @@
           },
           "separation": {
             "max_workers": 2,
+            "workers_per_gpu": 3,
             "gpu_prefetch_per_worker": 2,
             "postprocess_workers": 2,
             "postprocess_device": "cpu",
@@ -427,6 +428,7 @@
           "music": {
             "tagger_workers": 1,
             "max_separator_workers": 2,
+            "workers_per_gpu": 3,
             "cross_file_overlap": false,
             "ordered_postprocess": true,
             "postprocess_workers": 2

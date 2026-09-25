@@ -70,6 +70,10 @@ _STAGES = {
     },
     "separation": {
         "max_workers": (INT, 1, 1, 2),
+        # Sidon worker processes on each GPU (max_workers still picks how many
+        # GPUs). Sidon runs one small diffusion job at a time, so a card often
+        # waits on kernel launches; a second process can use those gaps.
+        "workers_per_gpu": (INT, 1, 1, 4),
         "gpu_prefetch_per_worker": (INT, 1, 1, 8),
         "postprocess_workers": (INT, 1, 1, 16),
         "postprocess_device": (STR, "cpu", None, None),
@@ -78,6 +82,10 @@ _STAGES = {
     "music": {
         "tagger_workers": (INT, 1, 1, 2),
         "max_separator_workers": (INT, 1, 1, 2),
+        # BS-RoFormer worker processes on each GPU (max_separator_workers still
+        # picks how many GPUs). Only honoured with bs_roformer.isolate_process,
+        # since each extra instance needs its own process.
+        "workers_per_gpu": (INT, 1, 1, 4),
         # SSLAM (tagger) always stays on device_1. When this is on, the sole
         # BS-RoFormer instance moves to device_2 instead, so file N's removal
         # and file N+1's classification land on different cards when the
@@ -286,3 +294,33 @@ def resolve_asr_placement(asr_cfg, gpu_1: int, gpu_2: int) -> dict:
         "whisper": ids[asr_cfg["whisper_gpu"]],
         "phowhisper": ids[asr_cfg["phowhisper_gpu"]],
     }
+
+
+def sidon_worker_devices(available, requested_gpus, workers_per_gpu, max_gpus,
+                         enabled) -> list:
+    """GPU id for every Sidon worker process, cards interleaved.
+
+    Interleaving ([0, 1, 0, 1]) keeps the pool's first idle leases alternating
+    between cards instead of filling one card before the next.
+    """
+    if not enabled:
+        return list(available)[:1]
+    gpus = list(available)[:max(1, min(int(requested_gpus), int(max_gpus)))]
+    return [gpu for _ in range(max(1, int(workers_per_gpu))) for gpu in gpus]
+
+
+def resolve_music_worker_devices(devices, workers_per_gpu, isolate_process,
+                                 logger=None) -> list:
+    """One entry per BS-RoFormer instance, the cards interleaved ([0, 1, 0, 1]).
+
+    Without process isolation extra instances on a card would share one process
+    (and its global SDPA flags), so they are not created.
+    """
+    per_gpu = max(1, int(workers_per_gpu))
+    if per_gpu > 1 and not isolate_process:
+        if logger:
+            logger.warning(
+                f"[performance] music.workers_per_gpu={per_gpu} needs "
+                "models.bs_roformer.isolate_process; using one worker per GPU")
+        per_gpu = 1
+    return [device for _ in range(per_gpu) for device in devices]

@@ -6,7 +6,7 @@ import torch
 from typing import Dict, Any
 
 from utils.steps import step_enabled
-from utils.performance_config import resolve_music_devices
+from utils.performance_config import resolve_music_devices, resolve_music_worker_devices
 
 from models.whisper_wrapper import WhisperASR
 from models.whisper_vllm import WhisperVLLMClient
@@ -200,6 +200,10 @@ class ModelLoader:
                 max_separator_workers=int(music_perf.get("max_separator_workers", 1)),
                 cross_file_overlap=bool(music_perf.get("cross_file_overlap", False)),
                 logger=self.logger)
+            devices = resolve_music_worker_devices(
+                devices, music_perf.get("workers_per_gpu", 1)
+                if perf.get("enabled", False) else 1,
+                bool(bs_roformer_cfg.get("isolate_process", False)), self.logger)
             if self.logger:
                 self.logger.info(
                     f"Loading {len(devices)} BS-RoFormer worker(s) on "
