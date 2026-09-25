@@ -61,3 +61,14 @@ def test_the_qwen3_profile_bounds_the_context_so_the_kv_cache_fits():
     cfg = json.load(open(os.path.join(ROOT, "config.json"), encoding="utf-8"))
     qwen = cfg["environments"]["a100"]["models"]["qwen3"]
     assert qwen["backend"] == "vllm" and 0 < qwen["max_model_len"] <= 16384
+
+
+
+def test_worker_trace_makes_child_processes_dump_their_stacks():
+    # EngineCore is a child of the worker; its silent start-up is what we need to see.
+    code = ("import os, worker_trace; worker_trace.watch(7); worker_trace.done();"
+            "print(os.environ['SOMMELIER_TRACE_CHILD'], os.environ['PYTHONPATH'])")
+    out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True,
+                         text=True, check=True).stdout.split()
+    assert out[0] == "7" and out[1].split(os.pathsep)[0].endswith("trace_site")
+    assert os.path.isfile(os.path.join(ROOT, "trace_site", "sitecustomize.py"))

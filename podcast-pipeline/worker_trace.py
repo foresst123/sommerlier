@@ -36,6 +36,18 @@ def note(message):
 
 def watch(interval=45):
     faulthandler.dump_traceback_later(interval, repeat=True, file=sys.stdout)
+    # The engine runs in child processes (vLLM's EngineCore), which is where a
+    # silent start-up hangs. Make them dump their own stacks to stderr too: the
+    # sitecustomize in trace_site/ does it for spawned children, the fork hook
+    # below for forked ones.
+    os.environ["SOMMELIER_TRACE_CHILD"] = str(interval)
+    site = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trace_site")
+    parts = [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p]
+    if site not in parts:
+        os.environ["PYTHONPATH"] = os.pathsep.join([site] + parts)
+    if hasattr(os, "register_at_fork"):
+        os.register_at_fork(after_in_child=lambda: faulthandler.dump_traceback_later(
+            interval, repeat=True, file=sys.stderr))
 
 
 def done():
