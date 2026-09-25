@@ -4,6 +4,8 @@ from services.base_worker_service import WorkerProcessService
 class Qwen3WorkerService(WorkerProcessService):
     """Manages the lifecycle of the isolated Qwen3-ASR worker process."""
 
+    ready_requires_json = True   # vLLM logs to stdout; see base_worker_service
+
     def __init__(self, python_env_path: str, worker_script_path: str, device_id: int = 1,
                  logger=None, env_name: str = "kaggle", config_path: str = "config.json",
                  batch_size: int = None, isolate_library_path: bool = False):

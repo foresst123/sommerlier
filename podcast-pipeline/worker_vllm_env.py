@@ -30,3 +30,7 @@ os.environ.setdefault("VLLM_HOST_IP", "127.0.0.1")
 os.environ.setdefault("GLOO_SOCKET_IFNAME", "lo")
 os.environ.setdefault("NCCL_SOCKET_IFNAME", "lo")
 os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+# vLLM logs to stdout by default -- the pipe that carries the JSON replies. The
+# client reads one line per reply and json.loads it, so a log line landing between
+# request and reply broke the protocol. stderr is drained into the pipeline log.
+os.environ.setdefault("VLLM_LOGGING_STREAM", "ext://sys.stderr")

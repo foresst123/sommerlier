@@ -24,6 +24,8 @@ from services.base_worker_service import WorkerProcessService
 class RefinementWorkerService(WorkerProcessService):
     """Subprocess wrapper cho refinement LLM worker."""
 
+    ready_requires_json = True   # vLLM logs to stdout; see base_worker_service
+
     def __init__(self, python_env_path: str, worker_script_path: str,
                  model_name: str, dtype: str = "bfloat16",
                  device_map: str = "auto", gpu_ids: str = "0,1",

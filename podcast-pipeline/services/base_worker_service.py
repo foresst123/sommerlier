@@ -103,6 +103,12 @@ class WorkerProcessService:
     # ------------------------------------------------------------------
     # readiness
     # ------------------------------------------------------------------
+    # True for workers whose libraries log to the same stdout (vLLM): only the JSON
+    # {"status": "ready"} counts. A bare "line containing ready" matched vLLM's own
+    # debug dump of VLLM_ENGINE_READY_TIMEOUT_S and declared the worker ready while
+    # its engine was still compiling.
+    ready_requires_json = False
+
     def is_ready_line(self, line: str) -> bool:
         """Whether ``line`` is the worker's ready handshake.
 
@@ -115,7 +121,7 @@ class WorkerProcessService:
         try:
             msg = json.loads(stripped)
         except Exception:
-            return "ready" in stripped.lower()
+            return (not self.ready_requires_json) and "ready" in stripped.lower()
         if isinstance(msg, dict):
             status = str(msg.get("status", "")).lower()
             if status == "ready":
