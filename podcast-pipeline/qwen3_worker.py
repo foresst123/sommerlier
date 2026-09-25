@@ -15,7 +15,6 @@ Protocol (stdin/stdout, line-delimited):
 
 import sys
 import json
-import time
 import os
 import numpy as np
 import torch
@@ -23,7 +22,6 @@ import soundfile as sf
 import argparse
 
 import worker_vllm_env  # noqa: F401  (sets VLLM_* defaults before vllm loads)
-import worker_trace  # TEMPORARY tracing, see worker_trace.py
 from worker_errors import describe_exception
 
 import warnings
@@ -63,19 +61,12 @@ def load_model(config_path=None, env_name="kaggle", batch_size=None):
                       "backend": backend}), flush=True)
 
     if backend == "vllm":
-        worker_trace.watch()
-        worker_trace.step(f"qwen3 start: cuda_visible={os.environ.get('CUDA_VISIBLE_DEVICES')} "
-                          f"host_ip={os.environ.get('VLLM_HOST_IP')} "
-                          f"nccl_if={os.environ.get('NCCL_SOCKET_IFNAME')}")
         try:
-            worker_trace.step("importing vllm")
             # qwen-asr swallows the real reason vllm fails to import and reports
             # a generic "vLLM is not available"; import it here first so the
             # actual error (a missing library, a version clash) is what surfaces.
             import vllm  # noqa: F401
-            worker_trace.step(f"vllm {vllm.__version__} imported; importing qwen_asr")
             from qwen_asr import Qwen3ASRModel
-            worker_trace.step("qwen_asr imported")
         except ImportError as exc:
             raise RuntimeError(
                 "vllm / qwen-asr cannot be imported in this environment "
@@ -90,11 +81,7 @@ def load_model(config_path=None, env_name="kaggle", batch_size=None):
         }
         if qwen_cfg.get("max_model_len"):
             kwargs["max_model_len"] = int(qwen_cfg["max_model_len"])
-        worker_trace.step(f"starting the engine (weights, memory profiling, compile, "
-                          f"cuda graphs) with {kwargs}")
         model = Qwen3ASRModel.LLM(**kwargs)
-        worker_trace.step("engine is up")
-        worker_trace.done()
         print(json.dumps({"status": "ready", "device": "cuda:0",
                           "backend": backend}), flush=True)
         return model, None, None, backend
@@ -160,7 +147,7 @@ def transcribe(model, processor, device, audio_path, language="vi",
 
         if backend == "vllm":
             result = model.transcribe(
-                audio=audio_data,
+                audio=(audio_data, 16000),
                 language=_qwen_language(language),
             )[0]
             return result.text.strip()
@@ -214,16 +201,14 @@ def transcribe_batch(model, processor, device, jobs, language="vi",
                     audio_data, orig_sr=sr, target_sr=16000)
             audio_arrays.append(audio_data)
         if backend == "vllm":
+            # qwen_asr takes a path/URL or a (waveform, sample_rate) pair; a bare
+            # ndarray raises "Unsupported audio input type".
+            clips = [(array, 16000) for array in audio_arrays]
             forced_language = _qwen_language(language)
-            _t = time.monotonic()
             outputs = model.transcribe(
-                audio=audio_arrays,
-                language=[forced_language] * len(audio_arrays),
+                audio=clips,
+                language=[forced_language] * len(clips),
             )
-            worker_trace.note(
-                f"qwen3 batch of {len(audio_arrays)} clips "
-                f"({sum(len(a) for a in audio_arrays) / 16000:.1f}s audio) "
-                f"generated in {time.monotonic() - _t:.2f}s")
             return [{"id": str(job["id"]), "text": output.text.strip()}
                     for job, output in zip(jobs, outputs)]
 
