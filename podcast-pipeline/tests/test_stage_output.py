@@ -195,11 +195,25 @@ def test_stage_artifacts_are_written_once_not_once_per_stage():
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "services/pipeline_service.py"), encoding="utf-8").read()
 
+    def guarded(stage, writer):
+        """Every call site of `writer` runs only for a freshly computed `stage`.
+
+        A site is fine when the paragraph before it is guarded by `if "<stage>" in
+        computed:`, or when it lives in a helper that run() only calls after computing
+        the stage (the asynchronous ASR commit).
+        """
+        for match in re.finditer(rf".*stage_out\.{writer}\(.*", src):
+            before = src[:match.start()]
+            in_fresh_only_helper = "def _submit_asr_async" in before[
+                before.rfind("\n    def "):]
+            if not (f'if "{stage}" in computed:' in before.rsplit("\n\n", 1)[-1]
+                    or in_fresh_only_helper):
+                return False
+        return True
+
     for stage, writer in (("separation", "write_separation"),
                           ("asr", "write_asr")):
-        call = re.search(rf".*stage_out\.{writer}\(.*", src).group(0)
-        before = src[:src.index(call)]
-        assert f'if "{stage}" in computed:' in before.rsplit("\n\n", 1)[-1], (
+        assert guarded(stage, writer), (
             f"{writer} runs even when {stage} came from a checkpoint")
 
     # Diarization has two call sites: a deferred one inside _finish(), wired

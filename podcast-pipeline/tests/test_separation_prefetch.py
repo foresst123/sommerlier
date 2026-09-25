@@ -317,7 +317,17 @@ def _sidon_runs_ahead(prefetch_per_worker):
     worker = threading.Thread(target=lambda: svc.process_overlaps(
         _many_overlaps(8), _audio(120.0), overlap_threshold=0.1))
     worker.start()
-    time.sleep(1.0)                 # everything Sidon can do while downstream is stuck
+    # Everything Sidon can do while downstream is stuck: wait until the count stops
+    # moving (no fixed sleep, which flaked when the machine was busy).
+    settled_since, last = time.monotonic(), -1
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        current = model.raw_done
+        if current != last:
+            last, settled_since = current, time.monotonic()
+        elif time.monotonic() - settled_since >= 0.5 and current > 0:
+            break
+        time.sleep(0.02)
     ahead = model.raw_done
     model.release.set()
     worker.join(30)

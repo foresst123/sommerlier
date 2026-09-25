@@ -781,6 +781,8 @@ def main():
                 # How many Sidon processes can serve a window at once.
                 "gpu_workers": max(sidon_worker_count,
                                    perf_cfg["stages"]["separation"]["max_workers"]),
+                # Lets the admission byte budget derive its ceiling from the RAM limit.
+                "ram_soft_fraction": perf_cfg["ram_soft_fraction"],
             },
         )
         music_svc = MusicService(
@@ -852,7 +854,11 @@ def main():
             alignment_cfg.setdefault("worker_gpus", sorted({args.gpu_1, args.gpu_2}))
         word_alignment_svc = WordAlignmentService(
             language=args.lang, logger=logger, **alignment_cfg)
-        clean_dataset_svc = CleanTwoChannelDatasetService(logger=logger)
+        clean_dataset_svc = CleanTwoChannelDatasetService(
+            logger=logger,
+            # Same bounded pool size as the conversation-export renderer.
+            workers=int(env_profile.get("models", {}).get(
+                "conversation_selection", {}).get("render_workers", 1)))
         export_svc = ExportService(logger=logger)
 
         # 4. Orchestrate via PipelineService
