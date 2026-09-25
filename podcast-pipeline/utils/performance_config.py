@@ -45,6 +45,14 @@ _STAGES = {
         # per-file barrier. Off by default, which keeps the per-file path.
         "cross_file": (BOOL, False, None, None),
         "files_in_flight": (INT, 3, 1, 8),
+        # With cross_file, a file's thread returns as soon as its clips are queued;
+        # the vote (ROVER) and the checkpoint commit run on `vote_workers` threads
+        # and are drained at the end of the stage. `max_prepared_mb` bounds the
+        # resampled waveform held for files whose lanes have not finished (0 = no
+        # bound). Only applies to by-stage runs that stop after asr.
+        "async_vote": (BOOL, False, None, None),
+        "vote_workers": (INT, 2, 1, 8),
+        "max_prepared_mb": (INT, 2048, 0, 262144),
         # Batch size while two models share a GPU, and the larger one a model
         # gets when its GPU peer has finished or when a replica starts.
         "shared_batch_size": (INT, 16, 1, 256),

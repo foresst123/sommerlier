@@ -318,6 +318,10 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
             # ("separation") could start reading a diarization checkpoint a
             # still-running background thread has not written yet.
             _drain_pending_diarization(pipeline, failures)
+            # Same for ASR: votes and checkpoint commits run off the file
+            # threads, and must all be on disk before the next stage reads them.
+            # The scheduler is still open here (end() below closes it).
+            _drain_pending_asr(pipeline, failures)
         finally:
             if end:
                 end()
@@ -378,6 +382,25 @@ def _drain_pending_diarization(pipeline, failures):
             future.result()
         except Exception as e:
             failures[path] = f"diarization: {type(e).__name__}: {e}"
+        finally:
+            pending.pop(path, None)
+
+
+def _drain_pending_asr(pipeline, failures):
+    """Block until every deferred ASR vote + checkpoint commit has resolved,
+    routing a failure into `failures` like a synchronous one.
+
+    A no-op unless PipelineService._submit_asr_async queued something (cross-file
+    ASR with async_vote). A file that failed earlier keeps its first error.
+    """
+    pending = getattr(pipeline, "_pending_asr_jobs", None)
+    if not pending:
+        return
+    for path, future in list(pending.items()):
+        try:
+            future.result()
+        except Exception as e:
+            failures.setdefault(path, f"asr: {type(e).__name__}: {e}")
         finally:
             pending.pop(path, None)
 

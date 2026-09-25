@@ -96,9 +96,12 @@ class FileTicket:
         self._lock = threading.Lock()
         self._event = threading.Event()
         self._callbacks = []
+        self._settled_callbacks = []
+        self._settled = False
         self._error = None
         if self._pending == 0:
             self._event.set()
+            self._settled = True
 
     def when_complete(self, callback):
         """Run `callback()` once every lane has delivered this file's results.
@@ -112,16 +115,35 @@ class FileTicket:
                 return
         callback()
 
+    def when_settled(self, callback):
+        """Run `callback(error)` once, when the ticket ends either way.
+
+        `error` is None when every lane delivered, else the exception `wait()`
+        would raise. Same threading rules as `when_complete`; unlike it, a
+        failed ticket still calls back, so a collector never waits forever.
+        """
+        with self._lock:
+            if not self._settled:
+                self._settled_callbacks.append(callback)
+                return
+            error = self._error
+        callback(error)
+
     def _deliver(self, lane, position, value):
-        callbacks = []
+        callbacks, settled, error = [], [], None
         with self._lock:
             self._results[lane][position] = value
             self._pending -= 1
-            if self._pending == 0:
+            if self._pending == 0 and not self._settled:
                 self._event.set()
+                self._settled = True
                 callbacks, self._callbacks = self._callbacks, []
+                settled, self._settled_callbacks = self._settled_callbacks, []
+                error = self._error
         for callback in callbacks:
             callback()
+        for callback in settled:
+            callback(error)
 
     def _fail(self, lane, error):
         """A lane this file needs cannot run: end the wait with that reason."""
@@ -131,6 +153,12 @@ class FileTicket:
                     f"ASR lane '{lane}' could not start: {error}")
             self._callbacks = []
             self._event.set()
+            settled = [] if self._settled else self._settled_callbacks
+            self._settled_callbacks = []
+            self._settled = True
+            failure = self._error
+        for callback in settled:
+            callback(failure)
 
     def wait(self, timeout=None) -> Dict[str, list]:
         if not self._event.wait(timeout):
@@ -138,6 +166,35 @@ class FileTicket:
         if self._error is not None:
             raise self._error
         return self._results
+
+
+class ByteBudget:
+    """Bounds the prepared waveform bytes a stage holds ahead of the lanes.
+
+    `acquire(n)` blocks while granting `n` would pass the cap, except when
+    nothing is held: one file bigger than the cap must still run, alone. A cap
+    of 0 or less means unbounded.
+    """
+
+    def __init__(self, cap_bytes: int):
+        self.cap = int(cap_bytes)
+        self.used = 0
+        self.peak = 0
+        self._cond = threading.Condition()
+
+    def acquire(self, nbytes: int):
+        nbytes = max(0, int(nbytes))
+        with self._cond:
+            while (self.cap > 0 and self.used > 0
+                   and self.used + nbytes > self.cap):
+                self._cond.wait()
+            self.used += nbytes
+            self.peak = max(self.peak, self.used)
+
+    def release(self, nbytes: int):
+        with self._cond:
+            self.used = max(0, self.used - max(0, int(nbytes)))
+            self._cond.notify_all()
 
 
 def _eta(lane) -> float:

@@ -1,6 +1,7 @@
 import os
 import re
 import copy
+import concurrent.futures
 import contextlib
 import threading
 from typing import Any
@@ -93,6 +94,42 @@ class PipelineService:
         # written yet.
         self._pending_diar_jobs = {}
         self._pending_diar_lock = threading.RLock()
+        # Same idea for ASR: futures whose vote and checkpoint commit run off the
+        # file's thread (see _submit_asr_async); run_batch_by_stage drains them.
+        self._pending_asr_jobs = {}
+        self._pending_asr_lock = threading.RLock()
+
+    def _asr_async_ok(self, args) -> bool:
+        """Async ASR commit only where nothing after ASR needs the transcripts."""
+        asr = getattr(self, "asr_svc", None)
+        return bool(getattr(args, "stop_after", None) == "asr"
+                    and getattr(asr, "async_vote_enabled", False))
+
+    def _submit_asr_async(self, audio_path, speech_segments, audio_data,
+                          checkpoint, stage_out):
+        """Queue this file's ASR and commit its result when the vote finishes.
+
+        The registered future resolves after the checkpoint and stage outputs are
+        written, so the drain in run_batch_by_stage covers the whole commit.
+        """
+        vote = self.asr_svc.process_async(speech_segments, audio_data)
+        done = concurrent.futures.Future()
+        base = os.path.basename(audio_path)
+
+        def commit(fut):
+            try:
+                transcripts = fut.result()
+                checkpoint.save("asr", transcripts)
+                stage_out.write_asr(transcripts)
+                stage_out.write_manifest({"audio_file": base, "stopped_after": "asr"})
+            except BaseException as exc:
+                done.set_exception(exc)
+                return
+            done.set_result(transcripts)
+
+        with self._pending_asr_lock:
+            self._pending_asr_jobs[audio_path] = done
+        vote.add_done_callback(commit)
 
     def parallel_stage_view(self, stage: str):
         """Return an isolated per-file view for a parallel pipeline stage.
@@ -1124,6 +1161,7 @@ class PipelineService:
 
         # 5. Nhận dạng lời nói bằng tổ hợp ASR (MoE)
         transcripts = None
+        asr_async = False
         if not self.step_enabled(args, "asr"):
             if self.logger:
                 self.logger.info("Step 'asr' is off in the profile; skipping")
@@ -1133,6 +1171,13 @@ class PipelineService:
         elif checkpoint.exists("asr"):
             if self.logger: self.logger.info("Loading ASR from checkpoint")
             transcripts = checkpoint.load("asr")
+        elif self._asr_async_ok(args):
+            # Cross-file ASR: queue the clips and free this thread; the vote and the
+            # checkpoint commit finish in the background (drained by the batch loop).
+            self._load("asr")
+            self._submit_asr_async(audio_path, speech_segments, audio_data,
+                                   checkpoint, stage_out)
+            asr_async = True
         else:
             self._load("asr")
             if self.logger: self.logger.info(f"[DEBUG] Sending {len(speech_segments)} segments to ASR")
@@ -1147,6 +1192,8 @@ class PipelineService:
         self._release_worker(args, "qwen3")
         self._release_worker(args, "whisper")
 
+        if asr_async:
+            return None     # manifest and checkpoint are written by the commit
         if getattr(args, "stop_after", None) == "asr":
             if self.logger: self.logger.info("Stopping pipeline after asr as requested by --stop_after.")
             stage_out.write_manifest({"audio_file": os.path.basename(audio_path),

@@ -23,7 +23,7 @@ class AsrProgress:
         self._clock = clock
         self._lock = threading.Lock()
         self._expected = None
-        self._files = {}          # file_id -> "queued" | "lanes_done" | "voting" | "voted"
+        self._files = {}          # file_id -> "queued" | "lanes_done" | "voting" | "voted" | "failed"
         self._lanes = {}          # lane -> counters
         self._last_signature = None
         self._stop = threading.Event()
@@ -95,6 +95,10 @@ class AsrProgress:
     def voted(self, file_id):
         self._set_file(file_id, "voted")
 
+    def failed(self, file_id):
+        """The file ended without a vote (a lane it needs never came up, or the vote broke)."""
+        self._set_file(file_id, "failed")
+
     def snapshot(self):
         with self._lock:
             return {"expected": self._expected, "files": dict(self._files),
@@ -114,6 +118,9 @@ class AsrProgress:
             voted = stages.count("voted")
             head = (f"{self._prefix} files {queued}/{expected} queued | waiting for lanes "
                     f"{waiting} | voting {voting} | voted {voted}/{expected}")
+            failed = stages.count("failed")
+            if failed:
+                head += f" | failed {failed}"
             parts = [self._lane_text(name, lane, now, growing)
                      for name, lane in self._lanes.items()]
         return [head, f"{self._prefix} " + (" | ".join(parts) if parts else "no models yet")]
