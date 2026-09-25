@@ -54,3 +54,14 @@ def test_the_a100_profiles_turn_them_on_and_keep_the_cpu_for_assignment():
         stage = cfg["environments"][name]["performance"]["stages"]["separation"]
         assert stage["postprocess_device"] == "cpu", name
         assert stage["assignment_threads"] > 4 and stage["assignment_parallel"] > 1, name
+
+
+def test_ticks_add_up_per_phase_and_count_the_calls():
+    import collections
+    sep = object.__new__(BssSeparator)
+    sep.timing = collections.Counter()
+    sep._timing_lock = threading.Lock()
+    started = time.perf_counter() - 0.5
+    sep._tick("wespeaker", started)
+    sep._tick("wespeaker", started)
+    assert sep.timing["wespeaker_calls"] == 2 and sep.timing["wespeaker"] >= 1.0

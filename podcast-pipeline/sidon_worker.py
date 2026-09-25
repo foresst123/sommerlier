@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import time
 
 # Phải set trước khi torch / numpy / torchaudio được import.
 CPU_THREADS = int(os.environ.get("SIDON_CPU_THREADS", "8"))
@@ -131,6 +132,7 @@ def serve():
                 continue
 
             try:
+                _worker_start = time.perf_counter()
                 audio_np = np.load(audio_path)
                 mix_tensor = torch.from_numpy(audio_np).float().unsqueeze(0).to(device)
 
@@ -145,6 +147,7 @@ def serve():
                 if est_sources.ndim == 2 and est_sources.shape[0] == 2:
                     track_1 = est_sources[0].detach().cpu().numpy()
                     track_2 = est_sources[1].detach().cpu().numpy()
+                    _infer_seconds = time.perf_counter() - _worker_start
 
                     raw_peak = max(np.abs(track_1).max(), np.abs(track_2).max())
                     print(
@@ -165,7 +168,11 @@ def serve():
                     "id": req_id,
                     "track_1_path": out_path_1,
                     "track_2_path": out_path_2,
-                    "target_sr": int(out_sr)
+                    "target_sr": int(out_sr),
+                    # For the performance report: GPU work (with the file read and
+                    # copies around it) and the whole request inside the worker.
+                    "infer_seconds": _infer_seconds,
+                    "worker_seconds": time.perf_counter() - _worker_start,
                 }), flush=True)
 
             except Exception as e:

@@ -468,6 +468,25 @@ class SeparationService:
         if self.logger:
             self.logger.debug(f"[TSE] {reason} @ {start:.2f}s {detail}")
 
+    def profile_snapshot(self):
+        """Where this file's separation time went, for the performance report.
+
+        Seconds, summed over parallel work where noted. Nothing is logged: the
+        pipeline writes it to the performance file.
+        """
+        s = self.stats
+        consumer = float(s["t_consumer"])
+        values = {
+            "windows": float(s["t_windows"]), "consumer": consumer,
+            "raw_wait": float(s["t_raw_wait"]), "post": float(s["t_post"]),
+            "other": consumer - float(s["t_raw_wait"]) - float(s["t_post"]),
+            "gpu_calls": float(s["t_gpu_calls"]), "gpu_queue": float(s["t_gpu_queue"]),
+            "gpu_run": float(s["t_gpu_run"]),
+        }
+        values.update({key: float(value) for key, value in
+                       dict(getattr(self.bss_model, "timing", None) or {}).items()})
+        return values
+
     def _report_stats(self):
         if not self.logger:
             return
@@ -476,17 +495,6 @@ class SeparationService:
             f"[TSE] jobs={s['jobs']} pairs={s['pairs']} spliced={s['spliced']} "
             f"retried={s['retried']}"
         )
-        if s["t_windows"]:
-            # Which side is the bottleneck: the workers (the consumer waits for the
-            # raw separation) or the ordered CPU work after them.
-            other = s["t_consumer"] - s["t_raw_wait"] - s["t_post"]
-            self.logger.info(
-                f"[TSE:timing] {int(s['t_windows'])} window(s) in "
-                f"{s['t_consumer']:.1f}s: waiting for Sidon {s['t_raw_wait']:.1f}s "
-                f"({100 * s['t_raw_wait'] / max(s['t_consumer'], 1e-9):.0f}%), "
-                f"speaker assignment {s['t_post']:.1f}s "
-                f"({100 * s['t_post'] / max(s['t_consumer'], 1e-9):.0f}%), "
-                f"the rest {other:.1f}s")
         fails = {r: s[f"fail_{r}"] for r in REASONS if s[f"fail_{r}"]}
         self.logger.info(f"[TSE] failures: {fails or 'none'}")
         if self.overlap_durations:
@@ -1579,6 +1587,20 @@ class SeparationService:
             initial_done = False
             next_sequence = 0
 
+            gpu_stats_lock = threading.Lock()
+
+            def timed_raw(audio, sample_rate, submitted):
+                """separate_raw, noting how long the job waited for a thread and ran."""
+                started = _time.perf_counter()
+                try:
+                    return model.separate_raw(audio, sample_rate)
+                finally:
+                    ended = _time.perf_counter()
+                    with gpu_stats_lock:
+                        self.stats["t_gpu_queue"] += started - submitted
+                        self.stats["t_gpu_run"] += ended - started
+                        self.stats["t_gpu_calls"] += 1
+
             def schedule(item):
                 nonlocal next_sequence
                 job, outcome, attempt = item
@@ -1590,7 +1612,7 @@ class SeparationService:
                     # The future owns only immutable window audio. All mutable
                     # state stays in this file's ordered consumer.
                     future = gpu_executor.submit(
-                        model.separate_raw, built.audio, sr)
+                        timed_raw, built.audio, sr, _time.perf_counter())
                 return item, future, sequence_id
 
             while True:

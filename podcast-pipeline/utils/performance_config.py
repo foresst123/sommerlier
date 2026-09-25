@@ -85,6 +85,11 @@ _STAGES = {
         # probe embeddings of a window at the same time.
         "assignment_threads": (INT, 0, 0, 64),
         "assignment_parallel": (INT, 1, 1, 4),
+        # Worker processes per GPU running Silero VAD + WeSpeaker for speaker
+        # assignment (assignment_worker.py). 0 keeps both models in the main
+        # process; with workers, assignment_parallel is how many probes of one
+        # window are in flight at once.
+        "assignment_workers_per_gpu": (INT, 0, 0, 4),
     },
     "music": {
         "tagger_workers": (INT, 1, 1, 2),

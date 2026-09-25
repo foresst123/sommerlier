@@ -132,7 +132,7 @@ class _AsyncModel(FakeTSE):
                                           core_range)
 
 
-def test_the_stage_reports_whether_it_waits_for_sidon_or_for_speaker_assignment():
+def test_the_profile_splits_a_files_separation_time_and_nothing_is_logged():
     logger = _Logger()
     svc = SeparationService(
         _AsyncModel(), logger=logger,
@@ -142,7 +142,32 @@ def test_the_stage_reports_whether_it_waits_for_sidon_or_for_speaker_assignment(
         svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
     finally:
         svc.close_async_pools()
-    timing = [line for line in logger.lines if "[TSE:timing]" in line]
-    assert len(timing) == 1
-    assert "waiting for Sidon" in timing[0] and "speaker assignment" in timing[0]
-    assert timing[0].split("]")[1].split()[0].isdigit() and " 0 window" not in timing[0]
+    profile = svc.profile_snapshot()
+    assert profile["windows"] >= 1 and profile["gpu_calls"] == profile["windows"]
+    assert profile["consumer"] >= profile["raw_wait"] + profile["post"] - 1e-6
+    assert profile["other"] == pytest.approx(
+        profile["consumer"] - profile["raw_wait"] - profile["post"])
+    assert profile["gpu_run"] >= 0 and profile["gpu_queue"] >= 0
+    assert not [line for line in logger.lines if "[TSE:timing]" in line], (
+        "the timings belong in the performance file, not the console log")
+
+
+def test_the_profile_includes_the_assignment_and_sidon_counters_of_the_model():
+    import collections
+
+    class Timed(_AsyncModel):
+        timing = collections.Counter(enrollment=0.5, probe_vad=3.0, probe_vad_calls=8,
+                                     wespeaker=9.0, wespeaker_calls=8, sidon_calls=4,
+                                     sidon_total=8.0, sidon_infer=6.0)
+
+    svc = SeparationService(
+        Timed(), logger=None,
+        performance_config={"enabled": True, "gpu_workers": 2, "postprocess_workers": 1,
+                            "ordered_postprocess": True})
+    try:
+        svc.process_overlaps(_dialogue(), _audio(), overlap_threshold=0.1)
+    finally:
+        svc.close_async_pools()
+    profile = svc.profile_snapshot()
+    assert profile["probe_vad"] == 3.0 and profile["wespeaker_calls"] == 8.0
+    assert profile["sidon_infer"] == 6.0

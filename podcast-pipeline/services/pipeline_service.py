@@ -155,7 +155,8 @@ class PipelineService:
             {
                 "base":        lambda: self.model_loader.load_base_models(),
                 "diarization": lambda: self.model_loader.load_diarization_models(w.get("diarizen")),
-                "separation":  lambda: self.model_loader.load_separation_models(w.get("sidon")),
+                "separation":  lambda: self.model_loader.load_separation_models(
+                    w.get("sidon"), w.get("assignment")),
                 "music":       lambda: self.model_loader.load_music_models(),
                 "tagger":      lambda: self.model_loader.load_tagger(),
                 "asr":         lambda: self.model_loader.load_asr_models(
@@ -167,7 +168,7 @@ class PipelineService:
     # trình thật trước khi dựng client kết nối.
     WORKERS_FOR_STAGE = {
         "diarization": ("diarizen",),
-        "separation": ("sidon",),
+        "separation": ("sidon", "assignment"),
         "asr": ("qwen3", "whisper"),
     }
 
@@ -242,6 +243,7 @@ class PipelineService:
                 continue
             if self.logger:
                 self.logger.info(f"Releasing {worker} worker (stage complete, freeing VRAM)")
+            self._record_worker_profile(worker, service)
             try:
                 service.stop()
             except Exception as e:
@@ -308,6 +310,17 @@ class PipelineService:
         else:
             callback()
 
+    def _record_worker_profile(self, name, service):
+        """How busy a pooled worker was, for the performance report (a file)."""
+        monitor = getattr(self, "performance_monitor", None)
+        profile = getattr(service, "profile", None)
+        if not monitor or not callable(profile):
+            return
+        try:
+            monitor.record("worker_profile", worker=name, **profile())
+        except Exception:
+            pass
+
     def _release_worker(self, args, name: str):
         """Dừng worker khi xong bước, tuân theo --keep_models.
         File tiếp theo cần khởi động lại nếu worker đã dừng, nếu không client
@@ -323,6 +336,7 @@ class PipelineService:
         if self.logger:
             self.logger.info(f"Releasing {name} worker (stage complete, freeing VRAM)")
         monitor = getattr(self, "performance_monitor", None)
+        self._record_worker_profile(name, service)
         if monitor:
             monitor.record("worker_stopping", worker=name)
         try:
@@ -978,6 +992,11 @@ class PipelineService:
             speech_segments = self.separation_svc.process_overlaps(
                 diarization_result.segments, audio_data, audio_path=audio_path)
             if self.logger: self.logger.info(f"[DEBUG] After Separation: {len(speech_segments)} segments")
+            monitor = getattr(self, "performance_monitor", None)
+            snapshot = getattr(self.separation_svc, "profile_snapshot", None)
+            if monitor and callable(snapshot):
+                monitor.record("separation_profile",
+                               file=os.path.basename(audio_path), values=snapshot())
             checkpoint.save("separation", speech_segments)
             if hasattr(self.separation_svc, "report_payload"):
                 checkpoint.save("separation_report",
@@ -998,6 +1017,7 @@ class PipelineService:
         # Worker giữ trọng số separator trên GPU mà ASR sắp cần; dừng sau bước
         # này. Backend trong cùng tiến trình không có worker nên không cần làm gì.
         self._release_worker(args, "sidon")
+        self._release_worker(args, "assignment")
         # Pool build cửa sổ song song của SeparationService (nếu có) phải sống
         # suốt cả batch giống Sidon worker ở trên -- tạo/đóng lại mỗi file
         # từng trả chi phí spawn process nhiều lần thay vì một lần cho cả

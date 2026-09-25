@@ -34,6 +34,7 @@ before, and treat any corpus built with it as carrying that caveat.
 """
 
 import os
+import time
 
 import numpy as np
 
@@ -96,6 +97,21 @@ class SidonBackend(SeparationBackend):
     def set_process(self, proc):
         self._process = proc
 
+    # Set by BssSeparator: a shared Counter and its lock for the performance report.
+    timing = None
+    timing_lock = None
+
+    def _note_timing(self, call_started, request_started, resp):
+        if self.timing is None:
+            return
+        now = time.perf_counter()
+        with self.timing_lock:
+            self.timing["sidon_calls"] += 1
+            self.timing["sidon_total"] += now - call_started
+            self.timing["sidon_roundtrip"] += now - request_started
+            self.timing["sidon_worker"] += float(resp.get("worker_seconds") or 0.0)
+            self.timing["sidon_infer"] += float(resp.get("infer_seconds") or 0.0)
+
     def separate(self, mixture, sample_rate, enroll_A=None, enroll_B=None):
         """Blind separation: the enrollments are not used, and cannot be.
 
@@ -116,6 +132,7 @@ class SidonBackend(SeparationBackend):
         with self._counter_lock:
             self._counter += 1
             req_id = str(self._counter)
+        _t_call = time.perf_counter()
         mix_path = os.path.join(self._temp_dir, f"mix_{req_id}.npy")
         np.save(mix_path, mixture)
 
@@ -124,6 +141,7 @@ class SidonBackend(SeparationBackend):
             request = {"id": req_id, "audio_path": mix_path,
                        "sample_rate": int(sample_rate)}
 
+            _t_request = time.perf_counter()
             if hasattr(self._process, "request"):
                 resp = self._process.request(request, response_id=req_id)
             else:
@@ -157,6 +175,7 @@ class SidonBackend(SeparationBackend):
             # input rate: Sidon's VAE decoder emits 24kHz whatever it was fed,
             # and resampling back against the wrong number is silent.
             target_sr = int(resp.get("target_sr") or sample_rate)
+            self._note_timing(_t_call, _t_request, resp)
             return (np.load(resp["track_1_path"]).astype(np.float32),
                     np.load(resp["track_2_path"]).astype(np.float32),
                     target_sr)

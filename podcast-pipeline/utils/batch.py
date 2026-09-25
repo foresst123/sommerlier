@@ -271,7 +271,9 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
                     if parallelism > 1 and hasattr(pipeline, "parallel_stage_view")
                     else pipeline)
                 try:
-                    stage_pipeline.run(copy.copy(stage_args), config, path)
+                    from utils import profiling
+                    with profiling.file_stage(label, path):
+                        stage_pipeline.run(copy.copy(stage_args), config, path)
                 finally:
                     if settle_asr:
                         settle_asr()

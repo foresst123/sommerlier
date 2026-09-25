@@ -24,8 +24,11 @@ recorded. See models/separation_backends.py and doc/audio-cleanliness.md.
 """
 import os
 import sys
+import collections
 import copy
+import itertools
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 import torch
 import numpy as np
@@ -85,7 +88,8 @@ class BssSeparator:
     def __init__(self, device: torch.device, process=None, checkpoint_path: str = None,
                  separator: str = None, embedding_repository: str = None,
                  embedding_filename: str = None, embedding_revision: str = None,
-                 logger=None, embedding_threads: int = None, score_workers: int = 1):
+                 logger=None, embedding_threads: int = None, score_workers: int = 1,
+                 assignment_process=None):
         import tempfile
 
         from models.separation_backends import make_backend
@@ -98,6 +102,16 @@ class BssSeparator:
         self._req_counter = 0
         self._logger = logger
         self._embedding_threads = embedding_threads or None
+        # When set, Silero VAD and WeSpeaker run in separate worker processes
+        # (assignment_worker.py) reached through this pool, and nothing is loaded
+        # here. See _remote().
+        self._assignment = assignment_process
+        self._remote_counter = itertools.count()
+        # Seconds spent per assignment phase, summed over every window (and over
+        # the parallel scoring tasks, so it can exceed wall time). Shared by the
+        # per-file clones made in fork(). Read by SeparationService._report_stats.
+        self.timing = collections.Counter()
+        self._timing_lock = threading.Lock()
         # The four probe embeddings that score a window are independent of each
         # other; with score_workers > 1 they run at the same time.
         self.score_workers = max(1, int(score_workers or 1))
@@ -112,6 +126,15 @@ class BssSeparator:
         self._separator_name = name
         self.backend = make_backend(name, process=process, temp_dir=self._temp_dir,
                                     device=device, logger=logger)
+        self._share_timing_with_backend(self.backend)
+
+        self._vad = None
+        self._vad_lock = threading.Lock()
+        if self._assignment is not None:
+            if logger:
+                logger.info("[BSS] speaker assignment (Silero + WeSpeaker) runs in "
+                            "worker processes")
+            return
 
         self._load_model(embedding_repository, embedding_filename, embedding_revision)
 
@@ -120,8 +143,6 @@ class BssSeparator:
         # a track that should be silent here can still yield an embedding built
         # from noise and invert the A/B assignment. Silero judges voice, not
         # loudness. Falls back to the energy gate if it cannot load.
-        self._vad = None
-        self._vad_lock = threading.Lock()
         try:
             from models.silero_vad import SileroVAD
             self._vad = SileroVAD(device=self.device)
@@ -148,7 +169,13 @@ class BssSeparator:
         clone.backend = make_backend(
             self._separator_name, process=self._process,
             temp_dir=clone._temp_dir, device=self.device, logger=self._logger)
+        self._share_timing_with_backend(clone.backend)
         return clone
+
+    def _share_timing_with_backend(self, backend):
+        """Let the backend add its timings to this separator's counter."""
+        if hasattr(backend, "_note_timing"):
+            backend.timing, backend.timing_lock = self.timing, self._timing_lock
 
     @property
     def process(self):
@@ -206,6 +233,11 @@ class BssSeparator:
         except Exception as e:
             raise RuntimeError(f"Failed to initialize WeSpeaker: {e}")
             
+    def _tick(self, key, started):
+        with self._timing_lock:
+            self.timing[key] += time.perf_counter() - started
+            self.timing[key + "_calls"] += 1
+
     def _run_scores(self, tasks):
         """Call every task and return the results in task order.
 
@@ -216,8 +248,48 @@ class BssSeparator:
         futures = [self._score_pool.submit(task) for task in tasks]
         return [future.result() for future in futures]
 
+    def _remote(self, cmd, audio, sample_rate, **options):
+        """Ask an assignment worker to do `cmd` on `audio`; returns its reply.
+
+        Audio travels as a .npy in this separator's scratch directory (one
+        per request, so parallel calls do not collide). The pool hands the
+        request to whichever worker is idle.
+        """
+        tag = f"{os.getpid()}_{next(self._remote_counter)}_{threading.get_ident()}"
+        audio_path = os.path.join(self._temp_dir, f"assign_{tag}.npy")
+        out_path = os.path.join(self._temp_dir, f"assign_{tag}_out.npy")
+        np.save(audio_path, np.asarray(audio, dtype=np.float32))
+        try:
+            reply = self._assignment.request(
+                {"cmd": cmd, "id": tag, "audio_path": audio_path,
+                 "out_path": out_path, "sr": int(sample_rate), **options},
+                response_id=tag)
+            if reply.get("error"):
+                raise RuntimeError(f"assignment worker: {reply['error']}")
+            if reply.get("probe_path"):
+                reply["probe"] = np.load(reply["probe_path"])
+            return reply
+        finally:
+            for path in (audio_path, out_path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+    def _embedding_from_reply(self, reply):
+        values = reply.get("embedding")
+        if values is None:
+            return None
+        return torch.tensor(values, dtype=torch.float32, device=self.device)
+
     def _get_embedding(self, audio_array: np.ndarray, sample_rate: int = 16000) -> torch.Tensor:
         """Helper to get speaker embedding from 1D numpy array."""
+        if self._assignment is not None:
+            _t = time.perf_counter()
+            embedding = self._embedding_from_reply(
+                self._remote("embed", audio_array, sample_rate))
+            self._tick("remote", _t)
+            return embedding
         if sample_rate != 16000:
             audio_array = librosa.resample(audio_array, orig_sr=sample_rate, target_sr=16000)
             
@@ -364,15 +436,66 @@ class BssSeparator:
         Returns None when there is too little voiced audio to trust, which means
         "this speaker is not present here" -- distinct from "extraction failed".
         """
-        if min_voiced_sec is None:
-            min_voiced_sec = BSS_MIN_VOICED_SEC
+        seg = self._cut_spans(track, spans)
+        if seg is None:
+            return None
+        if self._assignment is not None:
+            _t = time.perf_counter()
+            reply = self._remote("probe", seg, sr, floor_db=floor_db,
+                                 min_voiced_sec=min_voiced_sec,
+                                 abs_floor_rms=abs_floor_rms)
+            self._tick("remote", _t)
+            return reply.get("probe")
+        return self._probe_from_segment(seg, sr, floor_db, min_voiced_sec, abs_floor_rms)
+
+    @staticmethod
+    def _cut_spans(track: np.ndarray, spans):
+        """The audio of `spans` joined end to end, or None when there is none."""
         if not spans:
             return None
         pieces = [track[max(0, a):min(len(track), b)] for a, b in spans]
         pieces = [pc for pc in pieces if pc.size]
         if not pieces:
             return None
-        seg = np.concatenate(pieces).astype(np.float32)
+        return np.concatenate(pieces).astype(np.float32)
+
+    def _probe_embedding(self, track: np.ndarray, spans, sr: int, floor_db: float = -40.0,
+                         min_voiced_sec: float = None,
+                         abs_floor_rms: float = ABS_SILENCE_RMS):
+        """Voiced probe of `spans`, embedded; None when there is no probe.
+
+        Locally this is _gather_probe then _get_embedding. With assignment
+        workers it is one round trip, so the probe never travels back.
+        """
+        if self._assignment is None:
+            _t = time.perf_counter()
+            probe = self._gather_probe(track, spans, sr, floor_db, min_voiced_sec,
+                                       abs_floor_rms)
+            self._tick("probe_vad", _t)
+            if probe is None:
+                return None
+            _t = time.perf_counter()
+            embedding = F.normalize(self._get_embedding(probe, sr), p=2, dim=0)
+            self._tick("wespeaker", _t)
+            return embedding
+        seg = self._cut_spans(track, spans)
+        if seg is None:
+            return None
+        if min_voiced_sec is None:
+            min_voiced_sec = BSS_MIN_VOICED_SEC
+        _t = time.perf_counter()
+        reply = self._remote("probe_embed", seg, sr, floor_db=floor_db,
+                             min_voiced_sec=min_voiced_sec, abs_floor_rms=abs_floor_rms)
+        self._tick("remote", _t)
+        embedding = self._embedding_from_reply(reply)
+        return None if embedding is None else F.normalize(embedding, p=2, dim=0)
+
+    def _probe_from_segment(self, seg: np.ndarray, sr: int, floor_db: float = -40.0,
+                            min_voiced_sec: float = None,
+                            abs_floor_rms: float = ABS_SILENCE_RMS):
+        """The voiced part of `seg` (already cut from the track), or None."""
+        if min_voiced_sec is None:
+            min_voiced_sec = BSS_MIN_VOICED_SEC
 
         # --- Silero path: keep exactly the voiced runs, cross-fade the joins ---
         vad = getattr(self, "_vad", None)
@@ -450,7 +573,7 @@ class BssSeparator:
 
         Returns (track_A, track_B, sim_A, sim_B, diag).
         """
-        if not self.speaker_embedder:
+        if not self.speaker_embedder and self._assignment is None:
             raise RuntimeError("WeSpeaker is not loaded.")
         import torchaudio.functional as F_audio
 
@@ -462,8 +585,10 @@ class BssSeparator:
         track_2_tensor = torch.from_numpy(track_2_np).to(self.device)
 
         # --- WeSpeaker matching: Tính embedding cho các speaker có mẫu ---
+        _t = time.perf_counter()
         embed_A = self._get_target_embedding(enroll_A, id_A, sample_rate)
         embed_B = self._get_target_embedding(enroll_B, id_B, sample_rate)
+        self._tick("enrollment", _t)
 
         # Chỉ sửa chunk swap nếu CẢ HAI đều có embedding chuẩn
         n_flips = 0
@@ -495,12 +620,9 @@ class BssSeparator:
             attempts.append((full_span, "full_context"))
             for candidate_spans, source in attempts:
                 try:
-                    probe = self._gather_probe(track_np, candidate_spans, target_sr)
-                    if probe is None:
+                    emb = self._probe_embedding(track_np, candidate_spans, target_sr)
+                    if emb is None:
                         continue
-                    emb = F.normalize(
-                        self._get_embedding(probe, target_sr), p=2, dim=0
-                    )
                     score = float(torch.dot(target_embed, emb))
                     if not np.isfinite(score):
                         raise ValueError("nonfinite similarity")

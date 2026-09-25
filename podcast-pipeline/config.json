@@ -426,6 +426,7 @@
             "postprocess_device": "cpu",
             "assignment_threads": 12,
             "assignment_parallel": 4,
+            "assignment_workers_per_gpu": 2,
             "ordered_postprocess": true
           },
           "music": {
@@ -639,6 +640,7 @@
             "postprocess_device": "cpu",
             "assignment_threads": 12,
             "assignment_parallel": 4,
+            "assignment_workers_per_gpu": 2,
             "ordered_postprocess": true
           },
           "music": {

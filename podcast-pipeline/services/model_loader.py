@@ -100,7 +100,7 @@ class ModelLoader:
             self.models["diarizer"] = DiariZenDiarizer(process=endpoint)
             
     @_serialized
-    def load_separation_models(self, sidon_service=None):
+    def load_separation_models(self, sidon_service=None, assignment_service=None):
         """Load the separator and its WeSpeaker assignment, if enabled.
 
         `sidon_service` is only consulted by the out-of-process backend; the
@@ -140,6 +140,7 @@ class ModelLoader:
                 embedding_filename=bss_cfg.get("embedding_filename"),
                 embedding_revision=bss_cfg.get("embedding_revision"),
                 logger=self.logger,
+                assignment_process=assignment_service,
                 embedding_threads=(sep_perf.get("assignment_threads") or None
                                    if perf.get("enabled", False) else None),
                 score_workers=(sep_perf.get("assignment_parallel", 1)

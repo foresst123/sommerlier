@@ -35,6 +35,10 @@ class PerformanceMonitor:
         self._gpu_index_by_uuid = None
         self._process_sampling = True
         self._peak_process_mib = defaultdict(dict)
+        # What the end-of-run report is built from (utils/performance_report.py).
+        self._events = []
+        self._samples = []
+        self._psutil = None
 
     def start(self):
         if not self.enabled or self._thread is not None:
@@ -58,6 +62,12 @@ class PerformanceMonitor:
             self._event_file.write(json.dumps(payload, ensure_ascii=False) + "\n")
             self._event_file.flush()
             self._counts[event] += 1
+            if len(self._events) < 500000:
+                self._events.append(payload)
+
+    def record_span(self, name, seconds, **fields):
+        """One timed step. `fields` (stage, file, thread...) say where it ran."""
+        self.record("span", name=name, seconds=round(float(seconds), 4), **fields)
 
     def register_process(self, pid, name):
         """Name a PID so its VRAM is attributed to a worker, not a number."""
@@ -124,12 +134,24 @@ class PerformanceMonitor:
                     free_gib = free / (1024 ** 3)
                     self._min_gpu_free[index] = min(
                         self._min_gpu_free.get(index, free_gib), free_gib)
-                    sample["gpus"].append({
-                        "index": index, "free_gib": free_gib,
-                        "total_gib": total / (1024 ** 3),
-                    })
+                    entry = {"index": index, "free_gib": free_gib,
+                             "total_gib": total / (1024 ** 3)}
+                    try:
+                        # Needs pynvml; without it the report just has no GPU %.
+                        entry["util_pct"] = float(torch.cuda.utilization(index))
+                    except Exception:
+                        pass
+                    sample["gpus"].append(entry)
         except Exception as exc:
             sample["gpu_error"] = f"{type(exc).__name__}: {exc}"
+        try:
+            if self._psutil is None:
+                import psutil
+                self._psutil = psutil
+                psutil.cpu_percent(interval=None)      # first call only primes it
+            sample["cpu_pct"] = float(self._psutil.cpu_percent(interval=None))
+        except Exception:
+            self._psutil = False
         now = time.time()
         if self._process_sampling and now - self._last_process_sample >= self.process_interval:
             self._last_process_sample = now
@@ -147,9 +169,31 @@ class PerformanceMonitor:
         while not self._stop.wait(self.interval):
             sample = self._sample()
             with self._lock:
+                if len(self._samples) < 200000:
+                    self._samples.append({
+                        "time": sample["time"], "cpu_pct": sample.get("cpu_pct"),
+                        "gpu_util": {g["index"]: g["util_pct"] for g in sample["gpus"]
+                                     if "util_pct" in g},
+                        "gpu_free": {g["index"]: g["free_gib"] for g in sample["gpus"]}})
                 self._sample_file.write(
                     json.dumps(sample, ensure_ascii=False) + "\n")
                 self._sample_file.flush()
+
+    def write_report(self):
+        """performance_report.txt next to the summary; never raises."""
+        try:
+            from utils.performance_report import build_report
+            with self._lock:
+                events, samples = list(self._events), list(self._samples)
+            elapsed = time.time() - (self.started_at or time.time())
+            path = os.path.join(self.output_dir, "performance_report.txt")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(build_report(events, samples, elapsed))
+            return path
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(f"Could not write the performance report: {exc}")
+            return None
 
     def stop(self):
         if not self.enabled or self._thread is None:
@@ -174,6 +218,7 @@ class PerformanceMonitor:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
+        self.write_report()
         for handle in (self._event_file, self._sample_file):
             if handle:
                 handle.close()

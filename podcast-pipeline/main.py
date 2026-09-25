@@ -326,6 +326,7 @@ from models.qwen3_asr import Qwen3ASRClient
 from models.whisper_vllm import WhisperVLLMClient
 from services.diarizen_worker_service import DiarizenWorkerService
 from services.sidon_worker_service import SidonWorkerService
+from services.assignment_worker_service import AssignmentWorkerService
 from services.worker_pool_service import WorkerPoolService
 
 
@@ -397,6 +398,9 @@ def main():
         interval_seconds=perf_cfg["telemetry_interval_seconds"],
         enabled=perf_cfg["enabled"], logger=logger)
     performance_monitor.start()
+    if perf_cfg["enabled"]:
+        from utils import profiling
+        profiling.install(performance_monitor)     # step timings -> performance file
 
     # TF32 on the fp32 paths: DiariZen, BS-RoFormer, SSLAM and ECAPA all run in
     # fp32, and on Ampere and later their matmuls and convolutions can use
@@ -627,6 +631,28 @@ def main():
             f"[performance] Sidon pool: {len(sidon_workers)} worker(s) on "
             + ", ".join(f"GPU {d}" for d in sidon_devices))
 
+    # 1c'. Speaker-assignment workers (Silero VAD + WeSpeaker), one or more
+    # per GPU. Started by the separation stage; see assignment_worker.py.
+    assignment_service = None
+    _assign_per_gpu = int(perf_cfg["stages"]["separation"].get(
+        "assignment_workers_per_gpu", 0))
+    if (perf_cfg["enabled"] and _assign_per_gpu > 0 and getattr(args, "bss", False)
+            and will_run(args, "separation") and torch.cuda.is_available()):
+        _assign_gpus = [g for g in dict.fromkeys((args.gpu_1, args.gpu_2))
+                        if 0 <= int(g) < torch.cuda.device_count()]
+        _assign_script = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "assignment_worker.py")
+        _assign_workers = [AssignmentWorkerService(
+            _sys.executable, _assign_script, device_id=g, threads=2, logger=logger)
+            for _ in range(_assign_per_gpu) for g in _assign_gpus]
+        if _assign_workers:
+            assignment_service = (WorkerPoolService(_assign_workers, name="Assignment")
+                                  if len(_assign_workers) > 1 else _assign_workers[0])
+            logger.info(
+                f"[performance] Speaker-assignment pool: {len(_assign_workers)} "
+                "worker(s) on " + ", ".join(f"GPU {g}" for g in _assign_gpus)
+                + f" x{_assign_per_gpu}")
+
     # 1d. Join whichever actually started. They were launched without blocking,
     # so startup is bounded by the slowest rather than the sum -- that is the
     # whole point of doing it here. One that did not start is simply skipped;
@@ -796,6 +822,7 @@ def main():
                 "qwen3": qwen3_service,
                 "whisper": whisper_service,
                 "sidon": sidon_service,
+                "assignment": assignment_service,
             },
             performance_monitor=performance_monitor,
             relabel_svc=relabel_svc,
@@ -923,7 +950,15 @@ def main():
             diarizen_service.stop()
         if sidon_service:
             sidon_service.stop()
+        if assignment_service:
+            assignment_service.stop()
         performance_monitor.stop()
+        if perf_cfg["enabled"]:
+            from utils import profiling
+            profiling.uninstall()
+            logger.info("Performance report: "
+                        + os.path.join(performance_monitor.output_dir,
+                                       "performance_report.txt"))
 
         logger.info("Pipeline execution finished.")
 
