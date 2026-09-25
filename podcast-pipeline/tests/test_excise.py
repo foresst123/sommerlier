@@ -516,7 +516,7 @@ def test_the_pipeline_replays_from_the_timeline_not_from_the_map():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     source = open(os.path.join(root, "services", "pipeline_service.py"),
                   encoding="utf-8").read()
-    start = source.index("elif timeline:")
+    start = source.index("elif not processed_audio_cached and timeline:")
     block = source[start:source.index("self.timeline = timeline", start)]
     assert "replay = timeline.removed_spans(" in block
     # What matters is what reaches excise, not whether `cuts` is mentioned --
@@ -549,7 +549,7 @@ def test_the_reentry_warning_compares_merged_spans():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     source = open(os.path.join(root, "services", "pipeline_service.py"),
                   encoding="utf-8").read()
-    start = source.index("elif timeline:")
+    start = source.index("elif not processed_audio_cached and timeline:")
     block = source[start:source.index("self.timeline = timeline", start)]
     assert "_merge([(a, b) for a, b, _ in cuts])" in block
 

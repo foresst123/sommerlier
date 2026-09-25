@@ -221,8 +221,13 @@ def test_a_checkpointed_stage_does_not_revive_its_worker():
                           ("qwen3", "asr")):
         call = re.search(rf'.*_rebind_worker\(args, "{worker}".*', src).group(0)
         line_no = src[:src.index(call)].count("\n")
-        guard = src.splitlines()[line_no - 1]
-        assert f'checkpoint.exists("{stage}")' in guard, (
+        # The condition may span several lines, so look back to the `if` that opens it
+        # rather than at the single line above the call.
+        lines = src.splitlines()
+        start = next(i for i in range(line_no - 1, -1, -1)
+                     if lines[i].lstrip().startswith("if "))
+        guard = "\n".join(lines[start:line_no])
+        assert f'checkpoint.exists("{stage}"' in guard, (
             f"{worker} is revived unconditionally; it should only start when "
             f"the {stage} stage is actually going to run")
 

@@ -52,9 +52,11 @@ def test_loading_sits_inside_the_compute_branch():
     """A stage that reads its checkpoint must not load the model it will not
     call, which is the whole point of resuming."""
     src = _source("services/pipeline_service.py")
-    for group, marker in (("diarization", 'checkpoint.exists("diarization")'),
-                          ("separation", 'checkpoint.exists("separation")'),
-                          ("asr", 'checkpoint.exists("asr")')):
+    # The guard is whatever reads the checkpoint first: a presence check for the
+    # stages that only need to know, a verified read for the ones that use the data.
+    for group, marker in (("diarization", 'checkpoint.exists("diarization"'),
+                          ("separation", 'checkpoint.exists("separation"'),
+                          ("asr", 'checkpoint.load_if_committed("asr")')):
         load_at = src.index(f'self._load("{group}")')
         guard_at = src.index(marker)
         assert guard_at < load_at, (

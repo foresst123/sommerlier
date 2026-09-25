@@ -3,6 +3,8 @@ import re
 import copy
 import concurrent.futures
 import contextlib
+import hashlib
+import json
 import threading
 from typing import Any
 from utils.checkpoint import CheckpointManager
@@ -648,6 +650,31 @@ class PipelineService:
             name = ((profile.get("models") or {}).get("bs_roformer") or {}).get("model")
         return str(name or "default")
 
+    @classmethod
+    def _processed_audio_namespace(cls, args, config, music_payload,
+                                   timeline_payload, audio_path) -> str:
+        """Stable key for the lossless waveform after music/cut processing."""
+        try:
+            stat = os.stat(audio_path)
+            source = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+        except OSError:
+            source = {"path": os.path.abspath(audio_path)}
+        material = {
+            "source": source,
+            "sample_rate": 24000,
+            "music_scope": cls._music_scope(args),
+            "separator": cls._music_checkpoint_name(args, config),
+            "music": music_payload or {"fps": 100.0, "spans": []},
+            "timeline": timeline_payload or {"fade": 0.0, "kept": []},
+            "cut_music": bool(cls.step_enabled(args, "cut_music")),
+            "music_removal": bool(cls.step_enabled(args, "music_removal")),
+        }
+        digest = hashlib.sha1(
+            json.dumps(material, ensure_ascii=True, sort_keys=True,
+                       separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:20]
+        return f"v1-{digest}"
+
     def _strip_music(self, args, config, checkpoint, audio_data, audio_path,
                      music_map) -> bool:
         """Take the music out of the waveform. True when the waveform was changed.
@@ -703,9 +730,10 @@ class PipelineService:
         """
         if not self.step_enabled(args, "music_analysis"):
             return
-        if checkpoint.exists("noise_track_processed", fmt="json"):
-            self.noise_track = NoiseTrack.from_json(
-                checkpoint.load("noise_track_processed", fmt="json"))
+        processed_payload = checkpoint.load_if_committed(
+            "noise_track_processed", fmt="json")
+        if processed_payload is not None:
+            self.noise_track = NoiseTrack.from_json(processed_payload)
             return
         self._load("tagger")
         detector = self.model_loader.get("tagger") if self.model_loader else None
@@ -739,8 +767,9 @@ class PipelineService:
         """
         svc = self.relabel_svc
         checkpoint.namespaces["speaker_relabel"] = svc.checkpoint_namespace
-        if checkpoint.exists("speaker_relabel"):
-            payload = checkpoint.load("speaker_relabel") or {}
+        payload = checkpoint.load_if_committed("speaker_relabel")
+        if payload is not None:
+            payload = payload or {}
             changed = apply_relabels(
                 transcripts, payload.get("mapping", {}), speech_segments)
             if self.logger:
@@ -769,8 +798,9 @@ class PipelineService:
         """Attach final-text word times, reapplying a cached result on resume."""
         svc = self.word_alignment_svc
         checkpoint.namespaces["word_alignment"] = svc.checkpoint_namespace_for(transcripts)
-        if checkpoint.exists("word_alignment"):
-            payload = checkpoint.load("word_alignment") or {}
+        payload = checkpoint.load_if_committed("word_alignment")
+        if payload is not None:
+            payload = payload or {}
             applied = apply_word_alignments(
                 transcripts, payload.get("words_by_index", {}))
             if self.logger:
@@ -838,6 +868,22 @@ class PipelineService:
             output_dir, logger=self.logger,
             enabled=not getattr(args, "no_stage_output", False))
 
+        # The music operation already runs before diarization. Keep this stage
+        # name for stop-after and manifest compatibility, but do not decode
+        # audio or reopen checkpoints for a duplicate stage-major pass.
+        if (getattr(args, "stage_only_pass", False)
+                and getattr(args, "stop_after", None) == "music_removal"):
+            stage_out.write_manifest({
+                "audio_file": os.path.basename(audio_path),
+                "stopped_after": "music_removal",
+                "noop": True,
+            })
+            if self.logger:
+                self.logger.info(
+                    "Stage 'music_removal' is already covered by the music pass; "
+                    "skipping duplicate audio/checkpoint work")
+            return None
+
         base_job = getattr(args, "job_id", "default_job")
         job_id = f"{base_job}_{os.path.splitext(os.path.basename(audio_path))[0]}"
         cache_dir = getattr(args, "cache_dir", "cache")
@@ -863,19 +909,43 @@ class PipelineService:
         # Cũng chỉ khi lượt này thực sự chạy tới bước đó: chạy theo giai đoạn,
         # client của lượt trước vẫn còn, nên pass "music" từng hồi sinh worker
         # ASR và để nó giữ ~6 GB VRAM suốt music/diarization/separation.
-        if not checkpoint.exists("diarization") and self._reaches(args, "diarization"):
+        if (not checkpoint.exists("diarization", verify_digest=False)
+                and self._reaches(args, "diarization")):
             self._rebind_worker(args, "diarizen", self.diarization_svc, "diarizer")
 
-        if not checkpoint.exists("asr") and self._reaches(args, "asr"):
+        if (not checkpoint.exists("asr", verify_digest=False)
+                and self._reaches(args, "asr")):
             self._rebind_worker(args, "qwen3", self.asr_svc, "qwen3")
 
         # Chỉ backend chạy ngoài tiến trình mới có worker cần gán lại.
-        if not checkpoint.exists("separation") and self._reaches(args, "separation"):
+        if (not checkpoint.exists("separation", verify_digest=False)
+                and self._reaches(args, "separation")):
             self._rebind_worker(args, "sidon", self.separation_svc, "bss_model")
         
+        # Load small metadata before audio. Later stage-major passes can reuse
+        # the exact post-music waveform and avoid replaying patches/cuts.
+        music_payload = checkpoint.load_if_committed("music_map")
+        noise_payload = checkpoint.load_if_committed("noise_track", fmt="json")
+        timeline_payload = checkpoint.load_if_committed("timeline", fmt="json")
+        checkpoint.namespaces["processed_audio"] = self._processed_audio_namespace(
+            args, config, music_payload, timeline_payload, audio_path)
+        processed_waveform = checkpoint.load_array("processed_audio")
+        processed_audio_cached = processed_waveform is not None
+
         # 1. Chuẩn bị âm thanh
-        audio_data = self.audio_svc.load_audio(audio_path, target_sr=24000)
-        
+        if processed_audio_cached:
+            audio_data = AudioData(
+                waveform=processed_waveform,
+                sample_rate=24000,
+                name=os.path.basename(audio_path),
+                audio_segment=None,
+                duration=len(processed_waveform) / 24000.0,
+            )
+            if self.logger:
+                self.logger.info("Loading post-music waveform from checkpoint cache")
+        else:
+            audio_data = self.audio_svc.load_audio(audio_path, target_sr=24000)
+
         # Chỉ ghi dữ liệu đầu vào một lần mỗi file, không ghi lại ở từng lần
         # run() khi chạy theo giai đoạn.
         computed_stages = set()
@@ -885,9 +955,9 @@ class PipelineService:
         # được tách để giữ giọng, lời sạch giữ nguyên. Các bước sau dùng cùng
         # quyết định này. Nhóm nhiễu khác chỉ được đánh dấu để lọc corpus,
         # không tự sửa hay tái tạo giọng; xem doc/audio-cleanliness.md.
-        if checkpoint.exists("music_map"):
-            music_map = MusicMap.from_json(checkpoint.load("music_map"))
-            self.noise_track = NoiseTrack.from_json(checkpoint.load("noise_track", fmt="json"))
+        if music_payload is not None:
+            music_map = MusicMap.from_json(music_payload)
+            self.noise_track = NoiseTrack.from_json(noise_payload)
         else:
             music_map = MusicMap()
             if self.step_enabled(args, "music_analysis"):
@@ -912,19 +982,21 @@ class PipelineService:
         # pipeline.music_scope: "spans" chỉ tách các khoảng có nhạc nền dưới lời;
         # "full" chạy model tách trên toàn bộ file. Sau khi audio đã đổi, độ nhiễu
         # được đo lại trên chính audio đó (xem _measure_processed_noise).
-        if self._strip_music(args, config, checkpoint, audio_data, audio_path, music_map):
+        if (not processed_audio_cached
+                and self._strip_music(args, config, checkpoint, audio_data,
+                                      audio_path, music_map)):
             self._measure_processed_noise(args, checkpoint, audio_data)
 
         # Cắt phần hát/nhạc độc lập trước diarization và ASR để lời bài hát không
         # lọt vào hội thoại. Timeline bị rút ngắn nên lưu ánh xạ để đổi về thời
         # gian gốc lúc xuất.
-        timeline = TimelineMap.from_json(checkpoint.load("timeline", fmt="json"))
+        timeline = TimelineMap.from_json(timeline_payload)
         cuts = (music_map.excised_spans()
                 if self.step_enabled(args, "cut_music") else [])
 
         # Không cho phép xóa gần hết bản ghi. Bộ phân loại có thể đặt ngưỡng sai
         # hoặc file không phù hợp; báo lỗi thay vì cho pipeline chạy trên âm thanh rỗng.
-        if cuts:
+        if cuts and not processed_audio_cached:
             share = sum(b - a for a, b, _ in cuts) / max(audio_data.duration, 1e-9)
             if share > CUT_SHARE_LIMIT:
                 if self.logger:
@@ -935,7 +1007,7 @@ class PipelineService:
                         "file is a recording of music.")
                 cuts = []
 
-        if cuts and not timeline:
+        if not processed_audio_cached and cuts and not timeline:
             trimmed, timeline = excise(audio_data.waveform,
                                        audio_data.sample_rate,
                                        [(a, b) for a, b, _ in cuts])
@@ -946,7 +1018,7 @@ class PipelineService:
                 self.logger.info(
                     f"Cut {timeline.removed:.1f}s of standalone music from "
                     f"{len(cuts)} stretch(es); {audio_data.duration / 60:.1f} min remain")
-        elif timeline:
+        elif not processed_audio_cached and timeline:
             # Ở lần run() sau, cắt lại audio gốc theo timeline đã lưu, không theo
             # bản đồ vừa tính bằng ngưỡng/cờ có thể đã đổi. Nếu không, audio và
             # checkpoint diarization sẽ dùng hai hệ thời gian khác nhau.
@@ -968,6 +1040,16 @@ class PipelineService:
             audio_data.waveform = trimmed
             audio_data.duration = len(trimmed) / float(audio_data.sample_rate)
         self.timeline = timeline
+
+        if not processed_audio_cached:
+            # Commit the exact float32 waveform after music/cut transforms so
+            # subsequent stages can mmap it. The final timeline is part of the
+            # cache identity and prevents reuse after a changed cut map.
+            final_music_payload = music_map.to_json()
+            final_timeline_payload = timeline.to_json()
+            checkpoint.namespaces["processed_audio"] = self._processed_audio_namespace(
+                args, config, final_music_payload, final_timeline_payload, audio_path)
+            checkpoint.save_array("processed_audio", audio_data.waveform)
 
         # Đã phân loại và tách nhạc xong: giải phóng model tại đây để không giữ
         # VRAM suốt các bước DiariZen, embedding, separation và ASR phía sau.
@@ -1000,12 +1082,13 @@ class PipelineService:
         computed = set()
 
         diarization_result = None
+        cached_diarization = checkpoint.load_if_committed("diarization")
         if not self.step_enabled(args, "diarization"):
             if self.logger:
                 self.logger.info("Step 'diarization' is off in the profile; skipping")
-        elif checkpoint.exists("diarization"):
+        elif cached_diarization is not None:
             if self.logger: self.logger.info("Loading Diarization from checkpoint")
-            diarization_result = checkpoint.load("diarization")
+            diarization_result = cached_diarization
         else:
             self._load("base")
             self._load("diarization")
@@ -1092,25 +1175,10 @@ class PipelineService:
 
         # 4. Tách giọng tại vùng overlap
         speech_segments = None
-        if not self.step_enabled(args, "separation"):
-            if self.logger:
-                self.logger.info("Step 'separation' is off in the profile; skipping")
-            # Dù tắt separation, các bước sau vẫn cần SpeechSegment;
-            # passthrough bọc segment diarization với âm thanh gốc.
-            if diarization_result is not None:
-                if checkpoint.exists("separation"):
-                    speech_segments = checkpoint.load("separation")
-                else:
-                    speech_segments = self.separation_svc.passthrough(
-                        diarization_result.segments, audio_data)
-                    checkpoint.save("separation", speech_segments)
-        elif diarization_result is None:
-            if self.logger:
-                self.logger.info("Skipping separation (no diarization segments)")
-        elif checkpoint.exists("separation"):
-            if self.logger: self.logger.info("Loading Separation from checkpoint")
+        cached_separation = None
+        if diarization_result is not None:
             try:
-                speech_segments = checkpoint.load("separation")
+                cached_separation = checkpoint.load_if_committed("separation")
             except (AttributeError, ModuleNotFoundError) as exc:
                 # Checkpoint trước khi đổi tên EnhancedSegment tham chiếu lớp không còn.
                 # Cần tính lại bước thay vì để lỗi pickle khó đọc tới người vận hành.
@@ -1118,7 +1186,24 @@ class PipelineService:
                     self.logger.warning(
                         f"Separation checkpoint predates a rename ({exc}); "
                         "recomputing this stage")
-                speech_segments = None
+        if not self.step_enabled(args, "separation"):
+            if self.logger:
+                self.logger.info("Step 'separation' is off in the profile; skipping")
+            # Dù tắt separation, các bước sau vẫn cần SpeechSegment;
+            # passthrough bọc segment diarization với âm thanh gốc.
+            if diarization_result is not None:
+                if cached_separation is not None:
+                    speech_segments = cached_separation
+                else:
+                    speech_segments = self.separation_svc.passthrough(
+                        diarization_result.segments, audio_data)
+                    checkpoint.save("separation", speech_segments)
+        elif diarization_result is None:
+            if self.logger:
+                self.logger.info("Skipping separation (no diarization segments)")
+        elif cached_separation is not None:
+            if self.logger: self.logger.info("Loading Separation from checkpoint")
+            speech_segments = cached_separation
         else:
             self._load("separation")
             self.separation_svc.dump_dir = os.path.join(
@@ -1193,15 +1278,16 @@ class PipelineService:
         # 5. Nhận dạng lời nói bằng tổ hợp ASR (MoE)
         transcripts = None
         asr_async = False
+        cached_asr = checkpoint.load_if_committed("asr")
         if not self.step_enabled(args, "asr"):
             if self.logger:
                 self.logger.info("Step 'asr' is off in the profile; skipping")
         elif speech_segments is None:
             if self.logger:
                 self.logger.info("Skipping ASR (no segments available)")
-        elif checkpoint.exists("asr"):
+        elif cached_asr is not None:
             if self.logger: self.logger.info("Loading ASR from checkpoint")
-            transcripts = checkpoint.load("asr")
+            transcripts = cached_asr
         elif self._asr_async_ok(args):
             # Cross-file ASR: queue the clips and free this thread; the vote and the
             # checkpoint commit finish in the background (drained by the batch loop).
@@ -1238,9 +1324,9 @@ class PipelineService:
         elif transcripts is None or speech_segments is None:
             if self.logger:
                 self.logger.info("Skipping captioning (no transcripts or segments available)")
-        elif checkpoint.exists("captioning"):
+        elif (cached_captioning := checkpoint.load_if_committed("captioning")) is not None:
             if self.logger: self.logger.info("Loading Captioning from checkpoint")
-            transcripts = checkpoint.load("captioning")
+            transcripts = cached_captioning
         else:
             self._load("caption")
             segment_audio = {s.index: s.audio for s in speech_segments if s.audio is not None}
@@ -1260,9 +1346,9 @@ class PipelineService:
         elif transcripts is None:
             if self.logger:
                 self.logger.info("Skipping refinement (no transcripts available)")
-        elif checkpoint.exists("refinement"):
+        elif (cached_refinement := checkpoint.load_if_committed("refinement")) is not None:
             if self.logger: self.logger.info("Loading Refinement from checkpoint")
-            transcripts = checkpoint.load("refinement")
+            transcripts = cached_refinement
         else:
             import copy
             before = copy.deepcopy(transcripts)
@@ -1311,7 +1397,7 @@ class PipelineService:
             # A checkpointed alignment loads no model and does not need this.
             checkpoint.namespaces["word_alignment"] = (
                 self.word_alignment_svc.checkpoint_namespace_for(transcripts))
-            alignment_cached = checkpoint.exists("word_alignment")
+            alignment_cached = checkpoint.exists("word_alignment", verify_digest=False)
             if not alignment_cached:
                 self._release_llm_before(args, "word alignment")
             try:

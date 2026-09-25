@@ -232,6 +232,11 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
         # Whether this batch goes on past this stage; a stage that hands the LLM
         # to the next one only keeps it when there is a next one.
         stage_args.batch_continues = original_stop != stage
+        # Used by PipelineService to make the retained music_removal label a
+        # truly zero-work compatibility pass. A direct --stop_after invocation
+        # keeps its historical behavior; only corpus-wide stage scheduling may
+        # skip the duplicate audio/checkpoint replay.
+        stage_args.stage_only_pass = True
         # The final pass re-enters run() to restore checkpointed state before
         # export. Clip judging has no checkpoint, so mark this invocation to
         # prevent a second LLM judgement after its dedicated corpus-wide pass.
