@@ -140,4 +140,4 @@ def test_the_a100_profiles_send_refinement_to_vllm_in_large_chunks():
     cfg = json.load(open(os.path.join(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))), "config.json"), encoding="utf-8"))
     for env in ("a100", "a100_hf"):
-        assert cfg["environments"][env]["models"]["refinement"]["batch_size"] == 384
+        assert cfg["environments"][env]["models"]["refinement"]["batch_size"] == 1024

@@ -328,7 +328,7 @@
         "refinement": {
           "backend": "vllm",
           "model_name": "Qwen/Qwen3.5-9B",
-          "batch_size": 384,
+          "batch_size": 1024,
           "torch_dtype": "bfloat16",
           "prefix_cache": true,
           "max_model_len": 49152
@@ -545,7 +545,7 @@
         },
         "refinement": {
           "model_name": "Qwen/Qwen3.5-9B",
-          "batch_size": 384,
+          "batch_size": 1024,
           "torch_dtype": "bfloat16",
           "prefix_cache": false
         },
