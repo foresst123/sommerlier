@@ -72,3 +72,23 @@ def test_worker_trace_makes_child_processes_dump_their_stacks():
                          text=True, check=True).stdout.split()
     assert out[0] == "7" and out[1].split(os.pathsep)[0].endswith("trace_site")
     assert os.path.isfile(os.path.join(ROOT, "trace_site", "sitecustomize.py"))
+
+
+def test_a_forked_child_does_not_hang_while_the_parent_is_being_traced():
+    # vLLM forks its EngineCore. The first version of worker_trace re-armed
+    # faulthandler in the child and the child hung before running a line.
+    code = (
+        "import os, sys, time, worker_trace\n"
+        "worker_trace.watch(1)\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    os._exit(0)\n"
+        "end = time.time() + 5\n"
+        "while time.time() < end:\n"
+        "    if os.waitpid(pid, os.WNOHANG)[0]:\n"
+        "        print('exited'); sys.exit(0)\n"
+        "    time.sleep(0.05)\n"
+        "os.kill(pid, 9); print('hung')\n")
+    out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True,
+                         text=True, timeout=30).stdout
+    assert "exited" in out and "hung" not in out

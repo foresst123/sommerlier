@@ -34,6 +34,17 @@ def note(message):
     print(_stamp(message), file=sys.stderr, flush=True)
 
 
+def _dump_from_a_thread(interval, minutes=15):
+    """Print every thread's stack to stderr each `interval` s for `minutes` min."""
+    def loop():
+        for _ in range(int(minutes * 60 / max(interval, 1))):
+            time.sleep(interval)
+            faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+
+    import threading
+    threading.Thread(target=loop, daemon=True, name="trace-dump").start()
+
+
 def watch(interval=45):
     faulthandler.dump_traceback_later(interval, repeat=True, file=sys.stdout)
     # The engine runs in child processes (vLLM's EngineCore), which is where a
@@ -46,8 +57,10 @@ def watch(interval=45):
     if site not in parts:
         os.environ["PYTHONPATH"] = os.pathsep.join([site] + parts)
     if hasattr(os, "register_at_fork"):
-        os.register_at_fork(after_in_child=lambda: faulthandler.dump_traceback_later(
-            interval, repeat=True, file=sys.stderr))
+        # NOT dump_traceback_later here: a forked child inherits the parent's
+        # "watchdog is running" state without the watchdog thread, and calling
+        # it waits for that thread forever -- the engine process hung at birth.
+        os.register_at_fork(after_in_child=lambda: _dump_from_a_thread(interval))
 
 
 def done():

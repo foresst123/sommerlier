@@ -10,13 +10,20 @@ import faulthandler
 import os
 import sys
 import threading
+import time
 
 _interval = os.environ.get("SOMMELIER_TRACE_CHILD")
+
+
+def _loop(interval):
+    for _ in range(int(900 / max(interval, 1))):
+        time.sleep(interval)
+        faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+
+
 if _interval:
     try:
-        faulthandler.dump_traceback_later(float(_interval), repeat=True, file=sys.stderr)
-        _stop = threading.Timer(900, faulthandler.cancel_dump_traceback_later)
-        _stop.daemon = True
-        _stop.start()
+        threading.Thread(target=_loop, args=(float(_interval),), daemon=True,
+                         name="trace-dump").start()
     except Exception:
         pass
