@@ -12,6 +12,7 @@ import sys
 
 import numpy as np
 
+import worker_vllm_env  # noqa: F401  (sets VLLM_* defaults before vllm loads)
 from worker_errors import describe_exception
 
 

@@ -41,6 +41,8 @@ import os
 import argparse
 import warnings
 
+import worker_vllm_env  # noqa: F401  (sets VLLM_* defaults before vllm loads)
+
 warnings.filterwarnings("ignore")
 
 import torch

@@ -1,0 +1,38 @@
+"""vLLM workers must not JIT-compile FlashInfer's sampler: the DGX has no CUDA
+toolkit (no nvcc), and the engine died in its first profiling run because of it."""
+
+import os
+import re
+import subprocess
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WORKERS = ("qwen3_worker.py", "whisper_vllm_worker.py", "refinement_worker.py")
+
+
+def _value_after_import(env_value):
+    env = {k: v for k, v in os.environ.items() if k != "VLLM_USE_FLASHINFER_SAMPLER"}
+    if env_value is not None:
+        env["VLLM_USE_FLASHINFER_SAMPLER"] = env_value
+    result = subprocess.run(
+        [sys.executable, "-c",
+         "import worker_vllm_env, os; print(os.environ.get('VLLM_USE_FLASHINFER_SAMPLER'))"],
+        cwd=ROOT, env=env, capture_output=True, text=True, check=True)
+    return result.stdout.strip()
+
+
+def test_the_flashinfer_sampler_is_off_unless_someone_asks_for_it():
+    assert _value_after_import(None) == "0"
+
+
+def test_an_explicit_choice_is_left_alone():
+    assert _value_after_import("1") == "1"
+
+
+def test_every_vllm_worker_sets_it_before_vllm_can_be_imported():
+    for name in WORKERS:
+        source = open(os.path.join(ROOT, name), encoding="utf-8").read()
+        assert "import worker_vllm_env" in source, name
+        first_vllm = re.search(r"^\s*(from vllm|import vllm)", source, re.MULTILINE)
+        assert first_vllm is None or (
+            source.index("import worker_vllm_env") < first_vllm.start()), name
