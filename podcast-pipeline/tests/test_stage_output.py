@@ -217,8 +217,8 @@ def test_stage_artifacts_are_written_once_not_once_per_stage():
         f"found {len(diar_calls)}")
     deferred_call, synchronous_call = diar_calls
 
-    finish_def = src.index("def _finish(fut")
-    finish_end = src.index("future.add_done_callback(_finish)")
+    finish_def = src.index("def _finish(result")
+    finish_end = src.index("raw, audio_data, args, then=_finish)")
     assert finish_def < deferred_call < finish_end, (
         "the first write_diarization call must be the deferred one inside "
         "_finish(), only ever wired up for a freshly-computed diarization")

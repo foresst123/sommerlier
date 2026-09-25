@@ -1003,20 +1003,23 @@ class PipelineService:
                 # utils/batch.py's run_batch_by_stage drains
                 # self._pending_diar_jobs before "separation" starts, so no
                 # later stage can read a checkpoint this hasn't written yet.
-                future = self.diarization_svc.submit_postprocess(raw, audio_data, args)
-                with self._pending_diar_lock:
-                    self._pending_diar_jobs[audio_path] = future
-
-                def _finish(fut, audio_path=audio_path, checkpoint=checkpoint,
+                # The tail (checkpoint commit, overlap-plan prefetch, audit
+                # writes) runs inside the same future the drain waits on, so
+                # the stage cannot end while it is still running or failed.
+                def _finish(result, audio_path=audio_path, checkpoint=checkpoint,
                             stage_out=stage_out, audio_data=audio_data, args=args):
-                    try:
-                        result = fut.result()
-                    except Exception:
-                        # Surfaced to run_batch_by_stage's `failures` by the
-                        # drain step, which calls future.result() again on
-                        # this same future -- deliberately not handled here.
-                        return
+                    if not result.segments:
+                        raise RuntimeError(
+                            f"Diarization ({result.method}) produced no segments for "
+                            f"{audio_path}. Check the worker log above for the "
+                            "underlying error; continuing would write an empty "
+                            "transcript.")
                     checkpoint.save("diarization", result)
+                    # Valid segments exist: start window building before the
+                    # audit clips, which nothing downstream depends on.
+                    if self.step_enabled(args, "separation"):
+                        self.separation_svc.prefetch_overlap_plan(
+                            result.segments, audio_data, audio_path)
                     stage_out.write_diarization(
                         result.segments,
                         total_dur=audio_data.duration,
@@ -1024,11 +1027,11 @@ class PipelineService:
                         audio=audio_data.waveform,
                         sample_rate=audio_data.sample_rate,
                     )
-                    if self.step_enabled(args, "separation"):
-                        self.separation_svc.prefetch_overlap_plan(
-                            result.segments, audio_data, audio_path)
 
-                future.add_done_callback(_finish)
+                future = self.diarization_svc.submit_postprocess(
+                    raw, audio_data, args, then=_finish)
+                with self._pending_diar_lock:
+                    self._pending_diar_jobs[audio_path] = future
                 if self.logger:
                     self.logger.info(
                         "Stopping pipeline after diarization as requested by "

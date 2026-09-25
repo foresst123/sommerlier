@@ -79,6 +79,10 @@ _STAGES = {
     "diarization": {
         "workers": (INT, 1, 1, 2),
         "placement": (STR, "single", None, None),
+        # Give every postprocess thread its own Silero VAD instance instead of
+        # sharing one behind a lock. Same VAD, same boundaries; costs one small
+        # ONNX session per thread. Needs postprocess_workers > 1 to matter.
+        "vad_per_worker": (BOOL, False, None, None),
     },
     "separation": {
         "max_workers": (INT, 1, 1, 2),
@@ -149,6 +153,10 @@ _STAGES = {
         # instead of doing both inline on the same thread.
         "postprocess_workers": (INT, 1, 1, 16),
         "ordered_postprocess": (BOOL, True, None, None),
+        # Spans decoded at 44.1kHz ahead of the separator (CPU decode on its own
+        # threads, before a BS-RoFormer instance is checked out). Also the cap on
+        # decoded spans alive at once. 0 decodes inside the separator call.
+        "hires_decode_ahead": (INT, 0, 0, 16),
     },
 }
 

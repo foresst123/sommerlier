@@ -132,7 +132,7 @@ def test_diarization_splits_at_seams_before_vad():
     source = open(os.path.join(root, "services", "diarization_service.py"),
                   encoding="utf-8").read()
     split = source.index("split_at_seams(")
-    vad = source.index("self.vad_model.vad(")
+    vad = source.index("vad.vad(combined_df")
     merge = source.index("cut_by_speaker_label(\n")
     assert split < vad < merge, "seam split, then VAD, then merge"
 

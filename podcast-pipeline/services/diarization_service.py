@@ -1,3 +1,4 @@
+import contextlib
 import os
 import tempfile
 import threading
@@ -37,11 +38,23 @@ class _RawDiarization:
     method: str
 
 
+class _GuardedVad:
+    """The boundary finder's view of a VAD: each call runs under the same
+    guard as vad.vad(), so a shared stateful model is never entered twice."""
+
+    def __init__(self, vad, guard):
+        self._vad, self._guard = vad, guard
+
+    def get_speech_timestamps(self, *args, **kwargs):
+        with self._guard:
+            return self._vad.get_speech_timestamps(*args, **kwargs)
+
+
 class DiarizationService:
     """Handles audio chunking, model inference (Pyannote/Sortformer), and cross-chunk fusion."""
     
     def __init__(self, diarizer=None, vad_model=None, embedder=None, logger=None,
-                 diarizer_config=None, model_loader=None):
+                 diarizer_config=None, model_loader=None, performance_config=None):
         self._diarizer = diarizer
         self._vad_model = vad_model
         self._embedder = embedder
@@ -51,6 +64,11 @@ class DiarizationService:
         # Silero's stateful ONNX wrapper is shared by the lightweight per-file
         # service copies used by the two-file diarization scheduler.
         self._vad_lock = threading.Lock()
+        # With vad_per_worker each postprocess thread runs its own Silero
+        # instance (fork()) and takes no lock. Shared by every per-file view
+        # for the same reason _postprocess_state is.
+        self.performance_config = dict(performance_config or {})
+        self._vad_local = threading.local()
         # Runs diarize_postprocess() in the background during the diarization
         # stage-major pass, so the GPU worker diarize_raw() just freed can
         # take the next file immediately instead of waiting for this file's
@@ -90,6 +108,21 @@ class DiarizationService:
     def embedder(self):
         return self._model(self._embedder, "embedder")
         
+    def _vad_for_thread(self):
+        """(vad, lock) for the calling thread: a private fork and no lock with
+        vad_per_worker, else the shared model and its lock. A model without
+        fork() stays shared."""
+        vad = self.vad_model
+        if vad is None:
+            return None, None
+        if self.performance_config.get("vad_per_worker", False) and callable(
+                getattr(vad, "fork", None)):
+            local = self._vad_local
+            if getattr(local, "source", None) is not vad:
+                local.source, local.vad = vad, vad.fork()
+            return local.vad, contextlib.nullcontext()
+        return vad, self._vad_lock
+
     def _log_segment_stats(self, stage: str, seg_list: list):
         """One line per pipeline stage so segment loss can be attributed."""
         if not self.logger:
@@ -248,10 +281,12 @@ class DiarizationService:
             combined_df = pd.DataFrame(raw_list)
 
         # Apply VAD to split long continuous segments if VAD is available
-        if getattr(args, "vad", False) and self.vad_model:
+        use_vad = bool(getattr(args, "vad", False) and self.vad_model)
+        vad, vad_guard = self._vad_for_thread() if use_vad else (None, None)
+        if use_vad:
             vad_audio = {"waveform": audio.waveform, "sample_rate": audio.sample_rate}
-            with self._vad_lock:
-                raw_list = self.vad_model.vad(combined_df, vad_audio)
+            with vad_guard:
+                raw_list = vad.vad(combined_df, vad_audio)
         else:
             raw_list = df_to_list(combined_df)
             
@@ -311,7 +346,7 @@ class DiarizationService:
             waveform=audio.waveform, sample_rate=audio.sample_rate,
             boundary_finder=AcousticBoundaryFinder(
                 audio.waveform, audio.sample_rate,
-                vad=self.vad_model if getattr(args, "vad", False) else None,
+                vad=_GuardedVad(vad, vad_guard) if use_vad else None,
             ))
         # split_long_segments rounds public timestamps to milliseconds. A tiny
         # preserved overlap can therefore collapse to start == end only after
@@ -360,13 +395,25 @@ class DiarizationService:
                     max_workers=max(1, workers), thread_name_prefix="diar-post")
             return state["executor"]
 
-    def submit_postprocess(self, raw: "_RawDiarization", audio: AudioData, args: Any):
+    def submit_postprocess(self, raw: "_RawDiarization", audio: AudioData, args: Any,
+                           then=None):
         """Run diarize_postprocess() on the shared background pool. Shared
         (not per-file) the same way SeparationService's gpu/post executors
         are -- parallel_stage_view("diarization") only shallow-copies
         DiarizationService, so every concurrent file's view submits to the
-        same pool."""
-        return self._postprocess_pool().submit(self.diarize_postprocess, raw, audio, args)
+        same pool.
+
+        `then(result)`, when given, runs on the same pool thread right after
+        postprocessing (checkpoint commit, prefetch, audit writes). The
+        returned future resolves only once it has finished, and carries its
+        exception, so a waiter cannot see the file as done while that tail is
+        still running or has failed."""
+        def job():
+            result = self.diarize_postprocess(raw, audio, args)
+            if then is not None:
+                then(result)
+            return result
+        return self._postprocess_pool().submit(job)
 
     def close_postprocess_pool(self):
         """Shut down the background pool. Safe to call with nothing ever

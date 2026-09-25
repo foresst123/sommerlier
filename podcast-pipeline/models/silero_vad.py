@@ -7,6 +7,7 @@
 # Note: This code has been modified to fit the context of this repository.
 
 import os
+import threading
 
 import librosa
 import torch
@@ -27,6 +28,11 @@ VAD_THRESHOLD = float(os.environ.get("VAD_THRESHOLD", "0.5"))
 # decides whether the VAD runs, this one decides how it carves the result.
 VAD_MAX_SEGMENT = float(os.environ.get("VAD_MAX_SEGMENT", "20.0"))
 SAMPLING_RATE = 16000
+
+
+# Construction swaps a global onnxruntime hook, so two threads building a VAD
+# at once (see SileroVAD.fork) must not interleave.
+_BUILD_LOCK = threading.Lock()
 
 
 class SileroVAD:
@@ -56,6 +62,23 @@ class SileroVAD:
         """
         self.vad_threshold = VAD_THRESHOLD if vad_threshold is None else float(vad_threshold)
         self.max_segment = VAD_MAX_SEGMENT if max_segment is None else float(max_segment)
+        self._init_args = dict(local=local, model=model, device=device,
+                               vad_threshold=vad_threshold, max_segment=max_segment)
+        try:
+            with _BUILD_LOCK:
+                self._load(local, model, device)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load VAD model: {e}")
+
+    def fork(self):
+        """A second, independent instance with the same settings.
+
+        The ONNX wrapper keeps per-call state, so one instance serves one
+        thread at a time; a thread that wants to run without a shared lock
+        takes its own fork."""
+        return SileroVAD(**self._init_args)
+
+    def _load(self, local, model, device):
         try:
             # Set ONNX Runtime providers based on device
             if device.type == "cuda":
@@ -105,8 +128,8 @@ class SileroVAD:
             self.vad_model = vad_model
             (get_speech_timestamps, _, _, _, _) = utils
             self._get_speech_timestamps = get_speech_timestamps
-        except Exception as e:
-            raise RuntimeError(f"Failed to load VAD model: {e}")
+        except Exception:
+            raise
 
     def get_speech_timestamps(self, audio_segment, **kwargs):
         """Wrapper for PyTorch Hub get_speech_timestamps with auto-resampling."""

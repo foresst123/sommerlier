@@ -39,6 +39,7 @@ class MusicService:
         self.performance_config = dict(performance_config or {})
         self._async_state = {
             "gpu_executor": None, "post_executor": None,
+            "decode_executor": None, "decode_slots": None,
             "lock": threading.Lock(),
         }
 
@@ -88,6 +89,26 @@ class MusicService:
                     max_workers=post_workers, thread_name_prefix="music-post")
             return state["gpu_executor"], state["post_executor"]
 
+    def _decode_runtime(self, pool_models):
+        """Shared (decode_executor, slots) for hi-res decode-ahead, or None.
+
+        Off unless `hires_decode_ahead` > 0. `slots` bounds how many decoded
+        spans exist at once (decoded, waiting for a separator, or waiting for
+        postprocessing), so the RAM held is limited however many spans a file
+        has."""
+        ahead = int(self.performance_config.get("hires_decode_ahead", 0) or 0)
+        if ahead <= 0 or not any(callable(getattr(m, "decode_span", None))
+                                 for m in pool_models):
+            return None
+        state = self._async_state
+        with state["lock"]:
+            if state["decode_executor"] is None:
+                state["decode_executor"] = ThreadPoolExecutor(
+                    max_workers=min(ahead, max(1, len(pool_models))),
+                    thread_name_prefix="music-decode")
+                state["decode_slots"] = threading.BoundedSemaphore(ahead)
+            return state["decode_executor"], state["decode_slots"]
+
     def close_async_pools(self):
         """Shut down the background pools. Safe to call with nothing ever
         submitted, and safe to call twice."""
@@ -97,10 +118,13 @@ class MusicService:
         with state["lock"]:
             gpu_executor, state["gpu_executor"] = state["gpu_executor"], None
             post_executor, state["post_executor"] = state["post_executor"], None
-        if gpu_executor is not None:
-            gpu_executor.shutdown(wait=True, cancel_futures=False)
-        if post_executor is not None:
-            post_executor.shutdown(wait=True, cancel_futures=False)
+            decode_executor, state["decode_executor"] = state["decode_executor"], None
+            state["decode_slots"] = None
+        # Decode feeds the GPU pool and the GPU pool feeds post, so drain in
+        # that order.
+        for executor in (decode_executor, gpu_executor, post_executor):
+            if executor is not None:
+                executor.shutdown(wait=True, cancel_futures=False)
 
     # Models are fetched from the loader on use, not captured at construction.
     # PipelineService loads each stage's models when that stage runs, so a
@@ -187,7 +211,7 @@ class MusicService:
                 return ordinal, i, None, used_hi_res
             return ordinal, i, np.asarray(vocals, dtype=np.float32), used_hi_res
 
-        def _raw_step(item):
+        def _raw_step(item, decoded_future=None):
             ordinal, (start, end) = item
             i, j = max(0, int(start * sr)), min(total, int(end * sr))
             if j - i < sr // 2:
@@ -195,6 +219,14 @@ class MusicService:
                 # work with, and the seams would cost more than the bed does.
                 return ordinal, i, j, None, None, False, None
             reference = np.asarray(waveform[i:j], dtype=np.float32).copy()
+            decoded = None
+            if decoded_future is not None:
+                # Wait for the decode before taking a separator, so an
+                # instance is never held while only the CPU is working.
+                try:
+                    decoded = decoded_future.result()
+                except Exception:
+                    decoded = None
             model = available.get()
 
             if not hasattr(model, "separate_raw"):
@@ -227,7 +259,13 @@ class MusicService:
                 if source_path is not None:
                     separate_span_raw = getattr(model, "separate_span_raw", None)
                     if separate_span_raw is not None:
-                        raw_result = separate_span_raw(source_path, start, end)
+                        if decoded_future is None:
+                            raw_result = separate_span_raw(source_path, start, end)
+                        elif decoded is not None:
+                            raw_result = separate_span_raw(
+                                source_path, start, end, decoded=decoded)
+                        # else: the decode already failed; go straight to the
+                        # 16kHz fallback, as a failed in-place decode would.
                         used_hi_res = raw_result is not None
                 if raw_result is None:
                     raw_result = model.separate_raw(reference, sr)
@@ -263,9 +301,58 @@ class MusicService:
             # whichever pending raw job is next, not gated on this job's own
             # CPU work finishing first.
             gpu_executor, post_executor = async_runtime
-            raw_futures = [gpu_executor.submit(_raw_step, item) for item in indexed_jobs]
-            post_futures = [post_executor.submit(_post_step, f.result()) for f in raw_futures]
-            separated = [f.result() for f in post_futures]
+            decode_runtime = (self._decode_runtime(pool_models)
+                              if source_path is not None else None)
+            decoder = None
+            if decode_runtime is not None:
+                decoder = next(m for m in pool_models
+                               if callable(getattr(m, "decode_span", None)))
+
+            def _post_release(step, slots):
+                try:
+                    return _post_step(step)
+                finally:
+                    if slots is not None:
+                        slots.release()
+
+            def _raw_then_post(item, decoded_future, slots):
+                # Postprocess is queued from the GPU thread the moment its raw
+                # call returns, so it never waits behind an earlier, slower job.
+                try:
+                    step = _raw_step(item, decoded_future)
+                except BaseException:
+                    if slots is not None:
+                        slots.release()
+                    raise
+                return post_executor.submit(_post_release, step, slots)
+
+            raw_futures = []
+            for item in indexed_jobs:
+                decoded_future = slots = None
+                _ordinal, (start, end) = item
+                i, j = max(0, int(start * sr)), min(total, int(end * sr))
+                if decoder is not None and j - i >= sr // 2:
+                    decode_executor, slots = decode_runtime
+                    slots.acquire()
+                    try:
+                        decoded_future = decode_executor.submit(
+                            decoder.decode_span, source_path, start, end)
+                    except BaseException:
+                        slots.release()
+                        raise
+                raw_futures.append(gpu_executor.submit(
+                    _raw_then_post, item, decoded_future, slots))
+            # Wait for every job before raising: a failed one must not leave
+            # others running against a waveform the caller is about to discard.
+            first_error = None
+            separated = []
+            for raw_future in raw_futures:
+                try:
+                    separated.append(raw_future.result().result())
+                except BaseException as exc:
+                    first_error = first_error or exc
+            if first_error is not None:
+                raise first_error
         elif pool_models and len(indexed_jobs) > 1:
             from concurrent.futures import ThreadPoolExecutor as _TPE
             with _TPE(max_workers=min(len(pool_models), len(indexed_jobs))) as executor:

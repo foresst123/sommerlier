@@ -769,7 +769,8 @@ def main():
         diarization_svc = DiarizationService(
             model_loader=model_loader,
             logger=logger,
-            diarizer_config=env_profile.get("models", {}).get("diarizen", {})
+            diarizer_config=env_profile.get("models", {}).get("diarizen", {}),
+            performance_config=perf_cfg["stages"]["diarization"],
         )
         separation_svc = SeparationService(
             model_loader=model_loader,

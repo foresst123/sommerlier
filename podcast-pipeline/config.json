@@ -448,7 +448,8 @@
             "workers_per_gpu": 2,
             "cross_file_overlap": false,
             "ordered_postprocess": true,
-            "postprocess_workers": 2
+            "postprocess_workers": 2,
+            "hires_decode_ahead": 4
           }
         }
       },
@@ -673,7 +674,8 @@
             "workers_per_gpu": 2,
             "cross_file_overlap": false,
             "ordered_postprocess": true,
-            "postprocess_workers": 2
+            "postprocess_workers": 2,
+            "hires_decode_ahead": 4
           }
         }
       },

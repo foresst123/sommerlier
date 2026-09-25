@@ -223,7 +223,7 @@ class SeparationService:
         # plan is a finished snapshot -- there is no per-file mutable state
         # left in it for two files to race on.
         self._prefetch_cache = {}
-        self._prefetch_lock = threading.Lock()
+        self._prefetch_lock = threading.RLock()
         self._prefetch_executor = None
         self.performance_config = dict(performance_config or {})
         self.splice_margin = BSS_SPLICE_MARGIN
@@ -400,11 +400,15 @@ class SeparationService:
         shallow copy of self synchronously, right here, which snapshots
         self.music_map/self.timeline as they are for THIS file, before the
         caller moves on and mutates them for the next one."""
-        if not segments or audio_path in self._prefetch_cache:
+        if not segments:
             return
-        clone = self.fork_for_file()
-        future = self._prefetch_pool().submit(clone._build_overlap_plan, segments, audio)
+        # Check and reserve in one critical section: two callers for the same
+        # path (a resume and a fresh diarization tail) must not both build.
         with self._prefetch_lock:
+            if audio_path in self._prefetch_cache:
+                return
+            clone = self.fork_for_file()
+            future = self._prefetch_pool().submit(clone._build_overlap_plan, segments, audio)
             self._prefetch_cache[audio_path] = future
         if self.logger:
             self.logger.info(

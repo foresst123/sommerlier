@@ -300,14 +300,12 @@ class BSRoformerRemover:
         result = self._run(segment_audio, sample_rate)
         return segment_audio if result is None else result
 
-    def separate_span_raw(self, source_path: str, start: float, end: float):
-        """Decode + GPU-only half of separate_span(): everything through the
-        raw separator call, before level-matching or resampling against the
-        caller's own reference. Returns a context dict for
-        separate_span_postprocess(), or None (hi-res unavailable, bad
-        decode, or the separator itself failed) so the caller can fall back
-        to separate_raw() on the 16kHz slice it already has.
-        """
+    def decode_span(self, source_path: str, start: float, end: float):
+        """CPU-only half of separate_span_raw(): decode one span from the
+        source at 44.1kHz. Returns (mix, sr) shaped (n,) or (n, channels), or
+        None when hi-res is unavailable or the decode fails. Touches no model
+        or device state, so a caller may run it ahead of the GPU checkout and
+        hand the result to separate_span_raw(decoded=...)."""
         if not self.hi_res or not source_path or not os.path.exists(source_path):
             return None
         duration = end - start
@@ -324,6 +322,33 @@ class BSRoformerRemover:
                 mix = mix.T
             if mix.size == 0:
                 return None
+            return mix, sr
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(
+                    f"Hi-res decode of {start:.1f}-{end:.1f}s failed "
+                    f"({type(exc).__name__}: {exc}); falling back to the "
+                    "slice already held")
+            return None
+
+    def separate_span_raw(self, source_path: str, start: float, end: float,
+                          decoded=None):
+        """Decode + GPU-only half of separate_span(): everything through the
+        raw separator call, before level-matching or resampling against the
+        caller's own reference. Returns a context dict for
+        separate_span_postprocess(), or None (hi-res unavailable, bad
+        decode, or the separator itself failed) so the caller can fall back
+        to separate_raw() on the 16kHz slice it already has.
+
+        `decoded` is a decode_span() result made ahead of time; when given,
+        the source is not decoded again.
+        """
+        try:
+            if decoded is None:
+                decoded = self.decode_span(source_path, start, end)
+            if decoded is None:
+                return None
+            mix, sr = decoded
 
             raw = self.separate_raw(mix, sr)
             if raw is None:

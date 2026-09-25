@@ -91,22 +91,25 @@ def test_diarization_postprocessing_is_deferred_only_when_stopping_after_diariza
     stop = src.index('getattr(args, "stop_after", None) == "diarization"')
     deferred_block = src[stop:src.index("return None", stop)]
     assert "self.diarization_svc.submit_postprocess(" in deferred_block
-    assert "add_done_callback" in deferred_block
+    assert "then=_finish" in deferred_block, (
+        "the tail must run inside the future the drain waits on, not in a done-callback")
+    assert "add_done_callback" not in deferred_block
     after_deferred_block = src[src.index("return None", stop):]
     # The synchronous fallback (for every OTHER call to this section) must
     # still call diarize_postprocess directly, outside the deferred block.
     assert "self.diarization_svc.diarize_postprocess(" in after_deferred_block[:800]
 
 
-def test_the_diarization_done_callback_writes_checkpoint_and_output_before_prefetching():
+def test_the_diarization_tail_checkpoints_then_prefetches_then_writes_audit_clips():
     src = _source("services/pipeline_service.py")
     stop = src.index('getattr(args, "stop_after", None) == "diarization"')
     deferred_block = src[stop:src.index("return None", stop)]
     checkpoint_at = deferred_block.index('checkpoint.save("diarization"')
     write_at = deferred_block.index("stage_out.write_diarization(")
     prefetch_at = deferred_block.index("self.separation_svc.prefetch_overlap_plan(")
-    assert checkpoint_at < write_at < prefetch_at, (
-        "must checkpoint, then write stage-out, then prefetch -- in that order")
+    assert checkpoint_at < prefetch_at < write_at, (
+        "must checkpoint, then start the overlap-plan prefetch, then write the "
+        "audit clips nothing downstream depends on")
 
 
 def test_pending_diar_jobs_is_shared_across_parallel_stage_view_copies():
