@@ -438,6 +438,217 @@
       "batch": {
         "max_hours_per_run": 20.0
       }
+    },
+    "a100_hf": {
+      "offline_mode": false,
+      "gpu_1": 0,
+      "gpu_2": 1,
+      "outputs": {
+        "clean_two_channel_dir": "/home/lamkd2/output_fullduplex_data"
+      },
+      "steps": {
+        "music_analysis": true,
+        "music_removal": true,
+        "cut_music": true,
+        "diarization": true,
+        "separation": true,
+        "asr": true,
+        "captioning": false,
+        "refinement": true,
+        "speaker_relabel": true,
+        "word_alignment": true,
+        "conversation_exports": true,
+        "export": true
+      },
+      "pipeline": {
+        "vad": true,
+        "bss": true,
+        "music": true,
+        "music_scope": "spans",
+        "ASRMoE": true,
+        "llm_refinement": true,
+        "qwen3omni": false,
+        "dia3": false,
+        "keep_models": false,
+        "prefetch_workers": false,
+        "by_stage": true,
+        "review_page": true,
+        "review_max_mb": 400,
+        "initprompt": true,
+        "lang": "vi",
+        "LLM": "case_0",
+        "merge_gap": 0.8,
+        "bridge_gap": 3.0,
+        "max_segment_length": 20.0,
+        "seg_th": 0.11,
+        "min_cluster_size": 11,
+        "clust_th": 0.5
+      },
+      "models": {
+        "vad": {
+          "vad_threshold": 2.0,
+          "max_segment": 20.0
+        },
+        "whisper": {
+          "model_size": "large-v3",
+          "compute_type": "float32",
+          "batch_size": 16
+        },
+        "phowhisper": {
+          "compute_type": "float32",
+          "batch_size": 16
+        },
+        "qwen3": {
+          "batch_size": 16,
+          "use_flash_attention": false,
+          "torch_dtype": "bfloat16"
+        },
+        "diarizen": {
+          "batch_size": 64,
+          "seg_duration": 16,
+          "segmentation_step": 0.05,
+          "apply_median_filtering": true,
+          "clustering_method": "VBxClustering",
+          "min_speakers": 1,
+          "max_speakers": 10,
+          "ahc_threshold": 0.5
+        },
+        "bss": {
+          "window_workers": 6,
+          "qc_sim_threshold": 0.2,
+          "min_voiced_sec": 1.0,
+          "context_per_side_seconds": 2.0,
+          "context_max_per_side_seconds": 2.2,
+          "padding_min_per_speaker_seconds": 1.0,
+          "boundary_search_seconds": 1800.0,
+          "enrollment_memory": false,
+          "separator": "sidon",
+          "embedding_repository": "Wespeaker/wespeaker-voxceleb-resnet293-LM",
+          "embedding_filename": "voxceleb_resnet293_LM.onnx"
+        },
+        "bs_roformer": {
+          "model": "model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt",
+          "chunk_duration": 600,
+          "normalization_threshold": 0.7,
+          "native_fp16": false,
+          "torch_compile": false,
+          "hi_res": true,
+          "isolate_process": true
+        },
+        "refinement": {
+          "model_name": "Qwen/Qwen3.5-9B",
+          "batch_size": 40,
+          "torch_dtype": "bfloat16",
+          "prefix_cache": false
+        },
+        "relabel": {
+          "window_tokens": 32000,
+          "overlap_segments": 30,
+          "min_confidence": 0.7,
+          "max_change_fraction": 0.15,
+          "thinking": false,
+          "max_new_tokens": 4096
+        },
+        "word_alignment": {
+          "model_name": "nguyenvulebinh/wav2vec2-base-vi-vlsp2020",
+          "device": "auto",
+          "interpolate_method": "nearest",
+          "batch_seconds": 180,
+          "workers_per_gpu": 2
+        },
+        "conversation_selection": {
+          "min_seconds": 30,
+          "max_seconds": 240,
+          "max_silence": 3.0,
+          "max_monologue": 0,
+          "min_turns_each": 1,
+          "min_score": 55,
+          "min_semantic": 4,
+          "max_candidates": 24,
+          "pad_seconds": 0.2,
+          "fade_ms": 50,
+          "stereo": true,
+          "overlap_first": true,
+          "overlap_min_seconds": 0.3,
+          "overlap_good_min_similarity": 0.6,
+          "overlap_good_min_coverage": 0.9,
+          "require_noise": true,
+          "require_semantic": true,
+          "noisy_run_seconds": 2.0,
+          "noise_speech_max": 0.1,
+          "noise_env_max": 0.15,
+          "noise_room_max": 0.1,
+          "noise_max": 0.15,
+          "music_patched_max": 0.15,
+          "require_word_alignment": true,
+          "thinking": false,
+          "max_new_tokens": 3072
+        },
+        "sidon": {
+          "num_steps": 100
+        }
+      },
+      "allow_tf32": false,
+      "performance": {
+        "enabled": true,
+        "max_gpus": 2,
+        "gpu_reserve_gib": 4.0,
+        "cpu_reserve_for_coordinator": 1,
+        "ram_soft_fraction": 0.75,
+        "ram_hard_fraction": 0.85,
+        "max_pending_jobs": 64,
+        "telemetry_interval_seconds": 1.0,
+        "stages": {
+          "asr": {
+            "true_batching": true,
+            "dynamic_replicas": true,
+            "max_replicas_per_model": 2,
+            "replica_min_pending_jobs": 32,
+            "replica_min_gain_seconds": 15.0,
+            "replica_load_seconds": 30.0,
+            "replica_speed_ratio": 0.5,
+            "cross_file": true,
+            "files_in_flight": 3,
+            "shared_batch_size": 16,
+            "boost_batch_size": 48,
+            "qwen3_gpu": "gpu_1",
+            "whisper_gpu": "gpu_2",
+            "phowhisper_gpu": "gpu_2"
+          },
+          "refinement": {
+            "workers": 2,
+            "placement": "pipelined",
+            "gpu_memory_utilization": 0.85,
+            "max_batch_tokens": 32768,
+            "micro_batch_size": 8,
+            "pipeline_split_ratio": 0.5,
+            "cpu_threads": 32
+          },
+          "diarization": {
+            "workers": 2,
+            "placement": "replicated"
+          },
+          "separation": {
+            "max_workers": 2,
+            "workers_per_gpu": 3,
+            "gpu_prefetch_per_worker": 2,
+            "postprocess_workers": 2,
+            "postprocess_device": "cpu",
+            "ordered_postprocess": true
+          },
+          "music": {
+            "tagger_workers": 1,
+            "max_separator_workers": 2,
+            "workers_per_gpu": 3,
+            "cross_file_overlap": false,
+            "ordered_postprocess": true,
+            "postprocess_workers": 2
+          }
+        }
+      },
+      "batch": {
+        "max_hours_per_run": 20.0
+      }
     }
   },
   "batch": {
