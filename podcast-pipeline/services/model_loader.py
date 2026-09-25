@@ -13,6 +13,7 @@ from models.whisper_vllm import WhisperVLLMClient
 from utils.asr_model_config import (
     asr_device, phowhisper_kwargs, whisper_backend, whisper_ct2_kwargs)
 from models.phowhisper import PhoWhisperASR
+from models.phowhisper_client import PhoWhisperClient
 from models.silero_vad import SileroVAD
 from models.pyannote import PyannoteDiarizer
 from models.diarizen_model import DiariZenDiarizer
@@ -219,7 +220,7 @@ class ModelLoader:
             
     @_serialized
     def load_asr_models(self, qwen3_service: Qwen3WorkerService = None,
-                        whisper_service=None):
+                        whisper_service=None, phowhisper_service=None):
         """Load ASR models (Whisper, PhoWhisper, Qwen3)."""
         if "phowhisper" in self.models:
             return
@@ -239,9 +240,16 @@ class ModelLoader:
         # was diarization. It failed on chunk 0 with DiariZen reporting
         # "batch_size (12) is probably too large" -- a misleading message, since
         # that batch needs under 1GB. The card was simply already full.
-        pho_device = self._asr_device("phowhisper", self.device_1)
-        if self.logger: self.logger.info(f"Loading PhoWhisper on {pho_device}")
-        self.models["phowhisper"] = self.make_phowhisper(pho_device)
+        if phowhisper_service is not None:
+            # Its weights live in the worker process(es); nothing loads here.
+            if self.logger: self.logger.info("Connecting to PhoWhisper worker")
+            self.models["phowhisper"] = PhoWhisperClient(
+                phowhisper_service,
+                batch_size=phowhisper_kwargs(self._models_cfg()).get("batch_size", 16))
+        else:
+            pho_device = self._asr_device("phowhisper", self.device_1)
+            if self.logger: self.logger.info(f"Loading PhoWhisper on {pho_device}")
+            self.models["phowhisper"] = self.make_phowhisper(pho_device)
 
         
         if getattr(self.args, "ASRMoE", False) and getattr(self.args, "lang", "vi") == "vi":

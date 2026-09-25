@@ -149,7 +149,13 @@ class PipelineService:
             # Bảo đảm worker đang chạy khi bước thực sự bắt đầu. main() có thể khởi
             # động sớm để làm nóng, nhưng tại đây lỗi phải được báo; worker đang chạy
             # thì không cần khởi động thêm.
-            self._ensure_workers(self.WORKERS_FOR_STAGE.get(group, ()))
+            # Cross-file ASR starts each lane when its own worker is up, so the
+            # workers are only spawned here and come up in the background; every
+            # other path needs them ready before the models are built.
+            cross_file_asr = bool(group == "asr" and getattr(
+                getattr(self, "asr_svc", None), "cross_file_enabled", False))
+            self._ensure_workers(self.WORKERS_FOR_STAGE.get(group, ()),
+                                 wait=not cross_file_asr)
 
             {
                 "base":        lambda: self.model_loader.load_base_models(),
@@ -159,7 +165,7 @@ class PipelineService:
                 "music":       lambda: self.model_loader.load_music_models(),
                 "tagger":      lambda: self.model_loader.load_tagger(),
                 "asr":         lambda: self.model_loader.load_asr_models(
-                    w.get("qwen3"), w.get("whisper")),
+                    w.get("qwen3"), w.get("whisper"), w.get("phowhisper")),
                 "caption":     lambda: self.model_loader.load_caption_model(),
             }[group]()
 
@@ -168,7 +174,7 @@ class PipelineService:
     WORKERS_FOR_STAGE = {
         "diarization": ("diarizen",),
         "separation": ("sidon", "assignment"),
-        "asr": ("qwen3", "whisper"),
+        "asr": ("qwen3", "whisper", "phowhisper"),
     }
 
     # Công tắc bước lấy từ profile, dự phòng bằng cờ cũ. Dùng chung utils.steps
@@ -393,10 +399,12 @@ class PipelineService:
         Trả None nếu bước không cấu hình worker riêng."""
         return self._ensure_workers([name]).get(name)
 
-    def _ensure_workers(self, names) -> dict:
+    def _ensure_workers(self, names, wait: bool = True) -> dict:
         """Khởi động các worker của một bước cùng lúc rồi chờ tất cả sẵn sàng.
         Khởi động lần lượt (spawn rồi chờ, từng cái một) làm thời gian nạp model
         của vLLM cộng dồn; spawn hết trước rồi mới chờ thì chỉ tốn bằng cái chậm nhất.
+        Với wait=False chỉ spawn: mỗi worker tự báo sẵn sàng ở luồng nền và bước dùng
+        nó (lane ASR) tự chờ qua wait_ready() — an toàn khi gọi nhiều lần.
         Trả {tên: tiến trình}, bỏ qua tên không có worker."""
         monitor = getattr(self, "performance_monitor", None)
         processes, spawned = {}, []
@@ -418,16 +426,37 @@ class PipelineService:
                 self._worker_start_failed(name, e)
             spawned.append((name, service))
 
+        def become_ready(name, service):
+            service.wait_ready()
+            pids = self._register_worker_pids(name, service)
+            if monitor:
+                monitor.record("worker_ready", worker=name, pids=pids)
+
+        if not wait:
+            for name, service in spawned:
+                processes[name] = getattr(service, "process", None)
+                self._register_worker_pids(name, service)
+                threading.Thread(
+                    target=self._ready_in_background, args=(name, service, become_ready),
+                    daemon=True, name=f"ready-{name}").start()
+            return processes
+
         for name, service in spawned:
             try:
-                service.wait_ready()
-                pids = self._register_worker_pids(name, service)
-                if monitor:
-                    monitor.record("worker_ready", worker=name, pids=pids)
+                become_ready(name, service)
             except Exception as e:
                 self._worker_start_failed(name, e)
             processes[name] = getattr(service, "process", None)
         return processes
+
+    def _ready_in_background(self, name, service, become_ready):
+        try:
+            become_ready(name, service)
+        except Exception as e:
+            # The lane that needs this worker raises the same error from its own
+            # wait_ready(); this only makes sure it is logged when it happens.
+            if self.logger:
+                self.logger.error(f"Could not start the {name} worker: {e}")
 
     def _worker_start_failed(self, name: str, error: Exception):
         # Báo lỗi thay vì trả None: bước sắp chạy không thể dùng client thiếu

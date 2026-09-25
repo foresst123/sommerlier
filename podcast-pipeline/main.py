@@ -322,6 +322,8 @@ from services.export_service import ExportService
 from services.pipeline_service import PipelineService
 from services.qwen3_worker_service import Qwen3WorkerService
 from services.whisper_vllm_worker_service import WhisperVLLMWorkerService
+from services.phowhisper_worker_service import PhoWhisperWorkerService
+from models.phowhisper_client import PhoWhisperClient
 from models.qwen3_asr import Qwen3ASRClient
 from models.whisper_vllm import WhisperVLLMClient
 from services.diarizen_worker_service import DiarizenWorkerService
@@ -512,6 +514,30 @@ def main():
                     logger=logger),
                 whisper_worker_script, device_id=asr_placement["whisper"],
                 logger=logger, env_name=args.env, config_path=args.config))
+
+    # 1a'. PhoWhisper as worker process(es), when the profile asks for them
+    # (stages.asr.phowhisper_workers > 0). Otherwise it stays in this process. More
+    # than one copy pulls from a single queue, spread across the cards.
+    pho_worker_script = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "phowhisper_worker.py")
+    phowhisper_service = None
+    if (perf_cfg["enabled"] and asr_perf["phowhisper_workers"] > 0
+            and will_run(args, "asr")):
+        _pho_gpus = [g for g in dict.fromkeys((args.gpu_1, args.gpu_2))
+                     if not torch.cuda.is_available()
+                     or 0 <= int(g) < torch.cuda.device_count()]
+        _pho_devices = performance_config.pho_worker_devices(
+            asr_placement["phowhisper"], _pho_gpus, asr_perf["phowhisper_workers"])
+        _pho_workers = [PhoWhisperWorkerService(
+            _sys.executable, pho_worker_script, device_id=device, logger=logger,
+            env_name=args.env, config_path=args.config) for device in _pho_devices]
+        if _pho_workers:
+            phowhisper_service = _prefetch(
+                WorkerPoolService(_pho_workers, name="PhoWhisper")
+                if len(_pho_workers) > 1 else _pho_workers[0])
+            logger.info(
+                f"[performance] PhoWhisper: {len(_pho_workers)} worker(s) on "
+                + ", ".join(f"GPU {d}" for d in _pho_devices))
 
     # 1b. Start DiariZen workers (if dia3 is not used)
     #
@@ -722,9 +748,19 @@ def main():
                 asr_replica_factories["whisper"] = lambda gpu, batch: (
                     model_loader.make_whisper_ct2(torch.device(f"cuda:{gpu}"), batch),
                     _free_cuda)
-            asr_replica_factories["phowhisper"] = lambda gpu, batch: (
-                model_loader.make_phowhisper(torch.device(f"cuda:{gpu}"), batch),
-                _free_cuda)
+            if phowhisper_service is not None:
+                def _pho_replica(gpu, batch):
+                    service = PhoWhisperWorkerService(
+                        _sys.executable, pho_worker_script, device_id=gpu,
+                        logger=logger, env_name=args.env, config_path=args.config)
+                    service.spawn()
+                    service.wait_ready()
+                    return PhoWhisperClient(service, batch_size=batch), service.stop
+                asr_replica_factories["phowhisper"] = _pho_replica
+            else:
+                asr_replica_factories["phowhisper"] = lambda gpu, batch: (
+                    model_loader.make_phowhisper(torch.device(f"cuda:{gpu}"), batch),
+                    _free_cuda)
 
         # 3. Initialize Services
         audio_svc = AudioService(logger=logger)
@@ -764,7 +800,8 @@ def main():
             keep_models=args.keep_models,
             replica_factories=asr_replica_factories,
             asr_workers={name: service for name, service in
-                         (("qwen3", qwen3_service), ("whisper", whisper_service))
+                         (("qwen3", qwen3_service), ("whisper", whisper_service),
+                          ("phowhisper", phowhisper_service))
                          if service is not None},
             asr_placement=asr_placement,
         )
@@ -821,6 +858,7 @@ def main():
                 "diarizen": diarizen_service,
                 "qwen3": qwen3_service,
                 "whisper": whisper_service,
+                "phowhisper": phowhisper_service,
                 "sidon": sidon_service,
                 "assignment": assignment_service,
             },

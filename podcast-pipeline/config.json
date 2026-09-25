@@ -269,27 +269,27 @@
           "vad_threshold": 2.0,
           "max_segment": 20.0
         },
-      "whisper": {
-        "backend": "vllm",
-        "model_size": "large-v3",
-        "model_name": "openai/whisper-large-v3",
-        "torch_dtype": "bfloat16",
-        "batch_size": 16,
-        "gpu_memory_utilization": 0.4,
-        "max_new_tokens": 256
+        "whisper": {
+          "backend": "vllm",
+          "model_size": "large-v3",
+          "model_name": "openai/whisper-large-v3",
+          "torch_dtype": "bfloat16",
+          "batch_size": 16,
+          "gpu_memory_utilization": 0.4,
+          "max_new_tokens": 256
         },
         "phowhisper": {
           "compute_type": "float32",
           "batch_size": 16
         },
-      "qwen3": {
-        "backend": "vllm",
-        "model_name": "Qwen/Qwen3-ASR-1.7B",
-        "batch_size": 32,
-        "torch_dtype": "bfloat16",
-        "gpu_memory_utilization": 0.4,
-        "max_model_len": 8192,
-        "max_new_tokens": 256
+        "qwen3": {
+          "backend": "vllm",
+          "model_name": "Qwen/Qwen3-ASR-1.7B",
+          "batch_size": 32,
+          "torch_dtype": "bfloat16",
+          "gpu_memory_utilization": 0.4,
+          "max_model_len": 8192,
+          "max_new_tokens": 256
         },
         "diarizen": {
           "batch_size": 64,
@@ -323,13 +323,13 @@
           "hi_res": true,
           "isolate_process": true
         },
-      "refinement": {
-        "backend": "vllm",
-        "model_name": "Qwen/Qwen3.5-9B",
-        "batch_size": 40,
-        "torch_dtype": "bfloat16",
-        "prefix_cache": true,
-        "max_model_len": 49152
+        "refinement": {
+          "backend": "vllm",
+          "model_name": "Qwen/Qwen3.5-9B",
+          "batch_size": 40,
+          "torch_dtype": "bfloat16",
+          "prefix_cache": true,
+          "max_model_len": 49152
         },
         "relabel": {
           "window_tokens": 32000,
@@ -403,7 +403,8 @@
             "boost_batch_size": 48,
             "qwen3_gpu": "gpu_1",
             "whisper_gpu": "gpu_2",
-            "phowhisper_gpu": "gpu_2"
+            "phowhisper_gpu": "gpu_2",
+            "phowhisper_workers": 2
           },
           "refinement": {
             "workers": 2,
@@ -617,7 +618,8 @@
             "boost_batch_size": 48,
             "qwen3_gpu": "gpu_1",
             "whisper_gpu": "gpu_2",
-            "phowhisper_gpu": "gpu_2"
+            "phowhisper_gpu": "gpu_2",
+            "phowhisper_workers": 2
           },
           "refinement": {
             "workers": 2,

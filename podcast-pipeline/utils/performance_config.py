@@ -54,6 +54,10 @@ _STAGES = {
         "qwen3_gpu": (STR, "gpu_2", None, None),
         "whisper_gpu": (STR, "gpu_2", None, None),
         "phowhisper_gpu": (STR, "gpu_1", None, None),
+        # PhoWhisper as worker processes (phowhisper_worker.py) instead of inside the
+        # main process. 0 keeps it in-process; more than 1 runs copies that pull from
+        # one queue, spread over the cards starting with `phowhisper_gpu`.
+        "phowhisper_workers": (INT, 0, 0, 4),
     },
     "refinement": {
         "workers": (INT, 1, 1, 2),
@@ -306,6 +310,21 @@ def resolve_asr_placement(asr_cfg, gpu_1: int, gpu_2: int) -> dict:
         "whisper": ids[asr_cfg["whisper_gpu"]],
         "phowhisper": ids[asr_cfg["phowhisper_gpu"]],
     }
+
+
+def pho_worker_devices(placement_gpu, available, count) -> list:
+    """GPU id for each PhoWhisper worker: its own card first, then alternating.
+
+    Alternating keeps the pool's first idle leases on different cards so two copies
+    do not start on the same one.
+    """
+    cards = list(dict.fromkeys(available))
+    if not cards:
+        return []
+    if placement_gpu in cards:
+        cards.remove(placement_gpu)
+        cards.insert(0, placement_gpu)
+    return [cards[i % len(cards)] for i in range(max(0, int(count)))]
 
 
 def sidon_worker_devices(available, requested_gpus, workers_per_gpu, max_gpus,

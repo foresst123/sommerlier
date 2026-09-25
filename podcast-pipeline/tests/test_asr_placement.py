@@ -52,3 +52,23 @@ def test_the_new_keys_do_not_change_the_output_fingerprint():
         "cross_file": True, "files_in_flight": 5, "qwen3_gpu": "gpu_1",
         "phowhisper_gpu": "gpu_2", "boost_batch_size": 64})))
     assert plain == tuned
+
+
+def test_phowhisper_runs_in_process_unless_workers_are_asked_for():
+    assert _asr()["phowhisper_workers"] == 0
+    assert _asr({"phowhisper_workers": 3})["phowhisper_workers"] == 3
+    too_many = pc.resolve(_profile({"phowhisper_workers": 99}))
+    assert too_many["stages"]["asr"]["phowhisper_workers"] == 4      # clamped, and reported
+    assert any("phowhisper_workers" in problem for problem in too_many["_problems"])
+
+
+def test_pho_workers_start_on_its_own_gpu_and_alternate_across_the_cards():
+    assert pc.pho_worker_devices(1, [0, 1], 1) == [1]
+    assert pc.pho_worker_devices(1, [0, 1], 2) == [1, 0]
+    assert pc.pho_worker_devices(1, [0, 1], 4) == [1, 0, 1, 0]
+    assert pc.pho_worker_devices(0, [0, 1], 3) == [0, 1, 0]
+
+
+def test_pho_workers_use_only_the_cards_that_exist():
+    assert pc.pho_worker_devices(1, [1], 2) == [1, 1]
+    assert pc.pho_worker_devices(5, [0, 1], 2) == [0, 1]     # placement not available
