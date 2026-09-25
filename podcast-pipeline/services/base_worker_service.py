@@ -102,6 +102,9 @@ class WorkerProcessService:
 
     _ERROR_MARKERS = ("error", "exception", "traceback", "critical", "fatal",
                       "out of memory", "killed", "segmentation")
+    # Warnings printed by libraries at import that do not affect a worker: pyannote's
+    # torchcodec notice mentions "Error message was" and would look like a failure.
+    _NOISE_MARKERS = ("torchcodec",)
 
     @classmethod
     def is_error_line(cls, line: str) -> bool:
@@ -111,6 +114,8 @@ class WorkerProcessService:
         healthy threads) still lands in the tail kept for a failed start, but is
         not written to the pipeline log."""
         lowered = line.lower()
+        if any(marker in lowered for marker in cls._NOISE_MARKERS):
+            return False
         return any(marker in lowered for marker in cls._ERROR_MARKERS)
 
     def stderr_tail(self, lines: int = 10) -> str:

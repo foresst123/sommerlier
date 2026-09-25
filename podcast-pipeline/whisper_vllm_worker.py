@@ -50,6 +50,12 @@ def load_model(config_path, env_name):
     }
     if cfg.get("max_model_len"):
         kwargs["max_model_len"] = int(cfg["max_model_len"])
+    if cfg.get("kv_cache_memory_bytes"):
+        # A fixed KV cache skips vLLM's memory profiling, which asserts that no other
+        # process frees GPU memory while it runs. PhoWhisper workers share these
+        # cards and free memory between batches, so profiling failed at start-up
+        # ("Error in memory profiling"). gpu_memory_utilization then no longer applies.
+        kwargs["kv_cache_memory_bytes"] = int(cfg["kv_cache_memory_bytes"])
     print(json.dumps({"status": "loading", "model": model_name,
                       "backend": "vllm"}), flush=True)
     llm = LLM(**kwargs)

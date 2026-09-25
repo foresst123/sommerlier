@@ -81,6 +81,12 @@ def load_model(config_path=None, env_name="kaggle", batch_size=None):
         }
         if qwen_cfg.get("max_model_len"):
             kwargs["max_model_len"] = int(qwen_cfg["max_model_len"])
+        if qwen_cfg.get("kv_cache_memory_bytes"):
+            # A fixed KV cache skips vLLM's memory profiling, which asserts that no other
+            # process frees GPU memory while it runs. PhoWhisper workers share these
+            # cards and free memory between batches, so profiling failed at start-up
+            # ("Error in memory profiling"). gpu_memory_utilization then no longer applies.
+            kwargs["kv_cache_memory_bytes"] = int(qwen_cfg["kv_cache_memory_bytes"])
         model = Qwen3ASRModel.LLM(**kwargs)
         print(json.dumps({"status": "ready", "device": "cuda:0",
                           "backend": backend}), flush=True)

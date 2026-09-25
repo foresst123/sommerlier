@@ -128,3 +128,10 @@ def test_a_failed_start_is_raised_to_every_caller():
         with pytest.raises(RuntimeError, match="boom"):
             service.wait_ready()
     assert type(service).waits == 1
+
+
+def test_the_torchcodec_import_notice_is_not_an_error_line():
+    from services.base_worker_service import WorkerProcessService
+    assert not WorkerProcessService.is_error_line(
+        "* fix torchcodec installation. Error message was:")
+    assert WorkerProcessService.is_error_line("AssertionError: Error in memory profiling.")

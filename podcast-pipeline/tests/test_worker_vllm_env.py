@@ -85,3 +85,16 @@ def test_a_spawned_engine_can_reimport_every_vllm_worker_module():
     for name in WORKERS:
         source = open(os.path.join(ROOT, name), encoding="utf-8").read()
         assert 'if __name__ == "__main__":' in source, name
+
+
+def test_the_vllm_asr_workers_pass_a_fixed_kv_cache_so_profiling_cannot_trip_on_neighbours():
+    # vLLM asserts that nobody freed GPU memory while it profiled; PhoWhisper workers
+    # share the cards, so the engines are given a fixed KV cache instead.
+    import json
+    for name in ("qwen3_worker.py", "whisper_vllm_worker.py"):
+        source = open(os.path.join(ROOT, name), encoding="utf-8").read()
+        assert 'kwargs["kv_cache_memory_bytes"]' in source, name
+    cfg = json.load(open(os.path.join(ROOT, "config.json"), encoding="utf-8"))
+    models = cfg["environments"]["a100"]["models"]
+    for key in ("qwen3", "whisper"):
+        assert int(models[key]["kv_cache_memory_bytes"]) > 0, key
