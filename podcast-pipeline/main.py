@@ -820,8 +820,11 @@ def main():
             refinement_perf = perf_cfg["stages"]["refinement"]
             for key in ("placement", "gpu_memory_utilization", "max_batch_tokens",
                         "micro_batch_size", "pipeline_split_ratio", "cpu_threads",
-                        "workers"):
-                refinement_cfg[key] = refinement_perf[key]
+                        "workers", "shared_queue", "chunk_size", "parallel_windows",
+                        "progress_interval_seconds"):
+                target = ("progress_interval"
+                          if key == "progress_interval_seconds" else key)
+                refinement_cfg[target] = refinement_perf[key]
             refinement_cfg["pipeline_devices"] = [args.gpu_1, args.gpu_2]
             refinement_cfg["device"] = f"cuda:{args.gpu_1}"
         refinement_svc = DiarizationRefinementService(

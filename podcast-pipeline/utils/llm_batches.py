@@ -22,23 +22,24 @@ def reply_budget(max_new_tokens: int, thinking: bool) -> int:
     return max(budget, THINKING_MIN_NEW_TOKENS) if thinking else budget
 
 
-def ask_in_batches(llm, system_prompt: str, messages: Sequence[str], *,
-                   per_call: int, max_new_tokens: int, label: str,
-                   logger=None, thinking: bool = False) -> Tuple[List[Optional[str]], int]:
-    """(replies, unanswered): one reply per message, None where none came.
+def llm_concurrency(llm) -> int:
+    """How many independent calls may be in flight at once on `llm`.
 
-    `per_call` is how many messages go in one `generate_texts` call; the caller
-    sizes it from the model's limits and the messages' length. `thinking` is only
-    passed on when it is on, so a model surface that knows nothing of it is
-    called exactly as before.
+    Only a pool of replicas that was asked to take independent windows in
+    parallel (`parallel_windows`) reports more than one; anything else, a fake
+    included, is called one chunk at a time as before.
     """
-    extra = {"thinking": True} if thinking else {}
-    replies: List[Optional[str]] = [None] * len(messages)
+    if not getattr(llm, "parallel_windows", False):
+        return 1
+    return max(1, int(getattr(llm, "replica_count", 1) or 1))
+
+
+def _ask_range(llm, system_prompt, messages, replies, start, stop, per_call, *,
+               label, logger, extra, max_new_tokens) -> int:
+    """Fill replies[start:stop], halving a chunk that fails. Returns the unanswered count."""
     unanswered = 0
-    per_call = max(1, int(per_call))
-    start = 0
-    while start < len(messages):
-        size = min(per_call, len(messages) - start)
+    while start < stop:
+        size = min(per_call, stop - start)
         while True:
             chunk = list(messages[start:start + size])
             ok, outputs = llm.generate_texts(
@@ -57,4 +58,41 @@ def ask_in_batches(llm, system_prompt: str, messages: Sequence[str], *,
                 logger.warning(f"[{label}] item {start} could not be answered")
             break
         start += len(chunk)
+    return unanswered
+
+
+def ask_in_batches(llm, system_prompt: str, messages: Sequence[str], *,
+                   per_call: int, max_new_tokens: int, label: str,
+                   logger=None, thinking: bool = False,
+                   concurrency: Optional[int] = None) -> Tuple[List[Optional[str]], int]:
+    """(replies, unanswered): one reply per message, None where none came.
+
+    `per_call` is how many messages go in one `generate_texts` call; the caller
+    sizes it from the model's limits and the messages' length. `thinking` is only
+    passed on when it is on, so a model surface that knows nothing of it is
+    called exactly as before.
+
+    With `concurrency` above one, chunks of `per_call` messages are asked at the
+    same time and a replica pool hands each to whichever engine is free. The
+    chunks and their replies are the same as one at a time; only the wait between
+    them goes. `None` asks the model (`llm_concurrency`).
+    """
+    extra = {"thinking": True} if thinking else {}
+    replies: List[Optional[str]] = [None] * len(messages)
+    per_call = max(1, int(per_call))
+    workers = llm_concurrency(llm) if concurrency is None else max(1, int(concurrency))
+    kwargs = dict(label=label, logger=logger, extra=extra,
+                  max_new_tokens=max_new_tokens)
+    if workers <= 1 or len(messages) <= per_call:
+        return replies, _ask_range(llm, system_prompt, messages, replies, 0,
+                                   len(messages), per_call, **kwargs)
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=workers,
+                            thread_name_prefix="llm-window") as executor:
+        futures = [executor.submit(_ask_range, llm, system_prompt, messages, replies,
+                                   start, min(start + per_call, len(messages)),
+                                   per_call, **kwargs)
+                   for start in range(0, len(messages), per_call)]
+        unanswered = sum(future.result() for future in futures)
     return replies, unanswered

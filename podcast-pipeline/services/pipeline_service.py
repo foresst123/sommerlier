@@ -381,6 +381,34 @@ class PipelineService:
             self.logger.info(f"Releasing the refinement LLM before {next_step} (frees VRAM)")
         service.unload()
 
+    def _keep_llm_for_relabel(self, args) -> bool:
+        """Whether the LLM should stay resident from Refinement into Speaker relabel.
+
+        Only in a stage-by-stage batch that goes on to relabel (`batch_continues`),
+        and only when the profile asks for it: the two stages use the same
+        replicas, and stopping them between the passes costs a cold load per
+        replica. Each stage keeps its own checkpoint and stop point.
+        """
+        perf = getattr(args, "performance_config", None) or {}
+        stage_cfg = (perf.get("stages") or {}).get("refinement") or {}
+        return bool(
+            perf.get("enabled", False)
+            and stage_cfg.get("keep_llm_across_relabel", False)
+            and getattr(args, "batch_continues", False)
+            and self.relabel_svc is not None
+            and opt_in_step_enabled(args, "speaker_relabel"))
+
+    def _release_llm_after(self, args, stage: str):
+        """Release the LLM when `stage` ends, unless the next stage reuses it."""
+        if getattr(args, "keep_models", False):
+            return
+        if stage == "refinement" and self._keep_llm_for_relabel(args):
+            if self.logger:
+                self.logger.info(
+                    "Keeping the refinement LLM resident for speaker relabel")
+            return
+        self._defer_or_run(self.refinement_svc.unload)
+
     def _release_worker(self, args, name: str):
         """Dừng worker khi xong bước, tuân theo --keep_models.
         File tiếp theo cần khởi động lại nếu worker đã dừng, nếu không client
@@ -1246,8 +1274,7 @@ class PipelineService:
             stage_out.write_refinement(transcripts, before=before)
 
         if getattr(args, "stop_after", None) == "refinement":
-            if not getattr(args, "keep_models", False):
-                self._defer_or_run(self.refinement_svc.unload)
+            self._release_llm_after(args, "refinement")
             if self.logger:
                 self.logger.info(
                     "Stopping pipeline after refinement as requested by --stop_after.")
@@ -1265,8 +1292,7 @@ class PipelineService:
                 checkpoint, stage_out, transcripts, speech_segments)
 
         if getattr(args, "stop_after", None) == "speaker_relabel":
-            if not getattr(args, "keep_models", False):
-                self._defer_or_run(self.refinement_svc.unload)
+            self._release_llm_after(args, "speaker_relabel")
             if self.logger:
                 self.logger.info(
                     "Stopping pipeline after speaker_relabel as requested by --stop_after.")
@@ -1318,8 +1344,7 @@ class PipelineService:
                 speech_segments=speech_segments)
 
         if getattr(args, "stop_after", None) == "conversation_exports":
-            if not getattr(args, "keep_models", False):
-                self._defer_or_run(self.refinement_svc.unload)
+            self._release_llm_after(args, "conversation_exports")
             if self.logger:
                 self.logger.info(
                     "Stopping pipeline after conversation_exports as requested by --stop_after.")

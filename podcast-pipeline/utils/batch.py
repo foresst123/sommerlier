@@ -229,6 +229,9 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
 
         stage_args = copy.copy(args)
         stage_args.stop_after = stage
+        # Whether this batch goes on past this stage; a stage that hands the LLM
+        # to the next one only keeps it when there is a next one.
+        stage_args.batch_continues = original_stop != stage
         # The final pass re-enters run() to restore checkpointed state before
         # export. Clip judging has no checkpoint, so mark this invocation to
         # prevent a second LLM judgement after its dedicated corpus-wide pass.
@@ -350,6 +353,12 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
         close = getattr(separation_svc, close_name, None)
         if callable(close):
             close()
+
+    # A stage that kept the LLM for its successor must not leave it behind when the
+    # successor never ran (every file failed, or the batch ended first).
+    release_llm = getattr(pipeline, "_release_llm_before", None)
+    if callable(release_llm):
+        release_llm(args, "the end of the batch")
 
     diarization_svc = getattr(pipeline, "diarization_svc", None)
     close_postprocess = getattr(diarization_svc, "close_postprocess_pool", None)

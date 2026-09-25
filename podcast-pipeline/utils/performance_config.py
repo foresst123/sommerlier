@@ -75,6 +75,19 @@ _STAGES = {
         "micro_batch_size": (INT, 1, 1, 1024),
         "pipeline_split_ratio": (FLOAT, 0.5, 0.20, 0.80),
         "cpu_threads": (INT, 0, 0, 256),
+        # Keep the replicas resident from Refinement into Speaker relabel in a
+        # stage-by-stage batch (one cold load fewer). Lifecycle only: no request changes.
+        "keep_llm_across_relabel": (BOOL, False, None, None),
+        # Refinement chunks go to whichever replica is free from one shared queue, and
+        # the next chunk is queued before the previous one is checked. Same requests,
+        # different grouping, so vLLM batch composition differs from the round-robin split.
+        "shared_queue": (BOOL, False, None, None),
+        # Requests per queued chunk (0 = batch_size split over the replicas).
+        "chunk_size": (INT, 0, 0, 65536),
+        # Independent relabel / export windows are asked of different replicas at once.
+        "parallel_windows": (BOOL, False, None, None),
+        # Seconds between "[LLM] done/total" progress lines in the log.
+        "progress_interval_seconds": (FLOAT, 15.0, 1.0, 3600.0),
     },
     "diarization": {
         "workers": (INT, 1, 1, 2),

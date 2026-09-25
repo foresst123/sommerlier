@@ -29,6 +29,7 @@ Protocol (stdin/stdout, line-delimited JSON):
         {"status": "shutdown"}             # quit
         {"id": "req-001",
          "texts": ["...", "..."],
+         "usage": {"prompt_tokens": 0, "completion_tokens": 0},
          "ok": true}                       # generate thành công
         {"id": "req-001", "ok": false,
          "error": "OOM or similar"}        # generate thất bại
@@ -213,8 +214,16 @@ def generate(model, tokenizer, system_prompt: str, user_messages: list,
              max_new_tokens: int = 512, thinking: bool = False,
              backend: str = "transformers") -> list:
     """Chạy một batch chat requests, trả về list[str]."""
+    return generate_with_usage(model, tokenizer, system_prompt, user_messages,
+                               max_new_tokens, thinking, backend)[0]
+
+
+def generate_with_usage(model, tokenizer, system_prompt: str, user_messages: list,
+                        max_new_tokens: int = 512, thinking: bool = False,
+                        backend: str = "transformers"):
+    """(texts, usage): usage counts the tokens the engine really processed."""
     if not user_messages:
-        return []
+        return [], {"prompt_tokens": 0, "completion_tokens": 0}
 
     # Tokenize
     if tokenizer.pad_token_id is None:
@@ -234,7 +243,11 @@ def generate(model, tokenizer, system_prompt: str, user_messages: list,
             ),
             use_tqdm=False,
         )
-        return [output.outputs[0].text for output in outputs]
+        usage = {
+            "prompt_tokens": sum(len(o.prompt_token_ids or ()) for o in outputs),
+            "completion_tokens": sum(len(o.outputs[0].token_ids or ()) for o in outputs),
+        }
+        return [output.outputs[0].text for output in outputs], usage
 
     inputs = tokenizer(texts, return_tensors="pt", padding=True)
     inputs = inputs.to(_entry_device(model))
@@ -252,9 +265,15 @@ def generate(model, tokenizer, system_prompt: str, user_messages: list,
         )
 
     # Cắt phần prompt
-    generated = generated[:, inputs.input_ids.size(1):]
+    prompt_len = inputs.input_ids.size(1)
+    generated = generated[:, prompt_len:]
     decoded = tokenizer.batch_decode(generated, skip_special_tokens=True)
-    return decoded
+    usage = {
+        "prompt_tokens": int(inputs.attention_mask.sum()),
+        # Padding after the first end token is not generated text.
+        "completion_tokens": int((generated != tokenizer.pad_token_id).sum()),
+    }
+    return decoded, usage
 
 
 def main():
@@ -315,7 +334,7 @@ def main():
         # cmd == "generate"
         req_id = req.get("id", "")
         try:
-            texts = generate(
+            texts, usage = generate_with_usage(
                 model, tokenizer,
                 system_prompt=req.get("system_prompt", ""),
                 user_messages=req.get("user_messages", []),
@@ -323,8 +342,8 @@ def main():
                 thinking=bool(req.get("thinking", False)),
                 backend=args.backend,
             )
-            print(json.dumps({"id": req_id, "ok": True, "texts": texts}),
-                  flush=True)
+            print(json.dumps({"id": req_id, "ok": True, "texts": texts,
+                              "usage": usage}), flush=True)
         except torch.cuda.OutOfMemoryError as e:
             torch.cuda.empty_cache()
             print(json.dumps({"id": req_id, "ok": False,

@@ -175,7 +175,9 @@ class DiarizationRefinementService:
                  pipeline_devices=None, micro_batch_size: int = 1,
                  pipeline_split_ratio: float = 0.5, cpu_threads: int = 0,
                  backend: str = "transformers", workers: int = 1,
-                 max_model_len: int = 0, config=None, env_profile=None):
+                 max_model_len: int = 0, config=None, env_profile=None,
+                 shared_queue: bool = False, chunk_size: int = 0,
+                 parallel_windows: bool = False, progress_interval: float = 15.0):
         self.logger = logger
         self.model = None
         self.tokenizer = None
@@ -198,6 +200,15 @@ class DiarizationRefinementService:
         self.backend = str(backend).strip().lower()
         self.worker_count = max(1, int(workers))
         self.max_model_len = max(0, int(max_model_len))
+        # Refinement feeds the replicas from one queue and checks a chunk's answers
+        # while the next chunk is already running. Off: one batch at a time.
+        self.shared_queue = bool(shared_queue)
+        # Requests per queued chunk; 0 is batch_size split over the replicas.
+        self.chunk_size = max(0, int(chunk_size))
+        # Independent windows of the relabel / export passes go to different replicas.
+        self.parallel_windows = bool(parallel_windows)
+        self.progress_interval = float(progress_interval)
+        self._local_executor = None
         self._worker_config = config
         self._worker_env_profile = env_profile
         self._active_cpu_threads = None
@@ -530,6 +541,10 @@ class DiarizationRefinementService:
         files run back to back and every later stage competes for what this
         stage is no longer using.
         """
+        executor = getattr(self, "_local_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=True)
+            self._local_executor = None
         if self._worker is not None:
             try:
                 self._worker.stop()
@@ -760,34 +775,19 @@ class DiarizationRefinementService:
             original_padding_side = tokenizer.padding_side
             tokenizer.padding_side = "left"
 
-        from tqdm import tqdm
-        refined_count = 0
-        failed_count = 0
+        from utils.llm_progress import LlmProgress
+        progress = LlmProgress(len(pending), logger=self.logger,
+                               interval=self.progress_interval,
+                               usage=self.token_usage)
         try:
-            with tqdm(total=len(pending), desc="[LLM] Đang tinh chỉnh câu") as bar:
-                start = 0
-                while start < len(pending):
-                    size = min(self.batch_size, len(pending) - start)
-                    batch = pending[start:start + size]
-                    ok, count = self._refine_batch(batch, system_prompt)
-
-                    # A batch that does not fit is halved rather than dropped:
-                    # the whole refinement stage silently no-ops otherwise.
-                    while not ok and len(batch) > 1:
-                        size = max(1, len(batch) // 2)
-                        if self.logger:
-                            self.logger.info(f"Retrying LLM refinement with batch size {size}")
-                        batch = pending[start:start + size]
-                        ok, count = self._refine_batch(batch, system_prompt)
-
-                    if ok:
-                        refined_count += count
-                    else:
-                        failed_count += len(batch)
-
-                    start += len(batch)
-                    bar.update(len(batch))
+            if self.shared_queue:
+                refined_count, failed_count = self._refine_queued(
+                    pending, system_prompt, progress)
+            else:
+                refined_count, failed_count = self._refine_sequential(
+                    pending, system_prompt, progress)
         finally:
+            progress.finish()
             if tokenizer is not None:
                 tokenizer.padding_side = original_padding_side
 
@@ -826,6 +826,98 @@ class DiarizationRefinementService:
                 f"segments ({100.0 * failed_count / len(pending):.0f}%). {cause}")
 
         return segments
+
+    def _refine_sequential(self, pending, system_prompt, progress):
+        """One batch at a time; a batch that fails is halved. Returns (refined, failed)."""
+        refined_count = failed_count = 0
+        start = 0
+        while start < len(pending):
+            size = min(self.batch_size, len(pending) - start)
+            batch = pending[start:start + size]
+            ok, count = self._refine_batch(batch, system_prompt)
+
+            # A batch that does not fit is halved rather than dropped:
+            # the whole refinement stage silently no-ops otherwise.
+            while not ok and len(batch) > 1:
+                size = max(1, len(batch) // 2)
+                if self.logger:
+                    self.logger.info(f"Retrying LLM refinement with batch size {size}")
+                batch = pending[start:start + size]
+                ok, count = self._refine_batch(batch, system_prompt)
+
+            if ok:
+                refined_count += count
+            else:
+                failed_count += len(batch)
+
+            start += len(batch)
+            progress.advance(len(batch))
+        return refined_count, failed_count
+
+    def _refine_queued(self, pending, system_prompt, progress):
+        """Chunks go to whichever replica is free; the next is queued before this one is checked.
+
+        The CPU check of a chunk (`_accept`) runs while the replicas already hold
+        the following chunks, so a card is not left idle behind it, and there is no
+        barrier between chunks. Every request is sent whole: nothing is cut to fit,
+        and chunk size only decides how work is shared. Answers are applied in
+        chunk order. Returns (refined, failed).
+        """
+        replicas = self.replica_count
+        chunk = self.chunk_size or max(1, -(-self.batch_size // replicas))
+        chunks = [pending[i:i + chunk] for i in range(0, len(pending), chunk)]
+        # One chunk running per replica plus one waiting: a replica that finishes
+        # takes the waiting one at once instead of when the CPU check is done.
+        depth = replicas + 1
+        inflight = []
+        submitted = 0
+        refined_count = failed_count = 0
+
+        def submit_more():
+            nonlocal submitted
+            while submitted < len(chunks) and len(inflight) < depth:
+                batch = chunks[submitted]
+                submitted += 1
+                inflight.append((batch, self.submit_texts(
+                    system_prompt, [msg for _, msg in batch], use_prefix=True,
+                    labels=[seg.index for seg, _ in batch])))
+
+        submit_more()
+        while inflight:
+            batch, future = inflight.pop(0)
+            try:
+                ok, decoded = future.result()
+            except Exception as e:
+                self.last_failure = f"{type(e).__name__}: {e}"
+                ok, decoded = False, []
+            if ok and len(decoded) != len(batch):
+                ok = False
+            submit_more()
+            if ok:
+                refined_count += self._apply_batch(batch, decoded)
+            else:
+                done, failed = self._refine_halved(batch, system_prompt)
+                refined_count += done
+                failed_count += failed
+            progress.advance(len(batch))
+        return refined_count, failed_count
+
+    def _refine_halved(self, batch, system_prompt):
+        """A chunk that failed as a whole, retried in halves. Returns (refined, failed)."""
+        if len(batch) <= 1:
+            return 0, len(batch)
+        half = len(batch) // 2
+        if self.logger:
+            self.logger.info(f"Retrying LLM refinement with batch size {half}")
+        refined = failed = 0
+        for part in (batch[:half], batch[half:]):
+            ok, count = self._refine_batch(part, system_prompt)
+            if ok:
+                refined += count
+            else:
+                done, lost = self._refine_halved(part, system_prompt)
+                refined, failed = refined + done, failed + lost
+        return refined, failed
 
     # ------------------------------------------------------------------
     def _split_prompt(self, system_prompt: str, user_msg: str):
@@ -1016,6 +1108,36 @@ class DiarizationRefinementService:
             return max(1, int(len(text) / 3.5))
         return len(self.tokenizer(text, add_special_tokens=False).input_ids)
 
+    @property
+    def replica_count(self) -> int:
+        """Engines a request can go to right now (1 until the workers are up)."""
+        services = getattr(self._worker, "services", None)
+        return max(1, len(services)) if services else 1
+
+    def token_usage(self) -> dict:
+        """Tokens the engines processed so far, from their own counts (empty if unknown)."""
+        return dict(getattr(self._worker, "usage", None) or {})
+
+    def submit_texts(self, system_prompt, user_messages, max_new_tokens=512,
+                     use_prefix=False, labels=None, thinking=False):
+        """Queue one request; the Future resolves to (ok, texts).
+
+        A replica pool takes it into the shared queue. Anything else runs it on one
+        background thread, so the caller can work while a single engine generates.
+        """
+        worker = self._worker if self._ensure_worker_started() else None
+        if worker is not None and hasattr(worker, "submit"):
+            return worker.submit(system_prompt, user_messages,
+                                 max_new_tokens=max_new_tokens,
+                                 thinking=bool(thinking))
+        if getattr(self, "_local_executor", None) is None:
+            from concurrent.futures import ThreadPoolExecutor
+            self._local_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="refinement-local")
+        return self._local_executor.submit(
+            self.generate_texts, system_prompt, user_messages, max_new_tokens,
+            use_prefix, labels, thinking)
+
     def ensure_loaded(self) -> bool:
         """Load the LLM if it is not resident yet. False when it cannot be used.
 
@@ -1181,6 +1303,10 @@ class DiarizationRefinementService:
             use_prefix=True, labels=[seg.index for seg, _ in batch])
         if not ok:
             return False, 0
+        return True, self._apply_batch(batch, decoded)
+
+    def _apply_batch(self, batch, decoded) -> int:
+        """Accept or reject each answer in place. Returns how many were applied."""
         count = 0
         for (seg, _), refined_text in zip(batch, decoded):
             refined_text = _THINK_RE.sub("", refined_text)
@@ -1192,4 +1318,4 @@ class DiarizationRefinementService:
                 continue
             seg.text = refined_text
             count += 1
-        return True, count
+        return count
