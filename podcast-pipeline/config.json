@@ -333,7 +333,8 @@
           "model_name": "nguyenvulebinh/wav2vec2-base-vi-vlsp2020",
           "device": "auto",
           "interpolate_method": "nearest",
-          "batch_seconds": 180
+          "batch_seconds": 180,
+          "workers_per_gpu": 2
         },
         "conversation_selection": {
           "min_seconds": 30,

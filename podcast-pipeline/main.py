@@ -685,6 +685,9 @@ def main():
                 f"cuda:{args.gpu_1}" if torch.cuda.is_available() else "cpu")
         alignment_cfg["model_cache_only"] = bool(
             env_profile.get("offline_mode", False))
+        if alignment_cfg.get("workers_per_gpu", 0) and torch.cuda.is_available():
+            # One pool spanning both cards; a single-GPU box collapses to one.
+            alignment_cfg.setdefault("worker_gpus", sorted({args.gpu_1, args.gpu_2}))
         word_alignment_svc = WordAlignmentService(
             language=args.lang, logger=logger, **alignment_cfg)
         clean_dataset_svc = CleanTwoChannelDatasetService(logger=logger)
