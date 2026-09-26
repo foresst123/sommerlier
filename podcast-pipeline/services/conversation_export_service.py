@@ -80,7 +80,7 @@ from utils.llm_json import clean_reply, is_cut_in_thought, is_readable, objects_
 from utils.transcript_windows import line_number
 
 # Bump when the prompt or the acceptance rules change.
-CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v6-durations-and-examples"
+CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v7-bounded-thinking"
 
 _TEMPLATE_SLACK_TOKENS = 64
 
@@ -134,9 +134,19 @@ CONVERSATION_FINDER_SYSTEM_PROMPT = (
     "- music: tỷ lệ segment bị music-patch; 0 là không patch, càng thấp càng tốt.\n"
     "- bss=1: segment có dùng separation; unsep: tỷ lệ chưa tách được.\n"
     "- seam_before/seam_inside và flags: cảnh báo kỹ thuật.\n"
-    "Ngưỡng validator: noise <= {noise_max}, ns <= {noise_speech_max}, ne <= {noise_env_max}, "
-    "nr <= {noise_room_max}, music <= {music_patched_max}; noisy khoảng {noisy_share_max} trở lên là rất xấu; "
-    "noisy run >= {noisy_run_seconds}s có thể bị validator loại.\n"
+    "Validator sau bạn tự đo lại các chỉ số này (noise <= {noise_max}, ns <= {noise_speech_max}, ne <= {noise_env_max}, "
+    "nr <= {noise_room_max}, music <= {music_patched_max}, noisy < {noisy_share_max}, run < {noisy_run_seconds}s). "
+    "Bạn KHÔNG tính lại từng dòng: chỉ tránh những dòng có chỉ số rõ ràng vượt xa ngưỡng.\n"
+    "\n"
+    "## CÁCH SUY NGHĨ (vừa đủ, ngắn gọn)\n"
+    "Suy nghĩ ngắn theo đúng 3 bước, rồi trả JSON. KHÔNG chép lại hay đọc lại từng dòng của cửa sổ.\n"
+    "1. Tìm ĐIỂM NGẮT, chỉ ghi số dòng: đổi chủ đề, seam_before=1, người thứ ba xuất hiện, một dòng xấu chen giữa, "
+    "intro/outro/quảng cáo, đoạn độc thoại dài.\n"
+    "2. Với mỗi vùng giữa hai điểm ngắt, tính thời lượng = end của dòng cuối trừ start của dòng đầu, "
+    "và đếm số người nói. Chỉ kiểm tra kỹ những vùng có vẻ giữ được; vùng rõ ràng bỏ thì ghi một dòng lý do.\n"
+    "3. Quyết định keep và self_contained MỘT lần cho mỗi vùng, rồi viết JSON. Không quay lại xét lại vùng đã chốt.\n"
+    "Khi vùng ở gần ngưỡng hoặc phân vân: nghiêng về keep=true nếu đúng hai người và đủ dài, vì validator sẽ kiểm tra lại. "
+    "Đừng tốn suy nghĩ vào transcript sai vài từ, nhãn A/B/C hay số thông số nhỏ lệch.\n"
     "\n"
     "## TÍNH THỜI LƯỢNG\n"
     "- Thời lượng một vùng = thời điểm KẾT THÚC của dòng cuối trừ thời điểm BẮT ĐẦU của dòng đầu, lấy từ mốc thời gian. "
