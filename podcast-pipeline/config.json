@@ -338,7 +338,7 @@
           "overlap_segments": 30,
           "min_confidence": 0.7,
           "max_change_fraction": 0.15,
-          "thinking": false,
+          "thinking": true,
           "max_new_tokens": 4096
         },
         "word_alignment": {
@@ -376,7 +376,7 @@
           "noise_max": 0.15,
           "music_patched_max": 0.15,
           "require_word_alignment": true,
-          "thinking": false,
+          "thinking": true,
           "max_new_tokens": 3072
         },
         "sidon": {
