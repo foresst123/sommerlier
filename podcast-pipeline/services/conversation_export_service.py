@@ -80,7 +80,7 @@ from utils.llm_json import clean_reply, is_cut_in_thought, is_readable, objects_
 from utils.transcript_windows import line_number
 
 # Bump when the prompt or the acceptance rules change.
-CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v5-coverage-aware-finder"
+CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v6-durations-and-examples"
 
 _TEMPLATE_SLACK_TOKENS = 64
 
@@ -102,6 +102,12 @@ def _topic_key(text) -> str:
 
 _EXAMPLE_TOPICS = {_topic_key(_EXAMPLE_GOOD["topic"]), _topic_key(_EXAMPLE_BAD["topic"])}
 
+# Topics of the worked examples in CONVERSATION_FINDER_SYSTEM_PROMPT. Like the two
+# above, a keep=true region carrying one of them was written from the prompt, not
+# from the window, and is refused.
+_FINDER_EXAMPLE_TOPICS = {_topic_key(t) for t in (
+    "chuyện chạy bộ mỗi sáng", "khám sức khỏe định kỳ", "kể chuyện khởi nghiệp một chiều")}
+
 CONVERSATION_FINDER_SYSTEM_PROMPT = (
     "Bạn là bộ PHÂN VÙNG + TÌM ĐOẠN hội thoại tiếng Việt để tạo dữ liệu huấn luyện full-duplex. "
     "Bạn nhận một cửa sổ dài của transcript sau diarization/ASR. Cửa sổ có thể có nhiều người nói.\n"
@@ -117,7 +123,8 @@ CONVERSATION_FINDER_SYSTEM_PROMPT = (
     "có thể gộp để đạt khoảng {min_seconds}-{max_seconds}s.\n"
     "\n"
     "## DỮ LIỆU MỖI DÒNG\n"
-    "Mỗi dòng có dạng: [số dòng] start-end NGƯỜI {THÔNG_SỐ}: nội dung. "
+    "Mỗi dòng có dạng: [số dòng] start-end (d=thời lượng) NGƯỜI {THÔNG_SỐ}: nội dung. "
+    "start-end là mốc phút:giây; d là độ dài của CHÍNH dòng đó tính bằng giây (một dòng có thể dài hàng chục giây). "
     "NGƯỜI là nhãn A/B/C/... chỉ để phân biệt người nói.\n"
     "THÔNG_SỐ là đo trực tiếp từ pipeline:\n"
     "- gap: khoảng cách với segment trước; số âm nghĩa là overlap thời gian.\n"
@@ -130,6 +137,11 @@ CONVERSATION_FINDER_SYSTEM_PROMPT = (
     "Ngưỡng validator: noise <= {noise_max}, ns <= {noise_speech_max}, ne <= {noise_env_max}, "
     "nr <= {noise_room_max}, music <= {music_patched_max}; noisy khoảng {noisy_share_max} trở lên là rất xấu; "
     "noisy run >= {noisy_run_seconds}s có thể bị validator loại.\n"
+    "\n"
+    "## TÍNH THỜI LƯỢNG\n"
+    "- Thời lượng một vùng = thời điểm KẾT THÚC của dòng cuối trừ thời điểm BẮT ĐẦU của dòng đầu, lấy từ mốc thời gian. "
+    "TUYỆT ĐỐI không ước lượng theo số dòng: dòng ngắn và dòng dài khác nhau rất nhiều.\n"
+    "- Thời lượng nói của mỗi người = tổng d các dòng của người đó. Nếu một người chiếm gần hết thời lượng của vùng thì đó là độc thoại.\n"
     "\n"
     "## KHI NÀO keep=true\n"
     "Đặt keep=true khi vùng có TIỀM NĂNG làm một mẫu hội thoại tốt. Validator phía sau sẽ kiểm tra lại bằng số liệu, "
@@ -169,6 +181,44 @@ CONVERSATION_FINDER_SYSTEM_PROMPT = (
     "3 = theo dõi được nhưng còn cụt/mơ hồ hoặc biên chưa đẹp.\n"
     "1-2 = không phù hợp khi tách riêng.\n"
     "keep=true chỉ khi self_contained >= {min_semantic}. keep=false vẫn phải chấm self_contained để debug.\n"
+    "\n"
+    "## VÍ DỤ (chỉ minh họa cách quyết định; KHÔNG sao chép nội dung hay chủ đề vào câu trả lời)\n"
+    "Các dòng dưới đây bớt thông số cho gọn; cửa sổ thật có đủ thông số.\n"
+    "\n"
+    "Ví dụ 1 - hội thoại liền mạch, thời lượng tính từ mốc thời gian:\n"
+    "[1] 0:00-0:12 (d=12.0s) A {gap=0.0s ov=0.00s flags=-}: dạo này bạn chạy bộ buổi sáng hay buổi tối\n"
+    "[2] 0:13-0:24 (d=11.0s) B {gap=0.6s ov=0.00s flags=-}: mình chạy sáng, năm rưỡi dậy, ban đầu khổ lắm\n"
+    "[3] 0:24-0:26 (d=1.6s) A {gap=-0.2s ov=0.40s flags=-}: ừm ừm\n"
+    "[4] 0:26-0:52 (d=26.0s) B {gap=0.1s ov=0.00s flags=-}: nhưng hai tuần là quen, giờ không chạy là thấy thiếu\n"
+    "[5] 0:53-1:10 (d=17.0s) A {gap=0.9s ov=0.00s flags=-}: còn chuyện đau gối thì sao\n"
+    "[6] 1:11-1:34 (d=23.0s) B {gap=0.7s ov=0.00s flags=-}: mình khởi động kỹ và đổi giày, đỡ hẳn\n"
+    "[7] 1:35-1:42 (d=7.0s) A {gap=0.6s ov=0.00s flags=-}: hay quá, cảm ơn bạn nhé\n"
+    "-> [{\"start_line\": 1, \"end_line\": 7, \"keep\": true, \"self_contained\": 4, \"topic\": \"chuyện chạy bộ mỗi sáng\", "
+    "\"reason\": \"hỏi đáp liền mạch, có backchannel, hai người, dài 102s\"}]\n"
+    "(102s = 1:42 trừ 0:00, không phải số dòng nhân vài giây.)\n"
+    "\n"
+    "Ví dụ 2 - một dòng xấu giữa mạch: tách riêng dòng đó, giữ hai phần tốt hai bên:\n"
+    "[1] 0:00-0:16 (d=16.0s) A {gap=0.0s ov=0.00s flags=-}: nhiều người ngại đi khám định kỳ, bạn nghĩ sao\n"
+    "[2] 0:17-0:35 (d=18.0s) B {gap=0.8s ov=0.00s flags=-}: mình từng ngại, đến khi ba mình phát hiện bệnh muộn\n"
+    "[3] 0:36-0:58 (d=22.0s) A {gap=0.7s ov=0.00s flags=-}: vậy bạn khám mấy tháng một lần\n"
+    "[4] 0:58-1:03 (d=5.0s) B {gap=0.1s ov=0.00s flags=-}: hãy đăng ký cho kênh để không bỏ lỡ những video hấp dẫn\n"
+    "[5] 1:04-1:30 (d=26.0s) B {gap=0.8s ov=0.00s flags=-}: sáu tháng một lần, kèm xét nghiệm máu cơ bản\n"
+    "[6] 1:31-1:49 (d=18.0s) A {gap=0.8s ov=0.00s flags=-}: nghe có vẻ đơn giản hơn mình tưởng\n"
+    "[7] 1:50-2:14 (d=24.0s) B {gap=0.6s ov=0.00s flags=-}: đúng, quan trọng là đi đều\n"
+    "-> [{\"start_line\": 1, \"end_line\": 3, \"keep\": true, \"self_contained\": 4, \"topic\": \"khám sức khỏe định kỳ\", "
+    "\"reason\": \"hỏi đáp mạch lạc, hai người\"}, "
+    "{\"start_line\": 4, \"end_line\": 4, \"keep\": false, \"self_contained\": 1, \"topic\": \"lời kêu gọi đăng ký kênh\", "
+    "\"reason\": \"câu quảng cáo chen giữa mạch, có thể là ảo giác ASR\"}, "
+    "{\"start_line\": 5, \"end_line\": 7, \"keep\": true, \"self_contained\": 4, \"topic\": \"khám sức khỏe định kỳ\", "
+    "\"reason\": \"tiếp mạch câu trả lời, hai người\"}]\n"
+    "(Vùng chỉ có MỘT dòng được phép; mỗi vùng còn lại phải đủ dài để dùng.)\n"
+    "\n"
+    "Ví dụ 3 - một người nói gần hết thời lượng thì keep=false:\n"
+    "[1] 0:00-0:07 (d=7.0s) A {gap=0.0s ov=0.00s flags=-}: mời anh chia sẻ về hành trình của mình\n"
+    "[2] 0:08-1:21 (d=73.0s) B {gap=0.7s ov=0.00s flags=-}: hồi đó tôi bỏ việc, đi vay vốn, rồi thất bại ba lần liền...\n"
+    "[3] 1:22-1:26 (d=4.0s) A {gap=0.7s ov=0.00s flags=-}: dạ vâng\n"
+    "-> [{\"start_line\": 1, \"end_line\": 3, \"keep\": false, \"self_contained\": 3, \"topic\": \"kể chuyện khởi nghiệp một chiều\", "
+    "\"reason\": \"B nói 73s trên 84s, gần như độc thoại\"}]\n"
     "\n"
     "## ĐẦU RA\n"
     "Chỉ trả MỘT JSON ARRAY, không markdown, không giải thích ngoài JSON. Mỗi phần tử đúng 6 khóa:\n"
@@ -786,8 +836,9 @@ class ConversationExportService:
             f"seam_before={int(bool(q.get('seam_before')))} "
             f"seam_inside={int(bool(q.get('seam_inside')))} flags={flags}"
         )
+        length = max(0.0, float(seg.end) - float(seg.start))
         return (f"[{number}] {self._clock(float(seg.start))}-{self._clock(float(seg.end))} "
-                f"{who} {{{meta}}}: {text}")
+                f"(d={length:.1f}s) {who} {{{meta}}}: {text}")
 
     def _finder_windows(self, finder, names: Dict[str, str]) -> List[Tuple[int, int]]:
         """Token-aware overlapping windows; returns (start, stop) with stop exclusive."""
@@ -1013,6 +1064,12 @@ class ConversationExportService:
                 if not detail["keep"]:
                     detail["validator"] = "model_rejected"
                     row["proposal_results"].append(detail)
+                    continue
+
+                if _topic_key(detail["topic"]) in _FINDER_EXAMPLE_TOPICS:
+                    detail["validator"] = "copied_example"
+                    row["proposal_results"].append(detail)
+                    reject("copied_example")
                     continue
 
                 score = region.get("self_contained")
