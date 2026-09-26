@@ -104,11 +104,22 @@ def test_waiting_sweeps_are_served_in_the_order_they_arrived():
     tagger = Fake(delay=0.05, order=order)
     pool = SSLAMPool([tagger])
     threads = []
-    for k in range(6):
-        t = threading.Thread(target=pool.tag_framewise, args=(k,))
-        t.start()
-        threads.append(t)
-        time.sleep(0.02)                       # each arrives after the one before
+
+    def wait_until_blocked(count):
+        # Counts the threads parked in the queue's condition (a CPython detail), so
+        # each arrival is ordered by construction, not by a sleep the scheduler
+        # can outrun on a busy machine.
+        deadline = time.monotonic() + 5
+        while len(pool._free.not_empty._waiters) < count:
+            assert time.monotonic() < deadline, "sweep never reached the queue"
+            time.sleep(0.001)
+
+    with pool.checkout():                      # the only tagger is busy
+        for k in range(6):
+            t = threading.Thread(target=pool.tag_framewise, args=(k,))
+            t.start()
+            threads.append(t)
+            wait_until_blocked(k + 1)
     for t in threads:
         t.join(10)
     assert order == list(range(6))
