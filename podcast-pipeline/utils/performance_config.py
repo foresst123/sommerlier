@@ -84,6 +84,9 @@ _STAGES = {
         "shared_queue": (BOOL, False, None, None),
         # Requests per queued chunk (0 = batch_size split over the replicas).
         "chunk_size": (INT, 0, 0, 65536),
+        # Files whose relabel windows are asked at once (they share these replicas).
+        # Generation is memory-bound, so more sequences in flight cost little extra time.
+        "relabel_files_in_flight": (INT, 1, 1, 32),
         # Independent relabel / export windows are asked of different replicas at once.
         "parallel_windows": (BOOL, False, None, None),
         # Seconds between "[LLM] done/total" progress lines in the log.

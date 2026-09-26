@@ -339,8 +339,8 @@
           "max_window_segments": 200,
           "min_confidence": 0.7,
           "max_change_fraction": 0.15,
-          "thinking": true,
-          "max_new_tokens": 32768
+          "thinking": false,
+          "max_new_tokens": 10240
         },
         "word_alignment": {
           "model_name": "nguyenvulebinh/wav2vec2-base-vi-vlsp2020",
@@ -383,7 +383,7 @@
           "music_patched_max": 0.15,
           "require_word_alignment": true,
           "thinking": true,
-          "max_new_tokens": 32768
+          "max_new_tokens": 16384
         },
         "sidon": {
           "num_steps": 100
@@ -429,6 +429,7 @@
             "pipeline_split_ratio": 0.5,
             "cpu_threads": 32,
             "keep_llm_across_relabel": true,
+            "relabel_files_in_flight": 8,
             "parallel_windows": true,
             "shared_queue": true,
             "chunk_size": 32

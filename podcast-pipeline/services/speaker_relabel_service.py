@@ -32,7 +32,7 @@ alone, so the caller can checkpoint the decision before applying it.
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from utils.llm_batches import ask_in_batches, reply_budget
 from utils.llm_json import clean_reply, is_cut_in_thought, is_readable, objects_in
@@ -41,7 +41,7 @@ from utils.transcript_windows import build_windows, format_line, line_number
 # Bump when the prompt or the acceptance rules change: it is part of the
 # checkpoint namespace, so a changed prompt recomputes instead of reusing labels
 # that an older one produced.
-RELABEL_PROMPT_VERSION = "relabel-v4"
+RELABEL_PROMPT_VERSION = "relabel-v5"
 
 # Room the chat template and the reply framing take beyond the counted prompt.
 _TEMPLATE_SLACK_TOKENS = 64
@@ -76,8 +76,6 @@ RELABEL_SYSTEM_PROMPT = (
     "- gap: số giây từ lúc dòng trước kết thúc đến lúc dòng này bắt đầu. Gap ÂM nghĩa là hai người nói chồng lên nhau. "
     "Gap dài thường là đổi lượt; gap rất ngắn giữa hai dòng cùng chữ thường là một người đang nói tiếp.\n"
     "- Dòng có [cố định] đã gắn chặt với âm thanh đã tách giọng: dùng nó làm ngữ cảnh, nhưng KHÔNG đề xuất đổi người cho nó.\n"
-    "- Đoạn bạn nhận có thể bắt đầu hoặc kết thúc giữa cuộc trò chuyện. Với vài dòng sát đầu và sát cuối, bạn thiếu ngữ cảnh "
-    "ở một phía, nên hãy thận trọng hơn.\n"
     "\n"
     "### CÁCH XÉT (chỉ đề xuất khi mạch hội thoại cho bằng chứng rõ)\n"
     "1. Hỏi – đáp: một câu hỏi thường được người KHÁC trả lời. Nếu câu trả lời mang chữ của chính người vừa hỏi, "
@@ -88,14 +86,18 @@ RELABEL_SYSTEM_PROMPT = (
     "Nếu hai dòng đó mang hai chữ khác nhau thì một trong hai có thể sai.\n"
     "4. Lời đệm ngắn (ừ, ừm, dạ, vâng, à, đúng rồi) thường của người đang NGHE. "
     "Lời đệm mang chữ của chính người đang nói dài ngay quanh nó thì có thể sai.\n"
-    "5. Khi phân vân, KHÔNG đề xuất. Nhãn hiện tại đúng ở phần lớn các dòng.\n"
+    "\n"
+    "### CÁCH LÀM VIỆC (giữ ngắn, càng ít suy luận càng tốt)\n"
+    "- Chỉ nêu số dòng nghi ngờ. KHÔNG chép lại hay liệt kê các dòng đã ổn.\n"
+    "- Mỗi dòng nghi ngờ kết luận MỘT lần rồi thôi, KHÔNG xét lại.\n"
+    "- Không bàn những điều không đổi được kết quả: người nói vắng mặt trong đoạn này, lỗi chính tả, dòng không nghi ngờ.\n"
+    "- Phân vân thì bỏ qua: nhãn hiện tại đúng ở phần lớn các dòng.\n"
     "\n"
     "### KHÔNG PHẢI LÝ DO ĐỂ ĐỔI\n"
     "- Một người nói liền nhiều dòng (lượt nói dài) là bình thường.\n"
     "- Một chữ chỉ xuất hiện ở vài dòng không có nghĩa là sai: đó có thể là một người khác thật sự "
     "(khách mời, người trong đoạn video chèn vào, giọng đọc quảng cáo). "
     "Chỉ đổi khi nội dung và mạch hội thoại cho thấy rõ dòng đó là của người khác.\n"
-    "- Lỗi chính tả hoặc từ lạ trong văn bản không liên quan đến người nói.\n"
     "- Đừng đề xuất hàng loạt. Nếu bạn muốn đổi nhiều dòng trong một đoạn, hãy xét lại: có thể bạn đang hiểu sai mạch hội thoại.\n"
     "\n"
     "### ĐẦU RA\n"
@@ -401,7 +403,7 @@ class SpeakerRelabelService:
                                             for pos in range(w.start, w.stop)])
                     for w in windows]
 
-        replies = self._ask(messages, result)
+        replies, firsts = self._ask(messages, result)
 
         accepted: Dict[str, dict] = {}
 
@@ -414,7 +416,6 @@ class SpeakerRelabelService:
 
         for w_no, (window, reply) in enumerate(zip(windows, replies)):
             proposals = parse_proposals(reply) if reply is not None else []
-            firsts = getattr(self, "_first_replies", [])
             first = firsts[w_no] if w_no < len(firsts) else None
             self._record(result, segments, w_no, window, reply, len(proposals),
                          first_reply=first if first != reply else None)
@@ -514,8 +515,9 @@ class SpeakerRelabelService:
             say = self.logger.warning if reply is not None and not readable else self.logger.info
             say(f"[relabel] window {w_no} (#{first}-#{last}): {note}")
 
-    def _ask(self, messages: List[str], result: RelabelResult) -> List[Optional[str]]:
-        """One reply per window, retrying prose/thinking answers as JSON-only.
+    def _ask(self, messages: List[str], result: RelabelResult
+             ) -> Tuple[List[Optional[str]], List[Optional[str]]]:
+        """(replies, first replies): one per window, retrying prose/thinking answers as JSON-only.
 
         The normal call may still produce visible reasoning even when `thinking`
         is disabled by the caller (model/template versions differ).  Such a reply
@@ -530,10 +532,10 @@ class SpeakerRelabelService:
         result.failed_windows += unanswered
         # The retry replaces an unreadable reply; keep what the model first wrote so
         # replies.json can show its reasoning.
-        self._first_replies = list(replies)
+        firsts = list(replies)
 
         if not self.unreadable_retries:
-            return replies
+            return replies, firsts
 
         pending = [
             i for i, reply in enumerate(replies)
@@ -572,4 +574,4 @@ class SpeakerRelabelService:
                     still_bad.append(original_index)
             pending = still_bad
 
-        return replies
+        return replies, firsts

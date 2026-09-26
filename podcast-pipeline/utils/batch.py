@@ -440,6 +440,8 @@ def _stage_parallelism(args, stage) -> int:
         # Files in flight keep every ASR model's queue fed while another file
         # waits for its slowest model (services/asr_scheduler.py).
         return max(1, int(stages["asr"].get("files_in_flight", 3)))
+    if stage == "speaker_relabel":
+        return max(1, int(stages.get("refinement", {}).get("relabel_files_in_flight", 1)))
     if stage == "diarization" and not getattr(args, "dia3", False):
         return max(1, min(2, int(
             stages.get("diarization", {}).get("workers", 1))))

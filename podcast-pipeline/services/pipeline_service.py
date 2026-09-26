@@ -143,8 +143,10 @@ class PipelineService:
         if stage not in ("music", "diarization", "separation"):
             # ASR shares its scheduler across files, but each file still needs
             # its own timeline and noise track while it runs concurrently.
-            cross_file = (stage == "asr" and getattr(
-                getattr(self, "asr_svc", None), "cross_file_enabled", False))
+            # Speaker relabel shares the LLM replicas across files too, and reads
+            # the timeline for each file's gaps.
+            cross_file = (stage == "speaker_relabel" or (stage == "asr" and getattr(
+                getattr(self, "asr_svc", None), "cross_file_enabled", False)))
             if not cross_file:
                 return self
         view = copy.copy(self)
