@@ -568,3 +568,21 @@ def test_a_reply_that_ends_inside_its_reasoning_is_counted_as_out_of_budget():
 def test_a_reply_in_prose_is_unreadable_but_not_out_of_budget():
     result = _relabel(_conversation(wrong={4}), FakeLLM("Không có gì sai."), thinking=True)
     assert result.unreadable_windows == 1 and result.cut_in_thought_windows == 0
+
+
+def test_the_first_reply_is_kept_when_a_retry_replaces_it():
+    """replies.json is where the model's reasoning is read; the retry must not erase it."""
+    thought = "<think>Dòng 5 hỏi, dòng 6 là người kia, nhưng mà"      # cut off, no answer
+    answer = _json(_proposal(4, A))
+
+    def reply(message):
+        return answer if "NHẮC LẠI" in message else thought
+
+    result = _relabel(_conversation(wrong={4}), FakeLLM(reply), thinking=True)
+    row = result.replies[0]
+    assert row["raw"] == answer and row["first_raw"] == thought
+
+
+def test_a_window_answered_the_first_time_has_no_separate_first_reply():
+    result = _relabel(_conversation(wrong={4}), FakeLLM(_json(_proposal(4, A))), thinking=True)
+    assert result.replies[0]["first_raw"] is None

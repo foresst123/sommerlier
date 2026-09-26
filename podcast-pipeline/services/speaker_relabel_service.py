@@ -414,7 +414,10 @@ class SpeakerRelabelService:
 
         for w_no, (window, reply) in enumerate(zip(windows, replies)):
             proposals = parse_proposals(reply) if reply is not None else []
-            self._record(result, segments, w_no, window, reply, len(proposals))
+            firsts = getattr(self, "_first_replies", [])
+            first = firsts[w_no] if w_no < len(firsts) else None
+            self._record(result, segments, w_no, window, reply, len(proposals),
+                         first_reply=first if first != reply else None)
             if reply is None:
                 continue
             for proposal in proposals:
@@ -478,7 +481,8 @@ class SpeakerRelabelService:
         return result
 
     def _record(self, result: RelabelResult, segments, w_no: int, window,
-                reply: Optional[str], proposals: int) -> None:
+                reply: Optional[str], proposals: int,
+                first_reply: Optional[str] = None) -> None:
         """Keep the reply as the model wrote it, and count the ones with no JSON.
 
         A window answered with prose looks exactly like one answered `[]` once
@@ -497,7 +501,7 @@ class SpeakerRelabelService:
             "window": w_no, "first_index": first, "last_index": last,
             "lines": window.stop - window.start, "answered": reply is not None,
             "readable": readable, "cut_in_thought": cut, "proposals": proposals,
-            "raw": reply})
+            "raw": reply, "first_raw": first_reply})
         if self.logger:
             if reply is None:
                 note = "no answer"
@@ -524,6 +528,9 @@ class SpeakerRelabelService:
             per_call=self._windows_per_call(), max_new_tokens=self.max_new_tokens,
             label="relabel window", logger=self.logger, thinking=self.thinking)
         result.failed_windows += unanswered
+        # The retry replaces an unreadable reply; keep what the model first wrote so
+        # replies.json can show its reasoning.
+        self._first_replies = list(replies)
 
         if not self.unreadable_retries:
             return replies

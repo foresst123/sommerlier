@@ -21,6 +21,10 @@ def clean_reply(raw: Optional[str]) -> str:
     text = _THINK_RE.sub("", raw or "")
     # A reply cut off inside its reasoning holds drafts of an answer, not one.
     text = _OPEN_THINK_RE.sub("", text)
+    # A chat template that opens <think> in the prompt leaves a reply of the form
+    # "reasoning</think>answer": what follows the last closing tag is the answer.
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[1]
     fenced = _FENCE_RE.search(text)
     if fenced:
         text = fenced.group(1)

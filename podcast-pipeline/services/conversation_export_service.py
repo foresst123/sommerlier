@@ -871,6 +871,7 @@ class ConversationExportService:
             thinking=self.cfg.thinking)
         report["windows"] = len(windows)
         report["unanswered"] = unanswered
+        first_replies = list(replies)      # a retry may replace a reply; keep the first
 
         # One strict repair pass for the exact failure mode seen in practice:
         # a readable reply such as [] or a partial partition that silently leaves
@@ -969,6 +970,7 @@ class ConversationExportService:
                 **coverage,
                 "proposal_results": [],
                 "raw": raw,
+                "first_raw": first_replies[w_no] if first_replies[w_no] != raw else None,
                 "coverage_retry": retry_meta.get(w_no),
             }
             rows.append(row)

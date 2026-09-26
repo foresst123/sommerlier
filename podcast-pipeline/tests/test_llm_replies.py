@@ -8,7 +8,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.llm_batches import THINKING_MIN_NEW_TOKENS, ask_in_batches, reply_budget
-from utils.llm_json import clean_reply, is_cut_in_thought, is_readable
+from utils.llm_json import clean_reply, is_cut_in_thought, is_readable, objects_in
 
 
 # --- reasoning around the answer ---------------------------------------------------
@@ -77,3 +77,15 @@ def test_thinking_on_is_passed_on_to_every_call():
     ask_in_batches(llm, "s", ["a", "b", "c"], per_call=2, max_new_tokens=10,
                    label="x", thinking=True)
     assert llm.seen == [True, True]
+
+
+def test_a_reply_whose_reasoning_was_opened_by_the_prompt_is_cut_at_the_closing_tag():
+    """The chat template can open <think> itself, leaving only "reasoning</think>answer"."""
+    raw = 'Có thể là {"i": 3, "speaker": "B"} hoặc [5].</think>\n[{"i": 6, "speaker": "A"}]'
+    assert clean_reply(raw) == '[{"i": 6, "speaker": "A"}]'
+    assert objects_in(raw) == [{"i": 6, "speaker": "A"}]
+
+
+def test_a_matched_pair_and_a_closing_only_tag_are_both_handled():
+    assert clean_reply("<think>a</think>b</think>[1]") == "[1]"
+    assert clean_reply("[2]") == "[2]"
