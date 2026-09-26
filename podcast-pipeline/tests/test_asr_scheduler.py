@@ -477,3 +477,49 @@ def test_shutdown_waits_for_a_replica_that_is_still_starting_and_releases_it():
     sched.shutdown()
 
     assert released == [1], "the stage ended while a replica was still loading onto a GPU"
+
+
+# --- a model that runs on more than one GPU ---------------------------------------
+
+def test_a_lane_knows_every_gpu_it_runs_on():
+    assert _lane("x", 1).gpus == {1}
+    assert _lane("x", 1, gpus={1, 0}).gpus == {0, 1}
+
+
+def test_a_model_that_also_runs_on_the_freed_gpu_is_boosted_and_gets_no_replica():
+    finished = _Stub("qwen3", 0, 0)
+    finished.gpus = {0}
+    pho = _Stub("phowhisper", 1, 6000, rate=1.0, factory=lambda gpu, batch: None)
+    pho.gpus = {1, 0}                 # one process per card; GPU 0 was just freed
+    assert choose_rebalance(finished, [pho], CFG) == ("boost", pho)
+
+
+def test_a_model_on_none_of_the_freed_gpus_still_gets_a_replica_there():
+    finished = _Stub("qwen3", 0, 0)
+    finished.gpus = {0}
+    pho = _Stub("phowhisper", 1, 6000, rate=1.0, factory=lambda gpu, batch: None)
+    pho.gpus = {1}
+    assert choose_rebalance(finished, [pho], CFG) == ("replica", pho, 0)
+
+
+def test_a_two_gpu_model_gets_the_bigger_batch_and_no_extra_process_when_a_gpu_frees():
+    started, gate = [], threading.Event()
+
+    def slow(payloads, size):
+        gate.wait(5)
+        return [f"s:{p}" for p in payloads]
+
+    fast = _lane("fast", 0, batch=16)                                 # finishes on GPU 0
+    slow_lane = _lane("slow", 1, slow, batch=16, gpus={1, 0},
+                      replica_factory=lambda gpu, batch: started.append((gpu, batch)))
+    sched = _scheduler([fast, slow_lane], boost_batch=48)
+    sched.expect_files(1)
+    ticket = sched.submit("a", {"fast": [1, 2], "slow": list(range(40))})
+    try:
+        assert wait_until(lambda: slow_lane.primary.batch_size == 48)
+        assert started == [] and not slow_lane.replica_started
+        gate.set()
+        assert len(ticket.wait(5)["slow"]) == 40
+    finally:
+        gate.set()
+        sched.shutdown()

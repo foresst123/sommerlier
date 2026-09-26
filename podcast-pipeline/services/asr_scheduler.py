@@ -45,9 +45,13 @@ class Lane:
     """The jobs for one model, shared by every worker (primary and replicas)."""
 
     def __init__(self, name, gpu, primary: LaneWorker, empty,
-                 replica_factory: Optional[Callable] = None, boostable: bool = True):
+                 replica_factory: Optional[Callable] = None, boostable: bool = True,
+                 gpus=None):
         self.name = name
         self.gpu = gpu
+        # Every GPU a worker of this lane runs on. A pool of processes (PhoWhisper: one
+        # per card) spans more than the one `gpu` the model was placed on.
+        self.gpus = set(gpus) if gpus else ({gpu} if gpu is not None else set())
         self.primary = primary
         self.workers: List[LaneWorker] = [primary]
         self.empty = empty
@@ -197,6 +201,12 @@ class ByteBudget:
             self._cond.notify_all()
 
 
+def _gpus_of(lane) -> set:
+    """The GPUs a lane runs on (its placement GPU when it does not say)."""
+    gpus = getattr(lane, "gpus", None)
+    return set(gpus) if gpus else {lane.gpu}
+
+
 def _eta(lane) -> float:
     remaining = lane.remaining()
     if remaining <= 0:
@@ -214,7 +224,10 @@ def choose_rebalance(finished, remaining, cfg) -> tuple:
     if not remaining:
         return ("none",)
     slowest = max(remaining, key=lambda lane: (_eta(lane), lane.remaining()))
-    if slowest.gpu == finished.gpu:
+    if _gpus_of(slowest) & _gpus_of(finished):
+        # It already runs on a card that was just freed: give it bigger batches, and
+        # start nothing new there. Each worker process lowers its own batch if its
+        # card is still tight (see PhoWhisperASR).
         return ("boost", slowest) if slowest.boostable else ("none",)
     if slowest.replica_factory is None or slowest.replica_started:
         return ("none",)
@@ -420,7 +433,8 @@ class AsrScheduler:
             for worker in lane.workers:
                 worker.batch_size = max(worker.batch_size, self.boost_batch)
         self._log("info", f"[ASR scheduler] boosting {lane.name} batch to "
-                          f"{self.boost_batch} (GPU {lane.gpu} is now free of its peer)")
+                          f"{self.boost_batch} (GPU {sorted(_gpus_of(lane))} is now "
+                          f"free of its peer)")
         self._record("asr_batch_boosted", lane=lane.name, batch=self.boost_batch)
 
     def _start_replica(self, lane: Lane, gpu):
@@ -440,6 +454,7 @@ class AsrScheduler:
             else:
                 too_late = False
                 lane.workers.append(worker)
+                lane.gpus.add(gpu)
                 lane.replica_started = True
                 self._spawn_locked(lane, worker)
                 self._cond.notify_all()

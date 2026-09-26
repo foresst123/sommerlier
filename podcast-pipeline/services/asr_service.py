@@ -666,7 +666,11 @@ class ASRService:
             worker_service = self.asr_workers.get(kind)
             # A pool of worker processes is served by one lane worker per process, so
             # the lane's threads lease distinct processes and run side by side.
-            copies = max(1, len(getattr(worker_service, "services", ()) or ()))
+            services = list(getattr(worker_service, "services", ()) or ())
+            copies = max(1, len(services))
+            lane_gpus = {gpus[kind]} | {
+                getattr(service, "device_id", None) for service in services}
+            lane_gpus.discard(None)
             ready = (worker_service.wait_ready
                      if worker_service is not None
                      and hasattr(worker_service, "wait_ready") else None)
@@ -679,7 +683,7 @@ class ASRService:
                 made.append(worker)
             lane = Lane(kind, gpus[kind], made[0], empty=_EMPTY_RESULT[kind],
                         replica_factory=self._replica_factory(kind, tmp_dir),
-                        boostable=(kind != "qwen3"))
+                        boostable=(kind != "qwen3"), gpus=lane_gpus)
             lane.workers.extend(made[1:])
             lanes.append(lane)
         return AsrScheduler(lanes, boost_batch=boost, config=cfg, logger=self.logger,

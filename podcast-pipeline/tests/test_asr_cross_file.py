@@ -359,3 +359,19 @@ def test_a_pool_that_never_comes_up_fails_the_file_instead_of_voting_on_nothing(
             svc.process(_segments(3), _audio())
     finally:
         svc.end_cross_file_stage()
+
+
+def test_a_lane_served_by_a_pool_of_processes_knows_every_gpu_of_the_pool():
+    pool = SimpleNamespace(services=[SimpleNamespace(device_id=1),
+                                     SimpleNamespace(device_id=0)])
+    svc = ASRService(
+        whisper=FakeWhisper(), phowhisper=FakePho(), qwen3=FakeQwenClient(),
+        model_loader=FakeLoader(),
+        performance_config={"cross_file": True, "shared_batch_size": 16,
+                            "boost_batch_size": 48},
+        batch_size=8, edge_pad=0.0,
+        asr_placement={"qwen3": 0, "whisper": 1, "phowhisper": 1},
+        asr_workers={"phowhisper": pool})
+    lanes = svc._build_scheduler("tmp").lanes
+    assert lanes["phowhisper"].gpus == {0, 1} and len(lanes["phowhisper"].workers) == 2
+    assert lanes["whisper"].gpus == {1} and lanes["qwen3"].gpus == {0}
