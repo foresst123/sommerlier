@@ -158,7 +158,15 @@ class ConversationSelectionConfig:
 
     @classmethod
     def from_settings(cls, settings: Optional[dict]) -> "ConversationSelectionConfig":
-        return cls(**dict(settings or {}))
+        # `models.conversation_selection` also carries the export renderer's own
+        # knobs; they configure how clips are cut, not which are chosen. Any other
+        # unknown key still raises, so a misspelt setting is not silently ignored.
+        return cls(**{key: value for key, value in dict(settings or {}).items()
+                      if key not in RENDER_ONLY_SETTINGS})
+
+
+# Settings of `models.conversation_selection` read by the export renderer instead.
+RENDER_ONLY_SETTINGS = frozenset({"render_workers", "reuse_render"})
 
 
 def tier_of(score: float) -> str:
