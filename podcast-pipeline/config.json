@@ -339,7 +339,7 @@
           "min_confidence": 0.7,
           "max_change_fraction": 0.15,
           "thinking": true,
-          "max_new_tokens": 4096
+          "max_new_tokens": 49152
         },
         "word_alignment": {
           "model_name": "nguyenvulebinh/wav2vec2-base-vi-vlsp2020",
@@ -377,7 +377,7 @@
           "music_patched_max": 0.15,
           "require_word_alignment": true,
           "thinking": true,
-          "max_new_tokens": 3072
+          "max_new_tokens": 49152
         },
         "sidon": {
           "num_steps": 100
