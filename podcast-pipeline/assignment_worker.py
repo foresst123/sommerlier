@@ -49,6 +49,33 @@ def build_separator(device, threads=None):
     return sep
 
 
+def describe_embedder(sep, device, threads) -> str:
+    """One line saying where WeSpeaker really runs, and how long one embed takes.
+
+    ONNX Runtime falls back to the CPU without failing when CUDA cannot load, and
+    nothing else reports it, so a slow speaker-assignment stage looked the same
+    either way.
+    """
+    import time
+    embedder = sep.speaker_embedder
+    providers = embedder.active_providers()
+    audio = np.zeros(3 * 16000, dtype=np.float32)
+    started = time.perf_counter()
+    embedder.embed(audio, 16000)
+    millis = (time.perf_counter() - started) * 1000.0
+    on_gpu = bool(providers) and providers[0] == "CUDAExecutionProvider"
+    try:
+        cpus = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        cpus = os.cpu_count() or 1
+    line = (f"[assignment_worker] WeSpeaker requested={device} "
+            f"running_on={'GPU' if on_gpu else 'CPU'} providers={providers} "
+            f"embed(3s)={millis:.1f}ms threads={threads} usable_cpus={cpus}")
+    if str(device).startswith("cuda") and not on_gpu:
+        line += " -- CUDA was requested but WeSpeaker runs on the CPU"
+    return line
+
+
 def handle_request(sep, req: dict) -> dict:
     req_id = req.get("id", "unknown")
     try:
@@ -138,6 +165,8 @@ def serve():
         # The ONNX session is built on first use; do it now so the first real
         # request is not the slow one.
         sep._get_embedding(np.zeros(16000, dtype=np.float32), 16000)
+        print(describe_embedder(sep, args.device, args.threads),
+              file=sys.stderr, flush=True)
     except Exception as exc:
         emit({"status": "error", "message": f"{type(exc).__name__}: {exc}"})
         sys.exit(1)

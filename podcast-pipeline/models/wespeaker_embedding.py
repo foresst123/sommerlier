@@ -72,6 +72,11 @@ class WeSpeakerONNXEmbedder:
                     )
         return self._session
 
+    def active_providers(self):
+        """ONNX Runtime providers the session really got; CUDA is dropped silently
+        when its libraries cannot be loaded, leaving only the CPU provider."""
+        return list(self._get_session().get_providers())
+
     @staticmethod
     def _features(audio, sample_rate):
         waveform = torch.as_tensor(np.asarray(audio, dtype=np.float32)).reshape(1, -1)
