@@ -28,6 +28,16 @@ _BOILERPLATE_PATTERNS = [
     r"^\s*(câu hoàn chỉnh|kết quả|transcript|output)\s*[:：]",
     r"phụ đề (được )?(thực hiện|đóng góp) bởi",
     r"^\s*(hết|the end)\s*[\.!]?\s*$",
+    # The same subscribe pleas in the other spelling ("kí" for "ký", both are common)
+    # and the outro's own wording, which reached the transcripts blended into real
+    # speech ("... hãy đăng kí cho kênh X Để không bỏ lỡ những video hấp dẫn ..."). The
+    # bare word "đăng kí" is real speech ("đăng kí kết hôn"), so it needs the imperative
+    # in front of it or the channel after it.
+    r"(hãy |xin |mời )(các bạn )?đăng kí\b",
+    r"(đăng k[ýí]|subscribe)\s+(cho\s+|vào\s+)?(kênh|channel)",
+    r"like\s*,?\s*share\s*,?\s*(và\s*)?đăng kí",
+    r"đừng quên đăng kí",
+    r"không bỏ lỡ (những |các )?(video|clip)",
 ]
 
 # Vietnamese is written in Latin script. Any run of CJK, Cyrillic, Thai, Hangul
