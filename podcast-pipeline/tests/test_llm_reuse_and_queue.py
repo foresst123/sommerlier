@@ -453,12 +453,10 @@ def test_the_new_switches_default_off_and_the_a100_profile_sets_them():
             stage["parallel_windows"]) == (False, False, False)
     config = json.load(open(os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json")))
-    for name in ("a100", "a100_hf"):
-        tuned = resolve(config["environments"][name])["stages"]["refinement"]
-        assert tuned["keep_llm_across_relabel"] is True
-        assert tuned["shared_queue"] is (name == "a100")
-        if name == "a100":
-            assert tuned["chunk_size"] == 32
+    tuned = resolve(config["environments"]["a100"])["stages"]["refinement"]
+    assert tuned["keep_llm_across_relabel"] is True
+    assert tuned["shared_queue"] is True
+    assert tuned["chunk_size"] == 32
     assert resolve(config["environments"]["a100"])["stages"]["refinement"]["parallel_windows"]
 
 

@@ -281,7 +281,7 @@ def test_sslam_runs_under_its_lock_and_the_model_load_does_not():
     src = (Path(__file__).resolve().parents[1]
            / "services" / "pipeline_service.py").read_text(encoding="utf-8")
     load_at = src.index('self._load("tagger")')
-    lock_at = src.index('with (tagger_lock if tagger_lock is not None')
+    lock_at = src.index("with self._tagger_guard(detector)")
     build_at = src.index("build_maps(", lock_at)
 
     assert load_at < lock_at < build_at

@@ -13,7 +13,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.bss_model import BssSeparator
+from models.bss_model import BssSeparator, _AssignmentBatchPolicy
 from models.wespeaker_embedding import WeSpeakerONNXEmbedder
 from test_assignment_worker import FakePool, FakeWorkerSep, _client
 from utils import performance_config
@@ -24,10 +24,11 @@ def test_batching_is_opt_in_and_enabled_only_for_the_tuned_a100_profile():
     with open(os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json"),
               encoding="utf-8") as stream:
         environments = json.load(stream)["environments"]
-    assert environments["a100"]["performance"]["stages"]["separation"][
-        "assignment_batching"] is True
-    assert "assignment_batching" not in environments["a100_hf"]["performance"][
-        "stages"]["separation"]
+    separation = environments["a100"]["performance"]["stages"]["separation"]
+    assert separation["assignment_batching"] is True
+    assert separation["assignment_workers_per_gpu"] == 4
+    assert separation["assignment_batch_warmup_requests"] == 20
+    assert separation["assignment_batch_min_hit_rate"] == 0.5
 
 
 class Session:
@@ -101,6 +102,12 @@ class BatchWorker(FakeWorkerSep):
         self.speaker_embedder = SimpleNamespace(batch_stats=collections.Counter())
 
     def _get_embeddings(self, audios, sr):
+        if len(audios) > 1:
+            self.speaker_embedder.batch_stats["batch_attempts"] += 1
+            self.speaker_embedder.batch_stats["batches"] += 1
+            self.speaker_embedder.batch_stats["batched_items"] += len(audios)
+        else:
+            self.speaker_embedder.batch_stats["single_calls"] += len(audios)
         return [self._get_embedding(a, sr) for a in audios]
 
 
@@ -111,7 +118,11 @@ def test_packed_probe_batch_matches_single_requests_including_silent_probe():
               np.full(12000, 2, np.float32)]
     probes = [(track, [(0, len(track))]) for track in tracks]
     batched = client._probe_embeddings(probes, 24000)
-    assert pool.calls == ["probe_embed_batch"]
+    # VAD makes the two voiced probes different lengths, so neither is padded:
+    # both embeddings fan out as independent worker requests.
+    assert pool.calls.count("probe") == 3
+    assert pool.calls.count("embed") == 2
+    assert "embed_batch" not in pool.calls
     individual = [client._probe_embedding(track, spans, 24000) for track, spans in probes]
     for a, b in zip(batched, individual):
         if b is None:
@@ -137,7 +148,8 @@ def test_batch_scoring_reuses_full_context_for_both_speakers_and_preserves_fallb
     scores = client._score_probe_batch(requests, 16000, [(0, 9000)], sources, errors)
     # Four unique first attempts: two silent clean probes, two full tracks.
     # The two fallback comparisons reuse those full-track embeddings.
-    assert client._assignment.calls == ["probe_embed_batch"]
+    assert client._assignment.calls.count("probe") == 4
+    assert client._assignment.calls.count("embed_batch") == 1
     assert not errors and set(sources.values()) == {"full_context"}
     for score, (track, _, target, _) in zip(scores, requests):
         embedding = client._probe_embedding(track, [(0, 9000)], 16000)
@@ -199,3 +211,46 @@ def test_packed_batch_keeps_successes_when_one_probe_errors():
     values = client._probe_embeddings([(t, [(0, 9000)]) for t in tracks], 16000)
     assert isinstance(values[0], torch.Tensor)
     assert isinstance(values[1], RuntimeError) and "bad probe" in str(values[1])
+
+
+def test_low_batch_hit_rate_switches_the_rest_of_the_stage_to_direct_fanout():
+    pool = FakePool(BatchWorker())
+    client = _client(pool)
+    client._assignment_batch_policy = None
+    probes = [
+        (np.ones(9000, np.float32), [(0, 9000)]),
+        (np.ones(12000, np.float32), [(0, 12000)]),
+    ]
+    # Ten scoring calls observe 20 differently-sized, embeddable probes. None
+    # can share an ONNX batch, so the one-way policy switches at the threshold.
+    for _ in range(10):
+        client._probe_embeddings(probes, 16000)
+    before = len(pool.calls)
+    client._probe_embeddings(probes, 16000)
+    assert pool.calls[before:] == ["probe_embed", "probe_embed"]
+    assert client._assignment_batch_policy.fanout is True
+    assert client._assignment_batch_policy.total_items == 20
+
+
+def test_high_batch_hit_rate_keeps_exact_length_batching_after_warmup():
+    pool = FakePool(BatchWorker())
+    client = _client(pool)
+    client._assignment_batch_policy = None
+    probes = [(np.full(9000, value, np.float32), [(0, 9000)])
+              for value in (1, 2, 3, 4)]
+    for _ in range(5):
+        client._probe_embeddings(probes, 16000)
+    before = len(pool.calls)
+    client._probe_embeddings(probes, 16000)
+    assert pool.calls[before:].count("probe") == 4
+    assert pool.calls[before:].count("embed_batch") == 1
+    assert client._assignment_batch_policy.fanout is False
+    assert client._assignment_batch_policy.batched_items == 24
+
+
+def test_exactly_fifty_percent_is_kept_in_batch_mode():
+    policy = _AssignmentBatchPolicy(warmup_requests=20, min_hit_rate=0.5)
+    snapshot = policy.observe(batched_items=10, total_items=20)
+    assert snapshot["hit_rate"] == 0.5
+    assert snapshot["fanout"] is False
+    assert policy.should_batch() is True

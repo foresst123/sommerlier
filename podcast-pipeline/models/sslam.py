@@ -206,3 +206,50 @@ class SSLAMDetector:
 
     def unload(self):
         self._model = None
+
+
+class SSLAMPool:
+    """Several independent taggers; each sweep takes one and hands it back.
+
+    One SSLAMDetector is not safe to share between threads, so the pipeline used to
+    put a lock around it and every file queued for the single tagger. A pool gives
+    each sweep its own instance, so as many files as there are taggers are swept at
+    once and the rest wait in arrival order (`queue.Queue` wakes waiters first come,
+    first served -- a bare lock does not, and a file that started earlier could be
+    overtaken by later ones).
+
+    It answers `tag_framewise` itself, so `utils.music_map.build_maps` takes it for a
+    detector. `shared_safe` tells the caller not to add a lock of its own.
+    """
+
+    shared_safe = True
+
+    def __init__(self, detectors):
+        import queue
+        self.detectors = list(detectors)
+        if not self.detectors:
+            raise ValueError("an SSLAM pool needs at least one tagger")
+        self._free = queue.Queue()
+        for detector in self.detectors:
+            self._free.put(detector)
+
+    def checkout(self):
+        """Context manager: the next free tagger, returned when the block ends."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def held():
+            detector = self._free.get()
+            try:
+                yield detector
+            finally:
+                self._free.put(detector)
+        return held()
+
+    def tag_framewise(self, audio_array, sample_rate: int = SAMPLE_RATE):
+        with self.checkout() as detector:
+            return detector.tag_framewise(audio_array, sample_rate)
+
+    def unload(self):
+        for detector in self.detectors:
+            detector.unload()

@@ -630,6 +630,18 @@ class PipelineService:
             return {"enabled": True, "skipped": "export_error", "error": str(exc)}
 
     # -- music stage: taking the music out, and measuring what is left --------------
+    def _tagger_guard(self, detector):
+        """What to hold while a sweep runs.
+
+        A lone tagger is not safe to share, so files take turns on it under one lock.
+        A pool (`music.tagger_workers` > 1) hands each sweep a tagger of its own, and
+        an extra lock would put the files back in a single line.
+        """
+        if getattr(detector, "shared_safe", False):
+            return contextlib.nullcontext()
+        lock = getattr(self, "_tagger_lock", None)
+        return lock if lock is not None else contextlib.nullcontext()
+
     @staticmethod
     def _music_scope(args) -> str:
         """`spans`: strip only the stretches the tagger called a bed (the old way).
@@ -737,8 +749,7 @@ class PipelineService:
             return
         self._load("tagger")
         detector = self.model_loader.get("tagger") if self.model_loader else None
-        tagger_lock = getattr(self, "_tagger_lock", None)
-        with (tagger_lock if tagger_lock is not None else contextlib.nullcontext()):
+        with self._tagger_guard(detector):
             _, noise = build_maps(audio_data.waveform, audio_data.sample_rate,
                                   detector, logger=self.logger)
         if not noise:
@@ -948,12 +959,10 @@ class PipelineService:
                 # Chỉ tải model phân loại. Model tách nhạc sẽ tải nếu thực sự phát hiện nền.
                 self._load("tagger")
                 detector = self.model_loader.get("tagger") if self.model_loader else None
-                # _load above must stay outside this lock: the loader has its own
+                # _load above must stay outside this guard: the loader has its own
                 # lock, and taking them in opposite orders from two files would
                 # deadlock.
-                tagger_lock = getattr(self, "_tagger_lock", None)
-                with (tagger_lock if tagger_lock is not None
-                      else contextlib.nullcontext()):
+                with self._tagger_guard(detector):
                     music_map, self.noise_track = build_maps(
                         audio_data.waveform, audio_data.sample_rate, detector,
                         logger=self.logger)

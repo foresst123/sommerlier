@@ -3,7 +3,7 @@ import os
 import gc
 import threading
 import torch
-from typing import Dict, Any
+from typing import Any, Dict, Optional
 
 from utils.steps import step_enabled
 from utils.performance_config import resolve_music_devices, resolve_music_worker_devices
@@ -144,6 +144,10 @@ class ModelLoader:
                 assignment_process=assignment_service,
                 assignment_batching=(perf.get("enabled", False)
                                      and sep_perf.get("assignment_batching", False)),
+                assignment_batch_warmup_requests=sep_perf.get(
+                    "assignment_batch_warmup_requests", 20),
+                assignment_batch_min_hit_rate=sep_perf.get(
+                    "assignment_batch_min_hit_rate", 0.5),
                 embedding_threads=(sep_perf.get("assignment_threads") or None
                                    if perf.get("enabled", False) else None),
                 score_workers=(sep_perf.get("assignment_parallel", 1)
@@ -162,8 +166,65 @@ class ModelLoader:
         if "tagger" in self.models:
             return
         if step_enabled(self.args, "music_analysis"):
-            if self.logger: self.logger.info("Loading SSLAM tagger")
-            self.models["tagger"] = SSLAMDetector(device=str(self.device_1))
+            count = self._tagger_count()
+            if self._tagger_isolated():
+                # Separate worker processes, spread over the cards; a sweep leases
+                # an idle one. See sslam_worker.py for why processes and not threads.
+                from services.sslam_worker_service import build_sslam_pool
+                cards = [self.device_1]
+                if str(self.device_2) != str(self.device_1):
+                    cards.append(self.device_2)
+                devices = [self._gpu_index(cards[k % len(cards)]) for k in range(count)]
+                if self.logger:
+                    where = ", ".join("CPU" if d is None else f"GPU {d}" for d in devices)
+                    self.logger.info(f"Starting {count} SSLAM worker process(es) on {where}")
+                self.models["tagger"] = build_sslam_pool(devices, logger=self.logger)
+                return
+            if count <= 1:
+                if self.logger: self.logger.info("Loading SSLAM tagger")
+                self.models["tagger"] = SSLAMDetector(device=str(self.device_1))
+                return
+            from models.sslam import SSLAMPool
+            cards = [self.device_1]
+            if str(self.device_2) != str(self.device_1):
+                cards.append(self.device_2)
+            devices = [cards[k % len(cards)] for k in range(count)]
+            if self.logger:
+                self.logger.info(f"Loading {count} SSLAM taggers on "
+                                 f"{', '.join(str(d) for d in devices)}")
+            detectors = [SSLAMDetector(device=str(device)) for device in devices]
+            # Loaded one after another, here, under the loader's lock: fetching
+            # the model's remote code from several threads at once is a race, and
+            # a sweep should not pay the load.
+            for detector in detectors:
+                load = getattr(detector, "_load", None)
+                if callable(load):
+                    load()
+            self.models["tagger"] = SSLAMPool(detectors)
+
+    @staticmethod
+    def _gpu_index(device) -> Optional[int]:
+        """The physical GPU number of a torch device name ("cuda:1" -> 1), None for the CPU."""
+        text = str(device)
+        if not text.startswith("cuda"):
+            return None
+        return int(text.split(":")[1]) if ":" in text else 0
+
+    def _tagger_isolated(self) -> bool:
+        """`performance.stages.music.tagger_isolate_process`: taggers as worker processes."""
+        perf = (self.config.get("environments", {}).get(self.args.env, {})
+                .get("performance", {}))
+        music = perf.get("stages", {}).get("music", {})
+        return bool(perf.get("enabled", False) and music.get("tagger_isolate_process", False))
+
+    def _tagger_count(self) -> int:
+        """`performance.stages.music.tagger_workers`, or 1 when performance is off."""
+        perf = (self.config.get("environments", {}).get(self.args.env, {})
+                .get("performance", {}))
+        if not perf.get("enabled", False):
+            return 1
+        music = perf.get("stages", {}).get("music", {})
+        return max(1, int(music.get("tagger_workers", 1)))
 
     @_serialized
     def load_music_models(self):

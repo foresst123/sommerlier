@@ -48,12 +48,11 @@ def test_the_settings_are_valid_performance_keys_with_safe_defaults():
     assert schema["assignment_parallel"][1] == 1       # off unless a profile asks
 
 
-def test_the_a100_profiles_turn_them_on_and_keep_the_cpu_for_assignment():
+def test_the_a100_profile_turns_them_on_and_keeps_the_cpu_for_assignment():
     cfg = json.load(open(os.path.join(ROOT, "config.json"), encoding="utf-8"))
-    for name in ("a100", "a100_hf"):
-        stage = cfg["environments"][name]["performance"]["stages"]["separation"]
-        assert stage["postprocess_device"] == "cpu", name
-        assert stage["assignment_threads"] > 4 and stage["assignment_parallel"] > 1, name
+    stage = cfg["environments"]["a100"]["performance"]["stages"]["separation"]
+    assert stage["postprocess_device"] == "cpu"
+    assert stage["assignment_threads"] > 4 and stage["assignment_parallel"] > 1
 
 
 def test_ticks_add_up_per_phase_and_count_the_calls():

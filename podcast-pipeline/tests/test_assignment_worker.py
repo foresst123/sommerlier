@@ -139,13 +139,12 @@ def test_the_worker_process_runs_on_its_gpu_and_the_main_interpreter():
     assert args[args.index("--threads") + 1] == "3"
 
 
-def test_workers_are_off_by_default_and_on_in_the_a100_profiles():
+def test_workers_are_off_by_default_and_on_in_the_a100_profile():
     schema = performance_config._STAGES["separation"]["assignment_workers_per_gpu"]
     assert schema[1] == 0
     cfg = json.load(open(os.path.join(ROOT, "config.json"), encoding="utf-8"))
-    for name in ("a100", "a100_hf"):
-        stage = cfg["environments"][name]["performance"]["stages"]["separation"]
-        assert stage["assignment_workers_per_gpu"] >= 1, name
+    stage = cfg["environments"]["a100"]["performance"]["stages"]["separation"]
+    assert stage["assignment_workers_per_gpu"] >= 1
     kaggle = cfg["environments"]["kaggle"]["performance"]["stages"]["separation"]
     assert kaggle.get("assignment_workers_per_gpu", 0) == 0
 

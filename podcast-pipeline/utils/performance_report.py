@@ -151,6 +151,18 @@ def _separation(events):
                 "    WeSpeaker batching: "
                 f"{batches}/{attempts} batches accepted, {batched_items} items batched, "
                 f"{fallbacks} batch fallbacks, {singles} single-item calls")
+        adaptive_total = int(v.get("adaptive_batch_observed_items", 0))
+        adaptive_batched = int(v.get("adaptive_batch_batched_items", 0))
+        fanout_items = int(v.get("adaptive_fanout_items", 0))
+        if adaptive_total or fanout_items:
+            hit_rate = (100.0 * adaptive_batched / adaptive_total
+                        if adaptive_total else 0.0)
+            mode = ("fan-out" if v.get("adaptive_batch_switches", 0)
+                    else "exact-length batching")
+            out.append(
+                f"    similarity scheduler: {adaptive_batched}/{adaptive_total} "
+                f"items batched ({hit_rate:.1f}% hit), mode {mode}, "
+                f"{fanout_items} later fan-out items")
     return out
 
 

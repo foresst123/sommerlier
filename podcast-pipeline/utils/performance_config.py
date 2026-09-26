@@ -99,6 +99,10 @@ _STAGES = {
     },
     "separation": {
         "max_workers": (INT, 1, 1, 2),
+        # Files separated at once. 0 keeps the old rule (min(2, max_workers)). Sidon
+        # windows of every file share one pool of workers, so more files than GPUs
+        # only add ordered consumers that keep those workers fed.
+        "files_in_flight": (INT, 0, 0, 64),
         # Sidon worker processes on each GPU (max_workers still picks how many
         # GPUs). Sidon runs one small diffusion job at a time, so a card often
         # waits on kernel launches; a second process can use those gaps.
@@ -140,6 +144,11 @@ _STAGES = {
         # Batch equal-frame WeSpeaker probes without padding; reuse embeddings
         # when both speakers compare against the same probe.
         "assignment_batching": (BOOL, False, None, None),
+        # Similarity probes are sampled in adaptive mode first. Only exact
+        # post-VAD lengths share a batch; after this many embeddable probes the
+        # stage permanently fans out when the real batch hit-rate is too low.
+        "assignment_batch_warmup_requests": (INT, 20, 1, 10000),
+        "assignment_batch_min_hit_rate": (FLOAT, 0.5, 0.0, 1.0),
         # CPU threads inside each assignment worker process (ONNX Runtime and the
         # BLAS libraries). Each worker handles one probe at a time.
         "assignment_worker_threads": (INT, 2, 1, 32),
@@ -150,7 +159,14 @@ _STAGES = {
         "assignment_workers_per_gpu": (INT, 0, 0, 4),
     },
     "music": {
-        "tagger_workers": (INT, 1, 1, 2),
+        # SSLAM taggers loaded (alternating between the two GPUs) and files swept at
+        # once. 1 is a single tagger that files take turns on.
+        "tagger_workers": (INT, 1, 1, 64),
+        # Run each SSLAM tagger as a worker process of its own (sslam_worker.py)
+        # instead of a detector inside the main process. Separate processes sweep in
+        # parallel for real -- the CPU side of a sweep does not share one GIL -- and
+        # the main process no longer holds the model.
+        "tagger_isolate_process": (BOOL, False, None, None),
         "max_separator_workers": (INT, 1, 1, 2),
         # BS-RoFormer worker processes on each GPU (max_separator_workers still
         # picks how many GPUs). Only honoured with bs_roformer.isolate_process,

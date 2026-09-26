@@ -76,6 +76,52 @@ ABS_SILENCE_RMS = 1e-3
 BSS_MIN_VOICED_SEC = float(os.environ.get("BSS_MIN_VOICED_SEC", "1.0"))
 
 
+class _AssignmentBatchPolicy:
+    """One-way batch/fan-out decision shared by every file in the stage.
+
+    ``warmup_requests`` counts embeddable similarity probes, not windows.  A
+    probe only counts as batched when the worker reports that it actually ran
+    in a multi-item ONNX call.  Once the observed hit rate drops below the
+    threshold the stage stays in fan-out mode; this avoids oscillating between
+    two scheduling strategies while files are already in flight.
+    """
+
+    def __init__(self, warmup_requests=20, min_hit_rate=0.5):
+        self.warmup_requests = max(1, int(warmup_requests or 20))
+        self.min_hit_rate = min(1.0, max(0.0, float(min_hit_rate)))
+        self.total_items = 0
+        self.batched_items = 0
+        self.fanout = False
+        self._lock = threading.Lock()
+
+    def should_batch(self):
+        with self._lock:
+            return not self.fanout
+
+    def observe(self, batched_items, total_items):
+        total_items = max(0, int(total_items or 0))
+        batched_items = min(total_items, max(0, int(batched_items or 0)))
+        with self._lock:
+            switched = False
+            if total_items and not self.fanout:
+                self.total_items += total_items
+                self.batched_items += batched_items
+                if self.total_items >= self.warmup_requests:
+                    hit_rate = self.batched_items / self.total_items
+                    if hit_rate < self.min_hit_rate:
+                        self.fanout = True
+                        switched = True
+            hit_rate = (self.batched_items / self.total_items
+                        if self.total_items else 0.0)
+            return {
+                "total_items": self.total_items,
+                "batched_items": self.batched_items,
+                "hit_rate": hit_rate,
+                "fanout": self.fanout,
+                "switched": switched,
+            }
+
+
 class BssSeparator:
     """Blind source separation, then WeSpeaker speaker assignment.
 
@@ -89,7 +135,9 @@ class BssSeparator:
                  separator: str = None, embedding_repository: str = None,
                  embedding_filename: str = None, embedding_revision: str = None,
                  logger=None, embedding_threads: int = None, score_workers: int = 1,
-                 assignment_process=None, assignment_batching: bool = False):
+                 assignment_process=None, assignment_batching: bool = False,
+                 assignment_batch_warmup_requests: int = 20,
+                 assignment_batch_min_hit_rate: float = 0.5):
         import tempfile
 
         from models.separation_backends import make_backend
@@ -101,6 +149,8 @@ class BssSeparator:
         self._target_locks = {}
         self._target_locks_guard = threading.Lock()
         self.assignment_batching = bool(assignment_batching)
+        self._assignment_batch_policy = _AssignmentBatchPolicy(
+            assignment_batch_warmup_requests, assignment_batch_min_hit_rate)
         self._temp_dir = tempfile.mkdtemp(prefix="bss_exchange_")
         self._req_counter = 0
         self._logger = logger
@@ -248,7 +298,7 @@ class BssSeparator:
 
         Concurrent when score_workers > 1; the outcome never depends on it.
         """
-        if self._score_pool is None or len(tasks) < 2:
+        if getattr(self, "_score_pool", None) is None or len(tasks) < 2:
             return [task() for task in tasks]
         futures = [self._score_pool.submit(task) for task in tasks]
         return [future.result() for future in futures]
@@ -325,8 +375,13 @@ class BssSeparator:
         return results
 
     def _remote_embeddings(self, command, audios, sample_rate, **options):
+        values, _ = self._remote_embeddings_with_stats(
+            command, audios, sample_rate, **options)
+        return values
+
+    def _remote_embeddings_with_stats(self, command, audios, sample_rate, **options):
         if not audios:
-            return []
+            return [], {}
         started = time.perf_counter()
         try:
             reply = self._remote(
@@ -335,11 +390,12 @@ class BssSeparator:
             rows = reply.get("results", [])
             if len(rows) != len(audios):
                 raise RuntimeError("assignment worker batch result count mismatch")
+            stats = reply.get("batch_stats", {})
             with self._timing_lock:
-                for key, value in reply.get("batch_stats", {}).items():
+                for key, value in stats.items():
                     self.timing["embedding_" + key] += value
-            return [RuntimeError(row["error"]) if row.get("error") else
-                    self._embedding_from_reply(row) for row in rows]
+            return ([RuntimeError(row["error"]) if row.get("error") else
+                     self._embedding_from_reply(row) for row in rows], stats)
         finally:
             self._tick("remote", started)
 
@@ -559,14 +615,121 @@ class BssSeparator:
         embedding = self._embedding_from_reply(reply)
         return None if embedding is None else F.normalize(embedding, p=2, dim=0)
 
+    def _batch_policy(self):
+        policy = getattr(self, "_assignment_batch_policy", None)
+        if policy is None:
+            # Protocol tests construct BssSeparator without __init__. Production
+            # always takes the configured values above.
+            policy = _AssignmentBatchPolicy()
+            self._assignment_batch_policy = policy
+        return policy
+
+    def _note_batch_policy(self, snapshot, batched_items, observed_items):
+        with self._timing_lock:
+            self.timing["adaptive_batch_checks"] += 1
+            self.timing["adaptive_batch_observed_items"] += observed_items
+            self.timing["adaptive_batch_batched_items"] += min(observed_items,
+                                                                 batched_items)
+            if snapshot["switched"]:
+                self.timing["adaptive_batch_switches"] += 1
+        if snapshot["switched"] and getattr(self, "_logger", None):
+            self._logger.info(
+                "[BSS] similarity batching hit-rate %.1f%% after %d probes; "
+                "using assignment fan-out for the rest of the stage",
+                100.0 * snapshot["hit_rate"], snapshot["total_items"])
+
+    @staticmethod
+    def _normalized_embedding(value):
+        if value is None or isinstance(value, Exception):
+            return value
+        return F.normalize(value, p=2, dim=0)
+
+    def _probe_embeddings_fanout(self, probes, sr):
+        """Run complete VAD+embedding requests independently across workers."""
+        def task(track, spans):
+            def run():
+                try:
+                    return self._probe_embedding(track, spans, sr)
+                except Exception as exc:
+                    return exc
+            return run
+
+        with self._timing_lock:
+            self.timing["adaptive_fanout_items"] += len(probes)
+        return self._run_scores([task(track, spans) for track, spans in probes])
+
+    def _probe_embeddings_adaptive(self, probes, sr):
+        """VAD first, batch exact-length probes and fan out every singleton.
+
+        No waveform is padded or cropped. Different post-VAD lengths are sent
+        as independent ``embed`` requests, which lets the worker pool schedule
+        them on different assignment processes immediately.
+        """
+        results = [None] * len(probes)
+
+        def prepare(track, spans):
+            def run():
+                try:
+                    return self._gather_probe(track, spans, sr)
+                except Exception as exc:
+                    return exc
+            return run
+
+        prepared = self._run_scores([
+            prepare(track, spans) for track, spans in probes])
+        groups = collections.defaultdict(list)
+        for index, audio in enumerate(prepared):
+            if isinstance(audio, Exception):
+                results[index] = audio
+            elif audio is not None:
+                # At a fixed sample rate, equal sample counts produce equal
+                # WeSpeaker feature shapes. Exact grouping avoids padding and
+                # therefore preserves similarity quality bit-for-bit.
+                groups[len(audio)].append((index, audio))
+
+        jobs = []
+        for items in groups.values():
+            if len(items) > 1:
+                def batch_job(items=items):
+                    try:
+                        values, stats = self._remote_embeddings_with_stats(
+                            "embed_batch", [audio for _, audio in items], sr)
+                    except Exception as exc:
+                        values, stats = [exc] * len(items), {}
+                    return items, values, stats
+                jobs.append(batch_job)
+            else:
+                def single_job(items=items):
+                    try:
+                        value = self._get_embedding(items[0][1], sr)
+                    except Exception as exc:
+                        value = exc
+                    return items, [value], {}
+                jobs.append(single_job)
+
+        batched_items = 0
+        for items, values, stats in self._run_scores(jobs):
+            batched_items += int(stats.get("batched_items", 0))
+            for (index, _), value in zip(items, values):
+                results[index] = self._normalized_embedding(value)
+
+        observed_items = sum(len(items) for items in groups.values())
+        snapshot = self._batch_policy().observe(batched_items, observed_items)
+        self._note_batch_policy(snapshot, batched_items, observed_items)
+        return results
+
     def _probe_embeddings(self, probes, sr):
         """Gather independent probes and return normalized tensors/errors/None."""
+        if self._assignment is not None:
+            if not self._batch_policy().should_batch():
+                return self._probe_embeddings_fanout(probes, sr)
+            return self._probe_embeddings_adaptive(probes, sr)
+
         results = [None] * len(probes)
         audios, indices = [], []
         for index, (track, spans) in enumerate(probes):
             try:
-                audio = (self._cut_spans(track, spans) if self._assignment is not None
-                         else self._gather_probe(track, spans, sr))
+                audio = self._gather_probe(track, spans, sr)
                 if audio is not None:
                     audios.append(audio)
                     indices.append(index)
@@ -575,15 +738,11 @@ class BssSeparator:
         if not audios:
             return results
         try:
-            values = (self._remote_embeddings(
-                "probe_embed_batch", audios, sr, floor_db=-40.0,
-                min_voiced_sec=BSS_MIN_VOICED_SEC, abs_floor_rms=ABS_SILENCE_RMS)
-                if self._assignment is not None else self._get_embeddings(audios, sr))
+            values = self._get_embeddings(audios, sr)
         except Exception as exc:
             values = [exc] * len(audios)
         for index, value in zip(indices, values):
-            results[index] = (value if value is None or isinstance(value, Exception)
-                              else F.normalize(value, p=2, dim=0))
+            results[index] = self._normalized_embedding(value)
         return results
 
     def _score_probe_batch(self, requests, sr, full_span, sources, errors):

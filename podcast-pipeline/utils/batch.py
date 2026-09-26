@@ -426,6 +426,10 @@ def _asr_cross_file(args) -> bool:
                 and perf.get("stages", {}).get("asr", {}).get("cross_file", False))
 
 
+# "As many as there are files": the caller takes min(this, files pending).
+UNLIMITED_FILES = 1 << 30
+
+
 def _stage_parallelism(args, stage) -> int:
     """Concurrent files allowed for stages with independent GPU workers."""
     perf = getattr(args, "performance_config", None) or {}
@@ -443,9 +447,20 @@ def _stage_parallelism(args, stage) -> int:
         separator = (getattr(args, "separator", None)
                      or os.environ.get("BSS_SEPARATOR", "sidon"))
         if str(separator).strip().lower() == "sidon":
-            return max(1, min(2, int(
-                stages.get("separation", {}).get("max_workers", 1))))
+            separation = stages.get("separation", {})
+            files = int(separation.get("files_in_flight", 0))
+            if files > 0:
+                return files
+            return max(1, min(2, int(separation.get("max_workers", 1))))
     music_perf = stages.get("music", {})
+    taggers = max(1, int(music_perf.get("tagger_workers", 1)))
+    if stage == "music" and taggers >= 2:
+        # With a pool of taggers every file is in flight at once. Sweeps wait for a
+        # free tagger in arrival order, so each file's music-removal jobs reach the
+        # BS-RoFormer instances as soon as its sweep is done and they never wait for
+        # a batch of files to finish; capping the files would only leave them idle.
+        # The caller runs at most as many as there are files.
+        return UNLIMITED_FILES
     if stage == "music" and (
             music_perf.get("cross_file_overlap", False)
             or int(music_perf.get("max_separator_workers", 1)) >= 2):
