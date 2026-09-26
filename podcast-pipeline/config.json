@@ -358,6 +358,9 @@
           "max_monologue": 0,
           "min_turns_each": 1,
           "min_score": 55,
+          "weights": {
+            "interaction": 25
+          },
           "min_semantic": 4,
           "max_candidates": 24,
           "pad_seconds": 0.2,

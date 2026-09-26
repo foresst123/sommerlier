@@ -434,6 +434,15 @@ def test_weights_are_normalised_so_a_score_never_passes_100():
     assert finder._score(comps) == 100.0
 
 
+def test_low_interaction_is_soft_penalized_when_its_weight_is_increased():
+    comps = {k: 1.0 for k in ("turn_taking", "duration", "balance", "interaction",
+                              "continuity", "speaker_correctness", "cleanliness")}
+    comps["interaction"] = 0.0
+    baseline = _finder(_talk(2))._score(comps)
+    tuned = _finder(_talk(2), weights={"interaction": 25.0})._score(comps)
+    assert tuned < baseline and tuned > 55.0
+
+
 def test_the_configuration_refuses_what_it_does_not_know():
     with pytest.raises(TypeError):
         ConversationSelectionConfig(min_secs=30)
