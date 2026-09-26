@@ -83,7 +83,7 @@ def test_a_released_worker_is_restarted_for_the_next_file():
     pipe = _pipeline(worker)
 
     pipe._release_worker(_args(False), "diarizen")     # end of file 1
-    process = pipe._ensure_worker(_args(False), "diarizen")   # start of file 2
+    process = pipe._ensure_worker("diarizen")   # start of file 2
 
     assert process is not None
     assert worker.spawns == 2
@@ -91,7 +91,7 @@ def test_a_released_worker_is_restarted_for_the_next_file():
 
 def test_a_live_worker_is_not_restarted():
     worker = _FakeWorkerService()
-    process = _pipeline(worker)._ensure_worker(_args(False), "diarizen")
+    process = _pipeline(worker)._ensure_worker("diarizen")
 
     assert process is worker.process
     assert worker.spawns == 1
@@ -128,7 +128,7 @@ def test_an_absent_worker_is_tolerated():
     pipe = _pipeline(_FakeWorkerService())
     pipe.worker_services = {}
 
-    assert pipe._ensure_worker(_args(False), "diarizen") is None
+    assert pipe._ensure_worker("diarizen") is None
     pipe._rebind_worker(_args(False), "diarizen", None, "diarizer")
 
 
@@ -184,6 +184,27 @@ def test_closing_a_scope_that_was_never_opened_is_safe():
     pipe.end_stage_scope()          # must not raise
 
 
+def test_asr_models_are_held_for_the_full_asr_stage_then_released_once():
+    """ASRService normally releases Whisper/PhoWhisper per file.
+
+    The stage scheduler temporarily changes that rule, so a corpus pass loads
+    each model once and hands both GPUs to refinement only after every file has
+    completed ASR.
+    """
+    pipe = _pipeline(_FakeWorkerService())
+    pipe.model_loader = _Loader()
+    pipe.asr_svc = types.SimpleNamespace(keep_models=False)
+
+    pipe.prepare_stage_scope("asr")
+    pipe.begin_stage_scope()
+    assert pipe.asr_svc.keep_models is True
+
+    pipe.end_stage_scope()
+
+    assert pipe.asr_svc.keep_models is False
+    assert pipe.model_loader.unloaded == ["whisper", "phowhisper"]
+
+
 # --- workers are not revived for stages that will not use them --------------
 
 def test_a_checkpointed_stage_does_not_revive_its_worker():
@@ -197,12 +218,16 @@ def test_a_checkpointed_stage_does_not_revive_its_worker():
         "services/pipeline_service.py"), encoding="utf-8").read()
 
     for worker, stage in (("diarizen", "diarization"),
-                          ("sidon", "separation"),
                           ("qwen3", "asr")):
         call = re.search(rf'.*_rebind_worker\(args, "{worker}".*', src).group(0)
         line_no = src[:src.index(call)].count("\n")
-        guard = src.splitlines()[line_no - 1]
-        assert f'checkpoint.exists("{stage}")' in guard, (
+        # The condition may span several lines, so look back to the `if` that opens it
+        # rather than at the single line above the call.
+        lines = src.splitlines()
+        start = next(i for i in range(line_no - 1, -1, -1)
+                     if lines[i].lstrip().startswith("if "))
+        guard = "\n".join(lines[start:line_no])
+        assert f'checkpoint.exists("{stage}"' in guard, (
             f"{worker} is revived unconditionally; it should only start when "
             f"the {stage} stage is actually going to run")
 
@@ -254,3 +279,185 @@ def test_a_stage_scope_closes_even_when_the_stage_blows_up():
 
     assert pipe.opened == 1
     assert pipe.closed == 1, "the scope was left open after the stage failed"
+
+
+# --- the stage is what starts its worker -------------------------------------
+
+class _NeverStarted(_FakeWorkerService):
+    """A worker main() never managed to launch: constructed, not running."""
+
+    def __init__(self, fails=False):
+        self.process = None
+        self.spawns = 0
+        self.stops = 0
+        self.fails = fails
+
+    def spawn(self):
+        if self.fails:
+            raise FileNotFoundError("no interpreter for this worker")
+        super().spawn()
+
+
+class _RecordingLoader:
+    """Records the order of calls, so 'worker first' is checkable."""
+
+    def __init__(self, worker):
+        self.worker = worker
+        self.order = []
+
+    def _note(self, what):
+        self.order.append((what, self.worker.process is not None))
+
+    def load_diarization_models(self, service=None):
+        self._note("diarization")
+
+    def load_base_models(self):
+        self._note("base")
+
+    def load_tagger(self):
+        self._note("tagger")
+
+
+def _staged(worker):
+    p = _pipeline(worker)
+    p.model_loader = _RecordingLoader(worker)
+    return p
+
+
+def test_a_stage_starts_the_worker_it_needs():
+    """The point of the change: main() is a head start, not the authority.
+
+    A run whose worker never launched -- prefetch failed, or the stage was not
+    reachable when main() decided -- still has to work when the stage arrives.
+    """
+    worker = _NeverStarted()
+    pipe = _staged(worker)
+
+    pipe._load("diarization")
+
+    assert worker.spawns == 1
+    assert worker.process is not None
+
+
+def test_the_worker_is_up_before_the_models_load():
+    """The loader reads service.process; starting after it would pass None."""
+    worker = _NeverStarted()
+    pipe = _staged(worker)
+
+    pipe._load("diarization")
+
+    assert pipe.model_loader.order == [("diarization", True)]
+
+
+def test_a_stage_with_no_worker_loads_normally():
+    worker = _NeverStarted()
+    pipe = _staged(worker)
+
+    pipe._load("tagger")
+
+    assert worker.spawns == 0
+    assert pipe.model_loader.order == [("tagger", False)]
+
+
+def test_a_live_worker_is_not_started_twice():
+    worker = _FakeWorkerService()
+    pipe = _staged(worker)
+
+    pipe._load("diarization")
+
+    assert worker.spawns == 1, "already running; nothing to do"
+
+
+def test_a_worker_that_cannot_start_stops_its_stage():
+    """Loudly, and here. Returning None built a client wired to no process,
+    and the failure surfaced several steps later as an empty result."""
+    worker = _NeverStarted(fails=True)
+    pipe = _staged(worker)
+
+    try:
+        pipe._load("diarization")
+    except FileNotFoundError:
+        pass
+    else:
+        raise AssertionError("a stage with no worker must not proceed")
+
+    assert pipe.model_loader.order == [], "models must not load without it"
+
+
+# --- when a worker starts ----------------------------------------------------
+
+def test_workers_wait_for_their_stage_by_default():
+    """Starting both up front hides their load time behind the music stage,
+    but parks them in VRAM for the whole run: Qwen3-ASR is a 1.7B model that
+    sits on its GPU from the first second until the ASR stage. On a two-file
+    run that measured a quarter of an hour of memory held and unused."""
+    import json
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "config.json"), encoding="utf-8") as fh:
+        config = json.load(fh)
+    for env, profile in config["environments"].items():
+        assert profile["pipeline"]["prefetch_workers"] is False, env
+
+
+def test_the_lazy_path_is_the_one_that_already_existed():
+    """_ensure_worker runs immediately before each stage loads its models, so
+    not pre-starting costs a wait rather than a failure. This is what makes the
+    default safe."""
+    source = open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "services", "pipeline_service.py"),
+        encoding="utf-8").read()
+    load = source.index("def _load(self, group: str):")
+    body = source[load:source.index("def ", load + 10)]
+    assert "self._ensure_workers(" in body, (
+        "_load must start the stage's worker before loading its models")
+
+
+def test_prefetch_is_reachable_for_a_box_with_room():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    main = open(os.path.join(root, "main.py"), encoding="utf-8").read()
+    assert '"--prefetch_workers"' in main
+    assert 'getattr(args, "prefetch_workers", False)' in main
+
+
+def test_the_tagger_is_released_when_the_music_stage_ends():
+    """PANNs was only released at the end of step 5, the per-segment music
+    fallback -- a stage skipped whenever a music map existed, which under
+    stage-major execution the run left for diarization long before reaching. So
+    the tagger held ~600MB of VRAM for the whole run, on the card that then has
+    to fit DiariZen, the embedder, TSE and ASR.
+
+    Observed in a real run: "Unloaded bs_roformer from VRAM" appeared and no
+    matching line for the tagger ever did. The fallback is gone now, which is
+    why the release has to sit inside the music stage rather than after it."""
+    source = open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "services", "pipeline_service.py"),
+        encoding="utf-8").read()
+
+    release = source.index('self._free(args, "tagger")')
+    diarization = source.index("# 3. Diarization")
+    assert release < diarization, (
+        "the tagger must be released inside the music stage, not after it")
+
+    assert "# 5. Background Music Removal" not in source, (
+        "the per-segment fallback is gone; nothing should re-introduce it")
+
+
+def test_workers_of_one_stage_are_spawned_before_any_is_waited_on():
+    events = []
+
+    class Service:
+        def __init__(self, name):
+            self.name, self.process = name, None
+
+        def spawn(self):
+            events.append(f"spawn {self.name}")
+            self.process = object()
+
+        def wait_ready(self):
+            events.append(f"ready {self.name}")
+
+    pipe = _pipeline(None)
+    pipe.worker_services = {"qwen3": Service("qwen3"), "whisper": Service("whisper")}
+    pipe._register_worker_pids = lambda name, service: []
+    pipe._ensure_workers(("qwen3", "whisper"))
+    assert events == ["spawn qwen3", "spawn whisper", "ready qwen3", "ready whisper"]

@@ -1,184 +1,488 @@
 {
-    "language": {
-        "multilingual": false,
-        "supported": [
-            "en",
-            "ko",
-            "ja",
-            "zh",
-            "es",
-            "fr",
-            "de",
-            "it",
-            "pt",
-            "ru",
-            "ar",
-            "hi"
-        ]
-    },
-    "entrypoint": {
-        "input_folder_path": "audio_pipeline/test",
-        "SAMPLE_RATE": 16000
-    },
-    "huggingface_token": "hf_XXXXXXXXXXXXXXXXXXXXXXXX",
-    "environments": {
-        "kaggle": {
-            "offline_mode": false,
-            "gpu_1": 0,
-            "gpu_2": 1,
-            "pipeline": {
-                "vad": true,
-                "tse": true,
-                "panns": true,
-                "ASRMoE": true,
-                "llm_refinement": true,
-                "qwen3omni": false,
-                "dia3": false,
-                "keep_models": false,
-                "by_stage": true,
-                "initprompt": true,
-                "lang": "vi",
-                "LLM": "case_0",
-                "merge_gap": 0.3,
-                "max_segment_length": 20.0,
-                "seg_th": 0.11,
-                "min_cluster_size": 11,
-                "clust_th": 0.5
-            },
-            "models": {
-                "vad": {
-                    "vad_threshold": 2.0,
-                    "max_segment": 20.0
-                },
-                "whisper": {
-                    "model_size": "large-v3",
-                    "compute_type": "float16",
-                    "batch_size": 16
-                },
-                "phowhisper": {
-                    "compute_type": "float16",
-                    "batch_size": 16
-                },
-                "qwen3": {
-                    "batch_size": 6,
-                    "use_flash_attention": false,
-                    "torch_dtype": "float16"
-                },
-                "diarizen": {
-                    "batch_size": 12,
-                    "seg_duration": 16,
-                    "segmentation_step": 0.1,
-                    "apply_median_filtering": false,
-                    "clustering_method": "VBxClustering",
-                    "min_speakers": 1,
-                    "max_speakers": 10,
-                    "ahc_threshold": 0.6
-                },
-                "tse": {
-                    "qc_sim_threshold": 0.2,
-                    "min_voiced_sec": 1.0
-                },
-                "demucs": {
-                    "segment": 10,
-                    "overlap": 0.1
-                },
-                "refinement": {
-                    "model_name": "Qwen/Qwen2.5-3B-Instruct",
-                    "batch_size": 2,
-                    "torch_dtype": "float16",
-                    "prefix_cache": false,
-                    "device": "cuda:0"
-                }
-            },
-            "allow_tf32": true,
-            "batch": {
-                "max_hours_per_run": 5.0
-            }
+  "language": {
+    "multilingual": false,
+    "supported": [
+      "en",
+      "ko",
+      "ja",
+      "zh",
+      "es",
+      "fr",
+      "de",
+      "it",
+      "pt",
+      "ru",
+      "ar",
+      "hi"
+    ]
+  },
+  "entrypoint": {
+    "input_folder_path": "audio_pipeline/test",
+    "SAMPLE_RATE": 16000
+  },
+  "huggingface_token": "",
+  "environments": {
+    "kaggle": {
+      "offline_mode": false,
+      "gpu_1": 0,
+      "gpu_2": 1,
+      "outputs": {
+        "clean_two_channel_dir": ""
+      },
+      "steps": {
+        "music_analysis": true,
+        "music_removal": true,
+        "cut_music": true,
+        "diarization": true,
+        "separation": true,
+        "asr": true,
+        "captioning": false,
+        "refinement": true,
+        "speaker_relabel": true,
+        "word_alignment": true,
+        "conversation_exports": true,
+        "export": true
+      },
+      "pipeline": {
+        "vad": true,
+        "bss": true,
+        "music": true,
+        "music_scope": "spans",
+        "ASRMoE": true,
+        "llm_refinement": true,
+        "qwen3omni": false,
+        "dia3": false,
+        "keep_models": false,
+        "prefetch_workers": false,
+        "by_stage": true,
+        "review_page": true,
+        "review_max_mb": 400,
+        "initprompt": true,
+        "lang": "vi",
+        "LLM": "case_0",
+        "merge_gap": 0.8,
+        "bridge_gap": 3.0,
+        "max_segment_length": 20.0,
+        "seg_th": 0.11,
+        "min_cluster_size": 11,
+        "clust_th": 0.5
+      },
+      "models": {
+        "vad": {
+          "vad_threshold": 2.0,
+          "max_segment": 20.0
         },
-        "a100": {
-            "offline_mode": false,
-            "gpu_1": 0,
-            "gpu_2": 0,
-            "pipeline": {
-                "vad": true,
-                "tse": true,
-                "panns": true,
-                "ASRMoE": true,
-                "llm_refinement": true,
-                "qwen3omni": false,
-                "dia3": false,
-                "keep_models": true,
-                "by_stage": true,
-                "initprompt": true,
-                "lang": "vi",
-                "LLM": "case_0",
-                "merge_gap": 0.3,
-                "max_segment_length": 20.0,
-                "seg_th": 0.11,
-                "min_cluster_size": 11,
-                "clust_th": 0.5
-            },
-            "models": {
-                "vad": {
-                    "vad_threshold": 2.0,
-                    "max_segment": 20.0
-                },
-                "whisper": {
-                    "model_size": "large-v3",
-                    "compute_type": "bfloat16",
-                    "batch_size": 48
-                },
-                "phowhisper": {
-                    "compute_type": "bfloat16",
-                    "batch_size": 48
-                },
-                "qwen3": {
-                    "batch_size": 24,
-                    "use_flash_attention": false,
-                    "torch_dtype": "bfloat16"
-                },
-                "diarizen": {
-                    "batch_size": 64,
-                    "seg_duration": 16,
-                    "segmentation_step": 0.5,
-                    "apply_median_filtering": false,
-                    "clustering_method": "VBxClustering",
-                    "min_speakers": 1,
-                    "max_speakers": 20,
-                    "ahc_threshold": 0.6
-                },
-                "tse": {
-                    "qc_sim_threshold": 0.2,
-                    "min_voiced_sec": 1.0
-                },
-                "demucs": {
-                    "segment": 30,
-                    "overlap": 0.25
-                },
-                "refinement": {
-                    "model_name": "Qwen/Qwen3-4B",
-                    "batch_size": 24,
-                    "torch_dtype": "bfloat16",
-                    "prefix_cache": true,
-                    "device": "cuda:0"
-                }
-            },
-            "allow_tf32": true,
-            "batch": {
-                "max_hours_per_run": 20.0
-            }
+        "whisper": {
+          "model_size": "large-v3",
+          "compute_type": "float16",
+          "batch_size": 16
+        },
+        "phowhisper": {
+          "compute_type": "float16",
+          "batch_size": 16
+        },
+        "qwen3": {
+          "batch_size": 6,
+          "use_flash_attention": false,
+          "torch_dtype": "float16"
+        },
+        "diarizen": {
+          "batch_size": 12,
+          "seg_duration": 16,
+          "segmentation_step": 0.1,
+          "apply_median_filtering": true,
+          "clustering_method": "VBxClustering",
+          "min_speakers": 1,
+          "max_speakers": 10,
+          "ahc_threshold": 0.62
+        },
+        "bss": {
+          "qc_sim_threshold": 0.2,
+          "min_voiced_sec": 1.0,
+          "context_per_side_seconds": 2.0,
+          "context_max_per_side_seconds": 2.2,
+          "padding_min_per_speaker_seconds": 1.0,
+          "boundary_search_seconds": 1800.0,
+          "enrollment_memory": false,
+          "separator": "sidon",
+          "embedding_repository": "Wespeaker/wespeaker-voxceleb-resnet293-LM",
+          "embedding_filename": "voxceleb_resnet293_LM.onnx"
+        },
+        "bs_roformer": {
+          "model": "mel_band_roformer_kim_ft2_bleedless_unwa.ckpt",
+          "chunk_duration": 300,
+          "normalization_threshold": 1.0,
+          "native_fp16": false,
+          "torch_compile": false,
+          "hi_res": true
+        },
+        "refinement": {
+          "model_name": "Qwen/Qwen2.5-3B-Instruct",
+          "batch_size": 2,
+          "torch_dtype": "bfloat16",
+          "prefix_cache": false
+        },
+        "relabel": {
+          "window_tokens": 6000,
+          "overlap_segments": 30,
+          "min_confidence": 0.7,
+          "max_change_fraction": 0.15,
+          "thinking": false
+        },
+        "word_alignment": {
+          "model_name": "nguyenvulebinh/wav2vec2-base-vi-vlsp2020",
+          "device": "auto",
+          "interpolate_method": "nearest",
+          "batch_seconds": 180
+        },
+        "conversation_selection": {
+          "min_seconds": 60,
+          "max_seconds": 240,
+          "max_silence": 3.0,
+          "max_monologue": 0,
+          "min_turns_each": 1,
+          "min_score": 55,
+          "min_semantic": 4,
+          "max_candidates": 24,
+          "pad_seconds": 0.2,
+          "fade_ms": 50,
+          "stereo": true,
+          "overlap_first": true,
+          "overlap_min_seconds": 0.3,
+          "overlap_good_min_similarity": 0.6,
+          "overlap_good_min_coverage": 0.9,
+          "require_noise": true,
+          "require_semantic": true,
+          "noisy_run_seconds": 2.0,
+          "noise_speech_max": 0.1,
+          "noise_env_max": 0.15,
+          "noise_room_max": 0.1,
+          "noise_max": 0.15,
+          "music_patched_max": 0.15,
+          "require_word_alignment": true,
+          "thinking": false
+        },
+        "sidon": {
+          "num_steps": 100
         }
+      },
+      "allow_tf32": true,
+      "performance": {
+        "enabled": true,
+        "max_gpus": 2,
+        "gpu_reserve_gib": 2.0,
+        "cpu_reserve_for_coordinator": 1,
+        "ram_soft_fraction": 0.75,
+        "ram_hard_fraction": 0.85,
+        "max_pending_jobs": 32,
+        "telemetry_interval_seconds": 1.0,
+        "stages": {
+          "asr": {
+            "true_batching": true,
+            "dynamic_replicas": true,
+            "max_replicas_per_model": 2,
+            "replica_min_pending_jobs": 12,
+            "replica_min_gain_seconds": 15.0,
+            "replica_load_seconds": 30.0,
+            "replica_speed_ratio": 0.5
+          },
+          "refinement": {
+            "workers": 2,
+            "placement": "pipelined",
+            "gpu_memory_utilization": 0.82,
+            "max_batch_tokens": 8192,
+            "micro_batch_size": 1,
+            "pipeline_split_ratio": 0.5,
+            "cpu_threads": 8
+          },
+          "diarization": {
+            "workers": 2,
+            "placement": "replicated"
+          },
+          "separation": {
+            "max_workers": 2,
+            "gpu_prefetch_per_worker": 2,
+            "postprocess_workers": 2,
+            "postprocess_device": "cpu",
+            "ordered_postprocess": true
+          },
+          "music": {
+            "tagger_workers": 1,
+            "max_separator_workers": 2,
+            "cross_file_overlap": false,
+            "ordered_postprocess": true,
+            "postprocess_workers": 2
+          }
+        }
+      },
+      "batch": {
+        "max_hours_per_run": 5.0
+      }
     },
-    "batch": {
-        "max_hours_per_run": 5.0,
-        "audio_extensions": [
-            ".mp3",
-            ".wav",
-            ".m4a",
-            ".flac",
-            ".opus",
-            ".ogg",
-            ".aac"
-        ]
+    "a100": {
+      "offline_mode": false,
+      "gpu_1": 0,
+      "gpu_2": 1,
+      "outputs": {
+        "clean_two_channel_dir": "/home/lamkd2/output_fullduplex_data"
+      },
+      "steps": {
+        "music_analysis": true,
+        "music_removal": true,
+        "cut_music": true,
+        "diarization": true,
+        "separation": true,
+        "asr": true,
+        "captioning": false,
+        "refinement": true,
+        "speaker_relabel": true,
+        "word_alignment": true,
+        "conversation_exports": true,
+        "export": true
+      },
+      "pipeline": {
+        "vad": true,
+        "bss": true,
+        "music": true,
+        "music_scope": "spans",
+        "ASRMoE": true,
+        "llm_refinement": true,
+        "qwen3omni": false,
+        "dia3": false,
+        "keep_models": false,
+        "prefetch_workers": false,
+        "by_stage": true,
+        "review_page": true,
+        "review_max_mb": 400,
+        "initprompt": true,
+        "lang": "vi",
+        "LLM": "case_0",
+        "merge_gap": 0.8,
+        "bridge_gap": 3.0,
+        "max_segment_length": 20.0,
+        "seg_th": 0.11,
+        "min_cluster_size": 11,
+        "clust_th": 0.5
+      },
+      "models": {
+        "vad": {
+          "vad_threshold": 2.0,
+          "max_segment": 20.0
+        },
+        "whisper": {
+          "backend": "vllm",
+          "model_size": "large-v3",
+          "model_name": "openai/whisper-large-v3",
+          "torch_dtype": "bfloat16",
+          "batch_size": 16,
+          "gpu_memory_utilization": 0.4,
+          "kv_cache_memory_bytes": 6442450944,
+          "max_new_tokens": 256
+        },
+        "phowhisper": {
+          "compute_type": "float32",
+          "batch_size": 16
+        },
+        "qwen3": {
+          "backend": "vllm",
+          "model_name": "Qwen/Qwen3-ASR-1.7B",
+          "batch_size": 32,
+          "torch_dtype": "bfloat16",
+          "gpu_memory_utilization": 0.4,
+          "kv_cache_memory_bytes": 5368709120,
+          "max_model_len": 8192,
+          "max_new_tokens": 256
+        },
+        "diarizen": {
+          "batch_size": 72,
+          "seg_duration": 16,
+          "segmentation_step": 0.05,
+          "apply_median_filtering": true,
+          "clustering_method": "VBxClustering",
+          "min_speakers": 1,
+          "max_speakers": 10,
+          "ahc_threshold": 0.5
+        },
+        "bss": {
+          "window_workers": 6,
+          "qc_sim_threshold": 0.2,
+          "min_voiced_sec": 1.0,
+          "context_per_side_seconds": 2.0,
+          "context_max_per_side_seconds": 2.2,
+          "padding_min_per_speaker_seconds": 1.0,
+          "boundary_search_seconds": 1800.0,
+          "enrollment_memory": false,
+          "separator": "sidon",
+          "embedding_repository": "Wespeaker/wespeaker-voxceleb-resnet293-LM",
+          "embedding_filename": "voxceleb_resnet293_LM.onnx"
+        },
+        "bs_roformer": {
+          "model": "model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt",
+          "chunk_duration": 600,
+          "normalization_threshold": 0.7,
+          "native_fp16": false,
+          "torch_compile": false,
+          "hi_res": true,
+          "isolate_process": true
+        },
+        "refinement": {
+          "backend": "vllm",
+          "model_name": "Qwen/Qwen3.5-9B",
+          "batch_size": 1024,
+          "torch_dtype": "bfloat16",
+          "prefix_cache": true,
+          "max_model_len": 49152
+        },
+        "relabel": {
+          "window_tokens": 32000,
+          "overlap_segments": 30,
+          "max_window_segments": 200,
+          "min_confidence": 0.7,
+          "max_change_fraction": 0.15,
+          "thinking": true,
+          "max_new_tokens": 32768
+        },
+        "word_alignment": {
+          "model_name": "nguyenvulebinh/wav2vec2-base-vi-vlsp2020",
+          "device": "auto",
+          "interpolate_method": "nearest",
+          "batch_seconds": 180,
+          "workers_per_gpu": 2,
+          "prefetch_batches": 2
+        },
+        "conversation_selection": {
+          "render_workers": 4,
+          "reuse_render": true,
+          "min_seconds": 30,
+          "max_seconds": 240,
+          "finder_window_segments": 150,
+          "finder_overlap_segments": 40,
+          "max_silence": 3.0,
+          "max_monologue": 0,
+          "min_turns_each": 1,
+          "min_score": 55,
+          "weights": {
+            "interaction": 25
+          },
+          "min_semantic": 4,
+          "max_candidates": 24,
+          "pad_seconds": 0.2,
+          "fade_ms": 50,
+          "stereo": true,
+          "overlap_first": true,
+          "overlap_min_seconds": 0.3,
+          "overlap_good_min_similarity": 0.6,
+          "overlap_good_min_coverage": 0.9,
+          "require_noise": true,
+          "require_semantic": true,
+          "noisy_run_seconds": 2.0,
+          "noise_speech_max": 0.1,
+          "noise_env_max": 0.15,
+          "noise_room_max": 0.1,
+          "noise_max": 0.15,
+          "music_patched_max": 0.15,
+          "require_word_alignment": true,
+          "thinking": true,
+          "max_new_tokens": 32768
+        },
+        "sidon": {
+          "num_steps": 100
+        }
+      },
+      "allow_tf32": false,
+      "performance": {
+        "enabled": true,
+        "max_gpus": 2,
+        "gpu_reserve_gib": 4.0,
+        "cpu_reserve_for_coordinator": 1,
+        "ram_soft_fraction": 0.75,
+        "ram_hard_fraction": 0.85,
+        "max_pending_jobs": 64,
+        "telemetry_interval_seconds": 1.0,
+        "stages": {
+          "asr": {
+            "true_batching": true,
+            "dynamic_replicas": true,
+            "max_replicas_per_model": 2,
+            "replica_min_pending_jobs": 32,
+            "replica_min_gain_seconds": 15.0,
+            "replica_load_seconds": 30.0,
+            "replica_speed_ratio": 0.5,
+            "cross_file": true,
+            "files_in_flight": 3,
+            "async_vote": true,
+            "vote_workers": 2,
+            "max_prepared_mb": 2048,
+            "shared_batch_size": 16,
+            "boost_batch_size": 48,
+            "qwen3_gpu": "gpu_1",
+            "whisper_gpu": "gpu_2",
+            "phowhisper_gpu": "gpu_2",
+            "phowhisper_workers": 2
+          },
+          "refinement": {
+            "workers": 2,
+            "placement": "pipelined",
+            "gpu_memory_utilization": 0.95,
+            "max_batch_tokens": 32768,
+            "micro_batch_size": 8,
+            "pipeline_split_ratio": 0.5,
+            "cpu_threads": 32,
+            "keep_llm_across_relabel": true,
+            "parallel_windows": true,
+            "shared_queue": true,
+            "chunk_size": 32
+          },
+          "diarization": {
+            "workers": 2,
+            "placement": "replicated"
+          },
+          "separation": {
+            "max_workers": 2,
+            "files_in_flight": 4,
+            "workers_per_gpu": 3,
+            "gpu_prefetch_per_worker": 0,
+            "admission_bytes": 0,
+            "lazy_windows": false,
+            "cpu_budget": false,
+            "postprocess_workers": 8,
+            "postprocess_device": "cpu",
+            "assignment_threads": 24,
+            "assignment_worker_threads": 4,
+            "assignment_parallel": 4,
+            "assignment_batching": true,
+            "assignment_batch_warmup_requests": 20,
+            "assignment_batch_min_hit_rate": 0.5,
+            "assignment_workers_per_gpu": 4,
+            "ordered_postprocess": true
+          },
+          "music": {
+            "tagger_workers": 4,
+            "tagger_isolate_process": true,
+            "max_separator_workers": 2,
+            "workers_per_gpu": 2,
+            "cross_file_overlap": false,
+            "ordered_postprocess": true,
+            "postprocess_workers": 2,
+            "hires_decode_ahead": 4
+          }
+        }
+      },
+      "batch": {
+        "max_hours_per_run": 20.0
+      }
     }
+  },
+  "batch": {
+    "max_hours_per_run": 5.0,
+    "audio_extensions": [
+      ".mp3",
+      ".wav",
+      ".m4a",
+      ".flac",
+      ".opus",
+      ".ogg",
+      ".aac"
+    ]
+  }
 }

@@ -80,7 +80,7 @@ def _gap_profile(merged, span) -> dict:
 def _as_dict(obj) -> dict:
     """Plain dict for one segment/transcript, without any waveform payload."""
     d = dict(obj.__dict__) if hasattr(obj, "__dict__") else dict(obj)
-    d.pop("enhanced_audio", None)
+    d.pop("audio", None)
     for k, v in list(d.items()):
         if isinstance(v, np.ndarray):
             d[k] = {"_ndarray": True, "shape": list(v.shape), "dtype": str(v.dtype)}
@@ -92,12 +92,20 @@ def _as_dict(obj) -> dict:
 class StageOutputService:
     """Writes one directory per pipeline stage."""
 
+    # Numbered by the order they run, which changed when music analysis moved
+    # ahead of diarization: the diarizer now segments audio whose music bed has
+    # already been stripped, rather than seeing it and being told about it
+    # afterwards.
     STAGES = {
-        "diarization": "01_diarization",
-        "separation": "02_separation",
-        "music_removal": "03_music_removal",
-        "asr": "04_asr",
-        "refinement": "05_refinement",
+        "music": "01_music",
+        "diarization": "02_diarization",
+        "separation": "03_separation",
+        "music_removal": "04_music_removal",
+        "asr": "05_asr",
+        "refinement": "06_refinement",
+        "relabel": "07_relabel",
+        "word_alignment": "08_word_alignment",
+        "conversation_exports": "09_conversation_exports",
     }
 
     def __init__(self, output_dir: str, logger=None, enabled: bool = True):
@@ -212,15 +220,15 @@ class StageOutputService:
     @staticmethod
     def separation_stats(segs: List[Any]) -> dict:
         items = [_as_dict(s) for s in segs]
-        sep = [d for d in items if d.get("tse")]
-        spliced = sum(len(d.get("tse_spans") or []) for d in items)
-        failed = sum(len(d.get("tse_failed_spans") or []) for d in items)
-        sims = [sp[2] for d in items for sp in (d.get("tse_spans") or [])
+        sep = [d for d in items if d.get("bss")]
+        spliced = sum(len(d.get("bss_spans") or []) for d in items)
+        failed = sum(len(d.get("bss_failed_spans") or []) for d in items)
+        sims = [sp[2] for d in items for sp in (d.get("bss_spans") or [])
                 if len(sp) > 2 and sp[2] is not None and sp[2] >= 0]
 
         reasons: Dict[str, int] = {}
         for d in items:
-            for fs in (d.get("tse_failed_spans") or []):
+            for fs in (d.get("bss_failed_spans") or []):
                 if len(fs) > 2:
                     reasons[str(fs[2])] = reasons.get(str(fs[2]), 0) + 1
 
@@ -291,22 +299,109 @@ class StageOutputService:
                 self.logger.warning(f"[stage-out] {stage}: {msg}")
         return d
 
-    def write_diarization(self, segments, total_dur=None):
-        return self._finish("diarization", "segments.json", segments,
-                            self.segment_stats(segments, total_dur))
+    def write_music(self, music_map, timeline=None, audio=None, sample_rate=None):
+        """What the tagger found, and what was done about it.
+
+        Written before diarization runs, so a `--stop_after music` run leaves
+        the whole verdict on disk: which stretches were cut as standalone
+        music, which were beds to strip, how much left the recording, and the
+        audio that remains.
+        """
+        if not self.enabled:
+            return
+        stage = self.stage_dir("music")
+
+        payload = dict(music_map.summary())
+        payload["spans"] = [{"start": round(a, 3), "end": round(b, 3), "kind": k}
+                            for a, b, k in music_map.spans]
+        if timeline is not None:
+            payload["removed_seconds"] = round(timeline.removed, 2)
+            payload["kept_stretches"] = len(timeline.kept)
+            # The map itself, not just its size: the spans above are in the
+            # original recording's time and after_music.wav is in the cut one,
+            # so without this nothing can line the two up -- not export, and
+            # not a person trying to hear what a join sounds like.
+            payload["timeline"] = timeline.to_json()
+        self._write_json(os.path.join(stage, "music_map.json"), payload)
+
+        # The trimmed recording itself, so the cuts and their joins can be
+        # judged by ear rather than from counters.
+        if audio is not None and sample_rate:
+            try:
+                import soundfile as sf
+                sf.write(os.path.join(stage, "after_music.wav"), audio, sample_rate, subtype='PCM_16')
+            except Exception as exc:
+                if self.logger:
+                    self.logger.warning(f"Could not write after_music.wav: {exc}")
+
+    def write_diarization(self, segments, total_dur=None,
+                          raw_segments=None, audio=None, sample_rate=None):
+        """Write diarization artifacts.
+
+        Lưu hai file JSON song song:
+          segments.json      -- đầu ra đã xử lý (merge + ghost dissolution)
+          segments_raw.json  -- đầu ra thẳng từ diarizer, chưa qua xử lý
+
+        Và audio clips cho từng segment của cả hai phiên bản vào:
+          audio/processed/<idx>_<speaker>_<start>-<end>.wav
+          audio/raw/<idx>_<speaker>_<start>-<end>.wav
+
+        Clip bắt đầu/kết thúc đúng biên segment, không có padding thêm,
+        để nghe kiểm tra xem cắt đúng chỗ chuyển lượt không.
+        """
+        d = self._finish("diarization", "segments.json", segments,
+                         self.segment_stats(segments, total_dur),
+                         extra={"segments_raw.json": [_as_dict(r) for r in raw_segments]}
+                         if raw_segments else None)
+
+        if audio is None or sample_rate is None or not self.enabled:
+            return d
+
+        try:
+            import soundfile as sf
+        except Exception as e:
+            if self.logger and not self._warned_sf:
+                self.logger.warning(f"[stage-out] soundfile unavailable, no diarization clips: {e}")
+                self._warned_sf = True
+            return d
+
+        def _write_clips(seg_list, subdir):
+            clip_dir = self.stage_dir("diarization", "audio", subdir)
+            written = 0
+            for seg in seg_list:
+                start_s = getattr(seg, "start", None)
+                end_s   = getattr(seg, "end", None)
+                spk     = getattr(seg, "speaker", "?")
+                idx     = getattr(seg, "index", "?")
+                if start_s is None or end_s is None or end_s <= start_s:
+                    continue
+                lo = max(0, int(start_s * sample_rate))
+                hi = min(len(audio), int(end_s   * sample_rate))
+                if hi <= lo:
+                    continue
+                fname = f"{idx}_{spk}_{start_s:.3f}-{end_s:.3f}.wav"
+                try:
+                    sf.write(os.path.join(clip_dir, fname),
+                             audio[lo:hi], sample_rate, subtype="PCM_16")
+                    written += 1
+                except Exception as exc:
+                    if self.logger:
+                        self.logger.warning(f"[stage-out] clip write failed {fname}: {exc}")
+            return written
+
+        n_proc = _write_clips(segments,     "processed")
+        n_raw  = _write_clips(raw_segments or [], "raw")
+        if self.logger:
+            self.logger.info(
+                f"[stage-out] diarization clips: {n_proc} processed, {n_raw} raw"
+            )
+        return d
 
     def write_separation(self, segments, total_dur=None, report=None):
         stats = self.separation_stats(segments)
         stats["segments"] = self.segment_stats(segments, total_dur)
         return self._finish("separation", "segments.json", segments, stats,
                             extra={"report.json": report} if report else None)
-
-    def write_music_removal(self, segments, total_dur=None):
-        items = [_as_dict(s) for s in segments]
-        stats = {"segments_total": len(items),
-                 "segments_demucs": sum(1 for d in items if d.get("demucs"))}
-        stats["segments"] = self.segment_stats(segments, total_dur)
-        return self._finish("music_removal", "segments.json", segments, stats)
 
     def write_asr(self, transcripts):
         return self._finish("asr", "transcripts.json", transcripts,
@@ -342,9 +437,133 @@ class StageOutputService:
                 stats.setdefault("warnings", []).append(
                     f"refinement removed {drop_pct:.1f}% of the words it touched "
                     f"({words_before - words_after} of {words_before}): check "
-                    "05_refinement/changes.json for deleted content")
+                    "06_refinement/changes.json for deleted content")
             extra = {"changes.json": changes}
         return self._finish("refinement", "transcripts.json", transcripts, stats, extra)
+
+    def write_relabel(self, report: dict):
+        """What the speaker relabel pass changed, and every proposal it refused.
+
+        Only `speaker` is ever rewritten by that pass, so this directory is the
+        whole record of it: `changes.json` is what was applied, `rejected.json`
+        is what was proposed and refused with the reason -- the place to look
+        when a label looks wrong, or when the model is proposing nonsense.
+        `replies.json` is what the model actually wrote for each window; it is
+        the only way to tell "found nothing wrong" from "did not answer in JSON".
+        """
+        stats = {k: report.get(k) for k in (
+            "segments", "windows", "failed_windows", "unreadable_windows",
+            "cut_in_thought_windows", "proposed", "thinking",
+            "changed", "changed_fraction", "skipped", "discarded")}
+        warnings = []
+        if report.get("discarded"):
+            warnings.append(
+                f"the model proposed too many changes ({report['discarded']}); "
+                "every original label was kept")
+        if report.get("failed_windows"):
+            warnings.append(
+                f"{report['failed_windows']} of {report.get('windows', 0)} "
+                "window(s) got no answer; those labels were left as they were")
+        if report.get("cut_in_thought_windows"):
+            warnings.append(
+                f"{report['cut_in_thought_windows']} window(s) ran out of tokens while the "
+                "model was still thinking, so they have no answer; raise "
+                "models.relabel.max_new_tokens")
+        if report.get("unreadable_windows"):
+            warnings.append(
+                f"{report['unreadable_windows']} of {report.get('windows', 0)} "
+                "window(s) were answered without any JSON; read replies.json to see what "
+                "the model wrote instead")
+        if warnings:
+            stats["warnings"] = warnings
+        return self._finish(
+            "relabel", "changes.json", report.get("applied", []), stats,
+            extra={"rejected.json": report.get("rejected", []),
+                   "replies.json": report.get("replies", []),
+                   "report.json": {k: v for k, v in report.items() if k != "replies"}})
+
+    def write_word_alignment(self, transcripts, report: dict):
+        """Final refined text with Wav2Vec2 timestamps for every aligned word."""
+        stats = {key: report.get(key) for key in (
+            "segments", "segments_aligned", "segments_complete",
+            "expected_words", "aligned_words", "word_coverage")}
+        warnings = []
+        if report.get("segments_failed"):
+            warnings.append(
+                f"{len(report['segments_failed'])} segment(s) failed forced alignment")
+        incomplete = ((report.get("segments_aligned") or 0)
+                      - (report.get("segments_complete") or 0))
+        if incomplete > 0:
+            warnings.append(
+                f"{incomplete} aligned segment(s) do not have one timed row per text word")
+        if warnings:
+            stats["warnings"] = warnings
+        return self._finish(
+            "word_alignment", "transcripts.json", transcripts, stats,
+            extra={"report.json": report})
+
+    def write_conversation_exports(self, report: dict, exports: List[dict]):
+        """What the conversation-export pass found, judged and wrote.
+
+        The audio and per-item JSON live in `conversation_exports/` beside the final
+        export, one folder per conversation filed under its tier
+        (`tier_1_S/conversation_1/`); this directory holds the accounting:
+        `exports.json` is one row per item written, `report.json` carries the finder's counts (how many blocks
+        each rule ended, how many windows each noise or music gate refused, how
+        many the model turned down), which is where to look when a recording
+        gives nothing and the thresholds need moving. `replies.json` holds the
+        model's raw answer for every candidate it was asked about, with the
+        verdict made of it.
+        """
+        finder = report.get("finder") or {}
+        stats = {
+            "candidates": report.get("candidates"),
+            "shortlisted": report.get("shortlisted"),
+            "accepted": report.get("accepted"),
+            "exported": report.get("exported"),
+            "skipped": report.get("skipped"),
+            "blocks": finder.get("blocks"),
+            "blocks_short": finder.get("blocks_short"),
+            "noise_measured": finder.get("noise_measured"),
+            "word_alignment_missing": (finder.get("breaks") or {}).get(
+                "word_alignment_missing", 0),
+            "tiers": report.get("tiers"),
+            "verification_failed": report.get("verification_failed"),
+        }
+        warnings = []
+        if report.get("skipped") == "noise_not_measured":
+            warnings.append(
+                "no noise labels for this file, so no conversation item was exported; turn on "
+                "music_analysis (SSLAM) or set models.conversation_selection.require_noise "
+                "to false")
+        if report.get("skipped") == "llm_unavailable":
+            warnings.append("the LLM was not available for the semantic check")
+        if report.get("unanswered"):
+            warnings.append(f"{report['unanswered']} candidate(s) got no answer")
+        if report.get("verification_failed"):
+            warnings.append(
+                f"{report['verification_failed']} conversation folder(s) failed the read-back "
+                "check (length, channels or channel equality); see verification in their "
+                "conversation.json and do not use them")
+        if report.get("cut_in_thought"):
+            warnings.append(
+                f"{report['cut_in_thought']} candidate(s) ran out of tokens while the "
+                "model was still thinking, so they have no verdict; raise "
+                "models.conversation_selection.max_new_tokens")
+        if report.get("unreadable"):
+            warnings.append(
+                f"{report['unreadable']} candidate(s) were answered without any JSON; "
+                "read replies.json to see what the model wrote instead")
+        if stats["word_alignment_missing"]:
+            warnings.append(
+                f"{stats['word_alignment_missing']} segment(s) were excluded because "
+                "the final text lacks complete word timestamps")
+        if warnings:
+            stats["warnings"] = warnings
+        return self._finish(
+            "conversation_exports", "exports.json", exports, stats,
+            extra={"replies.json": report.get("replies", []),
+                   "report.json": {k: v for k, v in report.items() if k != "replies"}})
 
     # -- separated audio ------------------------------------------------
     def write_separated_audio(self, segments, sample_rate: int) -> dict:
@@ -372,9 +591,9 @@ class StageOutputService:
         ok_dir = self.stage_dir("separation", "audio", "separated")
         bad_dir = self.stage_dir("separation", "audio", "failed")
         for seg in segments:
-            audio = getattr(seg, "enhanced_audio", None)
-            spans = getattr(seg, "tse_spans", None) or []
-            fails = getattr(seg, "tse_failed_spans", None) or []
+            audio = getattr(seg, "audio", None)
+            spans = getattr(seg, "bss_spans", None) or []
+            fails = getattr(seg, "bss_failed_spans", None) or []
             if audio is None or not len(audio):
                 counts["skipped"] += 1
                 continue
@@ -415,12 +634,36 @@ class StageOutputService:
         """
         if not self.enabled:
             return None
+
+        path = os.path.join(self.output_dir, "manifest.json")
+
+        # Merge with whatever is already on disk. Under stage-major execution
+        # this service is constructed fresh inside every run(), so self.manifest
+        # only ever holds the one stage this call computed -- writing it plain
+        # left the file describing the last stage alone, and the flow it exists
+        # to show could not be reconstructed. Stages from this run win, so a
+        # recomputed stage replaces its earlier entry rather than being ignored.
+        stages = {}
+        try:
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as f:
+                    stages = (json.load(f) or {}).get("stages", {}) or {}
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(
+                    f"[stage-out] could not read the existing manifest ({e}); "
+                    "starting a fresh one")
+        stages.update(self.manifest["stages"])
+        self.manifest["stages"] = stages
+
         flow = []
-        for name in ("diarization", "separation", "music_removal", "asr", "refinement"):
+        for name in ("diarization", "separation", "music_removal", "asr",
+                     "refinement", "word_alignment"):
             st = self.manifest["stages"].get(name, {}).get("stats")
             if not st:
                 continue
-            n = st.get("n_segments") or st.get("segments_total") or st.get("n_transcripts")
+            n = (st.get("n_segments") or st.get("segments_total")
+                 or st.get("n_transcripts") or st.get("segments"))
             flow.append({"stage": name, "n": n, "warnings": len(st.get("warnings", []))})
 
         payload = dict(self.manifest)
@@ -439,7 +682,6 @@ class StageOutputService:
                 for msg in payload["warnings"]:
                     self.logger.warning(f"[stage-out] {msg}")
 
-        path = os.path.join(self.output_dir, "manifest.json")
         self._write_json(path, payload)
         if self.logger:
             self.logger.info(f"[stage-out] manifest -> {path}")

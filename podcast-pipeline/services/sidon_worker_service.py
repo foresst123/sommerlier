@@ -1,46 +1,29 @@
-import os
-from typing import Any, Dict
-
 from services.base_worker_service import WorkerProcessService
-from utils.worker_env import resolve_worker_python
 
 
 class SidonWorkerService(WorkerProcessService):
-    """Manages the lifecycle of the Sidon (TSE) worker subprocess."""
+    """Manages the lifecycle of the isolated DialogueSidon worker process.
 
-    def __init__(self, config: Dict[str, Any], args: Any, logger=None):
-        self.config = config
-        self.args = args
-        self.env_profile = config.get("environments", {}).get(
-            getattr(args, "env", "kaggle"), {}
-        )
+    Separate interpreter because Sidon needs `diffusers` and a torch build the
+    rest of the pipeline does not agree with. `sidon_infer.load_models` pulls
+    the .pt2 weights from the DialogueSidon HF repo -- honouring HF_HOME, so an
+    offline profile still resolves from its own cache -- and there is no local
+    checkpoint to point at, which is why startup is allowed longer than the
+    other workers: a cold cache downloads before it can answer.
+    """
 
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-        # sidon_infer.load_models pulls the .pt2 weights from the DialogueSidon
-        # HF repo (honouring HF_HOME, so an offline profile still resolves from
-        # its own cache). There is no local checkpoint to point at.
+    def __init__(self, python_env_path: str, worker_script_path: str, device_id: int = 0,
+                 logger=None, env_name: str = "kaggle", config_path: str = "config.json"):
         super().__init__(
             name="Sidon",
-            python_bin=resolve_worker_python(
-                "sidon", config=config, env_profile=self.env_profile, logger=logger
-            ),
-            worker_script=os.path.join(base_dir, "sidon_worker.py"),
-            extra_args=["--device", f"cuda:{args.gpu_1}"],
+            python_bin=python_env_path,
+            worker_script=worker_script_path,
+            # CUDA_VISIBLE_DEVICES maps this physical device to local cuda:0.
+            # Passing the host index here breaks worker 2 (only cuda:0 exists
+            # inside a process masked to physical GPU 1).
+            extra_args=["--device", "cuda:0",
+                        "--config", config_path, "--env", env_name],
+            device_id=device_id,
             logger=logger,
-            # Weight download on a cold cache is the slow part of startup.
             ready_timeout=1800.0,
         )
-
-    def spawn(self):
-        # Guard lives on spawn(), not start(): callers that spawn/wait_ready
-        # separately would otherwise bypass it and launch the worker with
-        # --tse off.
-        if not getattr(self.args, "tse", False):
-            return
-        super().spawn()
-
-    def wait_ready(self):
-        if self.process is None:
-            return
-        super().wait_ready()

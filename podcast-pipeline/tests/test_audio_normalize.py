@@ -129,3 +129,67 @@ def test_limiter_is_a_no_op_when_there_is_headroom():
     out, gain = safe_limit(quiet)
     assert gain == 1.0
     assert out is quiet
+
+
+# --- edge-weighted splice matching ------------------------------------------
+
+def test_the_edges_decide_the_gain_not_the_whole_span():
+    """A dynamic span makes the mean the wrong average.
+
+    Whole-span RMS closes the gap between the two *means*, which can leave both
+    ends visibly off -- and the ends are where a splice is heard. Three of the
+    worst joins on the measured corpus sat inside spans holding 22-35 dB of
+    internal range.
+    """
+    sr = 24000
+    rng = np.random.default_rng(0)
+
+    # Host: quiet at both ends, loud in the middle.
+    host = rng.standard_normal(sr) * 0.02
+    host[sr // 3: 2 * sr // 3] *= 12.0
+    # Patch: the same shape at half the level, so the edges need a gain of 2.
+    patch = host * 0.5
+
+    matched = match_splice_level(host, patch)
+    edge = slice(0, 480)
+    ratio = (np.sqrt(np.mean(host[edge] ** 2))
+             / np.sqrt(np.mean(matched[edge] ** 2)))
+    assert abs(20 * np.log10(ratio)) < 1.0, "edges should line up"
+
+
+def test_a_uniform_span_is_unaffected_by_the_change():
+    """With no internal dynamics the edge gain and the mean gain agree."""
+    sr = 24000
+    host = np.random.default_rng(1).standard_normal(sr) * 0.1
+    matched = match_splice_level(host, host * 0.4)
+    assert np.allclose(matched, host, rtol=0.05)
+
+
+def test_a_silent_edge_falls_back_to_the_whole_span():
+    """At a genuine speech onset the step is the recording, not an artifact."""
+    sr = 24000
+    host = np.zeros(sr)
+    host[sr // 2:] = np.random.default_rng(2).standard_normal(sr // 2) * 0.1
+    patch = host * 0.5
+    matched = match_splice_level(host, patch)
+    # Still scaled towards the host, via the whole-span figure.
+    assert np.sqrt(np.mean(matched ** 2)) > np.sqrt(np.mean(patch ** 2))
+
+
+def test_the_gain_stays_within_max_adjust():
+    """A loud consonant at one edge may not set the level for everything."""
+    sr = 24000
+    rng = np.random.default_rng(3)
+    host = rng.standard_normal(sr) * 0.5
+    patch = rng.standard_normal(sr) * 0.001          # needs 500x
+    matched = match_splice_level(host, patch, max_adjust=3.0)
+    gain = np.sqrt(np.mean(matched ** 2)) / np.sqrt(np.mean(patch ** 2))
+    assert gain <= 3.0 + 1e-6
+
+
+def test_a_span_too_short_to_have_edges_still_returns_audio():
+    sr = 24000
+    host = np.random.default_rng(4).standard_normal(200) * 0.1
+    out = match_splice_level(host, host * 0.5)
+    assert len(out) == len(host)
+    assert np.all(np.isfinite(out))

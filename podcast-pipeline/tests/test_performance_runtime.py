@@ -1,0 +1,181 @@
+import json
+import os
+import sys
+import threading
+import types
+from concurrent.futures import ThreadPoolExecutor
+
+import numpy as np
+import torch
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from models.qwen3_asr import Qwen3ASRClient
+from models.diarizen_model import DiariZenClient
+from models.separation_backends import SidonBackend
+from services.base_worker_service import WorkerProcessService
+from services.worker_pool_service import WorkerPoolService
+from utils.checkpoint import CheckpointManager
+
+
+def test_worker_cuda_mask_supports_one_or_multiple_physical_devices(tmp_path):
+    worker = WorkerProcessService("x", sys.executable, str(tmp_path / "worker.py"),
+                                  device_id=[2, 5])
+    assert worker.cuda_visible_devices == "2,5"
+    worker.device_id = 3
+    assert worker.cuda_visible_devices == "3"
+
+
+def test_worker_pool_dispatches_round_robin():
+    class Worker:
+        def __init__(self, name):
+            self.name = name
+            self.process = object()
+            self.calls = 0
+
+        def request(self, payload, response_id=None):
+            self.calls += 1
+            return {"worker": self.name}
+
+        def spawn(self): pass
+        def wait_ready(self): pass
+        def stop(self): self.process = None
+
+    left, right = Worker("left"), Worker("right")
+    pool = WorkerPoolService([left, right])
+    assert pool.request({})["worker"] == "left"
+    assert pool.request({})["worker"] == "right"
+    assert (left.calls, right.calls) == (1, 1)
+
+
+def test_worker_pool_leases_two_workers_concurrently():
+    barrier = threading.Barrier(2)
+
+    class Worker:
+        def __init__(self, name):
+            self.name = name
+            self.process = object()
+
+        def request(self, payload, response_id=None):
+            barrier.wait(timeout=1.0)
+            return {"worker": self.name}
+
+    pool = WorkerPoolService([Worker("gpu0"), Worker("gpu1")])
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(pool.request, {"job": i}) for i in range(2)]
+        workers = {future.result(timeout=2.0)["worker"] for future in futures}
+
+    assert workers == {"gpu0", "gpu1"}
+
+
+def test_diarizen_client_can_dispatch_through_a_pool_endpoint(tmp_path):
+    class Endpoint:
+        def __init__(self):
+            self.calls = 0
+
+        def request(self, payload, response_id=None):
+            self.calls += 1
+            assert os.path.exists(payload["audio_path"])
+            return {"segments": [
+                {"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}
+            ]}
+
+    endpoint = Endpoint()
+    client = DiariZenClient(endpoint)
+    result = client.diarize({"waveform": torch.zeros(16000, dtype=torch.float32),
+                             "sample_rate": 16000})
+
+    assert endpoint.calls == 1
+    assert list(result.itertracks(yield_label=True))[0][2] == "SPEAKER_00"
+
+
+def test_checkpoint_manifest_rejects_a_corrupt_result(tmp_path):
+    checkpoints = CheckpointManager(str(tmp_path), "job")
+    checkpoints.save("asr", {"ok": True}, fmt="json")
+    path = checkpoints._get_stage_path("asr", "json")
+    assert checkpoints.exists("asr", "json")
+    assert os.path.exists(path + ".manifest.json")
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write("corrupt")
+    assert not checkpoints.exists("asr", "json")
+    assert checkpoints.load("asr", "json") is None
+
+
+def test_qwen_batch_client_maps_results_by_id_not_response_order():
+    class Pipe:
+        def __init__(self):
+            self.stdin = self
+            self.stdout = self
+            self.request = None
+
+        def write(self, line):
+            self.request = json.loads(line)
+
+        def flush(self): pass
+
+        def readline(self):
+            return json.dumps({"results": [
+                {"id": "b", "text": "second"},
+                {"id": "a", "text": "first"},
+            ]}) + "\n"
+
+    client = Qwen3ASRClient(Pipe())
+    assert client.transcribe_batch([("a", "/a.npy"), ("b", "/b.npy")]) == [
+        "first", "second"]
+
+
+def test_sidon_backend_can_use_a_pool_endpoint(tmp_path):
+    class Endpoint:
+        def request(self, payload, response_id=None):
+            first = tmp_path / "first.npy"
+            second = tmp_path / "second.npy"
+            np.save(first, np.ones(8, np.float32))
+            np.save(second, np.zeros(8, np.float32))
+            return {"id": response_id, "track_1_path": str(first),
+                    "track_2_path": str(second), "target_sr": 24000}
+
+    backend = SidonBackend(process=Endpoint(), temp_dir=str(tmp_path))
+    first, second, rate = backend.separate(np.zeros(16, np.float32), 16000)
+    assert rate == 24000
+    assert first.tolist() == [1.0] * 8
+    assert second.tolist() == [0.0] * 8
+
+
+def test_concurrent_separation_views_do_not_share_speaker_cache():
+    from services.separation_service import SeparationService
+
+    class FileModel:
+        def __init__(self):
+            self.target_embed_cache = {}
+            self.closed = False
+
+        def reset_speakers(self):
+            self.target_embed_cache.clear()
+
+        def close(self):
+            self.closed = True
+
+    class BaseModel:
+        def __init__(self):
+            self.forks = []
+
+        def fork(self):
+            model = FileModel()
+            self.forks.append(model)
+            return model
+
+    base = BaseModel()
+    loader = types.SimpleNamespace(get=lambda name: base if name == "separator" else None)
+    service = SeparationService(model_loader=loader)
+    left = service.fork_for_file()
+    right = service.fork_for_file()
+
+    left.bss_model.target_embed_cache["1"] = "file-a"
+    right.bss_model.target_embed_cache["1"] = "file-b"
+
+    assert left.bss_model is not right.bss_model
+    assert left.bss_model.target_embed_cache == {"1": "file-a"}
+    assert right.bss_model.target_embed_cache == {"1": "file-b"}
+    left.close_file_model()
+    right.close_file_model()
+    assert all(model.closed for model in base.forks)

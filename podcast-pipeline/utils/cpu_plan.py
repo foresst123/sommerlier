@@ -1,7 +1,7 @@
 """Deciding how many CPU threads each process may use.
 
 The pipeline runs four processes at once -- the main one plus the DiariZen,
-Qwen3 and Sidon workers -- and every one of them links against OpenMP/MKL
+Qwen3 and DiariZen workers -- and every one of them links against OpenMP/MKL
 through torch. Left alone, each grabs a thread per visible core, so four
 processes on sixteen cores spawn sixty-four threads that fight over sixteen.
 On the two-core allocation this pipeline was last run on, that contention made
@@ -41,7 +41,13 @@ def thread_plan(n_workers: int = 3, reserve_for_main: bool = True) -> dict:
     """
     cores = usable_cores()
     processes = n_workers + (1 if reserve_for_main else 0)
-    per_process = max(1, cores // max(1, processes))
+    # Floor of 2, not 1: a single-threaded BLAS/OpenMP pool was measured too
+    # slow for the matmuls this pipeline actually runs. The trade-off is
+    # explicit -- on a box with few cores and many processes (the 2-core case
+    # this module's docstring warns about), 2 per process oversubscribes
+    # rather than staying at 1. Chosen deliberately; revisit if a constrained
+    # box regresses the way that 2-core run once did.
+    per_process = max(4, cores // max(1, processes))
 
     return {
         "cores_detected": cores,
@@ -57,6 +63,30 @@ def thread_plan(n_workers: int = 3, reserve_for_main: bool = True) -> dict:
             "RAYON_NUM_THREADS": str(per_process),
         },
     }
+
+
+def separation_thread_budget(cores: int, sidon_workers: int, assignment_workers: int,
+                             assignment_worker_threads: int) -> dict:
+    """Split the cores of the separation stage between its CPU consumers.
+
+    Sidon workers mostly wait on the GPU and each need about one core to feed
+    it; the main process needs one. Assignment (WeSpeaker/ONNX) takes at most
+    60% of what is left, shrinking its per-worker threads to fit, and the
+    window-build pool gets the rest (never below a quarter of what is left, so
+    building cannot starve). A heuristic split, not measured; it only changes
+    thread counts, never results.
+    """
+    cores = max(1, int(cores))
+    left = max(1, cores - 1 - max(0, int(sidon_workers)))
+    workers = max(0, int(assignment_workers))
+    per_worker = max(1, int(assignment_worker_threads))
+    if workers:
+        per_worker = max(1, min(per_worker, int(left * 0.6) // workers))
+    assignment_total = workers * per_worker
+    pool = max(1, left // 4, left - assignment_total)
+    return {"cores": cores, "window_pool_workers": pool,
+            "assignment_worker_threads": per_worker,
+            "assignment_total_threads": assignment_total}
 
 
 def apply_to_env(env: dict, per_process: int) -> dict:
@@ -93,3 +123,26 @@ def configure_process(n_workers: int = 3, logger=None) -> int:
             f"across {plan['processes']} process(es)"
         )
     return plan["per_process"]
+
+
+def onnx_session_options(per_process: int | None = None):
+    """SessionOptions khớp với thread budget của process đang gọi.
+
+    onnxruntime có thread pool riêng, không đọc OMP_NUM_THREADS: mặc định nó
+    spawn intra_op_num_threads = số core máy nhìn thấy rồi cố pthread_setaffinity
+    từng thread vào 1 core. Trên máy có affinity mask hẹp hơn số core vật lý
+    (SLURM / cgroup / container), setaffinity fail hàng loạt với EINVAL và log
+    ngập lệnh error, tệ hơn nữa là 22 worker của TSE window pool cùng dựng
+    Silero VAD sẽ nhân số thread lên gấp đôi ba, làm 24 core usable phải gánh
+    hàng ngàn thread tranh nhau.
+
+    Hàm này đọc OMP_NUM_THREADS mà configure_process() đã set (được thừa kế
+    qua fork/spawn) nên không phải truyền tham số qua nhiều tầng khởi tạo.
+    """
+    import onnxruntime as ort
+    if per_process is None:
+        per_process = int(os.environ.get("OMP_NUM_THREADS", "1"))
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = max(1, per_process)
+    opts.inter_op_num_threads = 1
+    return opts

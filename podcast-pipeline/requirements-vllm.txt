@@ -1,0 +1,6 @@
+# Shared isolated runtime for Qwen3-ASR, Whisper large-v3 and Qwen3.5.
+# Do not install this into the main pipeline environment: vLLM controls its
+# own compatible torch/transformers stack.
+vllm[audio]>=0.22.1,<0.31
+qwen-asr[vllm]==0.0.6
+soundfile>=0.13,<1

@@ -27,7 +27,7 @@ def test_the_separation_report_is_checkpointed_where_it_is_produced():
     batch wrote stats={} while stats.json held spliced=3."""
     src = _source("services/pipeline_service.py")
     save = src.index('checkpoint.save("separation_report"')
-    assert 'checkpoint.save("separation", enhanced_segments)' in src[:save], (
+    assert 'checkpoint.save("separation", speech_segments)' in src[:save], (
         "the report must be captured in the same branch that computed it")
 
 
@@ -56,7 +56,7 @@ def test_refinement_is_checkpointed_like_every_other_stage():
     """It is the most expensive stage -- 12 minutes for 200 segments on a T4 --
     so a retry that recomputes it pays for half the run again."""
     src = _source("services/pipeline_service.py")
-    assert 'checkpoint.exists("refinement")' in src
+    assert 'checkpoint.load_if_committed("refinement")' in src
     assert 'checkpoint.save("refinement", transcripts)' in src
 
 
@@ -64,7 +64,7 @@ def test_a_restored_refinement_does_not_rewrite_its_stage_output():
     """changes.json needs the pre-refinement text, which a checkpoint restore
     does not have -- so the write belongs in the compute branch only."""
     src = _source("services/pipeline_service.py")
-    load = src.index('checkpoint.load("refinement")')
+    load = src.index('checkpoint.load_if_committed("refinement")')
     save = src.index('checkpoint.save("refinement", transcripts)')
     write = src.index("stage_out.write_refinement(")
 

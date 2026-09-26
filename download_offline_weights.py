@@ -113,14 +113,31 @@ def download_models(token=None):
     except Exception as e:
         print(f"    -> Lỗi tải NeMo Sortformer: {e}. Có thể bỏ qua nếu dùng Pyannote.")
 
-    # 8. Download DialogueSidon (TSE separator used by sidon_worker.py)
-    print(f"\n[+] Đang tải mô hình: DialogueSidon (TSE)...")
+    # 8. Download the BS-RoFormer vocal checkpoint (audio-separator).
+    #    It does not come from the HF hub, so HF_HUB_OFFLINE does nothing for
+    #    it: without this the music-removal stage is the one stage that still
+    #    needs the network, and it fails deep into a run.
+    sep_dir = os.path.join(base_dir, "audio-separator")
+    os.makedirs(sep_dir, exist_ok=True)
+    ckpt = os.environ.get("BS_ROFORMER_MODEL",
+                          "model_bs_roformer_ep_368_sdr_12.9628.ckpt")
+    print(f"\n[+] Đang tải mô hình: BS-RoFormer ({ckpt})...")
     try:
-        for filename in ["ssl_encoder.pt2", "diffusion_head.pt2", "vae_decoder.pt2", "metadata.json"]:
-            hf_hub_download(repo_id="sarulab-speech/DialogueSidon", filename=filename)
+        from audio_separator.separator import Separator
+        sep = Separator(model_file_dir=sep_dir, log_level=40)
+        # download_model_files fetches the checkpoint and its config without
+        # building the model; load_model is the fallback for releases that do
+        # not expose it, and costs a model construction we throw away.
+        # This also writes download_checks.json into sep_dir -- the remote
+        # model list audio-separator fetches on every load. Without it the
+        # stage still needs the network even with the weights already there.
+        if hasattr(sep, "download_model_files"):
+            sep.download_model_files(ckpt)
+        else:
+            sep.load_model(model_filename=ckpt)
         print(f"    -> Xong!")
     except Exception as e:
-        print(f"    -> Lỗi tải DialogueSidon: {e}")
+        print(f"    -> Lỗi tải BS-RoFormer: {e}. Cần `pip install audio-separator`.")
 
     print(f"\n=====================================================")
     print(f"TẢI HOÀN TẤT! Toàn bộ models đã nằm trong: {base_dir}")
@@ -129,6 +146,7 @@ def download_models(token=None):
     print(f"export TORCH_HOME=\"{torch_cache}\"")
     print(f"export HOME=\"{base_dir}\"  # Dành cho PANNS")
     print(f"export XDG_CACHE_HOME=\"{base_dir}\"  # Dành cho NeMo")
+    print(f"export BS_ROFORMER_MODEL_DIR=\"{sep_dir}\"  # Dành cho BS-RoFormer")
     print(f"=====================================================")
 
 if __name__ == "__main__":

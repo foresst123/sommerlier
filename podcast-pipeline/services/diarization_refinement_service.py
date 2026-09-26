@@ -1,50 +1,110 @@
 import os
 from typing import List
 from difflib import SequenceMatcher
-from algorithms.asr.hallucination import foreign_script_ratio
+from utils.worker_env import resolve_worker_python
+from algorithms.asr.hallucination import diacritic_ratio, foreign_script_ratio
 from algorithms.asr.rover import normalize_token
 from schemas.transcript import TranscriptSegment
+from utils import profiling
+from utils.llm_sampling import hf_generate_kwargs
 import torch
-
+import re
 # Hoisted out of the per-segment loop: this is ~1200 constant tokens that would
 # otherwise be rebuilt and re-tokenized for every single segment.
 # Below this word-level similarity to every input transcript, the refinement is
 # discarded. 0.5 keeps genuine cleanups (punctuation, a corrected word) while
 # rejecting output that came from somewhere else.
 ACCEPT_SIMILARITY = 0.5
-
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 FUSION_SYSTEM_PROMPT = (
-    "Bạn hợp nhất 3 bản transcript ASR tiếng Việt của CÙNG một đoạn audio thành "
-    "1 bản duy nhất. Bạn không nghe được audio, chỉ có 3 bản text.\n\n"
-
-    "### NGUYÊN TẮC GỐC\n"
-    "Mỗi từ trong kết quả PHẢI xuất hiện trong ít nhất 1 trong 3 bản. "
-    "Bạn CHỌN giữa các bản, không VIẾT LẠI. Khi phân vân, chọn phương án "
-    "ít thay đổi nhất.\n\n"
-
+    "Bạn hợp nhất 3 bản transcript ASR tiếng Việt của CÙNG một đoạn audio ngắn thành 1 bản duy nhất. Bạn không nghe được audio, chỉ có 3 bản text.\n"
+    "\n"
+    "Bản 1 = Whisper. Bản 2 = PhoWhisper. Bản 3 = Qwen3.\n"
+    "Ba model này sai theo những kiểu KHÁC NHAU và biết trước được. Dùng hiểu biết đó để chọn.\n"
+    "\n"
+    # The single largest correctable failure: 47 of 303 wrong segments (15.5%)
+    # were the three transcripts concatenated rather than one chosen.
+    # Stating the rule abstractly was not enough; the contrasting examples are.
+    "### LUẬT TUYỆT ĐỐI\n"
+    "Đây là BA CÁCH NGHE KHÁC NHAU của cùng một câu nói, KHÔNG PHẢI ba câu nói nối tiếp nhau. Kết quả dài xấp xỉ MỘT bản, không phải tổng của ba bản.\n"
+    "- SAI: 'Bản 1: dạ / Bản 2: nhờ / Bản 3: yeah' → 'dạ nhờ yeah'\n"
+    "- ĐÚNG: chọn một → 'dạ'\n"
+    "- SAI: 'xong mình thấy vậy' + 'sau mình thấy vậy' → ghép cả hai\n"
+    "- ĐÚNG: 'xong mình thấy vậy'\n"
+    "Khi các bản chỉ khác nhau ở một vài từ, chúng là CÙNG một câu: chọn từ, đừng cộng câu.\n"
+    "\n"
+    "Mỗi từ trong kết quả PHẢI xuất hiện trong ít nhất 1 trong 3 bản. Bạn CHỌN giữa các bản, không VIẾT LẠI. Khi phân vân, chọn phương án ít thay đổi nhất.\n"
+    "\n"
+    # Each model fails in its own measurable way across the 932-segment
+    # evaluation, and naming those ways is what lets the fusion pick between
+    # them rather than average them. The claims below are all measured, not
+    # guessed -- see tools/asr_evaluation/.
+    "### ĐẶC TÍNH TỪNG BẢN\n"
+    "\n"
+    "Bản 1 (Whisper)\n"
+    "- Đáng tin khi: đoạn chỉ có một từ đệm đứng một mình; đoạn rất ngắn 1-2 từ.\n"
+    "- Hay sai khi: câu dài (>11 từ) — kém nhất; nuốt mất từ (cái, ờ, mà, là); đổi số thành chữ số ('hai'→'2'); nhầm đại từ ('anh'→'em'); bỏ mất phần lặp; viết 'yeah' thành 'dạ'/'vâng'.\n"
+    "- Nếu Bản 1 khác cả hai bản kia, nó chỉ đúng ~7% — theo hai bản kia.\n"
+    "\n"
+    "Bản 2 (PhoWhisper)\n"
+    "- Đáng tin khi: câu có từ đệm ở ĐẦU hoặc GIỮA (ờ, ừm, ờm, à) — bản duy nhất giữ được; câu ngắn 2-6 từ; giữ phần lặp.\n"
+    "- Hay sai khi: câu có từ tiếng Anh — TỆ NHẤT, luôn phiên âm thành tiếng Việt vô nghĩa; câu dài; chèn thêm từ không có ('cái', 'là', cả từ đệm 'ờ' giả); nhầm đại từ vùng miền ('cô'→'cổ', 'tôi'→'tui'); sinh token rác 'unk'; Việt hóa tên riêng ('youtube'→'túp').\n"
+    "\n"
+    "Bản 3 (Qwen3)\n"
+    "- Đáng tin khi: câu dài (≥11 từ) — hơn hẳn, càng dài càng hơn; câu có số liệu; câu có đại từ nhân xưng; tên riêng; giữ phần lặp; từ 'yeah' (bản duy nhất viết đúng).\n"
+    "- Hay sai khi: đoạn cực ngắn 1-2 từ — hay TRẢ VỀ RỖNG (43 lần, gần như toàn bộ là 'ừ/ờ/ừm'); xóa từ đệm cho câu 'sạch'; chèn thêm 'cái', 'là', 'nó', 'mà' để câu mượt hơn; DỊCH NGUYÊN CÂU SANG TIẾNG ANH khi gặp nhiều từ tiếng Anh; dịch từ chức năng ('thì'→'then').\n"
+    "\n"
     "### CÁCH CHỌN\n"
     "1. Chỗ cả 3 bản giống nhau: giữ nguyên.\n"
-    "2. Chỗ khác nhau: chọn bản nghe hợp lý nhất trong mạch câu. Không đếm "
-    "phiếu máy móc — 1 bản đúng vẫn thắng 2 bản sai.\n"
-    "3. Tên riêng, số liệu: chọn bản rõ nghĩa nhất. Không tự sửa theo hiểu "
-    "biết của bạn.\n"
-    "4. Câu dở dang trong cả 3 bản: giữ dở dang. Không viết tiếp cho trọn ý.\n"
-    "5. Từ bị lặp liền kề do lỗi ASR (ví dụ 'gì hết. gì hết.'): giữ lại một lần.\n\n"
-
+    "2. Chỗ khác nhau: chọn phương án hợp lý nhất trong mạch câu. Không đếm phiếu máy móc — 1 bản đúng vẫn thắng 2 bản sai — nhưng khi không có lý do rõ ràng để chọn khác, phương án được 2 bản đồng ý thường đúng (khoảng 7/10 lần).\n"
+    "3. Bản trống hoặc chứa 'unk' là bản đó NGHE HỤT, không phải người nói im lặng. Bỏ qua nó, chọn giữa hai bản còn lại. Đừng bao giờ trả về rỗng chỉ vì một bản rỗng.\n"
+    "4. Câu dài, nhiều mệnh đề: lấy bản mạch lạc nhất làm khung (thường là Bản 3), rồi sửa từng từ lẻ theo hai bản kia nếu chúng đồng ý với nhau.\n"
+    "5. Đoạn rất ngắn: chọn bản CÓ CHỮ. Đừng chọn bản rỗng, đừng ghép hai bản ngắn lại.\n"
+    "6. Tên riêng, số liệu: chọn bản rõ nghĩa nhất, giữ nguyên dạng chữ ('hai' vẫn là 'hai', không đổi thành '2'). Không tự sửa theo hiểu biết của bạn.\n"
+    "7. Câu dở dang trong cả 3 bản: giữ dở dang. Không viết tiếp cho trọn ý.\n"
+    "8. Giữ nguyên thứ tự từ của bản bạn chọn. Không đảo vế câu cho xuôi tai.\n"
+    "\n"
+    # Filler behaviour splits by position, and the split is large: on fillers
+    # inside a sentence PhoWhisper keeps 16/18 against 2/18 for the others,
+    # while on a filler standing alone Whisper leads Qwen3 52% to 8%.
+    "### TỪ ĐỆM (ờ, ừ, ừm, ờm, à, dạ, vâng)\n"
+    "Từ đệm là một phần của lời nói, phải giữ.\n"
+    "- Nếu MỘT bản mở đầu bằng từ đệm mà các bản kia không có: GIỮ từ đệm đó. Bản bắt được nó thường đúng.\n"
+    "- Nếu cả đoạn chỉ là một từ đệm: chọn bản có từ đệm tiếng Việt. Bản rỗng và bản dịch sang tiếng Anh ('is', 'yes', 'el') đều sai.\n"
+    "- 'dạ' và 'yeah' là hai từ khác nhau, không thay cho nhau. Bản nào viết 'yeah' thì thường là nghe đúng 'yeah'.\n"
+    "- Đừng lược bỏ từ đệm để câu gọn hơn.\n"
+    "\n"
+    # The previous prompt told the model to collapse every adjacent repeat,
+    # which was wrong on the 38 segments where the speaker really did repeat.
+    # Agreement separates the two cases: where >=2 transcripts carry the
+    # repeat it is genuine (29/38), and where exactly one does it is an ASR
+    # artefact (24/24).
+    "### TỪ LẶP LIỀN KỀ\n"
+    "Người nói có lặp từ thật ('mình mình cũng tự hào', 'từ từ', 'lâng lâng').\n"
+    "- Nếu HAI bản trở lên cùng có phần lặp: giữ phần lặp — người nói lặp thật.\n"
+    "- Nếu CHỈ MỘT bản có phần lặp còn hai bản kia không: bỏ phần lặp — đó là lỗi ASR.\n"
+    "\n"
+    # Loanwords are the corpus's hardest class. PhoWhisper scores 4-12% on
+    # them at every density -- it transliterates rather than transcribes --
+    # while Qwen3 translates 28 segments wholesale into English. The two
+    # failures pull in opposite directions, so both need naming.
+    "### TỪ TIẾNG ANH XEN TIẾNG VIỆT\n"
+    "Người nói trộn thuật ngữ tiếng Anh (mindset, fix, format, unlearn, relearn, fail, chill, top, debate, platform, content, feedback, launch, evolve, impact, brand, test, speaker, profile...).\n"
+    "- ASR hay phiên âm chúng thành từ tiếng Việt vô nghĩa: 'mai sét' (mindset), 'phích' (fix), 'mát' (format), 'phèo' (fail), 'chiêu' (chill), 'lên' (unlearn), 'túp' (youtube), 'ninh' (unlearning).\n"
+    "- Nếu một bản giữ chữ tiếng Anh còn bản khác cho ra từ tiếng Việt nghe na ná mà vô nghĩa trong câu: CHỌN BẢN TIẾNG ANH. Đây là luật chắc chắn nhất — bản phiên âm gần như luôn sai.\n"
+    "- NGƯỢC LẠI, KHÔNG DỊCH tiếng Việt sang tiếng Anh. Nếu một bản biến cả câu thành tiếng Anh ('nhưng sau đó họ fail là bởi vì họ fix' → 'but after that they failed because they fixed'), BỎ bản đó, dùng hai bản kia.\n"
+    "- Kết quả luôn là câu tiếng Việt có dấu, chỉ giữ nguyên các từ tiếng Anh mà người nói thực sự dùng.\n"
+    "\n"
     "### GIỮ NGUYÊN VĂN NÓI\n"
-    "Đây là hội thoại tự nhiên. Giữ từ đệm (ừ, à, ờ, thì, mà, kiểu như), giữ "
-    "đại từ nhân xưng đúng như trong bản gốc, không thay bằng từ trang trọng "
-    "hơn. Chỉ thêm dấu câu để dễ đọc.\n\n"
-
+    "Đây là hội thoại tự nhiên. Giữ từ đệm, giữ đại từ nhân xưng đúng như trong bản gốc, không thay bằng từ trang trọng hơn. Không thêm từ nối ('cái', 'là', 'nó', 'mà') để câu mượt hơn — nếu một bản có từ đó mà hai bản kia không có, nhiều khả năng nó được chèn thêm. Chỉ thêm dấu câu để dễ đọc.\n"
+    "\n"
     "### ĐẦU RA\n"
     "Chỉ xuất transcript tiếng Việt của đoạn này, không gì khác.\n"
-    "- Không nhận xét, không đánh giá, không giải thích. Nếu bạn nghĩ đoạn này "
-    "là quảng cáo, vô nghĩa hay bị lỗi, bạn VẪN xuất transcript của nó. "
-    "Việc lọc bỏ do hệ thống khác làm, không phải việc của bạn.\n"
-    "- Không thêm tiền tố ('Kết quả:', 'Transcript:'), không ngoặc kép, "
-    "không Markdown.\n"
+    "- Không nhận xét, không đánh giá, không giải thích. Nếu bạn nghĩ đoạn này là quảng cáo, vô nghĩa hay bị lỗi, bạn VẪN xuất transcript của nó. Việc lọc bỏ do hệ thống khác làm, không phải việc của bạn.\n"
+    "- Không thêm tiền tố ('Kết quả:', 'Transcript:'), không ngoặc kép, không Markdown.\n"
     "- Nếu cả 3 bản đều trống, xuất ra chuỗi rỗng.\n"
+    ""
 )
 
 
@@ -52,21 +112,109 @@ FUSION_SYSTEM_PROMPT = (
 # than as having hit a few awkward inputs.
 REFINE_FAILURE_LIMIT = float(os.environ.get("REFINE_FAILURE_LIMIT", "0.5"))
 
+# Segments this short, or this few words, are left with their ROVER text.
+#
+# Fusion needs three transcripts that disagree in a way context can settle. A
+# backchannel gives the model one or two words and no sentence to place them
+# in, so there is nothing to choose between -- and what came back instead was
+# invention: "dạ" -> "dạ nhờ yeah", "ừ" -> "ừ từ đúng", "đúng không" -> "bàu
+# đùa". Hand-checking 932 segments found the models already right on these and
+# refinement wrong, so the cheapest correct move is not to ask.
+#
+# The bound is deliberately tight. Refinement earns its keep on ordinary
+# segments (286 fixed against 38 broken), and every segment skipped here is one
+# it no longer gets to fix.
+REFINE_MIN_SECONDS = float(os.environ.get("REFINE_MIN_SECONDS", "1.0"))
+REFINE_MIN_WORDS = int(os.environ.get("REFINE_MIN_WORDS", "2"))
+
+
+def too_short_to_refine(seg) -> bool:
+    """Whether ``seg`` is a backchannel that refinement should leave alone.
+
+    Duration and word count are both checked because either can be the honest
+    signal: a 0.4s "ừ" is short in time, while a slowly drawn-out "dạ" is short
+    only in words. The word count uses the longest of the three transcripts --
+    the shortest is often blank, and one model dropping a word is not evidence
+    the segment is a backchannel.
+    """
+    words = max((len(t.split()) for t in
+                 (seg.text_whisper, seg.text_phowhisper, seg.text_qwen3) if t),
+                default=0)
+    if words and words <= REFINE_MIN_WORDS:
+        return True
+
+    # A missing or reversed span says nothing; only trust a real duration.
+    start, end = getattr(seg, "start", None), getattr(seg, "end", None)
+    if start is not None and end is not None and end > start:
+        return (end - start) < REFINE_MIN_SECONDS
+    return False
+
 
 class DiarizationRefinementService:
-    """Uses a local LLM (Qwen) to refine speaker labels and text based on dialogue context."""
+    """Fuses the ASR transcripts of one segment into its final text.
+
+    Despite the name, speaker labels are not touched here: nothing in this
+    class writes to a segment's speaker. It takes the text the voters produced
+    for a segment and returns better text for that same segment, or keeps the
+    ROVER text when the guards reject what the model returned.
+
+    Speaker labels can still change later, in a separate pass:
+    `services/speaker_relabel_service.SpeakerRelabelService` reuses this
+    resident model to reassign a segment's speaker (and only that field) from
+    the whole transcript. That pass has no audio to check against, which is the
+    reason it lives apart from fusion and carries its own guards -- this class
+    keeps the invariant that the text it returns belongs to the segment it was
+    given.
+    """
 
     # The ~1200-token system prompt dominates each sequence, so even a modest
     # batch builds a large KV cache; 2 fits alongside the ASR models on a T4.
     def __init__(self, logger=None, batch_size: int = 4, model_name: str = None,
-                 torch_dtype: str = "bfloat16", prefix_cache: bool = False):
+                 torch_dtype: str = "bfloat16", prefix_cache: bool = False,
+                 device: str = "cuda:0",
+                 placement: str = "auto", gpu_memory_utilization: float = 0.82,
+                 max_batch_tokens: int = 0,
+                 pipeline_devices=None, micro_batch_size: int = 1,
+                 pipeline_split_ratio: float = 0.5, cpu_threads: int = 0,
+                 backend: str = "transformers", workers: int = 1,
+                 max_model_len: int = 0, config=None, env_profile=None,
+                 shared_queue: bool = False, chunk_size: int = 0,
+                 parallel_windows: bool = False, progress_interval: float = 15.0):
         self.logger = logger
         self.model = None
         self.tokenizer = None
         self.device = device
         self.batch_size = batch_size
         self.rejected = 0
+        # What the most recent failed batch died of, so a total failure can say
+        # so instead of guessing at memory.
+        self.last_failure = None
         self.torch_dtype = torch_dtype
+        self.placement = placement
+        self.gpu_memory_utilization = min(
+            0.95, max(0.50, float(gpu_memory_utilization)))
+        self.max_batch_tokens = max(0, int(max_batch_tokens))
+        self.pipeline_devices = tuple(pipeline_devices or ())
+        self.micro_batch_size = max(1, int(micro_batch_size))
+        self.pipeline_split_ratio = min(
+            0.80, max(0.20, float(pipeline_split_ratio)))
+        self.cpu_threads = max(0, int(cpu_threads))
+        self.backend = str(backend).strip().lower()
+        self.worker_count = max(1, int(workers))
+        self.max_model_len = max(0, int(max_model_len))
+        # Refinement feeds the replicas from one queue and checks a chunk's answers
+        # while the next chunk is already running. Off: one batch at a time.
+        self.shared_queue = bool(shared_queue)
+        # Requests per queued chunk; 0 is batch_size split over the replicas.
+        self.chunk_size = max(0, int(chunk_size))
+        # Independent windows of the relabel / export passes go to different replicas.
+        self.parallel_windows = bool(parallel_windows)
+        self.progress_interval = float(progress_interval)
+        self._local_executor = None
+        self._worker_config = config
+        self._worker_env_profile = env_profile
+        self._active_cpu_threads = None
+        self.pipeline_pool = None
         # Every request repeats the same ~1200-token system prompt, and without
         # this each batch re-runs the attention over it from scratch. Caching
         # its keys and values once per stage cuts the prefill by 43% at batch 2
@@ -92,26 +240,275 @@ class DiarizationRefinementService:
         # SOMMELIER_LLM still overrides without a code change.
         self.model_name = (model_name or os.environ.get(
             "SOMMELIER_LLM", "Qwen/Qwen2.5-3B-Instruct"))
+
+        # Nếu có refinement_env riêng → dùng subprocess worker để tránh
+        # xung đột transformers 4.53 (main env) vs 5.x (Qwen3.5/3.8).
+        # KHÔNG start ở đây: worker chỉ spawn khi stage refinement thực sự
+        # chạy (lazy, giống qwen3/diarizen/sidon). __init__ chỉ kiểm tra
+        # xem refinement_env có tồn tại không để quyết định dùng worker
+        # hay fallback direct-load.
+        self._worker = None
+        self._worker_python = None
+        self._worker_env_error = None
+        try:
+            worker_env = "vllm" if self.backend == "vllm" else "refinement"
+            self._worker_python = resolve_worker_python(
+                worker_env, config=config, env_profile=env_profile, logger=logger)
+            if logger:
+                logger.info(
+                    f"[refinement] {worker_env}_env found ({self._worker_python}); "
+                    f"worker will start when refinement stage begins")
+        except FileNotFoundError as _e:
+            if self.backend == "vllm":
+                self._worker_env_error = _e
+            if logger:
+                if self.backend == "vllm":
+                    logger.warning(
+                        "[refinement] vllm_env is required but was not found; "
+                        "the refinement stage will stop with setup instructions")
+                else:
+                    logger.info(
+                        "[refinement] no refinement_env found, "
+                        "loading model directly in main process")
+        except Exception as _e:
+            if logger:
+                logger.warning(
+                    f"[refinement] worker env resolution failed ({_e}), "
+                    "falling back to direct load")
+            self._worker_python = None
+
+    def _ensure_worker_started(self):
+        """Spawn worker subprocess lần đầu cần dùng (lazy start).
+
+        Gọi từ ensure_loaded/generate_texts — tức khi stage refinement
+        thực sự chạy, không phải lúc pipeline khởi tạo service.
+        """
+        if self._worker is not None:
+            return True  # đã start
+        if self._worker_env_error is not None:
+            raise RuntimeError(
+                "A separate vllm_env is required for Qwen3-ASR, Whisper "
+                "large-v3 and Qwen3.5. Run scripts/create_vllm_env.sh, then "
+                "export VLLM_PYTHON=/path/to/vllm_env/bin/python. "
+                f"Resolver detail: {self._worker_env_error}")
+        if self._worker_python is None:
+            return False  # không có refinement_env → dùng direct load
+        try:
+            import os as _os
+            _script = _os.path.join(
+                _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                "refinement_worker.py")
+            from services.refinement_worker_service import (
+                RefinementWorkerPoolService, RefinementWorkerService)
+            devices = list(dict.fromkeys(self.pipeline_devices))
+            if not devices:
+                try:
+                    devices = [int(str(self.device).split(":")[-1])]
+                except (TypeError, ValueError):
+                    devices = [0]
+            replica_count = (min(self.worker_count, len(devices))
+                             if self.backend == "vllm" else 1)
+            services = [RefinementWorkerService(
+                python_env_path=self._worker_python,
+                worker_script_path=_script,
+                model_name=self.model_name,
+                dtype=self.torch_dtype,
+                device_map="single" if self.backend == "vllm" else self.placement,
+                gpu_ids="0" if self.backend == "vllm" else ",".join(
+                    str(value) for value in devices),
+                gpu_memory_fraction=self.gpu_memory_utilization,
+                backend=self.backend,
+                device_id=devices[index] if self.backend == "vllm" else None,
+                tensor_parallel_size=1,
+                max_model_len=self.max_model_len,
+                enable_prefix_caching=(self.prefix_cache
+                                       or self.backend == "vllm"),
+                logger=self.logger,
+            ) for index in range(replica_count)]
+            self._worker = (RefinementWorkerPoolService(services, self.logger)
+                            if len(services) > 1 else services[0])
+            self._worker_devices = list(devices[:replica_count])
+            if self.backend == "vllm":
+                # The engine refuses to start unless its share of the card is free, and
+                # a model stopped a moment ago may not have given its memory back yet.
+                from utils.gpu_memory import wait_for_free_vram
+                wait_for_free_vram(devices[:replica_count],
+                                   self.gpu_memory_utilization, logger=self.logger)
+            self._worker.start()
+            if self.logger:
+                self.logger.info(
+                    f"[refinement] subprocess worker started "
+                    f"(python={self._worker_python}, model={self.model_name}, "
+                    f"backend={self.backend}, replicas={len(services)})")
+            return True
+        except Exception as _e:
+            if self.backend == "vllm":
+                if self._worker is not None:
+                    try:
+                        self._worker.stop()
+                    except Exception:
+                        pass
+                self._worker = None
+                raise RuntimeError(
+                    f"Failed to start vLLM refinement workers for "
+                    f"{self.model_name}: {_e}") from _e
+            if self.logger:
+                self.logger.warning(
+                    f"[refinement] worker start failed ({_e}), "
+                    "falling back to direct load")
+            self._worker = None
+            self._worker_python = None
+            return False
+
+    def _activate_cpu_threads(self):
+        """Give refinement the cores released by earlier pipeline stages."""
+        if self._active_cpu_threads is not None:
+            return self._active_cpu_threads
+
+        from utils.cpu_plan import usable_cores
+
+        available = max(1, usable_cores())
+        requested = self.cpu_threads or available
+        workers = max(1, min(requested, available))
+        self._active_cpu_threads = workers
+
+        # The refinement tokenizer is created after this call, so its Rayon
+        # pool observes the larger stage-specific budget. PyTorch was imported
+        # at process start and needs its runtime setter as well.
+        os.environ["RAYON_NUM_THREADS"] = str(workers)
+        os.environ["TOKENIZERS_PARALLELISM"] = "true"
+        try:
+            torch.set_num_threads(workers)
+        except RuntimeError:
+            pass
+        if self.logger:
+            self.logger.info(
+                f"LLM refinement CPU budget: {workers}/{available} usable cores")
+        return workers
         
     def _load_model(self):
         if self.model is not None:
             return
+
+        self._activate_cpu_threads()
             
         if self.logger: self.logger.info(f"Loading LLM {self.model_name} for refinement...")
         try:
-            from transformers import AutoModelForCausalLM, AutoTokenizer
+            from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
             # bfloat16 keeps fp32's exponent range, so activations cannot
             # overflow the way they can in fp16. It only runs natively from
             # Ampere onwards -- Turing emulates it -- so the profile picks.
             dtype = getattr(torch, self.torch_dtype, torch.bfloat16)
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_name,
-                torch_dtype=dtype,
-                low_cpu_mem_usage=True,
-            ).to(self.device)
+            device_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+            wants_pipeline = (
+                self.placement == "pipelined"
+                and len(self.pipeline_devices) == 2
+                and self.pipeline_devices[0] != self.pipeline_devices[1]
+                and all(0 <= int(device) < device_count
+                        for device in self.pipeline_devices)
+            )
+
+            if wants_pipeline:
+                try:
+                    from services.refinement_pipeline_pool import RefinementPipelinePool
+
+                    config = AutoConfig.from_pretrained(self.model_name)
+                    layer_count = int(config.num_hidden_layers)
+                    split_layer = max(1, min(
+                        layer_count - 1,
+                        round(layer_count * self.pipeline_split_ratio),
+                    ))
+                    device_map = RefinementPipelinePool.build_device_map(
+                        layer_count, self.pipeline_devices, split_layer,
+                        tie_word_embeddings=bool(
+                            getattr(config, "tie_word_embeddings", False)))
+                    max_memory = {
+                        int(index): int(torch.cuda.get_device_properties(int(index)).total_memory
+                                        * self.gpu_memory_utilization)
+                        for index in self.pipeline_devices
+                    }
+                    self.model = AutoModelForCausalLM.from_pretrained(
+                        self.model_name,
+                        torch_dtype=dtype,
+                        device_map=device_map,
+                        max_memory=max_memory,
+                        low_cpu_mem_usage=True,
+                    )
+                    self.pipeline_pool = RefinementPipelinePool(
+                        self.model,
+                        devices=self.pipeline_devices,
+                        split_layer=split_layer,
+                        micro_batch_size=self.micro_batch_size,
+                        logger=self.logger,
+                    )
+                    if self.prefix_cache and self.logger:
+                        self.logger.info(
+                            "Prefix cache is disabled for pipelined refinement; "
+                            "each stage keeps its own per-micro-batch KV cache")
+                    if self.logger:
+                        self.logger.info(
+                            f"LLM pipeline ready: layers 0..{split_layer - 1} on "
+                            f"cuda:{self.pipeline_devices[0]}, layers "
+                            f"{split_layer}..{layer_count - 1} on "
+                            f"cuda:{self.pipeline_devices[1]}, micro-batch "
+                            f"{self.micro_batch_size}")
+                except Exception as pipeline_error:
+                    # A model with an unexpected forward contract must not make
+                    # refinement disappear. Drop any partial allocation and use
+                    # the measured Accelerate-sharded path instead.
+                    self.model = None
+                    self.pipeline_pool = None
+                    try:
+                        import gc
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+                    if self.logger:
+                        self.logger.warning(
+                            f"Pipelined refinement unavailable ({pipeline_error}); "
+                            "falling back to balanced layer placement")
+
+            # Sharding is the performance path and stays opt-in. The default
+            # pins the whole model to one card, which is what the baseline was
+            # measured with and what a single-GPU box needs; asking for a
+            # shard without a second card would just be the same placement by
+            # a slower route.
+            shard = (self.placement in ("sharded", "balanced", "pipelined")
+                     and device_count > 1)
+            if self.model is None and shard:
+                max_memory = {
+                    index: int(torch.cuda.get_device_properties(index).total_memory
+                               * self.gpu_memory_utilization)
+                    for index in range(device_count)
+                }
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    self.model_name,
+                    torch_dtype=dtype,
+                    device_map="balanced",
+                    max_memory=max_memory,
+                    low_cpu_mem_usage=True,
+                )
+            elif self.model is None:
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    self.model_name,
+                    torch_dtype=dtype,
+                    low_cpu_mem_usage=True,
+                ).to(self.device)
             self.model.eval()
-            if self.logger: self.logger.info("LLM loaded successfully.")
+            if self.logger:
+                if self.pipeline_pool is not None:
+                    placed = ("pipeline across "
+                              f"cuda:{self.pipeline_devices[0]} and "
+                              f"cuda:{self.pipeline_devices[1]}")
+                elif shard:
+                    placed = ("balanced across "
+                              f"{device_count} GPU(s): "
+                              f"{getattr(self.model, 'hf_device_map', None)}")
+                else:
+                    placed = f"pinned to {self.device}"
+                self.logger.info(f"LLM loaded successfully ({placed}).")
         except Exception as e:
             # Do not swallow this. refine() treats a missing model as "nothing
             # to do" and hands the transcripts straight back, so a failed load
@@ -130,6 +527,13 @@ class DiarizationRefinementService:
         """Clear per-file counters; the instance is reused across a batch."""
         self.rejected = 0
 
+    def _input_device(self):
+        """Entry device for both single-GPU and Accelerate-sharded models."""
+        try:
+            return self.model.get_input_embeddings().weight.device
+        except Exception:
+            return self.model.device
+
     def unload(self):
         """Release the refinement model and its VRAM.
 
@@ -139,12 +543,25 @@ class DiarizationRefinementService:
         files run back to back and every later stage competes for what this
         stage is no longer using.
         """
+        executor = getattr(self, "_local_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=True)
+            self._local_executor = None
+        if self._worker is not None:
+            try:
+                self._worker.stop()
+            except Exception:
+                pass
+            self._worker = None
+            self._wait_until_vram_is_back()
+            return
         if self.model is None and self.tokenizer is None:
             return
         # The prefix cache holds tensors on the model's device; dropping the
         # model without it would leave that memory pinned for the rest of the run.
         self._release_prefix()
         self._prefix_failed = False
+        self.pipeline_pool = None
         self.model = None
         self.tokenizer = None
         try:
@@ -154,6 +571,36 @@ class DiarizationRefinementService:
             pass
         if self.logger:
             self.logger.info("Unloaded refinement LLM from VRAM")
+
+    # The share of each card that must be free again before the next step may start. What
+    # stays behind is this process's CUDA context and small caches, a few GiB at most.
+    VRAM_FREE_AFTER_UNLOAD = 0.90
+
+    def _wait_until_vram_is_back(self):
+        """Do not return until the engine's cards are free again (or say they are not).
+
+        Stopping the engine process is not the same as its memory being back: the driver
+        takes a moment, and an engine process that survived would hold it indefinitely.
+        The step that follows (word alignment, a second model) starts on what is free.
+        """
+        devices = list(getattr(self, "_worker_devices", None) or [])
+        if not devices:
+            return
+        from utils import gpu_memory
+        free = gpu_memory.wait_for_free_vram(
+            devices, self.VRAM_FREE_AFTER_UNLOAD, timeout=60.0, logger=self.logger)
+        if self.logger:
+            if free:
+                self.logger.info("Refinement LLM released; the GPU memory is free again")
+            else:
+                self.logger.warning(
+                    "Refinement LLM was stopped but its GPU memory is still not free "
+                    "(see the line above); a step that needs it may run out of memory")
+
+    def is_resident(self) -> bool:
+        """Whether an engine or model of this service is still loaded."""
+        return (self._worker is not None or self.model is not None
+                or self.tokenizer is not None)
 
     def _accept(self, seg, refined: str) -> bool:
         """Whether the model's output is a fusion of this segment's transcripts.
@@ -182,6 +629,42 @@ class DiarizationRefinementService:
                 )
             return False
 
+        # The check above only sees non-Latin script, and English is Latin, so
+        # a segment translated wholesale into English passes it untouched:
+        # "nhưng sau đó họ fail là bởi vì họ fix" came back as "but after that
+        # they failed because they fixed" and scored 0.00 on both sides.
+        #
+        # Diacritics are the difference. Compare against the inputs rather than
+        # thresholding the output alone -- Vietnamese transcribed without
+        # diacritics is legitimate, and only a drop relative to what the ASR
+        # models produced is evidence the model translated instead of choosing.
+        source_diacritics = diacritic_ratio(" ".join(sources))
+        if source_diacritics >= 0.25 and diacritic_ratio(refined) < source_diacritics * 0.4:
+            if self.logger:
+                self.logger.warning(
+                    f"[LLM] rejected refinement for segment {seg.index} "
+                    f"(translated out of Vietnamese: diacritics "
+                    f"{source_diacritics:.2f} -> {diacritic_ratio(refined):.2f}); "
+                    "keeping ROVER text"
+                )
+            return False
+
+        # Length is checked before similarity, not after it. Fusing three
+        # readings of one utterance cannot outrun the longest of them, but a
+        # concatenation ("dạ" + "nhờ" + "yeah" -> "dạ nhờ yeah") contains every
+        # input word and so scores high on the similarity test below. Ordering
+        # the checks this way turns 41 of the corpus's 303 wrong segments into
+        # rejections at the cost of one correct segment.
+        longest_words = max(len(t.split()) for t in sources)
+        if longest_words and len(refined.split()) > longest_words * 1.5:
+            if self.logger:
+                self.logger.warning(
+                    f"[LLM] rejected refinement for segment {seg.index} "
+                    f"(concatenated inputs: {len(refined.split())} words vs "
+                    f"longest input {longest_words}); keeping ROVER text"
+                )
+            return False
+
         # Compare on folded tokens. Punctuation is exactly what refinement is
         # supposed to add, and on a one-word backchannel it is the whole
         # difference: "Ừ?" against "Ừ" scores 0.0 as raw words and would reject
@@ -196,15 +679,10 @@ class DiarizationRefinementService:
         if best >= ACCEPT_SIMILARITY:
             return True
 
-        # Length alone catches the "borrowed a neighbour's turn" case even when
-        # wording overlaps: fusing three transcripts cannot double the longest.
-        longest = max(len(t.split()) for t in sources)
-        reason = ("too dissimilar" if len(refined.split()) <= longest * 1.5
-                  else "much longer than any input")
         if self.logger:
             self.logger.warning(
-                f"[LLM] rejected refinement for segment {seg.index} ({reason}, "
-                f"sim={best:.2f}); keeping ROVER text"
+                f"[LLM] rejected refinement for segment {seg.index} "
+                f"(too dissimilar, sim={best:.2f}); keeping ROVER text"
             )
         return False
 
@@ -228,7 +706,7 @@ class DiarizationRefinementService:
         if duration < 1.0:
             note = (f"\nĐoạn này chỉ dài {duration:.2f} giây — nhiều nhất là "
                     f"một vài từ. Bản dịch nào dài hơn thế là ASR bịa, bỏ qua.\n")
-        elif getattr(seg, 'tse', False):
+        elif getattr(seg, 'bss', False):
             note = ("\nĐoạn này có hai người nói chồng lên nhau, ASR dễ nghe sai. "
                     "Ưu tiên phần cả 3 bản đồng ý.\n")
 
@@ -241,13 +719,12 @@ class DiarizationRefinementService:
         )
 
     def refine(self, segments: List[TranscriptSegment], prompt: str = None) -> List[TranscriptSegment]:
-        """Call local Qwen LLM to fix hallucination and text errors.
+        if not self.ensure_loaded():
+            raise RuntimeError(
+                f"Failed to initialize refinement LLM {self.model_name}"
+            )
 
-        ``prompt`` overrides the built-in fusion system prompt when supplied.
-        """
-        self._load_model()
-        if not self.model:
-            return segments
+        self.last_failure = None
 
         if self.logger: self.logger.info("Running LLM Refinement on all segments...")
 
@@ -258,13 +735,23 @@ class DiarizationRefinementService:
         # GPU busy instead of running one 1200-token prefill at a time.
         # _build_user_message is pure string work over the pre-refinement text,
         # so the segments are independent and this parallelises cleanly. It is
-        # the one part of refinement that is CPU-bound: generation itself is on
-        # the GPU and stays sequential.
+        # the one part of refinement that is CPU-bound. In pipelined mode the
+        # generated micro-batches then circulate through the two GPU stages.
         indices = [i for i, seg in enumerate(segments)
-                   if (seg.text_whisper or seg.text_phowhisper or seg.text_qwen3)]
+                   if (seg.text_whisper or seg.text_phowhisper or seg.text_qwen3)
+                   and not too_short_to_refine(seg)]
 
-        workers = int(os.environ.get("OMP_NUM_THREADS", "1"))
-        if len(indices) > 64 and workers > 1:
+        skipped = sum(1 for seg in segments
+                      if (seg.text_whisper or seg.text_phowhisper or seg.text_qwen3)
+                      and too_short_to_refine(seg))
+        if skipped and self.logger:
+            self.logger.info(
+                f"[LLM] Skipping {skipped} backchannel segment(s) "
+                f"(< {REFINE_MIN_SECONDS}s or <= {REFINE_MIN_WORDS} words); "
+                "keeping their ROVER text")
+
+        workers = self._activate_cpu_threads()
+        if len(indices) >= max(8, workers * 2) and workers > 1:
             from concurrent.futures import ThreadPoolExecutor
             with ThreadPoolExecutor(max_workers=workers) as ex:
                 messages = list(ex.map(lambda i: self._build_user_message(segments, i),
@@ -278,42 +765,33 @@ class DiarizationRefinementService:
         if not pending:
             return segments
 
-        tokenizer = self.tokenizer
-        if tokenizer.pad_token_id is None:
-            tokenizer.pad_token = tokenizer.eos_token
-        # Decoder-only models need left padding for correct batched generation.
-        original_padding_side = tokenizer.padding_side
-        tokenizer.padding_side = "left"
+        tokenizer = None
+        original_padding_side = None
 
-        from tqdm import tqdm
-        refined_count = 0
-        failed_count = 0
+        if self._worker is None:
+            tokenizer = self.tokenizer
+
+            if tokenizer.pad_token_id is None:
+                tokenizer.pad_token = tokenizer.eos_token
+
+            original_padding_side = tokenizer.padding_side
+            tokenizer.padding_side = "left"
+
+        from utils.llm_progress import LlmProgress
+        progress = LlmProgress(len(pending), logger=self.logger,
+                               interval=self.progress_interval,
+                               usage=self.token_usage)
         try:
-            with tqdm(total=len(pending), desc="[LLM] Đang tinh chỉnh câu") as bar:
-                start = 0
-                while start < len(pending):
-                    size = min(self.batch_size, len(pending) - start)
-                    batch = pending[start:start + size]
-                    ok, count = self._refine_batch(batch, system_prompt)
-
-                    # A batch that does not fit is halved rather than dropped:
-                    # the whole refinement stage silently no-ops otherwise.
-                    while not ok and len(batch) > 1:
-                        size = max(1, len(batch) // 2)
-                        if self.logger:
-                            self.logger.info(f"Retrying LLM refinement with batch size {size}")
-                        batch = pending[start:start + size]
-                        ok, count = self._refine_batch(batch, system_prompt)
-
-                    if ok:
-                        refined_count += count
-                    else:
-                        failed_count += len(batch)
-
-                    start += len(batch)
-                    bar.update(len(batch))
+            if self.shared_queue:
+                refined_count, failed_count = self._refine_queued(
+                    pending, system_prompt, progress)
+            else:
+                refined_count, failed_count = self._refine_sequential(
+                    pending, system_prompt, progress)
         finally:
-            tokenizer.padding_side = original_padding_side
+            progress.finish()
+            if tokenizer is not None:
+                tokenizer.padding_side = original_padding_side
 
         tail = f", {self.rejected} rejected as unfaithful" if self.rejected else ""
         if self.logger:
@@ -334,14 +812,128 @@ class DiarizationRefinementService:
         # failed and retried, instead of silently landing in the dataset with a
         # stage missing.
         if pending and failed_count / len(pending) > REFINE_FAILURE_LIMIT:
+            # Name what actually failed. This message used to say "too little
+            # free VRAM" whatever the cause, and a device-placement error read as
+            # a memory problem until someone read the warnings above it.
+            if self.last_failure and "out of memory" not in self.last_failure:
+                cause = (f"The last error was not an out-of-memory failure: "
+                         f"{self.last_failure}")
+            else:
+                cause = (f"The usual cause is too little free VRAM for "
+                         f"{self.model_name}: check the out-of-memory warnings "
+                         "above, lower models.refinement.batch_size, or use a "
+                         "smaller model.")
             raise RuntimeError(
                 f"LLM refinement failed on {failed_count} of {len(pending)} "
-                f"segments ({100.0 * failed_count / len(pending):.0f}%). The "
-                "usual cause is too little free VRAM for "
-                f"{self.model_name}: check the out-of-memory warnings above, "
-                "lower models.refinement.batch_size, or use a smaller model.")
+                f"segments ({100.0 * failed_count / len(pending):.0f}%). {cause}")
 
         return segments
+
+    def _refine_sequential(self, pending, system_prompt, progress):
+        """One batch at a time; a batch that fails is halved. Returns (refined, failed)."""
+        refined_count = failed_count = 0
+        start = 0
+        while start < len(pending):
+            size = min(self.batch_size, len(pending) - start)
+            batch = pending[start:start + size]
+            ok, count = self._refine_batch(batch, system_prompt)
+
+            # A batch that does not fit is halved rather than dropped:
+            # the whole refinement stage silently no-ops otherwise.
+            while not ok and len(batch) > 1:
+                size = max(1, len(batch) // 2)
+                if self.logger:
+                    self.logger.info(f"Retrying LLM refinement with batch size {size}")
+                batch = pending[start:start + size]
+                ok, count = self._refine_batch(batch, system_prompt)
+
+            if ok:
+                refined_count += count
+            else:
+                failed_count += len(batch)
+
+            start += len(batch)
+            progress.advance(len(batch))
+        return refined_count, failed_count
+
+    def _refine_queued(self, pending, system_prompt, progress):
+        """Chunks go to whichever replica is free; the next is queued before this one is checked.
+
+        The CPU check of a chunk (`_accept`) runs while the replicas already hold
+        the following chunks, so a card is not left idle behind it, and there is no
+        barrier between chunks. Every request is sent whole: nothing is cut to fit,
+        and chunk size only decides how work is shared. Answers are applied in
+        chunk order. Returns (refined, failed).
+        """
+        from concurrent.futures import FIRST_COMPLETED, wait
+
+        replicas = self.replica_count
+        chunk = self.chunk_size or max(1, -(-self.batch_size // replicas))
+        chunks = [pending[i:i + chunk] for i in range(0, len(pending), chunk)]
+        # One chunk running per replica plus one waiting: a replica that finishes
+        # takes the waiting one at once instead of when the CPU check is done.
+        depth = replicas + 1
+        inflight = {}
+        completed = {}
+        submitted = 0
+        next_commit = 0
+        refined_count = failed_count = 0
+
+        def submit_more():
+            nonlocal submitted
+            while submitted < len(chunks) and len(inflight) < depth:
+                batch = chunks[submitted]
+                index = submitted
+                submitted += 1
+                future = self.submit_texts(
+                    system_prompt, [msg for _, msg in batch], use_prefix=True,
+                    labels=[seg.index for seg, _ in batch])
+                inflight[future] = index
+
+        submit_more()
+        while inflight:
+            done, _ = wait(inflight, return_when=FIRST_COMPLETED)
+            for future in done:
+                completed[inflight.pop(future)] = future
+            # Refill on ANY completion, even if the first chunk is still running.
+            # Only replies wait for source order; the free replica does not.
+            submit_more()
+            while next_commit in completed:
+                batch = chunks[next_commit]
+                future = completed.pop(next_commit)
+                next_commit += 1
+                try:
+                    ok, decoded = future.result()
+                except Exception as e:
+                    self.last_failure = f"{type(e).__name__}: {e}"
+                    ok, decoded = False, []
+                if ok and len(decoded) != len(batch):
+                    ok = False
+                if ok:
+                    refined_count += self._apply_batch(batch, decoded)
+                else:
+                    refined, failed = self._refine_halved(batch, system_prompt)
+                    refined_count += refined
+                    failed_count += failed
+                progress.advance(len(batch))
+        return refined_count, failed_count
+
+    def _refine_halved(self, batch, system_prompt):
+        """A chunk that failed as a whole, retried in halves. Returns (refined, failed)."""
+        if len(batch) <= 1:
+            return 0, len(batch)
+        half = len(batch) // 2
+        if self.logger:
+            self.logger.info(f"Retrying LLM refinement with batch size {half}")
+        refined = failed = 0
+        for part in (batch[:half], batch[half:]):
+            ok, count = self._refine_batch(part, system_prompt)
+            if ok:
+                refined += count
+            else:
+                done, lost = self._refine_halved(part, system_prompt)
+                refined, failed = refined + done, failed + lost
+        return refined, failed
 
     # ------------------------------------------------------------------
     def _split_prompt(self, system_prompt: str, user_msg: str):
@@ -391,7 +983,8 @@ class DiarizationRefinementService:
         prefix_text, _ = split
         try:
             ids = self.tokenizer(prefix_text, return_tensors="pt",
-                                 add_special_tokens=False).input_ids.to(self.model.device)
+                                 add_special_tokens=False).input_ids.to(
+                                     self._input_device())
             if ids.shape[1] == 0:
                 raise ValueError("shared prefix tokenised to nothing")
             with torch.no_grad():
@@ -485,7 +1078,7 @@ class DiarizationRefinementService:
                 tails.append(split[1])
 
             enc = tok(tails, return_tensors="pt", padding=True,
-                      add_special_tokens=False).to(self.model.device)
+                      add_special_tokens=False).to(self._input_device())
 
             past = self._expand_prefix(len(batch))
             if past is None:
@@ -520,67 +1113,221 @@ class DiarizationRefinementService:
                     f"prompts: {e}")
             return False
 
-    def _refine_batch(self, batch, system_prompt):
-        """Refine one batch in place. Returns (succeeded, refined_count)."""
+    def count_tokens(self, text: str) -> int:
+        """Tokens `text` takes for this model's tokenizer.
+
+        Khi dùng subprocess worker tokenizer không có trong main process —
+        dùng xấp xỉ len/3.5 (phù hợp tiếng Việt với Qwen tokenizer).
+        Sai số ~10-15%, đủ cho việc chia batch của speaker_relabel.
+        """
+        if self.tokenizer is None:
+            return max(1, int(len(text) / 3.5))
+        return len(self.tokenizer(text, add_special_tokens=False).input_ids)
+
+    @property
+    def replica_count(self) -> int:
+        """Engines a request can go to right now (1 until the workers are up)."""
+        services = getattr(self._worker, "services", None)
+        return max(1, len(services)) if services else 1
+
+    def token_usage(self) -> dict:
+        """Tokens the engines processed so far, from their own counts (empty if unknown)."""
+        return dict(getattr(self._worker, "usage", None) or {})
+
+    def submit_texts(self, system_prompt, user_messages, max_new_tokens=512,
+                     use_prefix=False, labels=None, thinking=False):
+        """Queue one request; the Future resolves to (ok, texts).
+
+        A replica pool takes it into the shared queue. Anything else runs it on one
+        background thread, so the caller can work while a single engine generates.
+        """
+        worker = self._worker if self._ensure_worker_started() else None
+        if worker is not None and hasattr(worker, "submit"):
+            return worker.submit(system_prompt, user_messages,
+                                 max_new_tokens=max_new_tokens,
+                                 thinking=bool(thinking))
+        if getattr(self, "_local_executor", None) is None:
+            from concurrent.futures import ThreadPoolExecutor
+            self._local_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="refinement-local")
+        return self._local_executor.submit(
+            profiling.bind(self.generate_texts), system_prompt, user_messages,
+            max_new_tokens, use_prefix, labels, thinking)
+
+    def ensure_loaded(self) -> bool:
+        """Load the LLM if it is not resident yet. False when it cannot be used.
+
+        For passes other than `refine()` (speaker relabel, conversation-export
+        judging) that run on the same model: `refine()` loads it itself, but
+        those passes must work with refinement switched off too.
+        """
+        if self._ensure_worker_started():
+            return self._worker.ping()
+        self._load_model()
+        return self.model is not None
+
+    def generate_texts(self, system_prompt, user_messages, max_new_tokens=512,
+                       use_prefix=False, labels=None, thinking=False):
+        """Run one batch of chat requests. Returns (succeeded, decoded_texts).
+
+        The model-facing half of `_refine_batch`, split out so other passes over
+        the same resident LLM (speaker relabel, conversation-export judging) share its
+        OOM handling, `max_batch_tokens` guard and pipelined-GPU path instead of
+        loading a second copy. `succeeded` is False when the batch did not fit
+        or generation failed; the caller decides whether to halve and retry.
+
+        The model must already be loaded (`ensure_loaded`). `labels` only names
+        the requests in log lines. `use_prefix` is for the fusion prompt only:
+        the cached prefix is keyed on that one system prompt, and a different
+        prompt must not reuse it.
+
+        `thinking` lets a model that has a thinking mode (Qwen3) reason before it
+        answers. Fusion never asks for it: it runs once per segment, must answer
+        in a fixed shape and gets a few hundred tokens. The passes that read a
+        whole transcript run a handful of times and can afford it, but the reply
+        then starts with a `<think>` block, so `max_new_tokens` has to cover the
+        reasoning as well as the answer. A model with no thinking mode ignores it.
+        """
+        if self._ensure_worker_started():
+            return self._worker.generate_texts(
+                system_prompt, user_messages,
+                max_new_tokens=max_new_tokens,
+                thinking=bool(thinking),
+            )
+        if not self.model:
+            return False, []
+        tag = (", ".join(str(label) for label in labels) if labels
+               else f"{len(user_messages)} request(s)")
+        tokenizer = self.tokenizer
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        # Decoder-only models need left padding for correct batched generation.
+        # refine() sets it around its whole loop; other callers do not, so it is
+        # set here too and put back afterwards.
+        original_padding_side = tokenizer.padding_side
+        tokenizer.padding_side = "left"
+        try:
+            return self._generate_batch(
+                system_prompt, user_messages, max_new_tokens, use_prefix, tag,
+                thinking)
+        finally:
+            tokenizer.padding_side = original_padding_side
+
+    def _generate_batch(self, system_prompt, user_messages, max_new_tokens,
+                        use_prefix, tag, thinking=False):
         tokenizer = self.tokenizer
         texts = [
             tokenizer.apply_chat_template(
                 [{"role": "system", "content": system_prompt},
                  {"role": "user", "content": user_msg}],
-                tokenize=False, add_generation_prompt=True
+                tokenize=False, add_generation_prompt=True,
+                enable_thinking=bool(thinking),
             )
-            for _, user_msg in batch
+            for user_msg in user_messages
         ]
 
         try:
-            inputs = tokenizer(texts, return_tensors="pt", padding=True).to(self.model.device)
+            inputs = tokenizer(texts, return_tensors="pt", padding=True)
+            if (self.max_batch_tokens and
+                    int(inputs.attention_mask.sum()) > self.max_batch_tokens):
+                return False, []
             gen_kwargs = dict(
-                max_new_tokens=150,
-                do_sample=False,
-                temperature=None,
-                top_p=None,
-                top_k=None,
-                repetition_penalty=1.2,
+                max_new_tokens=max_new_tokens,
                 pad_token_id=tokenizer.pad_token_id,
+                **hf_generate_kwargs(thinking),
             )
 
-            # Reuse the shared prefix's KV cache when one is available. The
-            # tails are re-tokenised on their own and the attention mask is
-            # widened to cover the cached span, so the model sees exactly the
-            # same sequence -- only the prefix's attention is not recomputed.
-            # Anything unexpected falls through to the full-prompt path below,
-            # which is the one that has always run.
-            past = None
-            if self._build_prefix(system_prompt, batch[0][1]):
-                past = self._prepare_cached_inputs(batch, system_prompt, inputs, gen_kwargs)
+            if self.pipeline_pool is not None:
+                configured_eos = getattr(
+                    getattr(self.model, "generation_config", None),
+                    "eos_token_id", None)
+                if configured_eos is None:
+                    configured_eos = tokenizer.eos_token_id
+                if configured_eos is None:
+                    eos_ids = []
+                elif isinstance(configured_eos, (list, tuple, set)):
+                    eos_ids = [int(value) for value in configured_eos]
+                else:
+                    eos_ids = [int(configured_eos)]
 
-            with torch.no_grad():
-                generated_ids = self.model.generate(**inputs, **gen_kwargs)
+                generated_rows = self.pipeline_pool.generate(
+                    inputs.input_ids,
+                    inputs.attention_mask,
+                    eos_token_ids=eos_ids,
+                    pad_token_id=int(tokenizer.pad_token_id),
+                    max_new_tokens=gen_kwargs["max_new_tokens"],
+                )
+                decoded = tokenizer.batch_decode(
+                    generated_rows, skip_special_tokens=True)
+            else:
+                inputs = inputs.to(self._input_device())
+                # Reuse the shared prefix's KV cache when one is available. The
+                # tails are re-tokenised on their own and the attention mask is
+                # widened to cover the cached span, so the model sees exactly
+                # the same sequence -- only the prefix's attention is not
+                # recomputed. Anything unexpected falls through to the full
+                # prompt path below.
+                if use_prefix and self._build_prefix(system_prompt, user_messages[0]):
+                    self._prepare_cached_inputs(
+                        [(None, msg) for msg in user_messages],
+                        system_prompt, inputs, gen_kwargs)
 
-            prompt_len = inputs.input_ids.shape[1]
-            decoded = tokenizer.batch_decode(
-                generated_ids[:, prompt_len:], skip_special_tokens=True
-            )
-            count = 0
-            for (seg, _), refined_text in zip(batch, decoded):
-                refined_text = refined_text.strip()
-                if not refined_text:
-                    continue
-                if not self._accept(seg, refined_text):
-                    self.rejected += 1
-                    continue
-                seg.text = refined_text
-                count += 1
-            return True, count
+                with torch.no_grad():
+                    generated_ids = self.model.generate(**inputs, **gen_kwargs)
+
+                prompt_len = inputs.input_ids.shape[1]
+                decoded = tokenizer.batch_decode(
+                    generated_ids[:, prompt_len:], skip_special_tokens=True
+                )
+            return True, decoded
 
         except torch.cuda.OutOfMemoryError as e:
             torch.cuda.empty_cache()
+            self.last_failure = f"out of memory: {e}"
             if self.logger:
-                indices = ", ".join(seg.index for seg, _ in batch)
-                self.logger.warning(f"LLM out of memory on [{indices}] (batch {len(batch)}): {e}")
-            return False, 0
+                self.logger.warning(
+                    f"LLM out of memory on [{tag}] (batch {len(user_messages)}): {e}")
+            return False, []
         except Exception as e:
+            if self.pipeline_pool is not None:
+                # The weights are still a valid Accelerate device map. Disable
+                # only the custom scheduler and retry through transformers'
+                # proven serial generate() path, preserving refinement rather
+                # than failing the file because one model revision changed an
+                # internal forward detail.
+                self.pipeline_pool = None
+                if self.logger:
+                    self.logger.warning(
+                        f"LLM pipeline scheduler failed ({e}); retrying this and "
+                        "later batches with serial sharded generation")
+                return self._generate_batch(
+                    system_prompt, user_messages, max_new_tokens, use_prefix, tag,
+                    thinking)
+            self.last_failure = f"{type(e).__name__}: {e}"
             if self.logger:
-                indices = ", ".join(seg.index for seg, _ in batch)
-                self.logger.warning(f"LLM failed on segments [{indices}]: {e}")
+                self.logger.warning(f"LLM failed on [{tag}]: {e}")
+            return False, []
+
+    def _refine_batch(self, batch, system_prompt):
+        """Refine one batch in place. Returns (succeeded, refined_count)."""
+        ok, decoded = self.generate_texts(
+            system_prompt, [user_msg for _, user_msg in batch],
+            use_prefix=True, labels=[seg.index for seg, _ in batch])
+        if not ok:
             return False, 0
+        return True, self._apply_batch(batch, decoded)
+
+    def _apply_batch(self, batch, decoded) -> int:
+        """Accept or reject each answer in place. Returns how many were applied."""
+        count = 0
+        for (seg, _), refined_text in zip(batch, decoded):
+            refined_text = _THINK_RE.sub("", refined_text)
+            refined_text = refined_text.split("</think>")[-1].strip()
+            if not refined_text:
+                continue
+            if not self._accept(seg, refined_text):
+                self.rejected += 1
+                continue
+            seg.text = refined_text
+            count += 1
+        return count

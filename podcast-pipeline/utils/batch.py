@@ -2,6 +2,8 @@
 
 import os
 
+from utils.steps import opt_in_step_enabled, step_enabled
+
 
 def audio_duration(path: str) -> float:
     """Length of `path` in seconds, or 0.0 if it cannot be read.
@@ -110,9 +112,42 @@ def plan_batches(paths, max_hours: float, logger=None):
     return batches
 
 
+def split_final_failures(failures, is_done):
+    """Separate files that stayed failed from those a later pass recovered.
+
+    `failures` accumulates across passes, so a file that failed in pass 1 and
+    finished in pass 2 is still in it. Reporting that list as-is printed
+    "1/2 file(s) failed" right under "Corpus complete: 2 done". A file that
+    failed twice appears twice; only its last error is kept.
+    """
+    last = {}
+    for path, err in failures:
+        last[path] = err
+    still = [(p, e) for p, e in last.items() if not is_done(p)]
+    recovered = [(p, e) for p, e in last.items() if is_done(p)]
+    return still, recovered
+
+
 # Stage order must match the pipeline's own sequence; `None` means "run to the
-# end", which covers refinement and export.
-PIPELINE_STAGES = ("diarization", "separation", "music_removal", "asr", "captioning", None)
+# end" after all model-backed post-processing, covering clean-data selection
+# and export. Every GPU-backed post-ASR operation has its own corpus-wide pass:
+# refinement -> relabel -> forced alignment -> conversation-export judging. This keeps a model
+# resident for the entire corpus instead of swapping model families per file.
+#
+# "music" leads because it is a stage like any other: it loads PANNs and a
+# vocal separator, and running it as its own pass loads them once for the whole
+# batch instead of once inside each file's diarization pass. It is also the
+# stage a run keeps when everything after it is switched off, so it has to be
+# reachable on its own.
+PIPELINE_STAGES = (
+    "music", "diarization", "separation", "asr",
+    "captioning", "refinement", "speaker_relabel", "word_alignment",
+    "conversation_exports", None,
+)
+
+
+def label_of(stage):
+    return stage or "clean-data+export"
 
 
 def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELINE_STAGES):
@@ -137,31 +172,86 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
             if _stage_index(stage) > _stage_index(original_stop):
                 break
 
-        # captioning is the one stage whose flag can be honoured from here: with
-        # qwen3omni off it returns without touching the transcripts, so skipping
-        # it costs nothing and saves a pass that reloads the audio and re-reads
-        # four checkpoints to do nothing. The others are not safe to skip --
-        # separation and music_removal each produce or forward the
-        # enhanced_segments that ASR consumes, flag or no flag.
-        if stage == "captioning" and not getattr(args, "qwen3omni", False):
-            continue
+        label = label_of(stage)
 
-        label = stage or "refinement+export"
+        # Skip this pass entirely when the stage is switched off in the config.
+        # Model-backed opt-in passes are explicit stages. The final None pass
+        # only writes clean-data and normal exports, but may still be needed
+        # when the normal export switch is off.
+        _stage_step_map = {
+            "music": "music_analysis",
+            "diarization": "diarization",
+            "separation": "separation",
+            "asr": "asr",
+            "captioning": "captioning",
+            "refinement": "refinement",
+        }
+        _opt_in_stages = {"speaker_relabel", "word_alignment", "conversation_exports"}
+        if stage is not None:
+            enabled = (opt_in_step_enabled(args, stage)
+                       if stage in _opt_in_stages else
+                       step_enabled(args, _stage_step_map.get(stage, stage)))
+            if not enabled:
+                # Without diarization there is no segment timeline for the
+                # downstream stages; the music pass is the complete useful run.
+                if stage == "diarization":
+                    if logger:
+                        logger.info("Diarization is off; ending this batch after music")
+                    break
+                # Separation-off is different: PipelineService.passthrough()
+                # preserves the segment shape and later ASR/export stages can
+                # still run. Its pass must therefore reach the pipeline.
+                if stage == "separation":
+                    enabled = True
+                else:
+                    if logger:
+                        logger.info(f"Stage '{label}' is off in the profile; skipping batch pass")
+                    continue
+        elif stage is None:
+            profile = ((config.get("environments") or {})
+                       .get(getattr(args, "env", ""), {}))
+            clean_data_on = bool(
+                ((profile.get("outputs") or {}).get("clean_two_channel_dir")))
+            if not step_enabled(args, "export") and not clean_data_on:
+                if logger:
+                    logger.info("Clean-data and export are off; skipping final batch pass")
+                continue
         pending = [p for p in batch if p not in failures]
+        if stage == "diarization":
+            # DiariZen is a whole-file stage. Starting the longest files first
+            # keeps both replicas occupied and moves short-file tail work out
+            # of the critical path without changing any model or segmentation
+            # setting. Python's sort is stable, so equal/unknown durations keep
+            # the caller's order.
+            pending.sort(key=lambda path: audio_duration(path), reverse=True)
         if not pending:
             break
         if logger:
             logger.info(f"=== Stage '{label}': {len(pending)} file(s) ===")
+        monitor = getattr(pipeline, "performance_monitor", None)
+        stage_started = __import__("time").time()
+        if monitor:
+            monitor.record("stage_started", stage=label, files=len(pending))
 
         stage_args = copy.copy(args)
         stage_args.stop_after = stage
+        # Whether this batch goes on past this stage; a stage that hands the LLM
+        # to the next one only keeps it when there is a next one.
+        stage_args.batch_continues = original_stop != stage
+        # The final pass re-enters run() to restore checkpointed state before
+        # export. Clip judging has no checkpoint, so mark this invocation to
+        # prevent a second LLM judgement after its dedicated corpus-wide pass.
+        stage_args.postprocess_only = stage is None
 
         # Hold model releases until every file has passed through this stage.
         # Without this the first file frees the diarizer that the second file
         # is about to use, which turns stage-major back into file-major with
         # extra steps.
+        prepare = getattr(pipeline, "prepare_stage_scope", None)
         begin = getattr(pipeline, "begin_stage_scope", None)
         end = getattr(pipeline, "end_stage_scope", None)
+        if prepare:
+            prepare(stage)
         if begin:
             begin()
 
@@ -169,25 +259,222 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
         # later release, so a stage that dies outside the per-file try would
         # leave the models it finished with resident for the rest of the run.
         try:
-            for i, path in enumerate(pending, start=1):
+            parallelism = _stage_parallelism(stage_args, stage)
+
+            # Cross-file ASR: the service must know how many files will pass
+            # through, and hear about every one -- including files that fail or
+            # were checkpointed -- to know when no more work is coming.
+            asr_svc = (getattr(pipeline, "asr_svc", None)
+                       if stage == "asr" and _asr_cross_file(stage_args) else None)
+            begin_asr = getattr(asr_svc, "begin_cross_file_stage", None)
+            settle_asr = getattr(asr_svc, "settle_file", None)
+            if begin_asr:
+                begin_asr(len(pending))
+
+            def run_one(i, path):
                 if logger:
-                    logger.info(f"[{label} {i}/{len(pending)}] {os.path.basename(path)}")
+                    logger.info(
+                        f"[{label} {i}/{len(pending)}] {os.path.basename(path)}")
+                stage_pipeline = (
+                    pipeline.parallel_stage_view(stage)
+                    if parallelism > 1 and hasattr(pipeline, "parallel_stage_view")
+                    else pipeline)
                 try:
-                    pipeline.run(stage_args, config, path)
-                except Exception as e:
-                    # A file that dies in diarization must not be retried in
-                    # every later stage, and must not stop its neighbours.
-                    if logger:
-                        logger.error(f"Failed on {path} during {label}: {type(e).__name__}: {e}")
-                    failures[path] = f"{label}: {type(e).__name__}: {e}"
+                    from utils import profiling
+                    with profiling.file_stage(label, path):
+                        stage_pipeline.run(copy.copy(stage_args), config, path)
+                finally:
+                    if settle_asr:
+                        settle_asr()
+
+            if parallelism > 1 and len(pending) > 1:
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(
+                        max_workers=min(parallelism, len(pending)),
+                        thread_name_prefix=f"stage-{stage}") as executor:
+                    submitted = [
+                        (path, executor.submit(run_one, i, path))
+                        for i, path in enumerate(pending, start=1)
+                    ]
+                    for path, future in submitted:
+                        try:
+                            future.result()
+                        except Exception as e:
+                            if logger:
+                                logger.error(
+                                    f"Failed on {path} during {label}: "
+                                    f"{type(e).__name__}: {e}")
+                            failures[path] = (
+                                f"{label}: {type(e).__name__}: {e}")
+            else:
+                for i, path in enumerate(pending, start=1):
+                    try:
+                        run_one(i, path)
+                    except Exception as e:
+                        # A failed file is omitted from every later stage but
+                        # does not stop its neighbours.
+                        if logger:
+                            logger.error(
+                                f"Failed on {path} during {label}: "
+                                f"{type(e).__name__}: {e}")
+                        failures[path] = f"{label}: {type(e).__name__}: {e}"
+
+            # Block here until every diarize_postprocess() future this
+            # stage's files deferred (see PipelineService.run()'s
+            # "diarization" stop-point) has actually resolved. A no-op for
+            # any stage but "diarization" -- pipeline._pending_diar_jobs is
+            # only ever populated there. Without this, the next stage
+            # ("separation") could start reading a diarization checkpoint a
+            # still-running background thread has not written yet.
+            _drain_pending_diarization(pipeline, failures)
+            # Same for ASR: votes and checkpoint commits run off the file
+            # threads, and must all be on disk before the next stage reads them.
+            # The scheduler is still open here (end() below closes it).
+            _drain_pending_asr(pipeline, failures)
         finally:
             if end:
                 end()
+            if monitor:
+                monitor.stage_finished(
+                    label, __import__("time").time() - stage_started,
+                    len(pending), sum(1 for path in pending if path in failures))
 
         if stage is not None and original_stop == stage:
             break
 
+    # Safety net for a run that stops before the 'separation' stage (most
+    # commonly --stop_after diarization): the pools separation_service.py's
+    # prefetch_overlap_plan()/close_window_pool() are documented to close
+    # "once, at the end of the separation stage's scope" never get their
+    # close callbacks registered when that stage is never reached, since
+    # they live inside PipelineService.run()'s separation section -- code
+    # this loop skips entirely by breaking out above. By the time this
+    # function returns, no further stage will run in this invocation
+    # either way, so closing here is always correct and, for the normal
+    # case where separation did run and already closed them, a no-op
+    # (close_window_pool/close_prefetch_pool/close_async_pools all check
+    # for "nothing to close" before doing anything).
+    separation_svc = getattr(pipeline, "separation_svc", None)
+    for close_name in ("close_window_pool", "close_prefetch_pool", "close_async_pools"):
+        close = getattr(separation_svc, close_name, None)
+        if callable(close):
+            close()
+
+    # A stage that kept the LLM for its successor must not leave it behind when the
+    # successor never ran (every file failed, or the batch ended first).
+    release_llm = getattr(pipeline, "_release_llm_before", None)
+    if callable(release_llm):
+        release_llm(args, "the end of the batch")
+
+    diarization_svc = getattr(pipeline, "diarization_svc", None)
+    close_postprocess = getattr(diarization_svc, "close_postprocess_pool", None)
+    if callable(close_postprocess):
+        close_postprocess()
+
+    music_svc = getattr(pipeline, "music_svc", None)
+    close_music_pools = getattr(music_svc, "close_async_pools", None)
+    if callable(close_music_pools):
+        close_music_pools()
+
     return list(failures.items())
+
+
+def _drain_pending_diarization(pipeline, failures):
+    """Block until every deferred diarize_postprocess() future has resolved,
+    routing a failure into `failures` exactly like a synchronous one.
+
+    A no-op for any stage but 'diarization' (pipeline._pending_diar_jobs is
+    only ever populated by PipelineService.run()'s diarization stop-point).
+    Must run before the stage loop is allowed to move on, so 'separation'
+    never reads a checkpoint that a still-running background thread has not
+    written yet.
+    """
+    pending = getattr(pipeline, "_pending_diar_jobs", None)
+    if not pending:
+        return
+    for path, future in list(pending.items()):
+        try:
+            future.result()
+        except Exception as e:
+            failures[path] = f"diarization: {type(e).__name__}: {e}"
+        finally:
+            pending.pop(path, None)
+
+
+def _drain_pending_asr(pipeline, failures):
+    """Block until every deferred ASR vote + checkpoint commit has resolved,
+    routing a failure into `failures` like a synchronous one.
+
+    A no-op unless PipelineService._submit_asr_async queued something (cross-file
+    ASR with async_vote). A file that failed earlier keeps its first error.
+    """
+    pending = getattr(pipeline, "_pending_asr_jobs", None)
+    if not pending:
+        return
+    for path, future in list(pending.items()):
+        try:
+            future.result()
+        except Exception as e:
+            failures.setdefault(path, f"asr: {type(e).__name__}: {e}")
+        finally:
+            pending.pop(path, None)
+
+
+def _asr_cross_file(args) -> bool:
+    perf = getattr(args, "performance_config", None) or {}
+    return bool(perf.get("enabled", False)
+                and perf.get("stages", {}).get("asr", {}).get("cross_file", False))
+
+
+# "As many as there are files": the caller takes min(this, files pending).
+UNLIMITED_FILES = 1 << 30
+
+
+def _stage_parallelism(args, stage) -> int:
+    """Concurrent files allowed for stages with independent GPU workers."""
+    perf = getattr(args, "performance_config", None) or {}
+    if not perf.get("enabled", False):
+        return 1
+    stages = perf.get("stages", {})
+    if stage == "asr" and _asr_cross_file(args):
+        # Files in flight keep every ASR model's queue fed while another file
+        # waits for its slowest model (services/asr_scheduler.py).
+        return max(1, int(stages["asr"].get("files_in_flight", 3)))
+    if stage == "diarization" and not getattr(args, "dia3", False):
+        return max(1, min(2, int(
+            stages.get("diarization", {}).get("workers", 1))))
+    if stage == "separation":
+        separator = (getattr(args, "separator", None)
+                     or os.environ.get("BSS_SEPARATOR", "sidon"))
+        if str(separator).strip().lower() == "sidon":
+            separation = stages.get("separation", {})
+            files = int(separation.get("files_in_flight", 0))
+            if files > 0:
+                return files
+            return max(1, min(2, int(separation.get("max_workers", 1))))
+    music_perf = stages.get("music", {})
+    taggers = max(1, int(music_perf.get("tagger_workers", 1)))
+    if stage == "music" and taggers >= 2:
+        # With a pool of taggers every file is in flight at once. Sweeps wait for a
+        # free tagger in arrival order, so each file's music-removal jobs reach the
+        # BS-RoFormer instances as soon as its sweep is done and they never wait for
+        # a batch of files to finish; capping the files would only leave them idle.
+        # The caller runs at most as many as there are files.
+        return UNLIMITED_FILES
+    if stage == "music" and (
+            music_perf.get("cross_file_overlap", False)
+            or int(music_perf.get("max_separator_workers", 1)) >= 2):
+        # Two different reasons both cap out at 2, not more: cross_file_overlap
+        # keeps SSLAM and BS-RoFormer -- two model TYPES -- on two GPUs, so a
+        # third file gains nothing further (the first two already keep both
+        # cards busy). max_separator_workers>=2 instead puts two BS-RoFormer
+        # INSTANCES on the two GPUs; a third file gains nothing further there
+        # either, since strip_music_spans()'s checkout queue (see
+        # music_service.py) already lets any pending job take an instance the
+        # moment its GPU work frees up, without needing a third file's worth
+        # of extra concurrency at this level.
+        return 2
+    return 1
 
 
 def _stage_index(stage) -> int:

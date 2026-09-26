@@ -4,21 +4,38 @@ torchaudio==2.8.0
 torchvision==0.23.0
 lightning==2.4.0
 torchmetrics==1.6.2
-onnxruntime-gpu==1.19.2
-nemo-toolkit[asr]==2.2.0
+# Keep the GPU wheel on CUDA 12 / cuDNN 9 for Kaggle's Python 3.12 runtime.
+# The Kaggle notebook reapplies this wheel after dependency resolution because
+# some optional audio dependencies also request the CPU `onnxruntime` package,
+# and both distributions install the same Python module tree.
+onnxruntime-gpu==1.23.2
+wrapt==2.3.0
+# nemo-toolkit[asr]==2.2.0
+# Removed: it is imported by models/sortformer.py alone, and that module's
+# import in services/model_loader.py is commented out -- nothing loads it. It
+# also made this file unsatisfiable: nemo 2.2.0 requires numba==0.61.0 while
+# librosa/whisperx here want 0.61.2, so `uv pip install -r` failed outright.
+# Re-enabling Sortformer means installing nemo alongside, and pinning numba to
+# whatever that build of nemo wants.
 pyannote.audio==4.0.7
-speechbrain==1.0.2
 faster-whisper==1.2.0
 whisperx==3.8.6
 ctranslate2==4.5.0
-demucs>=4.0.1
-panns-inference
+
+# BS-RoFormer for vocal isolation. The checkpoint is models.bs_roformer.model in
+# the profile; the windowing knobs beside it are passed through as mdxc_params.
+# Checkpoints are pulled from UVR (not the HF hub) on first use, so an offline
+# run needs download_offline_weights.py and BS_ROFORMER_MODEL_DIR.
+audio-separator>=0.47.0
 librosa==0.10.2.post1
 soundfile==0.13.1
 pydub==0.25.1
 julius==0.2.7
 numba==0.61.2
 transformers==4.53.0
+# SSLAM's remote code builds its ViT through timm; without it the
+# checkpoint loads and then dies on the first forward pass.
+timm==1.0.29
 accelerate>=0.30.0
 # transformers 4.53, pyannote.audio 4.0.7 and whisperx 3.8.6 all require >=0.30
 huggingface-hub==0.33.4
