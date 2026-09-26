@@ -43,3 +43,36 @@ def test_no_warning_when_the_cpu_was_asked_for():
     sep, _ = _sep(["CPUExecutionProvider"])
     line = assignment_worker.describe_embedder(sep, "cpu", 2)
     assert "running_on=CPU" in line and "CUDA was requested" not in line
+
+
+def test_the_ready_message_carries_the_report_and_flags_a_cpu_fallback(monkeypatch, capsys):
+    import io
+    import json
+    import sys
+
+    class Sep:
+        def __init__(self, providers):
+            self.speaker_embedder = _Embedder(providers)
+
+        def _get_embedding(self, audio, sr):
+            return None
+
+    def ready_message(providers, device):
+        monkeypatch.setattr(assignment_worker, "build_separator",
+                            lambda dev, threads=None: Sep(providers))
+        monkeypatch.setattr(sys, "argv", ["assignment_worker.py", "--device", device])
+        monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+        real = sys.stdout
+        buffer = io.StringIO()
+        monkeypatch.setattr(sys, "stdout", buffer)
+        try:
+            assignment_worker.serve()
+        finally:
+            monkeypatch.setattr(sys, "stdout", real)
+        return json.loads(buffer.getvalue().splitlines()[0])
+
+    gpu = ready_message(["CUDAExecutionProvider", "CPUExecutionProvider"], "cuda:0")
+    assert gpu["status"] == "ready" and "running_on=GPU" in gpu["info"]
+    assert gpu["warning"] is False
+    cpu = ready_message(["CPUExecutionProvider"], "cuda:0")
+    assert cpu["warning"] is True and "runs on the CPU" in cpu["info"]

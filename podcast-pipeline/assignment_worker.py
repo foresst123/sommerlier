@@ -49,6 +49,9 @@ def build_separator(device, threads=None):
     return sep
 
 
+CUDA_FALLBACK_NOTE = "CUDA was requested but WeSpeaker runs on the CPU"
+
+
 def describe_embedder(sep, device, threads) -> str:
     """One line saying where WeSpeaker really runs, and how long one embed takes.
 
@@ -72,7 +75,7 @@ def describe_embedder(sep, device, threads) -> str:
             f"running_on={'GPU' if on_gpu else 'CPU'} providers={providers} "
             f"embed(3s)={millis:.1f}ms threads={threads} usable_cpus={cpus}")
     if str(device).startswith("cuda") and not on_gpu:
-        line += " -- CUDA was requested but WeSpeaker runs on the CPU"
+        line += f" -- {CUDA_FALLBACK_NOTE}"
     return line
 
 
@@ -165,12 +168,13 @@ def serve():
         # The ONNX session is built on first use; do it now so the first real
         # request is not the slow one.
         sep._get_embedding(np.zeros(16000, dtype=np.float32), 16000)
-        print(describe_embedder(sep, args.device, args.threads),
-              file=sys.stderr, flush=True)
+        report = describe_embedder(sep, args.device, args.threads)
     except Exception as exc:
         emit({"status": "error", "message": f"{type(exc).__name__}: {exc}"})
         sys.exit(1)
-    emit({"status": "ready", "device": args.device})
+    # The parent logs this; stderr lines without an error word never reach its log.
+    emit({"status": "ready", "device": args.device, "info": report,
+          "warning": CUDA_FALLBACK_NOTE in report})
 
     for line in sys.stdin:
         line = line.strip()

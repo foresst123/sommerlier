@@ -212,6 +212,22 @@ class WorkerProcessService:
                 raise RuntimeError(f"{self.name} worker reported error: {msg.get('message')}")
         return False
 
+    def log_ready_details(self, line: str) -> None:
+        """Log what a worker chose to say in its ready message.
+
+        stderr only reaches the log for lines that look like errors, so a worker that
+        needs a fact recorded on every run (which device it really got) puts it here:
+        {"status": "ready", "info": "...", "warning": true}.
+        """
+        try:
+            msg = json.loads(line)
+        except Exception:
+            return
+        if not isinstance(msg, dict) or not msg.get("info"):
+            return
+        emit = self.logger.warning if msg.get("warning") else self.logger.info
+        emit(f"{self.name} worker: {msg['info']}")
+
     # ------------------------------------------------------------------
     # lifecycle
     # ------------------------------------------------------------------
@@ -343,6 +359,7 @@ class WorkerProcessService:
                 if self.is_ready_line(stripped):
                     if self.logger:
                         self.logger.info(f"{self.name} worker is ready.")
+                        self.log_ready_details(stripped)
                     return
             except RuntimeError as e:
                 self._fail_start(str(e), last_stdout)

@@ -146,3 +146,62 @@ def test_vllms_optional_import_warnings_are_not_error_lines():
         assert not WorkerProcessService.is_error_line(line)
     assert WorkerProcessService.is_error_line(
         "(EngineCore pid=1) ERROR 09-25 16:33:01 [core.py:1195] EngineCore failed to start.")
+
+
+def test_a_ready_message_can_carry_a_line_for_the_pipeline_log():
+    import json
+    import logging
+
+    records = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            records.append((record.levelname, record.getMessage()))
+
+    logger = logging.getLogger("ready-details")
+    logger.handlers[:] = [Capture()]
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    service = _service(WorkerProcessService)
+    service.name, service.logger = "Assignment", logger
+
+    service.log_ready_details(json.dumps({"status": "ready", "info": "on GPU"}))
+    service.log_ready_details(json.dumps(
+        {"status": "ready", "info": "on the CPU", "warning": True}))
+    service.log_ready_details(json.dumps({"status": "ready", "device": "cuda:0"}))
+    service.log_ready_details("READY")
+
+    assert records == [("INFO", "Assignment worker: on GPU"),
+                       ("WARNING", "Assignment worker: on the CPU")]
+
+
+def test_wait_ready_writes_the_ready_details_to_the_log(tmp_path):
+    import logging
+    import textwrap
+
+    script = tmp_path / "fake_worker.py"
+    script.write_text(textwrap.dedent('''
+        import json, sys, time
+        print(json.dumps({"status": "ready", "info": "running_on=CPU", "warning": True}),
+              flush=True)
+        time.sleep(30)
+    '''))
+    records = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            records.append((record.levelname, record.getMessage()))
+
+    logger = logging.getLogger("ready-e2e")
+    logger.handlers[:] = [Capture()]
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    service = WorkerProcessService(
+        name="Assignment", python_bin=sys.executable, worker_script=str(script),
+        extra_args=[], device_id=None, logger=logger, ready_timeout=20.0)
+    try:
+        service.spawn()
+        service.wait_ready()
+    finally:
+        service.stop()
+    assert ("WARNING", "Assignment worker: running_on=CPU") in records
