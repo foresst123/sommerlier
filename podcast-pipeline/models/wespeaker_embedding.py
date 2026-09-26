@@ -21,14 +21,21 @@ from huggingface_hub import hf_hub_download
 SAMPLE_RATE = 16000
 DEFAULT_REPOSITORY = "Wespeaker/wespeaker-voxceleb-resnet293-LM"
 DEFAULT_FILENAME = "voxceleb_resnet293_LM.onnx"
+# ONNX Runtime's CUDA provider defaults to "EXHAUSTIVE": every input length it has
+# not seen yet triggers a search over convolution algorithms. On this ResNet that
+# cost ~2.5 s per new length (3.3 s for the first), against ~80 ms with "DEFAULT"
+# (measured on an A100), and probes almost never repeat a length.
+DEFAULT_CUDNN_CONV_ALGO_SEARCH = "DEFAULT"
 
 
 class WeSpeakerONNXEmbedder:
     """Extract ResNet293-LM speaker embeddings from mono waveform arrays."""
 
     def __init__(self, device, repository=DEFAULT_REPOSITORY,
-                 filename=DEFAULT_FILENAME, revision=None, threads=None):
+                 filename=DEFAULT_FILENAME, revision=None, threads=None,
+                 cudnn_conv_algo_search=DEFAULT_CUDNN_CONV_ALGO_SEARCH):
         self.device = torch.device(device)
+        self.cudnn_conv_algo_search = cudnn_conv_algo_search
         # ONNX Runtime intra-op threads; None keeps the process's CPU budget.
         self.threads = threads
         self.repository = repository
@@ -62,7 +69,8 @@ class WeSpeakerONNXEmbedder:
                     if self.device.type == "cuda":
                         providers.insert(0, (
                             "CUDAExecutionProvider",
-                            {"device_id": int(self.device.index or 0)},
+                            {"device_id": int(self.device.index or 0),
+                             "cudnn_conv_algo_search": self.cudnn_conv_algo_search},
                         ))
                     # sess_options caps ORT's intra-op thread pool; see cpu_plan.
                     self._session = ort.InferenceSession(
