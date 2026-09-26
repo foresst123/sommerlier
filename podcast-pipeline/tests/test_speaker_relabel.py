@@ -586,3 +586,14 @@ def test_the_first_reply_is_kept_when_a_retry_replaces_it():
 def test_a_window_answered_the_first_time_has_no_separate_first_reply():
     result = _relabel(_conversation(wrong={4}), FakeLLM(_json(_proposal(4, A))), thinking=True)
     assert result.replies[0]["first_raw"] is None
+
+
+def test_the_a100_relabel_settings_build_a_service_with_large_windows():
+    """main.py passes `models.relabel` straight to the constructor, so every key must exist."""
+    import json
+    import os
+    path = os.path.join(os.path.dirname(__file__), "..", "config.json")
+    with open(path) as handle:
+        cfg = json.load(handle)["environments"]["a100"]["models"]["relabel"]
+    service = SpeakerRelabelService(FakeLLM(), **cfg)
+    assert service.max_window_segments == 200 and service.overlap_segments == 30

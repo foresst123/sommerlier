@@ -336,10 +336,11 @@
         "relabel": {
           "window_tokens": 32000,
           "overlap_segments": 30,
+          "max_window_segments": 200,
           "min_confidence": 0.7,
           "max_change_fraction": 0.15,
           "thinking": true,
-          "max_new_tokens": 49152
+          "max_new_tokens": 32768
         },
         "word_alignment": {
           "model_name": "nguyenvulebinh/wav2vec2-base-vi-vlsp2020",
@@ -354,6 +355,8 @@
           "reuse_render": true,
           "min_seconds": 30,
           "max_seconds": 240,
+          "finder_window_segments": 150,
+          "finder_overlap_segments": 40,
           "max_silence": 3.0,
           "max_monologue": 0,
           "min_turns_each": 1,
@@ -380,7 +383,7 @@
           "music_patched_max": 0.15,
           "require_word_alignment": true,
           "thinking": true,
-          "max_new_tokens": 49152
+          "max_new_tokens": 32768
         },
         "sidon": {
           "num_steps": 100

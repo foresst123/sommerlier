@@ -24,3 +24,11 @@ def test_every_profile_in_config_json_builds_a_selection_config():
     for name, profile in environments.items():
         settings = profile.get("models", {}).get("conversation_selection", {})
         ConversationSelectionConfig.from_settings(settings), name
+
+
+def test_the_a100_finder_windows_are_150_segments_with_a_40_segment_overlap():
+    path = os.path.join(os.path.dirname(__file__), "..", "config.json")
+    with open(path) as handle:
+        settings = json.load(handle)["environments"]["a100"]["models"]["conversation_selection"]
+    cfg = ConversationSelectionConfig.from_settings(settings)
+    assert cfg.finder_window_segments == 150 and cfg.finder_overlap_segments == 40
