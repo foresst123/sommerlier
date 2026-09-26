@@ -127,7 +127,8 @@ def test_replicas_are_started_once_and_stopped_together():
 def test_the_worker_counts_the_tokens_the_engine_reports():
     service = RefinementWorkerService.__new__(RefinementWorkerService)
     service._usage_lock = threading.Lock()
-    service._usage = {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0}
+    service._usage = {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                      "repetition_stops": 0}
     service._lock = threading.Lock()
     service.logger = None
 
@@ -143,13 +144,15 @@ def test_the_worker_counts_the_tokens_the_engine_reports():
 
         def readline(self):
             return json.dumps({"ok": True, "texts": ["a", "b"],
-                               "usage": {"prompt_tokens": 100, "completion_tokens": 7}})
+                               "usage": {"prompt_tokens": 100, "completion_tokens": 7,
+                                         "repetition_stops": 1}})
 
     pipe = _Pipe()
     service.process = types.SimpleNamespace(stdin=pipe, stdout=pipe)
     assert service.generate_texts("s", ["x", "y"]) == (True, ["a", "b"])
     service.generate_texts("s", ["x", "y"])
-    assert service.usage == {"requests": 4, "prompt_tokens": 200, "completion_tokens": 14}
+    assert service.usage == {"requests": 4, "prompt_tokens": 200, "completion_tokens": 14,
+                             "repetition_stops": 2}
 
 
 # --- progress ------------------------------------------------------------------------------

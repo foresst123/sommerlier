@@ -60,7 +60,8 @@ class RefinementWorkerService(WorkerProcessService):
         self.model_name = model_name
         # Tokens the engine really processed, from the worker's own counts.
         self._usage_lock = threading.Lock()
-        self._usage = {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0}
+        self._usage = {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                       "repetition_stops": 0}
 
     @property
     def usage(self) -> dict:
@@ -72,8 +73,13 @@ class RefinementWorkerService(WorkerProcessService):
             return
         with self._usage_lock:
             self._usage["requests"] += int(requests)
-            for key in ("prompt_tokens", "completion_tokens"):
-                self._usage[key] += int(reported.get(key, 0) or 0)
+            for key in ("prompt_tokens", "completion_tokens", "repetition_stops"):
+                self._usage[key] = self._usage.get(key, 0) + int(reported.get(key, 0) or 0)
+        stopped = int(reported.get("repetition_stops", 0) or 0)
+        if stopped and getattr(self, "logger", None):
+            self.logger.warning(
+                f"[refinement_worker] {stopped} of {requests} repl(ies) looped and were "
+                "stopped early by repetition detection")
 
     # ── IPC ────────────────────────────────────────────────────────────────
 
@@ -170,7 +176,8 @@ class RefinementWorkerPoolService:
 
     @property
     def usage(self) -> dict:
-        total = {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0}
+        total = {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                 "repetition_stops": 0}
         for service in self.services:
             for key, value in (getattr(service, "usage", None) or {}).items():
                 total[key] = total.get(key, 0) + int(value)

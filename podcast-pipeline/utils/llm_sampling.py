@@ -20,11 +20,20 @@ THINKING_SAMPLING = {
     "seed": 0,
 }
 
+# vLLM ends a reply early when the same run of tokens repeats back to back (see
+# vllm.sampling_params.RepetitionDetectionParams; the worker builds the object).
+# A thinking reply that loops was seen alternating two 60-100 token blocks
+# dozens of times, so a pattern up to 256 tokens repeated 3 times catches it
+# after ~600 tokens instead of at the token limit. The 16-token floor keeps
+# short legitimate repeats (lists of labels, JSON keys) from counting.
+REPETITION_DETECTION = {"max_pattern_size": 256, "min_pattern_size": 16, "min_count": 3}
+
 
 def vllm_sampling_kwargs(thinking: bool, max_tokens: int) -> dict:
-    """Arguments for vllm.SamplingParams."""
+    """Arguments for vllm.SamplingParams (repetition_detection is plain data here)."""
     if thinking:
-        return {**THINKING_SAMPLING, "max_tokens": max_tokens, "repetition_penalty": 1.0}
+        return {**THINKING_SAMPLING, "max_tokens": max_tokens, "repetition_penalty": 1.0,
+                "repetition_detection": dict(REPETITION_DETECTION)}
     return {"temperature": 0.0, "max_tokens": max_tokens, "repetition_penalty": 1.0}
 
 

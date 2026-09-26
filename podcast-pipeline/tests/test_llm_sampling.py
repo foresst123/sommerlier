@@ -11,6 +11,8 @@ def test_thinking_calls_sample_with_the_recommended_settings():
     assert kwargs["temperature"] == 0.6 and kwargs["top_p"] == 0.95 and kwargs["top_k"] == 20
     assert kwargs["presence_penalty"] == 1.0 and kwargs["max_tokens"] == 8192
     assert kwargs["seed"] == THINKING_SAMPLING["seed"]
+    assert kwargs["repetition_detection"] == {
+        "max_pattern_size": 256, "min_pattern_size": 16, "min_count": 3}
 
 
 def test_calls_without_thinking_stay_greedy():
@@ -54,7 +56,11 @@ def worker(monkeypatch):
     """refinement_worker with vllm faked, so the arguments handed to it can be read."""
     fake = types.ModuleType("vllm")
     fake.SamplingParams = lambda **kwargs: types.SimpleNamespace(**kwargs)
+    params = types.ModuleType("vllm.sampling_params")
+    params.RepetitionDetectionParams = lambda **kwargs: types.SimpleNamespace(**kwargs)
+    fake.sampling_params = params
     monkeypatch.setitem(sys.modules, "vllm", fake)
+    monkeypatch.setitem(sys.modules, "vllm.sampling_params", params)
     monkeypatch.setitem(sys.modules, "worker_vllm_env", types.ModuleType("worker_vllm_env"))
     sys.modules.pop("refinement_worker", None)
     import refinement_worker
@@ -73,3 +79,36 @@ def test_the_vllm_worker_stays_greedy_without_thinking(worker):
     model = _Model()
     worker.generate_with_usage(model, _Tokenizer(), "sys", ["a"], 512, False, "vllm")
     assert model.params.temperature == 0.0 and not hasattr(model.params, "top_k")
+
+
+def test_thinking_calls_ask_vllm_to_stop_a_repeating_reply(worker):
+    model = _Model()
+    worker.generate_with_usage(model, _Tokenizer(), "sys", ["a"], 8192, True, "vllm")
+    detection = model.params.repetition_detection
+    assert (detection.max_pattern_size, detection.min_pattern_size,
+            detection.min_count) == (256, 16, 3)
+
+
+def test_calls_without_thinking_do_not_detect_repetition(worker):
+    model = _Model()
+    worker.generate_with_usage(model, _Tokenizer(), "sys", ["a"], 512, False, "vllm")
+    assert not hasattr(model.params, "repetition_detection")
+
+
+def test_replies_stopped_by_repetition_are_counted(worker):
+    class Stopped(_Output):
+        def __init__(self):
+            super().__init__()
+            self.outputs[0].finish_reason = "repetition"
+    model = _Model()
+    model.generate = lambda texts, sampling_params=None, use_tqdm=False: [Stopped(), _Output()]
+    _, usage = worker.generate_with_usage(
+        model, _Tokenizer(), "sys", ["a", "b"], 8192, True, "vllm")
+    assert usage["repetition_stops"] == 1
+
+
+def test_an_older_vllm_without_the_parameter_still_generates(worker, monkeypatch):
+    monkeypatch.setitem(sys.modules, "vllm.sampling_params", None)   # import raises
+    model = _Model()
+    worker.generate_with_usage(model, _Tokenizer(), "sys", ["a"], 8192, True, "vllm")
+    assert not hasattr(model.params, "repetition_detection")

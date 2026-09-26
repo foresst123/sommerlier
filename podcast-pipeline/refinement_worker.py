@@ -235,15 +235,22 @@ def generate_with_usage(model, tokenizer, system_prompt: str, user_messages: lis
 
     if backend == "vllm":
         from vllm import SamplingParams
+        kwargs = vllm_sampling_kwargs(thinking, max_new_tokens)
+        detection = kwargs.pop("repetition_detection", None)
+        if detection:
+            try:
+                from vllm.sampling_params import RepetitionDetectionParams
+                kwargs["repetition_detection"] = RepetitionDetectionParams(**detection)
+            except ImportError:
+                pass   # an older vLLM: the token limit is the only stop
         outputs = model.generate(
-            texts,
-            sampling_params=SamplingParams(
-                **vllm_sampling_kwargs(thinking, max_new_tokens)),
-            use_tqdm=False,
-        )
+            texts, sampling_params=SamplingParams(**kwargs), use_tqdm=False)
         usage = {
             "prompt_tokens": sum(len(o.prompt_token_ids or ()) for o in outputs),
             "completion_tokens": sum(len(o.outputs[0].token_ids or ()) for o in outputs),
+            "repetition_stops": sum(
+                1 for o in outputs
+                if getattr(o.outputs[0], "finish_reason", None) == "repetition"),
         }
         return [output.outputs[0].text for output in outputs], usage
 
