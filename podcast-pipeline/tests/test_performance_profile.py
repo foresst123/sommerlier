@@ -48,7 +48,10 @@ def _events():
             "windows": 57, "consumer": 61.8, "raw_wait": 5.7, "post": 54.0, "other": 2.1,
             "gpu_calls": 57, "gpu_queue": 0.0, "gpu_run": 200.0, "sidon_calls": 57,
             "sidon_total": 100.0, "sidon_roundtrip": 98.0, "sidon_worker": 90.0,
-            "sidon_infer": 80.0, "wespeaker": 30.0, "wespeaker_calls": 228}},
+            "sidon_infer": 80.0, "wespeaker": 30.0, "wespeaker_calls": 228,
+            "embedding_batch_attempts": 20, "embedding_batches": 19,
+            "embedding_batched_items": 70, "embedding_batch_fallbacks": 1,
+            "embedding_single_calls": 5}},
     ]
 
 
@@ -66,6 +69,7 @@ def test_the_report_lists_per_file_steps_workers_and_separation_internals():
     assert "worker 0: busy 20.0s" in text and "waited 1.5s" in text
     assert "speaker assignment" in text and "87.4%" in text        # 54.0 / 61.8
     assert "GPU inference 1.40s" in text                           # 80 / 57
+    assert "19/20 batches accepted" in text and "70 items batched" in text
 
 
 def test_the_report_attributes_gpu_and_cpu_use_to_the_stage_it_happened_in():

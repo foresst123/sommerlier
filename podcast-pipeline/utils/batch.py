@@ -140,7 +140,7 @@ def split_final_failures(failures, is_done):
 # stage a run keeps when everything after it is switched off, so it has to be
 # reachable on its own.
 PIPELINE_STAGES = (
-    "music", "diarization", "separation", "music_removal", "asr",
+    "music", "diarization", "separation", "asr",
     "captioning", "refinement", "speaker_relabel", "word_alignment",
     "conversation_exports", None,
 )
@@ -182,7 +182,6 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
             "music": "music_analysis",
             "diarization": "diarization",
             "separation": "separation",
-            "music_removal": "music_removal_fallback",
             "asr": "asr",
             "captioning": "captioning",
             "refinement": "refinement",
@@ -218,6 +217,13 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
                     logger.info("Clean-data and export are off; skipping final batch pass")
                 continue
         pending = [p for p in batch if p not in failures]
+        if stage == "diarization":
+            # DiariZen is a whole-file stage. Starting the longest files first
+            # keeps both replicas occupied and moves short-file tail work out
+            # of the critical path without changing any model or segmentation
+            # setting. Python's sort is stable, so equal/unknown durations keep
+            # the caller's order.
+            pending.sort(key=lambda path: audio_duration(path), reverse=True)
         if not pending:
             break
         if logger:
@@ -232,11 +238,6 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
         # Whether this batch goes on past this stage; a stage that hands the LLM
         # to the next one only keeps it when there is a next one.
         stage_args.batch_continues = original_stop != stage
-        # Used by PipelineService to make the retained music_removal label a
-        # truly zero-work compatibility pass. A direct --stop_after invocation
-        # keeps its historical behavior; only corpus-wide stage scheduling may
-        # skip the duplicate audio/checkpoint replay.
-        stage_args.stage_only_pass = True
         # The final pass re-enters run() to restore checkpointed state before
         # export. Clip judging has no checkpoint, so mark this invocation to
         # prevent a second LLM judgement after its dedicated corpus-wide pass.

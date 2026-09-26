@@ -89,7 +89,7 @@ class BssSeparator:
                  separator: str = None, embedding_repository: str = None,
                  embedding_filename: str = None, embedding_revision: str = None,
                  logger=None, embedding_threads: int = None, score_workers: int = 1,
-                 assignment_process=None):
+                 assignment_process=None, assignment_batching: bool = False):
         import tempfile
 
         from models.separation_backends import make_backend
@@ -98,6 +98,9 @@ class BssSeparator:
         self._process = process
         self.speaker_embedder = None
         self.target_embed_cache: Dict[str, torch.Tensor] = {}
+        self._target_locks = {}
+        self._target_locks_guard = threading.Lock()
+        self.assignment_batching = bool(assignment_batching)
         self._temp_dir = tempfile.mkdtemp(prefix="bss_exchange_")
         self._req_counter = 0
         self._logger = logger
@@ -164,6 +167,8 @@ class BssSeparator:
 
         clone = copy.copy(self)
         clone.target_embed_cache = {}
+        clone._target_locks = {}
+        clone._target_locks_guard = threading.Lock()
         clone._temp_dir = tempfile.mkdtemp(prefix="bss_exchange_")
         clone._req_counter = 0
         clone.backend = make_backend(
@@ -297,19 +302,83 @@ class BssSeparator:
             raise RuntimeError("WeSpeaker is not loaded.")
         return self.speaker_embedder.embed(audio_array, sample_rate)
 
+    def _get_embeddings(self, audios, sample_rate):
+        """Batch embeddings with the exact preprocessing of _get_embedding."""
+        if self._assignment is not None:
+            return self._remote_embeddings("embed_batch", audios, sample_rate)
+        results = [None] * len(audios)
+        prepared, indices = [], []
+        for index, audio in enumerate(audios):
+            try:
+                if sample_rate != 16000:
+                    audio = librosa.resample(audio, orig_sr=sample_rate, target_sr=16000)
+                prepared.append(audio)
+                indices.append(index)
+            except Exception as exc:
+                results[index] = exc
+        if prepared:
+            values = self.speaker_embedder.embed_batch(prepared, sample_rate)
+            if len(values) != len(indices):
+                raise RuntimeError("WeSpeaker batch result count mismatch")
+            for index, value in zip(indices, values):
+                results[index] = value
+        return results
+
+    def _remote_embeddings(self, command, audios, sample_rate, **options):
+        if not audios:
+            return []
+        started = time.perf_counter()
+        try:
+            reply = self._remote(
+                command, np.concatenate(audios), sample_rate,
+                lengths=[len(audio) for audio in audios], **options)
+            rows = reply.get("results", [])
+            if len(rows) != len(audios):
+                raise RuntimeError("assignment worker batch result count mismatch")
+            with self._timing_lock:
+                for key, value in reply.get("batch_stats", {}).items():
+                    self.timing["embedding_" + key] += value
+            return [RuntimeError(row["error"]) if row.get("error") else
+                    self._embedding_from_reply(row) for row in rows]
+        finally:
+            self._tick("remote", started)
+
     def _get_target_embedding(self, enrollment_audios: List[np.ndarray], target_id: str, sample_rate: int) -> Optional[torch.Tensor]:
         """Calculate and cache the target embedding. Returns None if no audios provided."""
+        # Assignment-ahead may ask for the same speaker from several windows.
+        # Only one computes its centroid; other speakers remain independent.
+        if target_id and hasattr(self, "_target_locks_guard"):
+            with self._target_locks_guard:
+                lock = self._target_locks.setdefault(target_id, threading.Lock())
+            with lock:
+                return self._compute_target_embedding(enrollment_audios, target_id, sample_rate)
+        return self._compute_target_embedding(enrollment_audios, target_id, sample_rate)
+
+    def _compute_target_embedding(self, enrollment_audios, target_id, sample_rate):
         if target_id and target_id in self.target_embed_cache:
             return self.target_embed_cache[target_id]
             
         enroll_embeddings = []
-        for e in enrollment_audios:
+        audios = [e for e in enrollment_audios if len(e) > 0]
+        batched = None
+        if getattr(self, "assignment_batching", False):
+            try:
+                batched = self._get_embeddings(audios, sample_rate)
+            except Exception as exc:
+                # Preserve the individual retry path for a transport/session
+                # failure, just as when a single enrollment request fails.
+                print(f"[TSE] enrollment batch failed; retrying individually: {exc}",
+                      file=sys.stderr)
+        for index, e in enumerate(audios):
             if len(e) > 0:
                 # Normalize each clip before averaging: raw speaker embeddings have
                 # length-dependent norms, so the longest clip would otherwise
                 # dominate the centroid.
                 try:
-                    embedding = F.normalize(self._get_embedding(e, sample_rate), p=2, dim=0)
+                    value = batched[index] if batched is not None else self._get_embedding(e, sample_rate)
+                    if isinstance(value, Exception):
+                        raise value
+                    embedding = F.normalize(value, p=2, dim=0)
                     if torch.isfinite(embedding).all() and torch.linalg.vector_norm(embedding) > 0:
                         enroll_embeddings.append(embedding)
                 except Exception as exc:
@@ -490,6 +559,81 @@ class BssSeparator:
         embedding = self._embedding_from_reply(reply)
         return None if embedding is None else F.normalize(embedding, p=2, dim=0)
 
+    def _probe_embeddings(self, probes, sr):
+        """Gather independent probes and return normalized tensors/errors/None."""
+        results = [None] * len(probes)
+        audios, indices = [], []
+        for index, (track, spans) in enumerate(probes):
+            try:
+                audio = (self._cut_spans(track, spans) if self._assignment is not None
+                         else self._gather_probe(track, spans, sr))
+                if audio is not None:
+                    audios.append(audio)
+                    indices.append(index)
+            except Exception as exc:
+                results[index] = exc
+        if not audios:
+            return results
+        try:
+            values = (self._remote_embeddings(
+                "probe_embed_batch", audios, sr, floor_db=-40.0,
+                min_voiced_sec=BSS_MIN_VOICED_SEC, abs_floor_rms=ABS_SILENCE_RMS)
+                if self._assignment is not None else self._get_embeddings(audios, sr))
+        except Exception as exc:
+            values = [exc] * len(audios)
+        for index, value in zip(indices, values):
+            results[index] = (value if value is None or isinstance(value, Exception)
+                              else F.normalize(value, p=2, dim=0))
+        return results
+
+    def _score_probe_batch(self, requests, sr, full_span, sources, errors):
+        """Same clean-probe/full-context fallback, with one embedding per input.
+
+        The normalized probe is independent of the speaker it is compared to.
+        Reuse it when A and B ask for the same track and sample ranges.
+        """
+        scores = [None] * len(requests)
+        cache = {}
+        for fallback in (False, True):
+            pending, unique = [], {}
+            failed_inputs = set()
+            for index, (track, spans, target, key) in enumerate(requests):
+                if target is None or scores[index] is not None or (fallback and not spans):
+                    continue
+                candidate = full_span if fallback or not spans else spans
+                source = "full_context" if fallback or not spans else "clean_probe"
+                identity = (id(track), tuple(tuple(span) for span in candidate))
+                pending.append((index, target, key, source, identity))
+                if identity not in cache:
+                    unique[identity] = (track, candidate)
+            if unique:
+                values = self._probe_embeddings(list(unique.values()), sr)
+                cache.update(zip(unique, values))
+            for index, target, key, source, identity in pending:
+                try:
+                    embedding = cache[identity]
+                    if isinstance(embedding, Exception):
+                        raise embedding
+                    if embedding is None:
+                        continue
+                    score = float(torch.dot(target, embedding))
+                    if not np.isfinite(score):
+                        raise ValueError("nonfinite similarity")
+                except Exception as exc:
+                    errors[f"{key}:{source}"] = f"{type(exc).__name__}: {exc}"
+                    # A failed attempt must not suppress the ordinary retry
+                    # when clean_probe and full_context happen to be identical.
+                    failed_inputs.add(identity)
+                    continue
+                scores[index] = score
+                sources[key] = source
+            for identity in failed_inputs:
+                cache.pop(identity, None)
+        for score, (_, _, target, key) in zip(scores, requests):
+            if score is None and target is not None:
+                sources[key] = "unscorable"
+        return scores
+
     def _probe_from_segment(self, seg: np.ndarray, sr: int, floor_db: float = -40.0,
                             min_voiced_sec: float = None,
                             abs_floor_rms: float = ABS_SILENCE_RMS):
@@ -639,12 +783,20 @@ class BssSeparator:
             return (lambda: _score(track_np, spans, embed, key)
                     if embed is not None else None)
 
-        s_1A, s_2A, s_1B, s_2B = self._run_scores([
-            _later(track_1_np, span_A, embed_A, "track1_A"),
-            _later(track_2_np, span_A, embed_A, "track2_A"),
-            _later(track_1_np, span_B, embed_B, "track1_B"),
-            _later(track_2_np, span_B, embed_B, "track2_B"),
-        ])
+        if getattr(self, "assignment_batching", False):
+            s_1A, s_2A, s_1B, s_2B = self._score_probe_batch([
+                (track_1_np, span_A, embed_A, "track1_A"),
+                (track_2_np, span_A, embed_A, "track2_A"),
+                (track_1_np, span_B, embed_B, "track1_B"),
+                (track_2_np, span_B, embed_B, "track2_B"),
+            ], target_sr, full_span, score_sources, scoring_errors)
+        else:
+            s_1A, s_2A, s_1B, s_2B = self._run_scores([
+                _later(track_1_np, span_A, embed_A, "track1_A"),
+                _later(track_2_np, span_A, embed_A, "track2_A"),
+                _later(track_1_np, span_B, embed_B, "track1_B"),
+                _later(track_2_np, span_B, embed_B, "track2_B"),
+            ])
 
         def _probe_rms(track, spans):
             pieces = [

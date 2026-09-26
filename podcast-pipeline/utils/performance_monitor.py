@@ -34,6 +34,9 @@ class PerformanceMonitor:
         self._process_names = {os.getpid(): "main"}
         self._gpu_index_by_uuid = None
         self._process_sampling = True
+        self._gpu_util_sampling = True
+        self._last_gpu_util_sample = 0.0
+        self._gpu_util_cache = {}
         self._peak_process_mib = defaultdict(dict)
         # What the end-of-run report is built from (utils/performance_report.py).
         self._events = []
@@ -128,6 +131,23 @@ class PerformanceMonitor:
         try:
             import torch
             if torch.cuda.is_available():
+                now = time.time()
+                if (self._gpu_util_sampling
+                        and now - self._last_gpu_util_sample >= self.process_interval):
+                    try:
+                        # torch.cuda.utilization is not available in many
+                        # pinned Torch builds. nvidia-smi is the driver-level
+                        # reading, sampled less often than memory so profiling
+                        # does not add a subprocess launch to every tick.
+                        self._gpu_util_cache = {
+                            int(index): float(value)
+                            for index, value in self._nvidia_smi(
+                                "--query-gpu=index,utilization.gpu")
+                        }
+                    except Exception:
+                        self._gpu_util_sampling = False
+                    self._last_gpu_util_sample = now
+                gpu_util = self._gpu_util_cache
                 for index in range(torch.cuda.device_count()):
                     with torch.cuda.device(index):
                         free, total = torch.cuda.mem_get_info()
@@ -137,8 +157,12 @@ class PerformanceMonitor:
                     entry = {"index": index, "free_gib": free_gib,
                              "total_gib": total / (1024 ** 3)}
                     try:
-                        # Needs pynvml; without it the report just has no GPU %.
-                        entry["util_pct"] = float(torch.cuda.utilization(index))
+                        if index in gpu_util:
+                            entry["util_pct"] = gpu_util[index]
+                        else:
+                            # Keep the old fallback for runtimes that expose
+                            # it through NVML bindings.
+                            entry["util_pct"] = float(torch.cuda.utilization(index))
                     except Exception:
                         pass
                     sample["gpus"].append(entry)

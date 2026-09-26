@@ -299,6 +299,41 @@ def test_a_chunk_that_fails_is_halved_and_only_the_bad_request_is_lost():
     assert unrefined == ["00005"]
 
 
+def test_fast_replica_gets_more_chunks_while_first_chunk_is_still_running():
+    """The admission queue must not wait for source-order result application."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    svc = _service([], shared_queue=True, batch_size=2)
+    first = Future()
+    refilled = threading.Event()
+    original = svc._worker.submit
+    held = []
+    calls = []
+
+    def submit(*args, **kwargs):
+        answer = original(*args, **kwargs)
+        calls.append(answer)
+        if len(calls) == 1:
+            held.append(answer.result())
+            return first
+        if len(calls) >= 4:       # past the initial depth of replicas + 1
+            refilled.set()
+        return answer
+
+    svc._worker.submit = submit
+    segments = _segments(8)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        work = executor.submit(svc.refine, segments)
+        try:
+            assert refilled.wait(5), "fast lane stalled behind the first chunk"
+            assert not work.done()
+        finally:
+            first.set_result(held[0] if held else (False, []))
+        result = work.result(timeout=5)
+    assert [s.index for s in result] == [s.index for s in segments]
+    assert all(s.text.endswith(" ok") for s in result)
+
+
 def test_most_chunks_failing_still_raises_the_failure_limit():
     svc = _service([], shared_queue=True, fail_when=lambda messages: True)
     with pytest.raises(RuntimeError, match="LLM refinement failed"):
@@ -421,7 +456,9 @@ def test_the_new_switches_default_off_and_the_a100_profile_sets_them():
     for name in ("a100", "a100_hf"):
         tuned = resolve(config["environments"][name])["stages"]["refinement"]
         assert tuned["keep_llm_across_relabel"] is True
-        assert tuned["shared_queue"] is False
+        assert tuned["shared_queue"] is (name == "a100")
+        if name == "a100":
+            assert tuned["chunk_size"] == 32
     assert resolve(config["environments"]["a100"])["stages"]["refinement"]["parallel_windows"]
 
 

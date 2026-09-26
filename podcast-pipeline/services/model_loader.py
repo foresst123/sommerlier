@@ -142,6 +142,8 @@ class ModelLoader:
                 embedding_revision=bss_cfg.get("embedding_revision"),
                 logger=self.logger,
                 assignment_process=assignment_service,
+                assignment_batching=(perf.get("enabled", False)
+                                     and sep_perf.get("assignment_batching", False)),
                 embedding_threads=(sep_perf.get("assignment_threads") or None
                                    if perf.get("enabled", False) else None),
                 score_workers=(sep_perf.get("assignment_parallel", 1)

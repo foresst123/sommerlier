@@ -11,6 +11,8 @@ Line-JSON on stdio (see services/base_worker_service.py); audio moves as .npy fi
   {"cmd": "embed",       "audio_path", "sr"}                     -> {"embedding": [...]}
   {"cmd": "probe",       "audio_path", "sr", "out_path", ...}    -> {"probe_path": path | null}
   {"cmd": "probe_embed", "audio_path", "sr", ...}                -> {"embedding": [...] | null}
+  {"cmd": "embed_batch" | "probe_embed_batch", "audio_path", "sr", "lengths", ...}
+      -> {"results": [{"embedding": [...] | null} | {"error": ...}], "batch_stats": ...}
 `...` = floor_db, min_voiced_sec, abs_floor_rms of BssSeparator._probe_from_segment.
 The logic is BssSeparator's own, so results match the in-process path.
 """
@@ -53,6 +55,8 @@ def handle_request(sep, req: dict) -> dict:
         cmd = req.get("cmd")
         audio = np.load(req["audio_path"])
         sr = int(req["sr"])
+        if cmd in ("embed_batch", "probe_embed_batch"):
+            return _handle_batch(sep, req, audio, sr)
         if cmd == "embed":
             return {"id": req_id,
                     "embedding": sep._get_embedding(audio, sr).detach().cpu().tolist()}
@@ -72,6 +76,41 @@ def handle_request(sep, req: dict) -> dict:
                 "embedding": sep._get_embedding(probe, sr).detach().cpu().tolist()}
     except Exception as exc:
         return {"id": req_id, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _handle_batch(sep, req, audio, sr):
+    lengths = req.get("lengths", [])
+    if (audio.ndim != 1 or not lengths or len(lengths) > 32
+            or any(type(n) is not int or n < 0 for n in lengths)
+            or sum(lengths) != len(audio)):
+        raise ValueError("invalid packed assignment batch lengths")
+    options = {key: req[key] for key in ("floor_db", "min_voiced_sec", "abs_floor_rms")
+               if req.get(key) is not None}
+    results = [{"embedding": None} for _ in lengths]
+    probes, indices, offset = [], [], 0
+    for index, length in enumerate(lengths):
+        segment = audio[offset:offset + length]
+        offset += length
+        try:
+            probe = (sep._probe_from_segment(segment, sr, **options)
+                     if req["cmd"] == "probe_embed_batch" else segment)
+            if probe is not None:
+                probes.append(probe)
+                indices.append(index)
+        except Exception as exc:
+            results[index] = {"error": f"{type(exc).__name__}: {exc}"}
+    before = dict(sep.speaker_embedder.batch_stats)
+    if probes:
+        values = sep._get_embeddings(probes, sr)
+        if len(values) != len(indices):
+            raise RuntimeError("assignment embedding result count mismatch")
+        for index, value in zip(indices, values):
+            results[index] = ({"error": f"{type(value).__name__}: {value}"}
+                              if isinstance(value, Exception) else
+                              {"embedding": value.detach().cpu().tolist()})
+    stats = {key: value - before.get(key, 0)
+             for key, value in sep.speaker_embedder.batch_stats.items()}
+    return {"id": req.get("id", "unknown"), "results": results, "batch_stats": stats}
 
 
 def _parse_args():

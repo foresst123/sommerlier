@@ -141,6 +141,16 @@ def _separation(events):
         if any(sec for _, sec, _ in parts):
             out.append("    assignment work (summed over parallel tasks): " + ", ".join(
                 f"{label} {sec:.1f}s ({calls} calls)" for label, sec, calls in parts if sec))
+        attempts = int(v.get("embedding_batch_attempts", 0))
+        batches = int(v.get("embedding_batches", 0))
+        batched_items = int(v.get("embedding_batched_items", 0))
+        fallbacks = int(v.get("embedding_batch_fallbacks", 0))
+        singles = int(v.get("embedding_single_calls", 0))
+        if attempts or singles:
+            out.append(
+                "    WeSpeaker batching: "
+                f"{batches}/{attempts} batches accepted, {batched_items} items batched, "
+                f"{fallbacks} batch fallbacks, {singles} single-item calls")
     return out
 
 
@@ -187,10 +197,36 @@ def _top(events):
         [[name, f"{sec:.1f}"] for name, sec in top], ["step", "total s"])]
 
 
+def _focused_stages(events):
+    """Show the decomposition most useful for the A100 bottleneck review."""
+    focus = ("asr", "refinement", "conversation_exports")
+    stage_seconds = {e["stage"]: float(e["seconds"]) for e in events
+                     if e.get("event") == "stage_finished"}
+    grouped = defaultdict(lambda: [0, 0.0])
+    for e in events:
+        if e.get("event") != "span" or e.get("name") == "file_stage":
+            continue
+        stage = e.get("stage")
+        if stage in focus:
+            item = grouped[(stage, e.get("name", "?"))]
+            item[0] += 1
+            item[1] += float(e.get("seconds", 0.0))
+    if not grouped:
+        return []
+    rows = []
+    for (stage, name), (calls, seconds) in sorted(
+            grouped.items(), key=lambda item: (_stage_key(item[0][0]), -item[1][1])):
+        wall = stage_seconds.get(stage, 0.0)
+        rows.append([stage, name, calls, f"{seconds:.1f}", _pct(seconds, wall)])
+    return ["", "8. FOCUSED DECOMPOSITION: ASR / REFINEMENT / CONVERSATION",
+            "   Nested spans are listed separately; their totals must not be summed as wall time.",
+            *_table(rows, ["stage", "part", "calls", "seconds", "% of stage"])]
+
+
 def build_report(events, samples, elapsed):
     lines = ["PIPELINE PERFORMANCE REPORT", "=" * 27, ""]
     for part in (_stages(events, elapsed), _file_stages(events), _steps(events),
                  _workers(events), _separation(events), _resources(events, samples),
-                 _top(events)):
+                 _top(events), _focused_stages(events)):
         lines += part
     return "\n".join(lines) + "\n"

@@ -137,6 +137,9 @@ _STAGES = {
         # probe embeddings of a window at the same time.
         "assignment_threads": (INT, 0, 0, 64),
         "assignment_parallel": (INT, 1, 1, 4),
+        # Batch equal-frame WeSpeaker probes without padding; reuse embeddings
+        # when both speakers compare against the same probe.
+        "assignment_batching": (BOOL, False, None, None),
         # CPU threads inside each assignment worker process (ONNX Runtime and the
         # BLAS libraries). Each worker handles one probe at a time.
         "assignment_worker_threads": (INT, 2, 1, 32),

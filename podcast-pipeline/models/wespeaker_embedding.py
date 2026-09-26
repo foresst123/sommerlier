@@ -7,6 +7,7 @@ frontend and ONNX Runtime, so inference stays deliberately small here.
 
 import os
 import threading
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -35,6 +36,7 @@ class WeSpeakerONNXEmbedder:
         self.revision = revision
         self._session = None
         self._session_lock = threading.Lock()
+        self.batch_stats = Counter()
 
     def _model_path(self):
         override = os.environ.get("WESPEAKER_MODEL_PATH")
@@ -99,3 +101,57 @@ class WeSpeakerONNXEmbedder:
         if not embedding.size or not np.isfinite(embedding).all():
             raise ValueError("WeSpeaker returned an invalid embedding")
         return torch.from_numpy(embedding).to(self.device)
+
+    def embed_batch(self, audios, sample_rate=SAMPLE_RATE, max_batch_size=4):
+        """Embed equal-frame inputs together, without padding or cropping.
+
+        Different lengths and fixed-batch-one exports run individually. Each
+        result is a tensor or its exception, so a bad clip cannot discard its
+        neighbours. Batch inference failures retry the same features singly.
+        """
+        results = [None] * len(audios)
+        groups = defaultdict(list)
+        for index, audio in enumerate(audios):
+            try:
+                features = self._features(audio, sample_rate).cpu().numpy()
+                groups[features.shape].append((index, features))
+            except Exception as exc:
+                results[index] = exc
+        if not groups:
+            return results
+        session = self._get_session()
+        shape = next(item.shape for item in session.get_inputs() if item.name == "feats")
+        dynamic_batch = bool(shape) and not isinstance(shape[0], int)
+        limit = max(1, int(max_batch_size)) if dynamic_batch else 1
+
+        def infer(items):
+            data = np.stack([features for _, features in items])
+            output = np.asarray(session.run(["embs"], {"feats": data})[0],
+                                dtype=np.float32)
+            if output.ndim != 2 or output.shape[0] != len(items) or not output.shape[1]:
+                raise ValueError("WeSpeaker returned an invalid embedding batch shape")
+            for (index, _), embedding in zip(items, output):
+                if not np.isfinite(embedding).all():
+                    raise ValueError("WeSpeaker returned an invalid embedding")
+                results[index] = torch.from_numpy(embedding.copy()).to(self.device)
+
+        for group in groups.values():
+            for start in range(0, len(group), limit):
+                items = group[start:start + limit]
+                if len(items) > 1:
+                    self.batch_stats["batch_attempts"] += 1
+                    try:
+                        infer(items)
+                    except Exception:
+                        self.batch_stats["batch_fallbacks"] += 1
+                    else:
+                        self.batch_stats["batches"] += 1
+                        self.batch_stats["batched_items"] += len(items)
+                        continue
+                for item in items:
+                    self.batch_stats["single_calls"] += 1
+                    try:
+                        infer([item])
+                    except Exception as exc:
+                        results[item[0]] = exc
+        return results

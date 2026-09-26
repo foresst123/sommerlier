@@ -863,43 +863,57 @@ class DiarizationRefinementService:
         and chunk size only decides how work is shared. Answers are applied in
         chunk order. Returns (refined, failed).
         """
+        from concurrent.futures import FIRST_COMPLETED, wait
+
         replicas = self.replica_count
         chunk = self.chunk_size or max(1, -(-self.batch_size // replicas))
         chunks = [pending[i:i + chunk] for i in range(0, len(pending), chunk)]
         # One chunk running per replica plus one waiting: a replica that finishes
         # takes the waiting one at once instead of when the CPU check is done.
         depth = replicas + 1
-        inflight = []
+        inflight = {}
+        completed = {}
         submitted = 0
+        next_commit = 0
         refined_count = failed_count = 0
 
         def submit_more():
             nonlocal submitted
             while submitted < len(chunks) and len(inflight) < depth:
                 batch = chunks[submitted]
+                index = submitted
                 submitted += 1
-                inflight.append((batch, self.submit_texts(
+                future = self.submit_texts(
                     system_prompt, [msg for _, msg in batch], use_prefix=True,
-                    labels=[seg.index for seg, _ in batch])))
+                    labels=[seg.index for seg, _ in batch])
+                inflight[future] = index
 
         submit_more()
         while inflight:
-            batch, future = inflight.pop(0)
-            try:
-                ok, decoded = future.result()
-            except Exception as e:
-                self.last_failure = f"{type(e).__name__}: {e}"
-                ok, decoded = False, []
-            if ok and len(decoded) != len(batch):
-                ok = False
+            done, _ = wait(inflight, return_when=FIRST_COMPLETED)
+            for future in done:
+                completed[inflight.pop(future)] = future
+            # Refill on ANY completion, even if the first chunk is still running.
+            # Only replies wait for source order; the free replica does not.
             submit_more()
-            if ok:
-                refined_count += self._apply_batch(batch, decoded)
-            else:
-                done, failed = self._refine_halved(batch, system_prompt)
-                refined_count += done
-                failed_count += failed
-            progress.advance(len(batch))
+            while next_commit in completed:
+                batch = chunks[next_commit]
+                future = completed.pop(next_commit)
+                next_commit += 1
+                try:
+                    ok, decoded = future.result()
+                except Exception as e:
+                    self.last_failure = f"{type(e).__name__}: {e}"
+                    ok, decoded = False, []
+                if ok and len(decoded) != len(batch):
+                    ok = False
+                if ok:
+                    refined_count += self._apply_batch(batch, decoded)
+                else:
+                    refined, failed = self._refine_halved(batch, system_prompt)
+                    refined_count += refined
+                    failed_count += failed
+                progress.advance(len(batch))
         return refined_count, failed_count
 
     def _refine_halved(self, batch, system_prompt):

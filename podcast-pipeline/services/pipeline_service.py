@@ -868,22 +868,6 @@ class PipelineService:
             output_dir, logger=self.logger,
             enabled=not getattr(args, "no_stage_output", False))
 
-        # The music operation already runs before diarization. Keep this stage
-        # name for stop-after and manifest compatibility, but do not decode
-        # audio or reopen checkpoints for a duplicate stage-major pass.
-        if (getattr(args, "stage_only_pass", False)
-                and getattr(args, "stop_after", None) == "music_removal"):
-            stage_out.write_manifest({
-                "audio_file": os.path.basename(audio_path),
-                "stopped_after": "music_removal",
-                "noop": True,
-            })
-            if self.logger:
-                self.logger.info(
-                    "Stage 'music_removal' is already covered by the music pass; "
-                    "skipping duplicate audio/checkpoint work")
-            return None
-
         base_job = getattr(args, "job_id", "default_job")
         job_id = f"{base_job}_{os.path.splitext(os.path.basename(audio_path))[0]}"
         cache_dir = getattr(args, "cache_dir", "cache")
