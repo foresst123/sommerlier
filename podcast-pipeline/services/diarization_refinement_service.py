@@ -6,6 +6,7 @@ from algorithms.asr.hallucination import diacritic_ratio, foreign_script_ratio
 from algorithms.asr.rover import normalize_token
 from schemas.transcript import TranscriptSegment
 from utils import profiling
+from utils.llm_sampling import hf_generate_kwargs
 import torch
 import re
 # Hoisted out of the per-segment loop: this is ~1200 constant tokens that would
@@ -1232,12 +1233,8 @@ class DiarizationRefinementService:
                 return False, []
             gen_kwargs = dict(
                 max_new_tokens=max_new_tokens,
-                do_sample=False,
-                temperature=None,
-                top_p=None,
-                top_k=None,
-                repetition_penalty=1.0,
                 pad_token_id=tokenizer.pad_token_id,
+                **hf_generate_kwargs(thinking),
             )
 
             if self.pipeline_pool is not None:

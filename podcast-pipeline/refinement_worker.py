@@ -43,6 +43,7 @@ import argparse
 import warnings
 
 import worker_vllm_env  # noqa: F401  (sets VLLM_* defaults before vllm loads)
+from utils.llm_sampling import hf_generate_kwargs, vllm_sampling_kwargs
 
 warnings.filterwarnings("ignore")
 
@@ -237,10 +238,7 @@ def generate_with_usage(model, tokenizer, system_prompt: str, user_messages: lis
         outputs = model.generate(
             texts,
             sampling_params=SamplingParams(
-                temperature=0.0,
-                max_tokens=max_new_tokens,
-                repetition_penalty=1.0,
-            ),
+                **vllm_sampling_kwargs(thinking, max_new_tokens)),
             use_tqdm=False,
         )
         usage = {
@@ -256,12 +254,8 @@ def generate_with_usage(model, tokenizer, system_prompt: str, user_messages: lis
         generated = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
-            do_sample=False,
-            temperature=None,
-            top_p=None,
-            top_k=None,
-            repetition_penalty=1.0,
             pad_token_id=tokenizer.pad_token_id,
+            **hf_generate_kwargs(thinking),
         )
 
     # Cắt phần prompt
