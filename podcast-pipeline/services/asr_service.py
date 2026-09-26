@@ -1173,7 +1173,7 @@ class ASRService:
                 return
             progress.voting(file_id)
             try:
-                self._vote_pool().submit(run_vote)
+                self._vote_pool().submit(profiling.bind(run_vote))
             except BaseException as exc:    # pool already shut down
                 progress.failed(file_id)
                 future.set_exception(exc)

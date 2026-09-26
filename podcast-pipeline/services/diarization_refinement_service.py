@@ -5,6 +5,7 @@ from utils.worker_env import resolve_worker_python
 from algorithms.asr.hallucination import diacritic_ratio, foreign_script_ratio
 from algorithms.asr.rover import normalize_token
 from schemas.transcript import TranscriptSegment
+from utils import profiling
 import torch
 import re
 # Hoisted out of the per-segment loop: this is ~1200 constant tokens that would
@@ -1149,8 +1150,8 @@ class DiarizationRefinementService:
             self._local_executor = ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix="refinement-local")
         return self._local_executor.submit(
-            self.generate_texts, system_prompt, user_messages, max_new_tokens,
-            use_prefix, labels, thinking)
+            profiling.bind(self.generate_texts), system_prompt, user_messages,
+            max_new_tokens, use_prefix, labels, thinking)
 
     def ensure_loaded(self) -> bool:
         """Load the LLM if it is not resident yet. False when it cannot be used.

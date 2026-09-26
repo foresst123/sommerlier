@@ -10,6 +10,8 @@ passes that only ever narrow what the pipeline already produced.
 
 from typing import List, Optional, Sequence, Tuple
 
+from utils import profiling
+
 # With thinking on, the reply starts with the model's reasoning and only then the
 # answer, all inside `max_new_tokens`. Under this a thinking model is cut off
 # before it answers, so a smaller configured limit is raised to it.
@@ -90,7 +92,8 @@ def ask_in_batches(llm, system_prompt: str, messages: Sequence[str], *,
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=workers,
                             thread_name_prefix="llm-window") as executor:
-        futures = [executor.submit(_ask_range, llm, system_prompt, messages, replies,
+        futures = [executor.submit(profiling.bind(_ask_range), llm, system_prompt,
+                                   messages, replies,
                                    start, min(start + per_call, len(messages)),
                                    per_call, **kwargs)
                    for start in range(0, len(messages), per_call)]

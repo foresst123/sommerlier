@@ -125,6 +125,29 @@ def current_file():
     return _context().file
 
 
+def bind(function):
+    """Make `function` run under the stage and file of the thread that calls bind().
+
+    The marker set by file_stage() is per thread, so work handed to a pool (the ASR vote,
+    LLM requests, the conversation window pool) recorded its spans with no stage, and the
+    report's per-stage breakdown skips a span that has none. Bind at the point the work is
+    queued, from the thread that owns the file. The pool thread's own marker is put back
+    afterwards, since the same thread serves other files.
+    """
+    stage, file = _context().stage, _context().file
+
+    @functools.wraps(function)
+    def bound(*args, **kwargs):
+        ctx = _context()
+        previous = (ctx.stage, ctx.file, ctx.depth)
+        ctx.stage, ctx.file, ctx.depth = stage, file, 0
+        try:
+            return function(*args, **kwargs)
+        finally:
+            ctx.stage, ctx.file, ctx.depth = previous
+    return bound
+
+
 @contextlib.contextmanager
 def file_stage(stage, path):
     """Mark this thread as running `stage` on `path`; records one span for it.

@@ -94,6 +94,10 @@ def _build_parser():
                              "instead of when their stage runs. Hides their "
                              "load time behind earlier stages, at the cost of "
                              "holding their VRAM for the whole run.")
+    parser.add_argument("--kill_orphans", action="store_true",
+                        help="At start-up, kill this user's leftover vLLM engines and "
+                             "pipeline workers from an earlier run (parent gone, still "
+                             "holding GPU memory). Without it they are only reported.")
     parser.add_argument("--keep_models", action="store_true",
                         help="Keep models in VRAM between stages instead of unloading them. "
                              "Saves reload time when processing many files, at the cost of a "
@@ -380,6 +384,8 @@ def main():
         
     logger = Logger.get_logger()
     logger.info(f"Starting Sommelier Pipeline for Job: {args.job_id}")
+    from utils import preflight
+    preflight.run(logger, kill_orphans=args.kill_orphans)
     logger.info(f"Steps ({args.env} profile{', +--steps' if args.steps else ''}): {_STEPS_NOTE}")
     from utils.cpu_plan import usable_cores
     # Workers inherit this through os.environ.copy() in base_worker_service.
