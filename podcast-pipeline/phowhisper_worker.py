@@ -36,6 +36,15 @@ def build_model(config_path, env_name):
     return PhoWhisperASR(device=device, **phowhisper_kwargs(models_cfg))
 
 
+class _StderrLog:
+    """The model reports OOM retries through a logger; stderr is what the parent
+    forwards (lines that say "out of memory" reach its log as warnings)."""
+
+    @staticmethod
+    def warning(message):
+        print(message, file=sys.stderr, flush=True)
+
+
 def handle_request(model, req: dict) -> dict:
     req_id = req.get("id", "unknown")
     try:
@@ -56,7 +65,8 @@ def handle_request(model, req: dict) -> dict:
         for length in lengths:
             clips.append(carrier[offset:offset + length])
             offset += length
-        texts = model.transcribe_batch(clips, batch_size=req.get("batch_size"))
+        texts = model.transcribe_batch(clips, batch_size=req.get("batch_size"),
+                                       logger=_StderrLog())
         return {"id": req_id,
                 "results": [{"id": str(i), "text": t} for i, t in zip(ids, texts)]}
     except Exception as exc:
