@@ -1,4 +1,5 @@
 import os
+import threading
 from typing import List
 from difflib import SequenceMatcher
 from utils.worker_env import resolve_worker_python
@@ -250,6 +251,14 @@ class DiarizationRefinementService:
         self._worker = None
         self._worker_python = None
         self._worker_env_error = None
+        # refinement_svc is shared across files running concurrently (see
+        # PipelineService.parallel_stage_view) so their threads can call
+        # ensure_loaded()/_ensure_worker_started() at the same time. Without
+        # this lock, one thread could observe self._worker already set by
+        # another thread that has not finished start() yet, ping() a pool
+        # whose replicas are still spawning, and fail a file that was never
+        # actually broken.
+        self._worker_start_lock = threading.Lock()
         try:
             worker_env = "vllm" if self.backend == "vllm" else "refinement"
             self._worker_python = resolve_worker_python(
@@ -282,83 +291,95 @@ class DiarizationRefinementService:
 
         Gọi từ ensure_loaded/generate_texts — tức khi stage refinement
         thực sự chạy, không phải lúc pipeline khởi tạo service.
+
+        refinement_svc is one shared instance across every file in flight, so
+        two files can call this at once. The lock makes the second caller
+        wait for the first's start() to finish (success or failure) instead
+        of seeing self._worker already set and pinging a pool whose replicas
+        have not come up yet.
         """
-        if self._worker is not None:
-            return True  # đã start
-        if self._worker_env_error is not None:
-            raise RuntimeError(
-                "A separate vllm_env is required for Qwen3-ASR, Whisper "
-                "large-v3 and Qwen3.5. Run scripts/create_vllm_env.sh, then "
-                "export VLLM_PYTHON=/path/to/vllm_env/bin/python. "
-                f"Resolver detail: {self._worker_env_error}")
-        if self._worker_python is None:
-            return False  # không có refinement_env → dùng direct load
-        try:
-            import os as _os
-            _script = _os.path.join(
-                _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
-                "refinement_worker.py")
-            from services.refinement_worker_service import (
-                RefinementWorkerPoolService, RefinementWorkerService)
-            devices = list(dict.fromkeys(self.pipeline_devices))
-            if not devices:
-                try:
-                    devices = [int(str(self.device).split(":")[-1])]
-                except (TypeError, ValueError):
-                    devices = [0]
-            replica_count = (min(self.worker_count, len(devices))
-                             if self.backend == "vllm" else 1)
-            services = [RefinementWorkerService(
-                python_env_path=self._worker_python,
-                worker_script_path=_script,
-                model_name=self.model_name,
-                dtype=self.torch_dtype,
-                device_map="single" if self.backend == "vllm" else self.placement,
-                gpu_ids="0" if self.backend == "vllm" else ",".join(
-                    str(value) for value in devices),
-                gpu_memory_fraction=self.gpu_memory_utilization,
-                backend=self.backend,
-                device_id=devices[index] if self.backend == "vllm" else None,
-                tensor_parallel_size=1,
-                max_model_len=self.max_model_len,
-                enable_prefix_caching=(self.prefix_cache
-                                       or self.backend == "vllm"),
-                logger=self.logger,
-            ) for index in range(replica_count)]
-            self._worker = (RefinementWorkerPoolService(services, self.logger)
-                            if len(services) > 1 else services[0])
-            self._worker_devices = list(devices[:replica_count])
-            if self.backend == "vllm":
-                # The engine refuses to start unless its share of the card is free, and
-                # a model stopped a moment ago may not have given its memory back yet.
-                from utils.gpu_memory import wait_for_free_vram
-                wait_for_free_vram(devices[:replica_count],
-                                   self.gpu_memory_utilization, logger=self.logger)
-            self._worker.start()
-            if self.logger:
-                self.logger.info(
-                    f"[refinement] subprocess worker started "
-                    f"(python={self._worker_python}, model={self.model_name}, "
-                    f"backend={self.backend}, replicas={len(services)})")
-            return True
-        except Exception as _e:
-            if self.backend == "vllm":
-                if self._worker is not None:
-                    try:
-                        self._worker.stop()
-                    except Exception:
-                        pass
-                self._worker = None
+        with self._worker_start_lock:
+            if self._worker is not None:
+                return True  # đã start
+            if self._worker_env_error is not None:
                 raise RuntimeError(
-                    f"Failed to start vLLM refinement workers for "
-                    f"{self.model_name}: {_e}") from _e
-            if self.logger:
-                self.logger.warning(
-                    f"[refinement] worker start failed ({_e}), "
-                    "falling back to direct load")
-            self._worker = None
-            self._worker_python = None
-            return False
+                    "A separate vllm_env is required for Qwen3-ASR, Whisper "
+                    "large-v3 and Qwen3.5. Run scripts/create_vllm_env.sh, then "
+                    "export VLLM_PYTHON=/path/to/vllm_env/bin/python. "
+                    f"Resolver detail: {self._worker_env_error}")
+            if self._worker_python is None:
+                return False  # không có refinement_env → dùng direct load
+            worker = None
+            try:
+                import os as _os
+                _script = _os.path.join(
+                    _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                    "refinement_worker.py")
+                from services.refinement_worker_service import (
+                    RefinementWorkerPoolService, RefinementWorkerService)
+                devices = list(dict.fromkeys(self.pipeline_devices))
+                if not devices:
+                    try:
+                        devices = [int(str(self.device).split(":")[-1])]
+                    except (TypeError, ValueError):
+                        devices = [0]
+                replica_count = (min(self.worker_count, len(devices))
+                                 if self.backend == "vllm" else 1)
+                services = [RefinementWorkerService(
+                    python_env_path=self._worker_python,
+                    worker_script_path=_script,
+                    model_name=self.model_name,
+                    dtype=self.torch_dtype,
+                    device_map="single" if self.backend == "vllm" else self.placement,
+                    gpu_ids="0" if self.backend == "vllm" else ",".join(
+                        str(value) for value in devices),
+                    gpu_memory_fraction=self.gpu_memory_utilization,
+                    backend=self.backend,
+                    device_id=devices[index] if self.backend == "vllm" else None,
+                    tensor_parallel_size=1,
+                    max_model_len=self.max_model_len,
+                    enable_prefix_caching=(self.prefix_cache
+                                           or self.backend == "vllm"),
+                    logger=self.logger,
+                ) for index in range(replica_count)]
+                worker = (RefinementWorkerPoolService(services, self.logger)
+                         if len(services) > 1 else services[0])
+                self._worker_devices = list(devices[:replica_count])
+                if self.backend == "vllm":
+                    # The engine refuses to start unless its share of the card is free, and
+                    # a model stopped a moment ago may not have given its memory back yet.
+                    from utils.gpu_memory import wait_for_free_vram
+                    wait_for_free_vram(devices[:replica_count],
+                                       self.gpu_memory_utilization, logger=self.logger)
+                worker.start()
+                # Published only once start() has returned, so a concurrent
+                # caller blocked on the lock above sees a worker that is
+                # already ready to ping, not one still spawning.
+                self._worker = worker
+                if self.logger:
+                    self.logger.info(
+                        f"[refinement] subprocess worker started "
+                        f"(python={self._worker_python}, model={self.model_name}, "
+                        f"backend={self.backend}, replicas={len(services)})")
+                return True
+            except Exception as _e:
+                if self.backend == "vllm":
+                    if worker is not None:
+                        try:
+                            worker.stop()
+                        except Exception:
+                            pass
+                    self._worker = None
+                    raise RuntimeError(
+                        f"Failed to start vLLM refinement workers for "
+                        f"{self.model_name}: {_e}") from _e
+                if self.logger:
+                    self.logger.warning(
+                        f"[refinement] worker start failed ({_e}), "
+                        "falling back to direct load")
+                self._worker = None
+                self._worker_python = None
+                return False
 
     def _activate_cpu_threads(self):
         """Give refinement the cores released by earlier pipeline stages."""

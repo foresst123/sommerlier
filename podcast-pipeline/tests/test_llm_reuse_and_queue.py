@@ -552,6 +552,58 @@ def test_without_a_relabel_service_refinement_still_releases(monkeypatch):
     assert not svc.is_resident()
 
 
+def test_two_files_sharing_the_pool_both_see_it_ready(monkeypatch):
+    """pipeline_service.parallel_stage_view() shares one refinement_svc across
+    concurrent files (it must, to reuse the resident LLM instead of spawning a
+    second one -- see the pool-duplication fix). That means two file threads
+    can call ensure_loaded() around the same time. _ensure_worker_started()
+    used to publish self._worker before start() had finished bringing the
+    replicas up, so the second thread's ping() found a not-yet-ready pool and
+    ensure_loaded() returned False -- refine() then raised "Failed to
+    initialize refinement LLM" for a file whose worker was, in fact, only
+    still starting.
+    """
+    from services import refinement_worker_service as rws
+
+    class _SlowService(_Replica):
+        def __init__(self, **kw):
+            super().__init__("r")
+            self._ready = False
+
+        def spawn(self):
+            self.spawned += 1
+            time.sleep(0.2)  # stand-in for real vLLM engine start-up time
+
+        def wait_ready(self):
+            self._ready = True
+
+        def ping(self):
+            return self._ready
+
+    monkeypatch.setattr(rws, "RefinementWorkerService", _SlowService)
+    monkeypatch.setattr("utils.gpu_memory.wait_for_free_vram", lambda *a, **k: True)
+    svc = refinement.DiarizationRefinementService(
+        logger=None, backend="vllm", workers=2, pipeline_devices=[0, 1], config={})
+    svc._worker_env_error, svc._worker_python = None, "python"
+
+    results = {}
+
+    def call(name):
+        results[name] = svc.ensure_loaded()
+
+    first = threading.Thread(target=call, args=("a",))
+    first.start()
+    time.sleep(0.05)  # file B calls in while file A's pool is still spawning
+    second = threading.Thread(target=call, args=("b",))
+    second.start()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert results == {"a": True, "b": True}, (
+        "a file that finds the pool already being started by another file "
+        "must wait for it, not observe it half-started and fail")
+
+
 def test_the_batch_releases_a_handed_on_llm_when_relabel_never_ran(monkeypatch):
     counter, svc, pipe, stage_pass = _lifecycle(monkeypatch, keep=True)
     stage_pass("refinement")
