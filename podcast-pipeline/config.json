@@ -275,7 +275,7 @@
           "model_name": "openai/whisper-large-v3",
           "torch_dtype": "bfloat16",
           "batch_size": 16,
-          "gpu_memory_utilization": 0.4,
+          "gpu_memory_utilization": 0.25,
           "kv_cache_memory_bytes": 6442450944,
           "max_new_tokens": 256
         },
