@@ -261,8 +261,10 @@ def test_a_view_is_isolated_where_it_must_be_and_shared_where_it_must_be():
     from services.pipeline_service import PipelineService
 
     music = MusicService(model_loader=None, logger=None)
+    refinement = object()  # stand-in for the resident vLLM worker pool
     pipeline = PipelineService(*(None,) * 8)
     pipeline.music_svc = music
+    pipeline.refinement_svc = refinement
     pipeline.noise_track = "the noise of file A"
 
     view = pipeline.parallel_stage_view("music")
@@ -272,6 +274,13 @@ def test_a_view_is_isolated_where_it_must_be_and_shared_where_it_must_be():
     assert view.music_svc is not music, "each file gets its own bs_roformer slot"
     assert view.music_svc._checkout is music._checkout, "but ONE checkout queue"
     assert view._tagger_lock is pipeline._tagger_lock, "and one file in SSLAM"
+    # Two files whose diarization/separation/asr are already checkpointed
+    # cascade into refinement inside this same "music"/"diarization"/
+    # "separation" view. A per-file copy here means each file spins up its
+    # own vLLM engine pair instead of sharing the one resident pool -- two
+    # engines landing on the same GPU and OOMing each other.
+    assert view.refinement_svc is refinement, (
+        "each file must reuse the one resident refinement pool, not spawn its own")
     assert pipeline.parallel_stage_view("asr") is pipeline
 
 

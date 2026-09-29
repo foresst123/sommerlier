@@ -162,7 +162,15 @@ class PipelineService:
         # music_svc creates once, and a shallow copy shares that dict, so every
         # file's view checks separators out of the same queue.
         view.music_svc = copy.copy(self.music_svc)
-        view.refinement_svc = copy.copy(self.refinement_svc)
+        # refinement_svc is NOT copied: it is the resident vLLM worker pool,
+        # already thread-safe (its own lock/queue) and meant to be shared by
+        # every file in flight, the same way speaker_relabel and
+        # conversation_exports reuse it. A file that already has
+        # diarization/separation/asr checkpointed cascades straight through
+        # this view into refinement -- a per-file copy.copy() here gave two
+        # such files their own independent, unstarted worker pool, and both
+        # spun up their own vLLM engine pair, landing two engines on the same
+        # GPU and OOMing each other.
         view.timeline = TimelineMap()
         # noise_track is written mid-run() (music-analysis step, before
         # diarization even for a "diarization"-stage pass reading it back from
@@ -494,11 +502,25 @@ class PipelineService:
         nó (lane ASR) tự chờ qua wait_ready() — an toàn khi gọi nhiều lần.
         Trả {tên: tiến trình}, bỏ qua tên không có worker."""
         monitor = getattr(self, "performance_monitor", None)
+        names = tuple(names)
+        cohort = [(name, self.worker_services.get(name)) for name in names]
+        cohort = [(name, service) for name, service in cohort if service is not None]
         processes, spawned = {}, []
-        for name in names:
-            service = self.worker_services.get(name)
-            if service is None:
-                continue
+
+        def stop_cohort():
+            # qwen3/Whisper/PhoWhisper form one ASR startup transaction.  A
+            # failure in any member means the stage cannot run, so keeping a
+            # successful peer resident only turns the next attempt into an OOM.
+            for worker_name, worker_service in cohort:
+                try:
+                    worker_service.stop()
+                except Exception as cleanup_error:
+                    if self.logger:
+                        self.logger.warning(
+                            f"Failed to clean up {worker_name} after worker "
+                            f"startup failure: {cleanup_error}")
+
+        for name, service in cohort:
             if getattr(service, "process", None) is not None:
                 self._register_worker_pids(name, service)
                 processes[name] = service.process
@@ -510,6 +532,7 @@ class PipelineService:
             try:
                 service.spawn()
             except Exception as e:
+                stop_cohort()
                 self._worker_start_failed(name, e)
             spawned.append((name, service))
 
@@ -524,7 +547,8 @@ class PipelineService:
                 processes[name] = getattr(service, "process", None)
                 self._register_worker_pids(name, service)
                 threading.Thread(
-                    target=self._ready_in_background, args=(name, service, become_ready),
+                    target=self._ready_in_background,
+                    args=(name, service, become_ready, stop_cohort),
                     daemon=True, name=f"ready-{name}").start()
             return processes
 
@@ -532,14 +556,16 @@ class PipelineService:
             try:
                 become_ready(name, service)
             except Exception as e:
+                stop_cohort()
                 self._worker_start_failed(name, e)
             processes[name] = getattr(service, "process", None)
         return processes
 
-    def _ready_in_background(self, name, service, become_ready):
+    def _ready_in_background(self, name, service, become_ready, stop_cohort):
         try:
             become_ready(name, service)
         except Exception as e:
+            stop_cohort()
             # The lane that needs this worker raises the same error from its own
             # wait_ready(); this only makes sure it is logged when it happens.
             if self.logger:
