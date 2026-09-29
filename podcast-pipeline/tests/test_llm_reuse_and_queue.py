@@ -461,6 +461,14 @@ def test_the_new_switches_default_off_and_the_a100_profile_sets_them():
     assert tuned["shared_queue"] is True
     assert tuned["chunk_size"] == 32
     assert resolve(config["environments"]["a100"])["stages"]["refinement"]["parallel_windows"]
+    # word_alignment_svc.unload() is deferred to end_stage_scope() during a
+    # by-stage batch (see pipeline_service.begin_stage_scope), so its worker
+    # pair can still be resident -- a few GiB per GPU -- when refinement tries
+    # to reload for conversation_exports. 0.95 left no room for that and
+    # vLLM's own memory check (not just wait_for_free_vram's best-effort
+    # wait) refused to start. Do not raise this back toward 0.95 without
+    # also freeing WordAlign sooner.
+    assert tuned["gpu_memory_utilization"] <= 0.85
 
 
 # --- lifecycle: how many times the replicas are started ---------------------------------------
