@@ -153,8 +153,14 @@ python main_original_ASR_MoE.py \
 
 ### Word-level Timestamps
 
-- `--whisperx_word_timestamps` / `--no-whisperx_word_timestamps`: Enable WhisperX alignment
-  - Provides precise word-level start/end times
+- The current pipeline controls this with `steps.word_alignment` (or
+  `--steps word_alignment=on`). It runs after refinement and speaker relabel,
+  then before dialogue-clip selection.
+- WhisperX forced-aligns the final text with the Vietnamese Wav2Vec2 model
+  configured at `models.word_alignment.model_name`. This avoids retaining word
+  times from the pre-refinement Whisper text.
+- Full-transcript word times are written to `08_word_alignment/transcripts.json`.
+  Selected clean clips also carry clip-relative word times in their metadata.
 
 
 

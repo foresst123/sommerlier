@@ -29,21 +29,21 @@ def test_each_stage_writes_its_own_directory(tmp_path):
     so.write_asr([_Seg(index="00000", text="xin chào")])
     so.write_manifest({"audio_file": "a.mp3"})
 
-    assert (tmp_path / "01_diarization" / "segments.json").exists()
-    assert (tmp_path / "01_diarization" / "stats.json").exists()
-    assert (tmp_path / "04_asr" / "transcripts.json").exists()
+    assert (tmp_path / "02_diarization" / "segments.json").exists()
+    assert (tmp_path / "02_diarization" / "stats.json").exists()
+    assert (tmp_path / "05_asr" / "transcripts.json").exists()
     assert (tmp_path / "manifest.json").exists()
 
 
 def test_waveforms_never_reach_the_json(tmp_path):
-    """enhanced_audio is megabytes of float32; serialising it would be fatal."""
+    """audio is megabytes of float32; serialising it would be fatal."""
     seg = _Seg(index="00000", start=0.0, end=1.0, speaker="1",
-               enhanced_audio=np.zeros(24000, dtype=np.float32))
+               audio=np.zeros(24000, dtype=np.float32))
     so = StageOutputService(str(tmp_path))
     so.write_diarization([seg], 1.0)
 
-    raw = (tmp_path / "01_diarization" / "segments.json").read_text()
-    assert "enhanced_audio" not in raw
+    raw = (tmp_path / "02_diarization" / "segments.json").read_text()
+    assert "audio" not in raw
     json.loads(raw)                       # and it is still valid JSON
 
 
@@ -73,12 +73,12 @@ def test_a_healthy_run_raises_no_warnings():
 
 def test_separation_stats_count_spans_not_segments():
     segs = [
-        _Seg(index="0", start=0, end=5, speaker="1", tse=True,
-             tse_spans=[(1.0, 1.4, 0.7)], tse_failed_spans=[]),
-        _Seg(index="1", start=5, end=9, speaker="2", tse=True,
-             tse_spans=[(6.0, 6.3, 0.6)], tse_failed_spans=[(7.0, 7.2, "qc_sim", "")]),
-        _Seg(index="2", start=9, end=14, speaker="1", tse=False,
-             tse_spans=[], tse_failed_spans=[]),
+        _Seg(index="0", start=0, end=5, speaker="1", bss=True,
+             bss_spans=[(1.0, 1.4, 0.7)], bss_failed_spans=[]),
+        _Seg(index="1", start=5, end=9, speaker="2", bss=True,
+             bss_spans=[(6.0, 6.3, 0.6)], bss_failed_spans=[(7.0, 7.2, "qc_sim", "")]),
+        _Seg(index="2", start=9, end=14, speaker="1", bss=False,
+             bss_spans=[], bss_failed_spans=[]),
     ]
     st = StageOutputService.separation_stats(segs)
     assert st["segments_total"] == 3
@@ -88,8 +88,8 @@ def test_separation_stats_count_spans_not_segments():
 
 
 def test_an_empty_track_failure_is_called_out():
-    segs = [_Seg(index="0", start=0, end=1, speaker="1", tse=False, tse_spans=[],
-                 tse_failed_spans=[(0.1, 0.4, "empty_track", "silent")])]
+    segs = [_Seg(index="0", start=0, end=1, speaker="1", bss=False, bss_spans=[],
+                 bss_failed_spans=[(0.1, 0.4, "empty_track", "silent")])]
     st = StageOutputService.separation_stats(segs)
     assert any("silent" in w for w in st["warnings"])
 
@@ -111,10 +111,10 @@ def test_refinement_records_what_the_llm_rewrote(tmp_path):
     so = StageOutputService(str(tmp_path))
     so.write_refinement(after, before=before)
 
-    changes = json.loads((tmp_path / "05_refinement" / "changes.json").read_text())
+    changes = json.loads((tmp_path / "06_refinement" / "changes.json").read_text())
     assert len(changes) == 1 and changes[0]["index"] == "0"
     assert json.loads(
-        (tmp_path / "05_refinement" / "stats.json").read_text())["segments_changed"] == 1
+        (tmp_path / "06_refinement" / "stats.json").read_text())["segments_changed"] == 1
 
 
 def test_rewriting_most_segments_is_not_itself_a_warning(tmp_path):
@@ -129,7 +129,7 @@ def test_rewriting_most_segments_is_not_itself_a_warning(tmp_path):
     so = StageOutputService(str(tmp_path))
     so.write_refinement(after, before=before)
 
-    stats = json.loads((tmp_path / "05_refinement" / "stats.json").read_text())
+    stats = json.loads((tmp_path / "06_refinement" / "stats.json").read_text())
     assert stats["segments_changed"] == 20
     assert "warnings" not in stats
 
@@ -140,7 +140,7 @@ def test_bulk_word_deletion_is_flagged(tmp_path):
     so = StageOutputService(str(tmp_path))
     so.write_refinement(after, before=before)
 
-    stats = json.loads((tmp_path / "05_refinement" / "stats.json").read_text())
+    stats = json.loads((tmp_path / "06_refinement" / "stats.json").read_text())
     assert stats["word_drop_pct"] > 15.0
     assert any("removed" in w for w in stats["warnings"])
 
@@ -195,11 +195,100 @@ def test_stage_artifacts_are_written_once_not_once_per_stage():
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "services/pipeline_service.py"), encoding="utf-8").read()
 
-    for stage, writer in (("diarization", "write_diarization"),
-                          ("separation", "write_separation"),
-                          ("music_removal", "write_music_removal"),
+    def guarded(stage, writer):
+        """Every call site of `writer` runs only for a freshly computed `stage`.
+
+        A site is fine when the paragraph before it is guarded by `if "<stage>" in
+        computed:`, or when it lives in a helper that run() only calls after computing
+        the stage (the asynchronous ASR commit).
+        """
+        for match in re.finditer(rf".*stage_out\.{writer}\(.*", src):
+            before = src[:match.start()]
+            in_fresh_only_helper = "def _submit_asr_async" in before[
+                before.rfind("\n    def "):]
+            if not (f'if "{stage}" in computed:' in before.rsplit("\n\n", 1)[-1]
+                    or in_fresh_only_helper):
+                return False
+        return True
+
+    for stage, writer in (("separation", "write_separation"),
                           ("asr", "write_asr")):
-        call = re.search(rf".*stage_out\.{writer}\(.*", src).group(0)
-        before = src[:src.index(call)]
-        assert f'if "{stage}" in computed:' in before.rsplit("\n\n", 1)[-1], (
+        assert guarded(stage, writer), (
             f"{writer} runs even when {stage} came from a checkpoint")
+
+    # Diarization has two call sites: a deferred one inside _finish(), wired
+    # up only when this pass freshly computes diarization and stops right
+    # after it (see PipelineService.run()'s "diarization" stop-point), and a
+    # synchronous one used by every other entry into this section
+    # (checkpoint-loaded, disabled, or a file-major run). Each is guarded on
+    # its own terms rather than sharing one `if "diarization" in computed:`
+    # check -- both must still add up to "never on a checkpoint reload".
+    diar_calls = sorted(m.start() for m in
+                        re.finditer(r"stage_out\.write_diarization\(", src))
+    assert len(diar_calls) == 2, (
+        "expected exactly one deferred call (inside _finish) and one "
+        "synchronous call (guarded by `if \"diarization\" in computed:`), "
+        f"found {len(diar_calls)}")
+    deferred_call, synchronous_call = diar_calls
+
+    finish_def = src.index("def _finish(result")
+    finish_end = src.index("raw, audio_data, args, then=_finish)")
+    assert finish_def < deferred_call < finish_end, (
+        "the first write_diarization call must be the deferred one inside "
+        "_finish(), only ever wired up for a freshly-computed diarization")
+
+    before_synchronous = src[:synchronous_call]
+    assert 'if "diarization" in computed:' in before_synchronous.rsplit("\n\n", 1)[-1], (
+        "the synchronous write_diarization call must stay guarded by "
+        '`if "diarization" in computed:` for checkpoint-loaded/disabled runs')
+
+
+def test_the_manifest_accumulates_across_separate_service_instances(tmp_path):
+    """Stage-major execution builds a new StageOutputService inside every run(),
+    so self.manifest only ever holds the one stage that call computed. Writing
+    it plain left the file describing the last stage alone -- a real two-file
+    run produced a manifest listing refinement and nothing else, while all five
+    stage directories held data."""
+    def _segments(n):
+        return [_Seg(index=str(i).zfill(5), start=i * 2.0, end=i * 2.0 + 1.8,
+                     speaker="1" if i % 2 else "2") for i in range(n)]
+
+    for writer in ("write_diarization", "write_separation"):
+        service = StageOutputService(str(tmp_path))          # fresh, as run() does
+        getattr(service, writer)(_segments(40), 90.0)
+        service.write_manifest({"audio_file": "a.mp3"})
+
+    service = StageOutputService(str(tmp_path))
+    service.write_asr([_Seg(index=str(i), text="x") for i in range(40)])
+    service.write_manifest({"audio_file": "a.mp3"})
+
+    flow = json.loads((tmp_path / "manifest.json").read_text())["flow"]
+    assert [r["stage"] for r in flow] == [
+        "diarization", "separation", "asr"]
+
+
+def test_a_recomputed_stage_replaces_its_earlier_entry(tmp_path):
+    def _segments(n):
+        return [_Seg(index=str(i).zfill(5), start=float(i), end=i + 0.9,
+                     speaker="1") for i in range(n)]
+
+    first = StageOutputService(str(tmp_path))
+    first.write_diarization(_segments(10), 20.0)
+    first.write_manifest({"audio_file": "a.mp3"})
+
+    second = StageOutputService(str(tmp_path))
+    second.write_diarization(_segments(25), 40.0)
+    second.write_manifest({"audio_file": "a.mp3"})
+
+    flow = json.loads((tmp_path / "manifest.json").read_text())["flow"]
+    assert len(flow) == 1
+    assert flow[0]["n"] == 25, "the rerun's count must win"
+
+
+def test_a_corrupt_manifest_does_not_stop_the_run(tmp_path):
+    (tmp_path / "manifest.json").write_text("{not json")
+    service = StageOutputService(str(tmp_path))
+    service.write_asr([_Seg(index="0", text="x")])
+    service.write_manifest({"audio_file": "a.mp3"})
+
+    assert json.loads((tmp_path / "manifest.json").read_text())["flow"]

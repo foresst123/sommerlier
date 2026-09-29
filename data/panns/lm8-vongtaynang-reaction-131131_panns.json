@@ -1,0 +1,38 @@
+{
+  "audio": "/Users/lam/Downloads/music_stage_audio (6)/lm8-vongtaynang-reaction-131131/before_lm8-vongtaynang-reaction-131131.mp3",
+  "duration_seconds": 1324.04,
+  "sample_rate": 16000,
+  "frames": 132404,
+  "rows_stored": 4138,
+  "row_seconds": 0.32,
+  "fps_advertised": 100.0,
+  "block_frames": 32,
+  "block_spread_max": 0.0,
+  "lossless_block_reduction": true,
+  "labels": 527,
+  "dtype": "float16",
+  "scale_applied": 0.94323,
+  "file_mb": 3.35,
+  "thresholds": {
+    "music_threshold": 0.1,
+    "singing_threshold": 0.35,
+    "singing_margin": 0.15,
+    "speech_present": 0.2,
+    "min_span_seconds": 0.3,
+    "merge_gap_seconds": 0.5,
+    "pad_seconds": 0.3
+  },
+  "group_seconds": {
+    "speech": 674.44,
+    "singing": 0.0,
+    "music": 195.84,
+    "noise_speech": 0.0,
+    "noise_env": 0.0,
+    "noise_room": 0.0
+  },
+  "flag_seconds": {
+    "is_singing": 0.0,
+    "is_song": 212.8,
+    "is_music": 31.36
+  }
+}

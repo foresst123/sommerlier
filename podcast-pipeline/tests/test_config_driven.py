@@ -16,7 +16,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Flags that decide whether a stage runs at all.
-STAGE_FLAGS = ("vad", "tse", "panns", "ASRMoE", "llm_refinement",
+STAGE_FLAGS = ("vad", "bss", "music", "ASRMoE", "llm_refinement",
                "qwen3omni", "dia3", "keep_models")
 
 
@@ -62,7 +62,7 @@ def test_stage_flags_live_in_every_profile():
 
 def test_profile_alone_turns_the_stages_on():
     args = _resolve(["--audio", "x.mp3", "--env", "kaggle"])
-    for flag in ("vad", "tse", "panns", "ASRMoE", "llm_refinement"):
+    for flag in ("vad", "bss", "music", "ASRMoE", "llm_refinement"):
         assert args[flag] is True, f"{flag} should come from the profile"
 
 
@@ -82,9 +82,12 @@ def test_the_command_line_wins_over_the_profile():
 
 def test_a_threshold_can_be_overridden_without_editing_config():
     base = _resolve(["--audio", "x.mp3", "--env", "a100"])
-    over = _resolve(["--audio", "x.mp3", "--env", "a100", "--merge_gap", "1.0"])
-    assert base["merge_gap"] == 0.3
+    over = _resolve(["--audio", "x.mp3", "--env", "a100", "--merge_gap", "1.0",
+                     "--bridge_gap", "2.5"])
+    assert base["merge_gap"] == 0.5
+    assert base["bridge_gap"] == 3.0
     assert over["merge_gap"] == 1.0
+    assert over["bridge_gap"] == 2.5
 
 
 def test_every_model_reads_its_own_batch_size():

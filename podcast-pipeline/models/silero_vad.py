@@ -7,6 +7,7 @@
 # Note: This code has been modified to fit the context of this repository.
 
 import os
+import threading
 
 import librosa
 import torch
@@ -14,17 +15,24 @@ import numpy as np
 import onnxruntime
 
 # Segments longer than this are re-cut on Silero's own speech boundaries;
-# shorter ones keep the diarizer's edges untouched. It used to be 20s, which
-# meant that once max_segment_length dropped to 20 nothing reached the VAD at
-# all and every boundary came straight from the diarizer's 0.8s frame grid.
-# A couple of seconds is enough audio for Silero to place an edge on the
-# waveform rather than on a frame index.
-VAD_THRESHOLD = float(os.environ.get("VAD_THRESHOLD", "2.0"))
+# shorter ones keep the diarizer's edges untouched. At 2.0 this mixed two
+# boundary systems in one timeline -- short turns on the diarizer's 0.8s frame
+# grid, long ones on Silero's waveform edges -- and every turn change between
+# the two produced 19-60ms phantom overlaps. 0.5 sends effectively everything
+# through Silero so one system decides every edge. Backchannels sit just above
+# it and keep their own edges, which is what we want: they are the shortest
+# real speech in the corpus and nothing should re-cut them.
+VAD_THRESHOLD = float(os.environ.get("VAD_THRESHOLD", "0.5"))
 # Longest run of speech `segment_speech` will hand back as one piece before it
 # splits at the widest internal pause. Independent of VAD_THRESHOLD: that one
 # decides whether the VAD runs, this one decides how it carves the result.
 VAD_MAX_SEGMENT = float(os.environ.get("VAD_MAX_SEGMENT", "20.0"))
 SAMPLING_RATE = 16000
+
+
+# Construction swaps a global onnxruntime hook, so two threads building a VAD
+# at once (see SileroVAD.fork) must not interleave.
+_BUILD_LOCK = threading.Lock()
 
 
 class SileroVAD:
@@ -54,6 +62,23 @@ class SileroVAD:
         """
         self.vad_threshold = VAD_THRESHOLD if vad_threshold is None else float(vad_threshold)
         self.max_segment = VAD_MAX_SEGMENT if max_segment is None else float(max_segment)
+        self._init_args = dict(local=local, model=model, device=device,
+                               vad_threshold=vad_threshold, max_segment=max_segment)
+        try:
+            with _BUILD_LOCK:
+                self._load(local, model, device)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load VAD model: {e}")
+
+    def fork(self):
+        """A second, independent instance with the same settings.
+
+        The ONNX wrapper keeps per-call state, so one instance serves one
+        thread at a time; a thread that wants to run without a shared lock
+        takes its own fork."""
+        return SileroVAD(**self._init_args)
+
+    def _load(self, local, model, device):
         try:
             # Set ONNX Runtime providers based on device
             if device.type == "cuda":
@@ -62,12 +87,20 @@ class SileroVAD:
                 providers = ['CPUExecutionProvider']
 
             # Monkey-patch onnxruntime.InferenceSession to use providers by default
+            from utils.cpu_plan import onnx_session_options
             original_init = onnxruntime.InferenceSession.__init__
 
             def patched_init(self, path_or_bytes, sess_options=None, **kwargs):
                 # setdefault, not an override: a caller that passes its own
                 # providers should keep them.
                 kwargs.setdefault("providers", providers)
+                # Cap ORT thread pool to this process's CPU budget. Without
+                # this, torch.hub.load builds an ORT session that spawns a
+                # thread per visible core and pthread_setaffinity fails on
+                # every core outside our affinity mask (22 TSE workers × ~128
+                # threads each = the wall of "Invalid argument" in the logs).
+                if sess_options is None:
+                    sess_options = onnx_session_options()
                 original_init(self, path_or_bytes, sess_options=sess_options, **kwargs)
 
             onnxruntime.InferenceSession.__init__ = patched_init
@@ -76,9 +109,8 @@ class SileroVAD:
                 vad_model, utils = torch.hub.load(
                     # Pinned: an unpinned master can change the hub entrypoint
                     # signature and break the pipeline with no local change.
-                    # Keep SILERO_VAD_REV in sync with download_offline_weights.py.
                     repo_or_dir=(
-                        os.environ.get("SILERO_VAD_REV", "snakers4/silero-vad:v5.1")
+                        os.environ.get("SILERO_VAD_REV", "snakers4/silero-vad:v6.2")
                         if not local else "vad/silero-vad"
                     ),
                     model=model,
@@ -96,8 +128,8 @@ class SileroVAD:
             self.vad_model = vad_model
             (get_speech_timestamps, _, _, _, _) = utils
             self._get_speech_timestamps = get_speech_timestamps
-        except Exception as e:
-            raise RuntimeError(f"Failed to load VAD model: {e}")
+        except Exception:
+            raise
 
     def get_speech_timestamps(self, audio_segment, **kwargs):
         """Wrapper for PyTorch Hub get_speech_timestamps with auto-resampling."""
@@ -203,23 +235,30 @@ class SileroVAD:
         audio_data = audio["waveform"]
 
         out = []
-        last_end = 0
+        # Per speaker, not global. A global cursor would clip one speaker's
+        # start against another's end -- which is exactly the cross-speaker
+        # overlap the separator exists to recover. Only a speaker overlapping
+        # themselves is a labelling artefact worth removing.
+        last_end_by_speaker = {}
         speakers_seen = set()
         count_id = 0
 
         for index, row in speakerdia.iterrows():
             start = float(row["start"])
             end = float(row["end"])
+            speaker = row["speaker"]
 
-            if end <= last_end:
-                pass
-            else:
-                last_end = end
+            cursor = last_end_by_speaker.get(speaker, 0.0)
+            if end <= cursor:
+                # Wholly inside a turn already emitted for this speaker.
+                continue
+            start = max(start, cursor)
+            last_end_by_speaker[speaker] = end
 
             start_frame = int(start * sampling_rate)
             end_frame = int(end * sampling_rate)
-            if row["speaker"] not in speakers_seen:
-                speakers_seen.add(row["speaker"])
+            if speaker not in speakers_seen:
+                speakers_seen.add(speaker)
 
             if end - start <= self.vad_threshold:
                 out.append(
@@ -227,7 +266,7 @@ class SileroVAD:
                         "index": str(count_id).zfill(5),
                         "start": start,  # in seconds
                         "end": end,
-                        "speaker": row["speaker"],  # same for all
+                        "speaker": speaker,  # same for all
                     }
                 )
                 count_id += 1
@@ -251,7 +290,7 @@ class SileroVAD:
                         "index": str(count_id).zfill(5),
                         "start": start_frame_sub / SAMPLING_RATE,  # in seconds
                         "end": end_frame_sub / SAMPLING_RATE,
-                        "speaker": row["speaker"],  # same for all
+                        "speaker": speaker,  # same for all
                     }
                 )
                 count_id += 1

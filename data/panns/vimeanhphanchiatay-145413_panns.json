@@ -1,0 +1,38 @@
+{
+  "audio": "/Users/lam/Downloads/music_stage_audio (6)/vimeanhphanchiatay-145413/before_vimeanhphanchiatay-145413.mp3",
+  "duration_seconds": 1689.86,
+  "sample_rate": 16000,
+  "frames": 168986,
+  "rows_stored": 5281,
+  "row_seconds": 0.32,
+  "fps_advertised": 100.0,
+  "block_frames": 32,
+  "block_spread_max": 0.0,
+  "lossless_block_reduction": true,
+  "labels": 527,
+  "dtype": "float16",
+  "scale_applied": 0.912192,
+  "file_mb": 4.35,
+  "thresholds": {
+    "music_threshold": 0.1,
+    "singing_threshold": 0.35,
+    "singing_margin": 0.15,
+    "speech_present": 0.2,
+    "min_span_seconds": 0.3,
+    "merge_gap_seconds": 0.5,
+    "pad_seconds": 0.3
+  },
+  "group_seconds": {
+    "speech": 1296.96,
+    "singing": 0.0,
+    "music": 61.76,
+    "noise_speech": 0.0,
+    "noise_env": 0.0,
+    "noise_room": 0.0
+  },
+  "flag_seconds": {
+    "is_singing": 0.0,
+    "is_song": 23.04,
+    "is_music": 71.68
+  }
+}

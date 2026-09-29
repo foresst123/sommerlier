@@ -12,14 +12,14 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from schemas.segment import EnhancedSegment
+from schemas.segment import SpeechSegment
 from services.export_service import ExportService
 from services.pipeline_service import PipelineService
 from utils.batch import find_name_collisions
 
 
 def _args(**kw):
-    base = dict(save_path="./output", tse=True, panns=True, vad=True, dia3=False,
+    base = dict(save_path="./output", bss=True, panns=True, vad=True, dia3=False,
                 merge_gap=2.0, seg_th=0.11, min_cluster_size=11, clust_th=0.5,
                 LLM="case_0")
     base.update(kw)
@@ -55,7 +55,7 @@ def test_default_layout_keeps_the_parameter_suffix():
     p = _pipeline()
     out = p._resolve_output_dir(_args(), "/audio/talk.mp3")
     assert "_final" in out
-    assert "-tse-True" in out and "-merge_gap-2.0" in out
+    assert "-bss-True" in out and "-merge_gap-2.0" in out
     assert out.startswith(os.path.join("/audio", "_final"))
 
 
@@ -86,8 +86,8 @@ def test_separated_audio_of_two_files_cannot_overwrite_each_other(tmp_path):
     for name, value in (("talk_a", 0.25), ("talk_b", 0.75)):
         out = p._resolve_output_dir(_args(save_path=str(tmp_path)), f"/audio/{name}.mp3")
         os.makedirs(out, exist_ok=True)
-        seg = EnhancedSegment(index="00000", start=0.0, end=1.0, speaker="SPEAKER_00")
-        seg.enhanced_audio = np.full(16000, value, dtype=np.float32)
+        seg = SpeechSegment(index="00000", start=0.0, end=1.0, speaker="SPEAKER_00")
+        seg.audio = np.full(16000, value, dtype=np.float32)
         svc.export_separated_audio([seg], 16000, out)
         written.append(os.path.join(out, "separation", "00000_SPEAKER_00_separated.wav"))
 
@@ -133,3 +133,87 @@ def test_the_separator_dump_is_scoped_to_one_file():
         "dump_dir must be built from output_dir, which is unique per file")
     assert "dirname(audio_path)" not in target, (
         "every file in a batch shares the audio's parent directory")
+
+
+# --- review page flag columns ----------------------------------------------
+
+def _review_module():
+    import importlib.util
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(root, "tools", "make_review_page.py")
+    spec = importlib.util.spec_from_file_location("make_review_page", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _flag_rows():
+    mod = _review_module()
+    segments = [
+        {"index": "1", "start": 0.0, "end": 1.0, "speaker": "1", "text": "a"},
+        {"index": "2", "start": 1.0, "end": 2.0, "speaker": "1", "text": "b",
+         "has_music": True, "bs_roformer": False},
+        {"index": "3", "start": 2.0, "end": 3.0, "speaker": "1", "text": "c",
+         "has_music": True, "bs_roformer": True},
+        {"index": "4", "start": 3.0, "end": 6.0, "speaker": "2", "text": "d", "bss": True,
+         "unseparated": [{"start": 3.0, "end": 4.2, "reason": "multi_speaker"}]},
+    ]
+    return mod, mod._rows(segments, {}, {}, [10 ** 9])
+
+
+def test_music_detection_is_reported_separately_from_removal():
+    """`bs_roformer` says the audio was replaced; `has_music` says it was detected."""
+    _, rows = _flag_rows()
+    assert (rows[1]["music"], rows[1]["bs_roformer"]) == (True, False)
+    assert (rows[2]["music"], rows[2]["bs_roformer"]) == (True, True)
+
+
+def test_unseparated_spans_reach_the_page():
+    _, rows = _flag_rows()
+    assert rows[3]["unseparated"][0]["reason"] == "multi_speaker"
+    assert rows[0]["unseparated"] == []
+
+
+def test_a_transcript_without_the_new_fields_still_renders():
+    """Runs recorded before these flags existed must not crash the page."""
+    _, rows = _flag_rows()
+    assert rows[0]["music"] is False
+    assert rows[0]["unseparated"] == []
+
+
+def test_every_field_a_reviewer_needs_is_on_the_card():
+    """The table this replaced could lose a column silently -- a missing <td>
+    shifted every column after it. The card layout cannot do that, but it can
+    drop a field outright, which is quieter still.
+
+    Pinned by name rather than by count: what matters is that a reviewer can
+    still hear the audio, compare the three transcripts, correct the text, and
+    record the two judgements only a person can make.
+    """
+    import re
+    mod = _review_module()
+    card = re.search(r"card\.innerHTML = `(.*?)`;", mod.PAGE, re.S)
+    assert card, "the card template moved or was renamed"
+    block = card.group(1)
+
+    for field in ("r.index", "r.speaker", "r.whisper", "r.phowhisper",
+                  "r.qwen3", "r.final", "r.edited", "r.note"):
+        assert field in block, f"the card no longer shows {field}"
+    for control in ('class="edit"', 'class="note"',
+                    'class="mk-music"', 'class="mk-multi"'):
+        assert control in block, f"the card lost {control}"
+    assert 'playCell(i, "src"' in block and 'playCell(i, "out"' in block
+
+
+def test_the_two_marks_start_empty_and_come_only_from_a_person():
+    """Nothing upstream writes them. A pipeline that pre-filled either one
+    would turn a reviewer's judgement into a machine's guess wearing the same
+    checkbox. A mark already made still survives a regenerated page."""
+    mod = _review_module()
+    seg = {"index": "00001", "speaker": "1", "start": 0.0, "end": 1.0}
+    rows = mod._rows([seg], {}, {}, [10 ** 9])
+    assert rows[0]["mark_music"] is False
+    assert rows[0]["mark_multi"] is False
+
+    rows = mod._rows([dict(seg, mark_music=True)], {}, {}, [10 ** 9])
+    assert rows[0]["mark_music"] is True
