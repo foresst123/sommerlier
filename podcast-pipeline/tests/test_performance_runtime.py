@@ -89,6 +89,29 @@ def test_diarizen_client_can_dispatch_through_a_pool_endpoint(tmp_path):
     assert list(result.itertracks(yield_label=True))[0][2] == "SPEAKER_00"
 
 
+def test_diarizen_client_raises_instead_of_reporting_zero_speakers(tmp_path):
+    """A worker OOM must fail the file, not be read as a silent empty result.
+
+    diarize() used to print the worker's error and return None; the caller
+    (diarization_service.diarize_raw) treats a None annotation as "no turns"
+    and builds an empty-but-successful diarization -- the file then finishes
+    the stage with 0 segments and no exception, so it is never retried and
+    can be marked done with no actual transcript.
+    """
+    class Endpoint:
+        def request(self, payload, response_id=None):
+            return {"error": "CUDA out of memory. Tried to allocate 7.03 GiB."}
+
+    client = DiariZenClient(Endpoint())
+    try:
+        client.diarize({"waveform": torch.zeros(16000, dtype=torch.float32),
+                        "sample_rate": 16000})
+    except RuntimeError as exc:
+        assert "out of memory" in str(exc)
+    else:
+        raise AssertionError("a worker error must raise, not return None")
+
+
 def test_checkpoint_manifest_rejects_a_corrupt_result(tmp_path):
     checkpoints = CheckpointManager(str(tmp_path), "job")
     checkpoints.save("asr", {"ok": True}, fmt="json")

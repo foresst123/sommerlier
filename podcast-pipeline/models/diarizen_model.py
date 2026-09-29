@@ -83,9 +83,8 @@ class DiariZenClient:
                         continue
 
             if resp is None:
-                print("[DiariZenClient] Empty or invalid response from worker", flush=True)
-                return None
-                
+                raise RuntimeError("Empty or invalid response from DiariZen worker")
+
             if "segments" in resp:
                 import pandas as pd
                 # Return something that has .itertracks(yield_label=True) mock
@@ -104,11 +103,16 @@ class DiariZenClient:
                             
                 return DummyAnnotation(resp["segments"])
             else:
-                print(f"[DiariZenClient] Worker error: {resp.get('error', 'Unknown worker error')}", flush=True)
-                return None
+                # A silent None here used to read downstream as "0 speakers
+                # found" -- a successful, empty diarization -- instead of the
+                # failure it is. That let a worker OOM finish the stage with
+                # no transcript and no retry.
+                raise RuntimeError(
+                    f"DiariZen worker error: {resp.get('error', 'Unknown worker error')}")
+        except RuntimeError:
+            raise
         except Exception as e:
-            print(f"[DiariZenClient] Exception in diarize: {e}", flush=True)
-            return None
+            raise RuntimeError(f"Exception in DiariZen diarize: {e}") from e
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
