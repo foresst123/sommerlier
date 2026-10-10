@@ -140,3 +140,12 @@ def test_main_env_still_broken_after_install_raises(monkeypatch):
     with pytest.raises(RuntimeError, match="still lacks"):
         env_bootstrap.ensure_main_env(LOG, "req.txt", missing=["torch"], python="/py",
                                       ensure_uv=lambda l: None, run=lambda c, l: None)
+
+
+def test_default_env_root_is_outside_the_repository(monkeypatch):
+    import os
+    monkeypatch.delenv("PIPELINE_ENV_ROOT", raising=False)
+    monkeypatch.setattr(os.path, "isdir", lambda p: False)   # no /kaggle
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(env_bootstrap.__file__)))
+    root = env_bootstrap.env_root()
+    assert os.path.dirname(os.path.dirname(repo)) == root

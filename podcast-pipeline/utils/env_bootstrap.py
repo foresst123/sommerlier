@@ -38,8 +38,10 @@ def env_root() -> str:
     for root in ("/kaggle/temp", "/kaggle/working"):
         if os.path.isdir(root):
             return root
+    # Beside the repository, not inside it: a `git clean` or a fresh clone must not take the
+    # venvs with it. resolve_worker_python searches this same place (<pipeline>/../..).
     pipeline_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.abspath(os.path.join(pipeline_dir, ".."))
+    return os.path.abspath(os.path.join(pipeline_dir, "..", ".."))
 
 
 def _python(env_dir: str) -> str:
