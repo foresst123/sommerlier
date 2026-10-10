@@ -284,8 +284,12 @@ class ModelLoader:
     @_serialized
     def load_asr_models(self, qwen3_service: Qwen3WorkerService = None,
                         whisper_service=None, phowhisper_service=None):
-        """Load ASR models (Whisper, PhoWhisper, Qwen3)."""
-        if "phowhisper" in self.models:
+        """Load the ASR models the profile asks for (`pipeline.asr_models`)."""
+        from utils.asr_models import enabled_asr_models
+        asr_models = enabled_asr_models(
+            self.config.get("environments", {}).get(self.args.env, {}))
+        # Any one of them marks the stage as loaded; PhoWhisper is not always among them.
+        if any(name in self.models for name in asr_models):
             return
         # --stop_after names the last stage to run, so anything that halts
         # before ASR must not pay for a 3GB model it will never call.
@@ -303,39 +307,40 @@ class ModelLoader:
         # was diarization. It failed on chunk 0 with DiariZen reporting
         # "batch_size (12) is probably too large" -- a misleading message, since
         # that batch needs under 1GB. The card was simply already full.
-        if phowhisper_service is not None:
-            # Its weights live in the worker process(es); nothing loads here.
-            if self.logger: self.logger.info("Connecting to PhoWhisper worker")
-            self.models["phowhisper"] = PhoWhisperClient(
-                phowhisper_service,
-                batch_size=phowhisper_kwargs(self._models_cfg()).get("batch_size", 16))
-        else:
-            pho_device = self._asr_device("phowhisper", self.device_1)
-            if self.logger: self.logger.info(f"Loading PhoWhisper on {pho_device}")
-            self.models["phowhisper"] = self.make_phowhisper(pho_device)
+        if "phowhisper" in asr_models:
+            if phowhisper_service is not None:
+                # Its weights live in the worker process(es); nothing loads here.
+                if self.logger: self.logger.info("Connecting to PhoWhisper worker")
+                self.models["phowhisper"] = PhoWhisperClient(
+                    phowhisper_service,
+                    batch_size=phowhisper_kwargs(self._models_cfg()).get("batch_size", 16))
+            else:
+                pho_device = self._asr_device("phowhisper", self.device_1)
+                if self.logger: self.logger.info(f"Loading PhoWhisper on {pho_device}")
+                self.models["phowhisper"] = self.make_phowhisper(pho_device)
 
-        
         if getattr(self.args, "ASRMoE", False) and getattr(self.args, "lang", "vi") == "vi":
             models_cfg = self._models_cfg()
             whisper_cfg = dict(models_cfg.get("whisper", {}))
-            if whisper_backend(models_cfg) == "vllm":
-                if whisper_service is None:
-                    raise RuntimeError(
-                        "models.whisper.backend=vllm requires a Whisper vLLM worker")
-                if self.logger:
-                    self.logger.info("Connecting to Whisper large-v3 vLLM worker")
-                self.models["whisper"] = WhisperVLLMClient(
-                    whisper_service,
-                    batch_size=whisper_cfg.get("batch_size", 16))
-            else:
-                whisper_device = self._asr_device("whisper", self.device_2)
-                if self.logger:
-                    self.logger.info(f"Loading Whisper on {whisper_device}")
-                self.models["whisper"] = self.make_whisper_ct2(whisper_device)
-            if qwen3_service:
+            if "whisper" in asr_models:
+                if whisper_backend(models_cfg) == "vllm":
+                    if whisper_service is None:
+                        raise RuntimeError(
+                            "models.whisper.backend=vllm requires a Whisper vLLM worker")
+                    if self.logger:
+                        self.logger.info("Connecting to Whisper large-v3 vLLM worker")
+                    self.models["whisper"] = WhisperVLLMClient(
+                        whisper_service,
+                        batch_size=whisper_cfg.get("batch_size", 16))
+                else:
+                    whisper_device = self._asr_device("whisper", self.device_2)
+                    if self.logger:
+                        self.logger.info(f"Loading Whisper on {whisper_device}")
+                    self.models["whisper"] = self.make_whisper_ct2(whisper_device)
+            if "qwen3" in asr_models and qwen3_service:
                 if self.logger: self.logger.info("Connecting to Qwen3 worker")
                 self.models["qwen3"] = Qwen3ASRClient(qwen3_service.process)
-                
+
     @_serialized
     def load_caption_model(self):
         """Load Omni caption client if enabled."""

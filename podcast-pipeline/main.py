@@ -153,17 +153,20 @@ def parse_args():
 # 1. EARLY ENVIRONMENT SETUP (PRE-IMPORT)
 # ==========================================
 args = parse_args()
+if os.environ.get("SOMMELIER_SKIP_BOOTSTRAP"):      # tests and CI must never install anything
+    args.skip_bootstrap = True
 
 with open(args.config, 'r', encoding='utf-8') as f:
     config = json.load(f)
 
 if not args.skip_bootstrap:
     import logging as _logging
-    from utils.env_bootstrap import ask_paths, ensure_main_env
+    from utils.env_bootstrap import ask_paths, ensure_ffmpeg, ensure_main_env
     # Before the first `import torch` below; the logger proper is not built yet.
     _logging.basicConfig(level=_logging.INFO, format="%(message)s")
     ensure_main_env(_logging.getLogger("bootstrap"),
                     os.path.join(os.path.dirname(os.path.abspath(__file__)), "requirements.txt"))
+    ensure_ffmpeg(_logging.getLogger("bootstrap"))
     ask_paths(args, config)
 
 if not args.audio and not args.audio_dir:
@@ -187,6 +190,8 @@ if hf_token:
 # ------------------------------------------------------------------
 
 env_profile = config.get("environments", {}).get(args.env, {})
+from utils.asr_models import enabled_asr_models
+asr_models = enabled_asr_models(env_profile)
 
 # --- Config -> args, with anything typed on the command line winning -------
 # argparse cannot tell a default from a value the user passed, so re-parse with
@@ -504,7 +509,7 @@ def main():
     qwen3_service = None
     qwen3_replica_service = None
     whisper_service = None
-    if args.ASRMoE and will_run(args, "asr"):
+    if args.ASRMoE and will_run(args, "asr") and "qwen3" in asr_models:
         qwen_cfg = env_profile.get("models", {}).get("qwen3", {})
         qwen_env = ("vllm" if str(qwen_cfg.get("backend", "transformers")).lower()
                     == "vllm" else "qwen3")
@@ -529,11 +534,11 @@ def main():
                 env_name=args.env, config_path=args.config,
                 isolate_library_path=(qwen_env == "vllm"))
 
+    whisper_worker_script = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "whisper_vllm_worker.py")
+    if args.ASRMoE and will_run(args, "asr") and "whisper" in asr_models:
         whisper_cfg = env_profile.get("models", {}).get("whisper", {})
         if str(whisper_cfg.get("backend", "ctranslate2")).lower() == "vllm":
-            whisper_worker_script = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
-                "whisper_vllm_worker.py")
             whisper_service = _prefetch(WhisperVLLMWorkerService(
                 lambda: resolve_worker_python(
                     "vllm", config=config, env_profile=env_profile,
@@ -548,7 +553,7 @@ def main():
         os.path.dirname(os.path.abspath(__file__)), "phowhisper_worker.py")
     phowhisper_service = None
     if (perf_cfg["enabled"] and asr_perf["phowhisper_workers"] > 0
-            and will_run(args, "asr")):
+            and will_run(args, "asr") and "phowhisper" in asr_models):
         _pho_gpus = [g for g in dict.fromkeys((args.gpu_1, args.gpu_2))
                      if not torch.cuda.is_available()
                      or 0 <= int(g) < torch.cuda.device_count()]
@@ -750,7 +755,7 @@ def main():
 
         asr_replica_factories = {}
         if asr_cross_file and args.ASRMoE and will_run(args, "asr"):
-            if qwen3_service is not None:
+            if qwen3_service is not None and "qwen3" in asr_models:
                 def _qwen3_replica(gpu, batch):
                     service = Qwen3WorkerService(
                         lambda: resolve_worker_python(
@@ -764,7 +769,9 @@ def main():
                     service.wait_ready()
                     return Qwen3ASRClient(service.process), service.stop
                 asr_replica_factories["qwen3"] = _qwen3_replica
-            if whisper_service is not None:
+            if "whisper" not in asr_models:
+                pass
+            elif whisper_service is not None:
                 def _whisper_replica(gpu, batch):
                     service = WhisperVLLMWorkerService(
                         lambda: resolve_worker_python(
@@ -780,7 +787,9 @@ def main():
                 asr_replica_factories["whisper"] = lambda gpu, batch: (
                     model_loader.make_whisper_ct2(torch.device(f"cuda:{gpu}"), batch),
                     _free_cuda)
-            if phowhisper_service is not None:
+            if "phowhisper" not in asr_models:
+                pass
+            elif phowhisper_service is not None:
                 def _pho_replica(gpu, batch):
                     service = PhoWhisperWorkerService(
                         _sys.executable, pho_worker_script, device_id=gpu,
@@ -833,6 +842,7 @@ def main():
             language=args.lang,
             batch_size=env_profile.get("models", {}).get("qwen3", {}).get("batch_size", 4),
             keep_models=args.keep_models,
+            asr_models=asr_models,
             replica_factories=asr_replica_factories,
             asr_workers={name: service for name, service in
                          (("qwen3", qwen3_service), ("whisper", whisper_service),

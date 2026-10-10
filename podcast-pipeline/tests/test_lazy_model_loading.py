@@ -73,7 +73,7 @@ def test_loaders_are_idempotent():
                   'if "diarizer" in self.models',
                   'if "separator" in self.models',
                   'if "tagger" in self.models',
-                  'if "phowhisper" in self.models',
+                  'if any(name in self.models for name in asr_models)',
                   'if "captioner" in self.models'):
         assert guard in src, f"missing early return: {guard}"
 

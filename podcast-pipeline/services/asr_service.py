@@ -89,7 +89,8 @@ class ASRService:
                  performance_monitor=None,
                  language: str = "vi", batch_size: int = 4,
                  keep_models: bool = False, edge_pad: float = EDGE_PAD_SECONDS,
-                 replica_factories=None, asr_workers=None, asr_placement=None):
+                 replica_factories=None, asr_workers=None, asr_placement=None,
+                 asr_models=("qwen3", "whisper", "phowhisper")):
         self._whisper = whisper
         self._phowhisper = phowhisper
         self._qwen3 = qwen3
@@ -111,6 +112,9 @@ class ASRService:
         self._user_keep_models = bool(keep_models)
         self.edge_pad = max(0.0, float(edge_pad))
         self._warned = False
+        # The models this run is meant to use. Only one means no ROVER: its text is the answer.
+        self.asr_models = tuple(asr_models)
+        self.rover_enabled = len(self.asr_models) > 1
         # Cross-file scheduling (see services/asr_scheduler.py).
         # replica_factories: {"qwen3"|"whisper"|"phowhisper": f(gpu, batch) -> (model, release)}
         # asr_workers: {"qwen3"|"whisper": worker service whose process is stopped on release}
@@ -171,12 +175,12 @@ class ASRService:
         if self._warned or not self.logger:
             return
         self._warned = True
-        if not self.whisper:
+        if "whisper" in self.asr_models and not self.whisper:
             self.logger.warning(
                 "Whisper is not loaded (requires --ASRMoE with --lang vi); "
                 "ROVER will vote without it."
             )
-        if not self.qwen3:
+        if "qwen3" in self.asr_models and not self.qwen3:
             self.logger.warning("Qwen3-ASR is not loaded; ROVER will vote without it.")
 
     def active_models(self) -> List[str]:
@@ -931,7 +935,7 @@ class ASRService:
         the file's audio has been dropped. Returns (transcripts, hallucinations_dropped).
         """
         results = []
-        rover = RoverEnsembler()
+        rover = RoverEnsembler() if self.rover_enabled else None
         hallucinations_dropped = 0
         for i, seg in enumerate(segs):
             t_whisper, lang, words = whisper_results[i]
@@ -961,12 +965,15 @@ class ASRService:
             # exactly where it misbehaved and got blanked above. Reordering
             # unconditionally on short clips measurably degraded segments where
             # Whisper was fine.
-            if t_whisper:
-                order = [t_whisper, t_qwen, t_pho]
+            if not self.rover_enabled:
+                final_text = {"whisper": t_whisper, "phowhisper": t_pho,
+                              "qwen3": t_qwen}[self.asr_models[0]]
             else:
-                order = [t_pho, t_qwen, t_whisper]
-
-            final_text = rover.align_and_vote(order)
+                if t_whisper:
+                    order = [t_whisper, t_qwen, t_pho]
+                else:
+                    order = [t_pho, t_qwen, t_whisper]
+                final_text = rover.align_and_vote(order)
 
             if enable_word_timestamps and words:
                 for w in words:

@@ -234,7 +234,7 @@
         "separation": true,
         "asr": true,
         "captioning": false,
-        "refinement": true,
+        "refinement": false,
         "speaker_relabel": true,
         "word_alignment": true,
         "conversation_exports": true,
@@ -262,7 +262,10 @@
         "max_segment_length": 20.0,
         "seg_th": 0.11,
         "min_cluster_size": 11,
-        "clust_th": 0.5
+        "clust_th": 0.5,
+        "asr_models": [
+          "qwen3"
+        ]
       },
       "models": {
         "vad": {
