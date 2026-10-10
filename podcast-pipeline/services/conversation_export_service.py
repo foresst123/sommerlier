@@ -85,7 +85,7 @@ from utils.llm_json import clean_reply, is_cut_in_thought, is_readable, objects_
 from utils.transcript_windows import line_number
 
 # Bump when the prompt or the acceptance rules change.
-CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v9-fullduplex"
+CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v10-foreign-review"
 
 _TEMPLATE_SLACK_TOKENS = 64
 
@@ -157,7 +157,8 @@ CONVERSATION_FINDER_SYSTEM_PROMPT = (
     "nr <= {noise_room_max}, music <= {music_patched_max}, noisy < {noisy_share_max}, run < {noisy_run_seconds}s). "
     "Bạn KHÔNG tính lại từng dòng: chỉ tránh những dòng có chỉ số rõ ràng vượt xa ngưỡng.\n"
     "- review: cờ từ bước rà soát transcript. Dòng không có review= là sạch. speaker_turn / asr_hallucination / asr_garbage là cờ CỨNG "
-    "(cả dòng thuộc người kia, hoặc ASR bịa/vô nghĩa); speaker_phrase:\"...\" là cờ MỀM (cụm từ trong dòng có thể là backchannel của người kia).\n"
+    "(cả dòng thuộc người kia, hoặc ASR bịa/vô nghĩa); speaker_phrase:\"...\" là cờ MỀM (cụm từ trong dòng có thể là backchannel của người kia); "
+    "review=not_vietnamese là dòng không phải tiếng Việt, hãy tránh đưa dòng đó vào vùng keep=true.\n"
     "Dòng có cờ CỨNG phải nằm NGOÀI mọi vùng keep=true: đặt biên vùng quanh chúng (tách vùng tại dòng đó). "
     "Dòng có cờ MỀM vẫn được phép nằm trong vùng keep=true nhưng làm vùng kém chất lượng hơn, nên tránh nếu có cách đặt biên tốt hơn.\n"
     "\n"
@@ -185,7 +186,6 @@ CONVERSATION_FINDER_SYSTEM_PROMPT = (
     "- có DÒNG CHẢY hội thoại liên tục: mỗi lượt đáp lại lượt trước, người kia theo mạch chứ không nói chuyện riêng;\n"
     "- nghe độc lập vẫn hiểu: không bắt đầu giữa một ý đang dở, kết thúc bằng một ý trọn hoặc một cặp hỏi-đáp trọn;\n"
     "- có nội dung thật (kiến thức, câu chuyện, trao đổi), không phải chào hỏi, quảng cáo, đọc kịch bản, intro/outro;\n"
-    "- là tiếng Việt (chen vài từ tiếng Anh thì được);\n"
     "- dài khoảng {min_seconds}-{max_seconds} giây, tính từ mốc thời gian.\n"
     "Ưu tiên vùng có tương tác full-duplex (ngắt lời, đệm lời ừ/dạ, nói chồng tự nhiên) nhưng không bắt buộc.\n"
     "\n"
@@ -201,16 +201,15 @@ CONVERSATION_FINDER_SYSTEM_PROMPT = (
     "\n"
     "## KHI NÀO keep=false\n"
     "Đặt keep=false khi vùng chỉ là cầu nối/intro/outro/quảng cáo, quá ngắn, quá dài không thể chia hợp lý, một người nói gần như độc thoại, "
-    "mạch hội thoại đứt hoặc cụt, có hơn hai người không thể tránh bằng đổi biên, không phải hội thoại tiếng Việt, "
+    "mạch hội thoại đứt hoặc cụt, có hơn hai người không thể tránh bằng đổi biên, "
     "hoặc chất lượng kỹ thuật rõ ràng quá xấu. "
     "reason phải nói NGẮN GỌN nguyên nhân chính để người vận hành debug được.\n"
-    "Nếu một vùng nói gần như toàn bộ bằng tiếng Anh hoặc ngôn ngữ khác, reason ghi \"không phải hội thoại tiếng Việt\".\n"
     "\n"
     "## self_contained (chấm dòng chảy hội thoại, KHÔNG phải 'chỉ một chủ đề')\n"
     "5 = mở và kết rất tự nhiên, dòng chảy rõ, nội dung thật. Chỉ dùng 5 khi thực sự nổi bật.\n"
     "4 = tốt, dùng được, có thể hơi thừa/thiếu nhẹ ở biên. Đây thường là mức của một đoạn tốt.\n"
     "3 = theo dõi được nhưng còn cụt/mơ hồ hoặc biên chưa đẹp.\n"
-    "1-2 = không dùng được riêng, hoặc không phải tiếng Việt.\n"
+    "1-2 = không dùng được riêng.\n"
     "keep=true chỉ khi self_contained >= {min_semantic}. keep=false vẫn phải chấm self_contained để debug.\n"
     "\n"
     "## VAI (chỉ cho vùng keep=true)\n"

@@ -30,6 +30,7 @@ five points for transcript quality). Weights are configurable.
 """
 
 import bisect
+import math
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -64,6 +65,9 @@ DEFAULT_WEIGHTS = {
 # Mirror transcript_review_service.HARD_FLAG_KINDS (not imported on purpose).
 HARD_REVIEW_KINDS = frozenset({"speaker_turn", "asr_hallucination", "asr_garbage"})
 SOFT_REVIEW_KINDS = frozenset({"speaker_phrase"})
+# Judged by share of the excerpt, not by presence: one short "OK"/"yeah" line must not
+# sink a Vietnamese conversation, a stretch of English must.
+RATIO_REVIEW_KINDS = frozenset({"not_vietnamese"})
 MAX_SOFT_PENALTY_FLAGS = 4
 
 
@@ -78,6 +82,13 @@ def hard_review_kind(seg) -> Optional[str]:
         if flag.get("kind") in HARD_REVIEW_KINDS:
             return str(flag["kind"])
     return None
+
+
+def foreign_seconds(seg) -> float:
+    """Seconds of `seg` flagged as not Vietnamese (the whole line), else 0."""
+    if any(f.get("kind") in RATIO_REVIEW_KINDS for f in review_flags_of(seg)):
+        return max(0.0, float(seg.end) - float(seg.start))
+    return 0.0
 
 
 def soft_review_count(seg) -> int:
@@ -118,6 +129,9 @@ class ConversationSelectionConfig:
     review_soft_penalty: float = 5.0
     review_hard_reject: bool = True
     max_soft_flags: int = 2              # more soft flags than this in a range rejects it
+    # Share of an excerpt's duration that review flagged as not Vietnamese
+    # (English or another Latin-script language). Over this the range is rejected.
+    max_foreign_share: float = 0.10
     # Legacy scan knobs are kept for backward compatibility, but the normal
     # export path now asks the LLM to FIND conversation spans first and uses this
     # module only to validate/score what the model proposes.
@@ -193,6 +207,13 @@ class ConversationSelectionConfig:
             raise ValueError(f"unknown conversation-export weight(s): {sorted(unknown)}")
         if self.min_seconds > self.max_seconds:
             raise ValueError("min_seconds is above max_seconds")
+        try:
+            foreign_share = float(self.max_foreign_share)
+        except (TypeError, ValueError):
+            raise ValueError("max_foreign_share must be a finite number between 0 and 1")
+        if not math.isfinite(foreign_share) or not 0.0 <= foreign_share <= 1.0:
+            raise ValueError("max_foreign_share must be between 0 and 1")
+        self.max_foreign_share = foreign_share
         if self.assistant_channel not in ("left", "right"):
             raise ValueError("assistant_channel must be 'left' or 'right'")
 
@@ -715,6 +736,7 @@ class ConversationSelectionFinder:
             "noisy_share_reference": self.cfg.noisy_share_max,
             "noisy_run_seconds": self.cfg.noisy_run_seconds,
             "music_patched_max": self.cfg.music_patched_max,
+            "max_foreign_share": self.cfg.max_foreign_share,
         }
 
     # -- scoring -------------------------------------------------------------------------
@@ -813,6 +835,18 @@ class ConversationSelectionFinder:
         if min(metrics["turns_each"].get(spk, 0) for spk in speakers) < cfg.min_turns_each:
             return None, "too_few_turns"
 
+        foreign = sum(foreign_seconds(s) for s in self.segs[i:j + 1])
+        # A zero-length candidate is normally rejected by the duration gate, but
+        # keep this metric total and deterministic for profiles that explicitly
+        # allow a zero-length range. It has no foreign *duration* to share.
+        duration = end - start
+        foreign_share = foreign / duration if duration > 0 else 0.0
+        # Keep the configured boundary inclusive. The ratio is made from
+        # floating-point timestamps, so an exact 10% span can be represented as
+        # 0.10000000000000002 on some inputs.
+        if foreign_share > cfg.max_foreign_share + 1e-9:
+            return None, "not_vietnamese"
+
         lo, hi = self._padded(i, j)
         noise = self._noise_of(lo, hi)
         if cfg.require_noise and noise is None:
@@ -835,6 +869,7 @@ class ConversationSelectionFinder:
         score = self._score(components)
         soft = sum(soft_review_count(s) for s in self.segs[i:j + 1])
         metrics["review_soft_flags"] = soft
+        metrics["foreign_share"] = round(foreign_share, 4)
         if soft > cfg.max_soft_flags:
             return None, "too_many_soft_flags"
         if soft and cfg.review_soft_penalty > 0:

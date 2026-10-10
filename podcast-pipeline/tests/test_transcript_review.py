@@ -80,8 +80,9 @@ def _review(segments, llm, **kw):
 # --- contract constants --------------------------------------------------------
 
 def test_constants_match_the_contract():
-    assert REVIEW_PROMPT_VERSION == "review-v1"
-    assert FLAG_KINDS == ("speaker_phrase", "speaker_turn", "asr_hallucination", "asr_garbage")
+    assert REVIEW_PROMPT_VERSION == "review-v2"
+    assert FLAG_KINDS == ("speaker_phrase", "speaker_turn", "asr_hallucination", "asr_garbage",
+                          "not_vietnamese")
     assert HARD_FLAG_KINDS == ("speaker_turn", "asr_hallucination", "asr_garbage")
 
 
@@ -182,7 +183,7 @@ def test_copying_the_prompt_example_is_refused():
     reply = example
     result = _review(_conversation(), FakeLLM(reply))
     assert not any(result.flags_by_index.values())
-    assert result.rejected.get("unknown_index") == 3
+    assert result.rejected.get("unknown_index") == 4      # the four example answers
 
 
 # --- never changes data; locked may be flagged ------------------------------------
@@ -283,7 +284,7 @@ def test_checkpoint_namespace_tracks_version_and_settings(monkeypatch):
                {"max_window_segments": 40}, {"max_new_tokens": 300}):
         assert TranscriptReviewService(FakeLLM(), **kw).checkpoint_namespace != base
     import services.transcript_review_service as mod
-    monkeypatch.setattr(mod, "REVIEW_PROMPT_VERSION", "review-v2")
+    monkeypatch.setattr(mod, "REVIEW_PROMPT_VERSION", "review-v99")
     assert TranscriptReviewService(FakeLLM()).checkpoint_namespace != base
 
 
@@ -299,3 +300,30 @@ def test_find_phrase_returns_the_segments_own_spelling_for_decomposed_text():
     text = unicodedata.normalize("NFD", "rất điềm tĩnh Đúng Rồi và cẩn thận")
     found = find_phrase(text, "đúng rồi")
     assert found is not None and found in text
+
+
+# --- not_vietnamese ------------------------------------------------------------
+
+def test_not_vietnamese_is_a_whole_line_flag_even_if_the_model_quotes_a_phrase():
+    segs = _conversation()
+    segs[4].text = "Yeah I think that is really interesting, let me explain why"
+    result = _review(segs, FakeLLM(_json(_flag(4, "not_vietnamese", phrase="really interesting"))))
+    assert result.flags_by_index[segs[4].index][0]["kind"] == "not_vietnamese"
+    assert result.flags_by_index[segs[4].index][0]["phrase"] is None
+    assert "not_vietnamese" not in HARD_FLAG_KINDS      # judged by share, not presence
+
+
+def test_not_vietnamese_still_requires_confidence_floor():
+    result = _review(_conversation(), FakeLLM(
+        _json(_flag(4, "not_vietnamese", conf=0.69))), min_confidence=0.7)
+    assert result.flags_by_index["00004"] == []
+    assert result.rejected == {"low_confidence": 1}
+
+
+def test_the_prompt_asks_for_not_vietnamese_and_keeps_borrowed_words_unflagged():
+    llm = FakeLLM()
+    _review(_conversation(), llm)
+    prompt = llm.system_prompts[0]
+    assert "not_vietnamese" in prompt and "NĂM LOẠI CỜ" in prompt
+    assert "BÌNH THƯỜNG" in prompt
+    assert "một câu tiếng nước ngoài có nghĩa" in prompt

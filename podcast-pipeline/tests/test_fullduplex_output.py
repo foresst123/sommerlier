@@ -242,7 +242,7 @@ def _prompt(**settings):
 
 
 def test_the_prompt_version_is_bumped():
-    assert CONVERSATION_EXPORT_PROMPT_VERSION == "conversation-export-v9-fullduplex"
+    assert CONVERSATION_EXPORT_PROMPT_VERSION == "conversation-export-v10-foreign-review"
 
 
 def test_the_prompt_asks_for_the_new_fields_and_fills_the_new_placeholder():

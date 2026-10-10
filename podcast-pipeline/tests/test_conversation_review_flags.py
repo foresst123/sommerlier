@@ -16,7 +16,7 @@ sf = pytest.importorskip("soundfile")
 
 from services.conversation_export_service import ConversationExportService
 from utils.conversation_selection import (
-    ConversationSelectionConfig, ConversationSelectionFinder)
+    ConversationSelectionConfig, ConversationSelectionFinder, foreign_seconds)
 from utils.excise import TimelineMap
 from utils.noise_map import KINDS, NoiseTrack
 
@@ -232,3 +232,66 @@ def test_conversation_json_rows_carry_nonempty_review_flags(tmp_path):
     assert rows["00005"]["review_flags"][0]["kind"] == "speaker_phrase"
     assert "review_flags" not in rows["00006"]
     assert "review_flags" not in rows["00004"]
+
+
+# --- not_vietnamese: rejected by share, not by presence ---------------------------
+
+def test_a_short_foreign_line_does_not_sink_an_excerpt():
+    segs = _talk()
+    segs[10].review_flags = [flag("not_vietnamese")]       # 7 s of 120 s, about 6%
+    cand, why = _finder(segs).evaluate(5, 20)
+    assert cand is not None, why
+    assert cand.metrics["foreign_share"] == pytest.approx(7.0 / (cand.end - cand.start), abs=1e-3)
+
+
+def test_too_much_foreign_text_rejects_the_range():
+    segs = _talk()
+    for k in (8, 9, 10):                                   # 21 s of about 120 s, over 10 %
+        segs[k].review_flags = [flag("not_vietnamese")]
+    cand, why = _finder(segs).evaluate(5, 20)
+    assert cand is None and why == "not_vietnamese"
+
+
+def test_the_foreign_share_limit_is_configurable():
+    segs = _talk()
+    for k in (8, 9, 10):
+        segs[k].review_flags = [flag("not_vietnamese")]
+    cand, why = _finder(segs, max_foreign_share=0.5).evaluate(5, 20)
+    assert cand is not None, why
+
+
+def test_foreign_share_at_the_limit_is_allowed():
+    segs = _talk()
+    # The selected span is 127 seconds; make the flagged duration exactly 10%.
+    # The gate is intentionally strict only above the configured maximum.
+    segs[5].end = segs[5].start + 12.7
+    segs[5].review_flags = [flag("not_vietnamese")]
+    cand, why = _finder(segs).evaluate(0, 15)
+    assert cand is not None, why
+    assert cand.metrics["foreign_share"] == pytest.approx(0.10)
+
+
+def test_zero_duration_foreign_segment_has_zero_share():
+    segs = _talk()
+    segs[3].end = segs[3].start
+    segs[3].review_flags = [flag("not_vietnamese")]
+    assert foreign_seconds(segs[3]) == 0.0
+
+
+@pytest.mark.parametrize("value", [-0.01, 1.01, float("nan"), float("inf")])
+def test_max_foreign_share_must_be_a_finite_fraction(value):
+    with pytest.raises(ValueError):
+        ConversationSelectionConfig(max_foreign_share=value)
+
+
+def test_not_vietnamese_is_not_a_hard_flag():
+    segs = _talk()
+    segs[3].review_flags = [flag("not_vietnamese")]
+    assert _finder(segs).segment_quality(3)["hard_flags"] == []
+
+
+def test_finder_line_shows_not_vietnamese_and_the_prompt_no_longer_owns_language():
+    from services.conversation_export_service import CONVERSATION_FINDER_SYSTEM_PROMPT as P
+    assert "review=not_vietnamese" in _line([flag("not_vietnamese")])
+    assert "không phải hội thoại tiếng Việt" not in P
+    assert "review=not_vietnamese" in P

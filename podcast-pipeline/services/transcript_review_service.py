@@ -10,7 +10,12 @@ finder can keep its ranges away from it:
   * `speaker_turn`     the whole turn belongs to the other speaker. Hard.
   * `asr_hallucination` boilerplate or invented text unrelated to the talk that
                        `algorithms/asr/hallucination.py` did not catch. Hard.
-  * `asr_garbage`      words that do not read as Vietnamese at all. Hard.
+  * `asr_garbage`      gibberish or disconnected ASR words, rather than a
+                       coherent foreign-language sentence. Hard.
+  * `not_vietnamese`   the whole line is in English or another Latin-script
+                       language (the code filters only non-Latin scripts). Not a
+                       hard flag: the selector rejects an excerpt only when such
+                       lines make up too large a share of it.
 
 Nothing here edits `speaker`, `text` or a time. `apply_review_flags` writes one
 attribute, `review_flags`. Flagging a segment locked to overlap separation is
@@ -37,10 +42,12 @@ from utils.transcript_windows import build_windows, format_line, line_number
 
 # Part of the checkpoint namespace: a changed prompt or rule recomputes instead of
 # reusing flags an older one produced.
-REVIEW_PROMPT_VERSION = "review-v1"
+REVIEW_PROMPT_VERSION = "review-v2"
 
-FLAG_KINDS = ("speaker_phrase", "speaker_turn", "asr_hallucination", "asr_garbage")
-# Soft: speaker_phrase only (a score penalty downstream). The rest reject a range.
+FLAG_KINDS = ("speaker_phrase", "speaker_turn", "asr_hallucination", "asr_garbage",
+              "not_vietnamese")
+# Soft: speaker_phrase is a score penalty downstream; not_vietnamese is checked by
+# duration share downstream. The remaining kinds reject a range.
 HARD_FLAG_KINDS = ("speaker_turn", "asr_hallucination", "asr_garbage")
 
 _TEMPLATE_SLACK_TOKENS = 64
@@ -72,7 +79,7 @@ REVIEW_SYSTEM_PROMPT = (
     "- gap: số giây từ lúc dòng trước kết thúc đến lúc dòng này bắt đầu. Gap ÂM nghĩa là hai người nói chồng lên nhau.\n"
     "- Dòng có [cố định] vẫn có thể bị gắn cờ; gắn cờ không thay đổi dữ liệu.\n"
     "\n"
-    "### BỐN LOẠI CỜ (trường \"kind\")\n"
+    "### NĂM LOẠI CỜ (trường \"kind\")\n"
     '1. "speaker_phrase": một cụm từ NẰM TRONG lượt nói rõ ràng là của người kia, thường là lời đệm bị gộp vào '
     "lượt của người đang nói. Ví dụ: \"…điềm tĩnh đúng rồi và cẩn thận…\" thì \"đúng rồi\" là lời người nghe chen vào. "
     'BẮT BUỘC có "phrase".\n'
@@ -81,8 +88,12 @@ REVIEW_SYSTEM_PROMPT = (
     '3. "asr_hallucination": văn bản ASR bịa ra hoặc câu mẫu không liên quan gì tới cuộc hội thoại '
     "(lời chào kênh, lời cảm ơn người xem, tên kênh, chữ lặp vô nghĩa chèn giữa câu chuyện). "
     '"phrase" là cụm sai, hoặc null nếu cả dòng sai.\n'
-    '4. "asr_garbage": các từ hoàn toàn không đọc ra tiếng Việt (chuỗi âm tiết vô nghĩa, từ rời rạc không thành câu). '
+    '4. "asr_garbage": chuỗi âm tiết vô nghĩa hoặc từ rời rạc không thành câu; đây không phải là một câu tiếng nước ngoài có nghĩa. '
     '"phrase" là cụm sai, hoặc null nếu cả dòng sai.\n'
+    '5. "not_vietnamese": CẢ dòng nói gần như toàn bằng tiếng Anh hoặc một ngôn ngữ khác viết bằng chữ Latin '
+    "(Pháp, Tây Ban Nha...), đọc lên không phải tiếng Việt. Chen vài từ tiếng Anh, tên riêng, thuật ngữ hay từ mượn "
+    "giữa câu tiếng Việt là BÌNH THƯỜNG, không gắn cờ. Một dòng chỉ có một hai từ như \"OK\", \"yeah\" cũng không gắn cờ. "
+    '"phrase" là null.\n'
     "\n"
     "### CHỈ GẮN CỜ KHI CỰC KỲ BẤT HỢP LÝ. KHÔNG GẮN CỜ:\n"
     "- Lỗi chính tả, dấu thanh sai, từ đồng âm, thiếu hoặc thừa dấu câu, tên riêng viết sai.\n"
@@ -90,7 +101,7 @@ REVIEW_SYSTEM_PROMPT = (
     "- Một người nói liền nhiều dòng (lượt nói dài) là bình thường. Một chữ chỉ xuất hiện ở vài dòng không có nghĩa là sai: "
     "đó có thể là khách mời hoặc giọng trong đoạn video chèn vào.\n"
     "- Những thứ mã đã tự lọc trước đó: danh sách câu mẫu quen thuộc (đăng ký kênh, hẹn gặp lại, bấm chuông...), "
-    "chữ lặp đi lặp lại, ký tự ngoại ngữ (Trung, Nhật, Hàn, Nga, Thái...), và quá nhiều từ so với một đoạn ngắn dưới 1 giây.\n"
+    "chữ lặp đi lặp lại, ký tự ngoại ngữ không phải chữ Latin (Trung, Nhật, Hàn, Nga, Thái...), và quá nhiều từ so với một đoạn ngắn dưới 1 giây. Tiếng Anh dùng chữ Latin nên mã KHÔNG lọc được: loại đó do bạn gắn cờ not_vietnamese.\n"
     "- Đừng gắn cờ hàng loạt. Nếu muốn gắn nhiều dòng trong một đoạn, hãy xét lại: có thể bạn đang hiểu sai mạch hội thoại.\n"
     "\n"
     "### CÁCH LÀM VIỆC (giữ ngắn, càng ít suy luận càng tốt)\n"
@@ -100,7 +111,7 @@ REVIEW_SYSTEM_PROMPT = (
     "### ĐẦU RA\n"
     "Chỉ MỘT mảng JSON, không viết gì ngoài JSON, không dùng ```. Mỗi phần tử có đúng năm khoá:\n"
     '- "i": số dòng, là số nguyên, đúng như số trong ngoặc vuông.\n'
-    '- "kind": một trong "speaker_phrase", "speaker_turn", "asr_hallucination", "asr_garbage".\n'
+    '- "kind": một trong "speaker_phrase", "speaker_turn", "asr_hallucination", "asr_garbage", "not_vietnamese".\n'
     '- "phrase": cụm từ chép NGUYÊN VĂN từ dòng đó (đúng từng chữ), hoặc null nếu cả dòng.\n'
     '- "conf": độ chắc chắn từ 0 đến 1. Chỉ gắn cờ khi conf từ {min_confidence} trở lên.\n'
     '- "why": lý do, tối đa 20 từ.\n'
@@ -113,12 +124,14 @@ REVIEW_SYSTEM_PROMPT = (
     "[903] 00:30.4-00:33.1 B (gap +0.4s) Vậy điều gì giữ anh lại với nghề?\n"
     "[904] 00:33.5-00:38.0 B (gap +0.4s) Chắc là vì mình thấy mình làm được điều có ích.\n"
     "[905] 00:38.4-00:41.0 A (gap +0.4s) xờ ky pờ lanh bu đê mon tơ nhây\n"
+    "[906] 00:41.4-00:47.0 B (gap +0.4s) Yeah I think that is really interesting, let me explain why this works\n"
     "Dòng 902 có \"đúng rồi\" là lời đệm của người nghe bị gộp vào lượt của B. "
     "Dòng 903 là câu hỏi mang chữ B ngay trước câu trả lời của chính B, nên cả lượt là của người kia. "
-    "Dòng 905 là chuỗi âm tiết không phải tiếng Việt. Kết quả đúng là:\n"
+    "Dòng 905 là chuỗi âm tiết không phải tiếng Việt. Dòng 906 là cả một câu tiếng Anh. Kết quả đúng là:\n"
     '[{"i": 902, "kind": "speaker_phrase", "phrase": "đúng rồi", "conf": 0.85, "why": "lời đệm của người nghe bị gộp vào lượt nói"}, '
     '{"i": 903, "kind": "speaker_turn", "phrase": null, "conf": 0.9, "why": "câu hỏi mang chữ của người vừa trả lời"}, '
-    '{"i": 905, "kind": "asr_garbage", "phrase": null, "conf": 0.9, "why": "âm tiết không phải tiếng Việt"}]'
+    '{"i": 905, "kind": "asr_garbage", "phrase": null, "conf": 0.9, "why": "âm tiết không phải tiếng Việt"}, '
+    '{"i": 906, "kind": "not_vietnamese", "phrase": null, "conf": 0.95, "why": "cả dòng là tiếng Anh"}]'
 )
 
 _WRAPPER_KEYS = ("flags", "review", "items", "result", "issues")
@@ -422,8 +435,8 @@ class TranscriptReviewService:
                     continue
                 seg = segments[pos]
                 phrase = proposal["phrase"]
-                if kind == "speaker_turn":
-                    phrase = None                      # whole turn by definition
+                if kind in ("speaker_turn", "not_vietnamese"):
+                    phrase = None                      # the whole line by definition
                 elif phrase is None:
                     if kind == "speaker_phrase":
                         reject("missing_phrase")
