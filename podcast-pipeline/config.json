@@ -67,7 +67,15 @@
         "min_cluster_size": 11,
         "clust_th": 0.5
       },
+      "audio_quality": {
+        "enabled": true,
+        "min_normalized_quality": 0.3,
+        "on_error": "reject"
+      },
       "models": {
+        "dnsmos": {
+          "model": "../offline_weights/dnsmos/sig_bak_ovr.onnx"
+        },
         "vad": {
           "vad_threshold": 2.0,
           "max_segment": 20.0
@@ -268,7 +276,15 @@
           "qwen3"
         ]
       },
+      "audio_quality": {
+        "enabled": true,
+        "min_normalized_quality": 0.3,
+        "on_error": "reject"
+      },
       "models": {
+        "dnsmos": {
+          "model": "../offline_weights/dnsmos/sig_bak_ovr.onnx"
+        },
         "vad": {
           "vad_threshold": 2.0,
           "max_segment": 20.0

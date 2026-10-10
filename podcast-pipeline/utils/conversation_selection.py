@@ -835,7 +835,15 @@ class ConversationSelectionFinder:
         if min(metrics["turns_each"].get(spk, 0) for spk in speakers) < cfg.min_turns_each:
             return None, "too_few_turns"
 
-        foreign = sum(foreign_seconds(s) for s in self.segs[i:j + 1])
+        foreign_spans = [
+            (float(seg.start), float(seg.end))
+            for seg in self.segs[i:j + 1]
+            if foreign_seconds(seg) > 0.0
+        ]
+        # Full-duplex segments may overlap. Count wall-clock coverage once;
+        # summing per-speaker durations could exceed the excerpt duration and
+        # reject a mostly Vietnamese range merely because both speakers talked.
+        foreign = _union_seconds(foreign_spans)
         # A zero-length candidate is normally rejected by the duration gate, but
         # keep this metric total and deterministic for profiles that explicitly
         # allow a zero-length range. It has no foreign *duration* to share.

@@ -278,6 +278,18 @@ def test_zero_duration_foreign_segment_has_zero_share():
     assert foreign_seconds(segs[3]) == 0.0
 
 
+def test_overlapping_foreign_segments_count_wall_clock_time_once():
+    segs = _talk()
+    segs[10].start, segs[10].end = 80.0, 87.0
+    segs[11].start, segs[11].end = 82.0, 89.0
+    segs[10].review_flags = [flag("not_vietnamese")]
+    segs[11].review_flags = [flag("not_vietnamese")]
+    cand, why = _finder(segs).evaluate(5, 20)
+    assert cand is not None, why
+    assert cand.metrics["foreign_share"] == pytest.approx(
+        9.0 / (cand.end - cand.start), abs=1e-3)
+
+
 @pytest.mark.parametrize("value", [-0.01, 1.01, float("nan"), float("inf")])
 def test_max_foreign_share_must_be_a_finite_fraction(value):
     with pytest.raises(ValueError):

@@ -1,6 +1,50 @@
 import os
 import argparse
+import hashlib
+import tempfile
+import urllib.request
 from huggingface_hub import snapshot_download, hf_hub_download
+
+
+DNSMOS_MODEL_URL = (
+    "https://raw.githubusercontent.com/microsoft/DNS-Challenge/"
+    "master/DNSMOS/DNSMOS/sig_bak_ovr.onnx"
+)
+DNSMOS_MODEL_SHA256 = "269fbebdb513aa23cddfbb593542ecc540284a91849ac50516870e1ac78f6edd"
+
+
+def download_dnsmos_model(base_dir):
+    """Provision the small official DNSMOS P.835 model used by input preflight."""
+    model_dir = os.path.join(base_dir, "dnsmos")
+    model_path = os.path.join(model_dir, "sig_bak_ovr.onnx")
+    os.makedirs(model_dir, exist_ok=True)
+
+    if os.path.isfile(model_path):
+        with open(model_path, "rb") as handle:
+            digest = hashlib.sha256(handle.read()).hexdigest()
+        if digest == DNSMOS_MODEL_SHA256:
+            print("    -> DNSMOS đã có và checksum hợp lệ.")
+            return model_path
+
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=model_dir, delete=False) as handle:
+            temp_path = handle.name
+            with urllib.request.urlopen(DNSMOS_MODEL_URL, timeout=60) as response:
+                while chunk := response.read(1024 * 1024):
+                    handle.write(chunk)
+        with open(temp_path, "rb") as handle:
+            digest = hashlib.sha256(handle.read()).hexdigest()
+        if digest != DNSMOS_MODEL_SHA256:
+            raise RuntimeError(
+                f"DNSMOS checksum mismatch: expected {DNSMOS_MODEL_SHA256}, got {digest}")
+        os.replace(temp_path, model_path)
+        temp_path = None
+        print("    -> Xong!")
+        return model_path
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
 
 def download_models(token=None):
     # Set cache directories
@@ -15,6 +59,14 @@ def download_models(token=None):
     os.environ["TORCH_HOME"] = torch_cache
     
     print(f"=====================================================")
+
+    # The input-quality gate is enabled by default and fail-closed, so this
+    # weight is part of a usable offline bundle rather than an optional metric.
+    print("\n[+] Đang tải mô hình: DNSMOS P.835 input-quality gate...")
+    try:
+        download_dnsmos_model(base_dir)
+    except Exception as e:
+        print(f"    -> Lỗi tải DNSMOS: {e}")
     print(f"BẮT ĐẦU TẢI MODELS VỀ THƯ MỤC: {base_dir}")
     print(f"=====================================================")
     

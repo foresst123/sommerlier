@@ -47,7 +47,8 @@ class PipelineService:
                  conversation_export_svc=None,
                  word_alignment_svc=None,
                  clean_dataset_svc=None,
-                 review_svc=None):
+                 review_svc=None,
+                 input_audio_gate=None):
         self.audio_svc = audio_svc
         self.diarization_svc = diarization_svc
         self.separation_svc = separation_svc
@@ -64,6 +65,7 @@ class PipelineService:
         self.conversation_export_svc = conversation_export_svc
         self.word_alignment_svc = word_alignment_svc
         self.clean_dataset_svc = clean_dataset_svc
+        self.input_audio_gate = input_audio_gate
         self.logger = logger
         self.model_loader = model_loader
         self.performance_monitor = performance_monitor
@@ -103,6 +105,73 @@ class PipelineService:
         # file's thread (see _submit_asr_async); run_batch_by_stage drains them.
         self._pending_asr_jobs = {}
         self._pending_asr_lock = threading.RLock()
+
+    def _resolve_input_audio_gate(self, config, args):
+        """Build the optional DNSMOS gate lazily from the active profile."""
+        if self.input_audio_gate is not None:
+            return self.input_audio_gate
+        profile = (config or {}).get("environments", {}).get(
+            getattr(args, "env", "kaggle"), {})
+        quality = profile.get("audio_quality", {})
+        if not quality.get("enabled", False):
+            return None
+        from services.dnsmos_gate import DNSMOSInputGate
+        model_cfg = profile.get("models", {}).get("dnsmos", {})
+        self.input_audio_gate = DNSMOSInputGate(
+            profile=profile,
+            model_path=quality.get("model") or model_cfg.get("model"),
+            min_normalized_quality=quality.get("min_normalized_quality", 0.3),
+            enabled=True,
+            on_error=quality.get("on_error", "reject"),
+        )
+        return self.input_audio_gate
+
+    @staticmethod
+    def _input_source_identity(audio_path):
+        stat = os.stat(audio_path)
+        return {
+            "source_abspath": os.path.abspath(audio_path),
+            "source_size": stat.st_size,
+            "source_mtime_ns": stat.st_mtime_ns,
+        }
+
+    def _check_input_audio_quality(self, gate, checkpoint, audio_path,
+                                   waveform=None, sample_rate=None):
+        """Check raw input once, before any model worker is started.
+
+        Returns ``(report, decoded_audio_or_none)``.  When the report is stale
+        and no waveform was supplied, the raw source is decoded here and handed
+        back so the normal pipeline can reuse that decode.
+        """
+        if gate is None or not getattr(gate, "enabled", True):
+            return None, None
+        report = checkpoint.load_if_committed("input_audio_quality", fmt="json")
+        fingerprint = {
+            **getattr(gate, "config_fingerprint", {}),
+            **self._input_source_identity(audio_path),
+        }
+        decoded_audio = None
+        if report is None or any(report.get(k) != v for k, v in fingerprint.items()):
+            if waveform is None or sample_rate is None:
+                decoded_audio = self.audio_svc.load_audio(audio_path, target_sr=24000)
+                waveform = decoded_audio.waveform
+                sample_rate = decoded_audio.sample_rate
+            report = gate.check(waveform, sample_rate, source_path=audio_path)
+            report.update(fingerprint)
+            checkpoint.save("input_audio_quality", report, fmt="json")
+            if self.logger:
+                if report.get("skipped"):
+                    self.logger.warning(
+                        f"DNSMOS input quality skipped: {report.get('reason', 'unknown')}")
+                else:
+                    self.logger.info(
+                        f"DNSMOS input quality {report['normalized_quality']:.3f} "
+                        f"(OVRL {report['OVRL']:.3f}, threshold {report['threshold']:.3f})")
+        elif self.logger:
+            self.logger.info(
+                f"Using checkpointed DNSMOS input quality "
+                f"{report.get('normalized_quality', float('nan')):.3f}")
+        return report, decoded_audio
 
     def _asr_async_ok(self, args) -> bool:
         """Async ASR commit only where nothing after ASR needs the transcripts."""
@@ -1049,6 +1118,13 @@ class PipelineService:
                 stage: window_version for stage in (
                     "separation", "separation_report", "asr", "captioning", "refinement")}
 
+        # Reject bad raw inputs before starting any diarization/ASR/separation
+        # worker.  A valid checkpoint avoids decoding; a missing/stale report
+        # decodes the original source (never processed_audio) and returns it for
+        # reuse below.
+        _, preflight_audio = self._check_input_audio_quality(
+            self._resolve_input_audio_gate(config, args), checkpoint, audio_path)
+
         # Các dịch vụ được tạo một lần rồi dùng lại cho mọi file trong batch.
         for svc in (self.separation_svc, self.refinement_svc):
             reset = getattr(svc, "reset_stats", None)
@@ -1097,7 +1173,8 @@ class PipelineService:
             if self.logger:
                 self.logger.info("Loading post-music waveform from checkpoint cache")
         else:
-            audio_data = self.audio_svc.load_audio(audio_path, target_sr=24000)
+            audio_data = (preflight_audio
+                          or self.audio_svc.load_audio(audio_path, target_sr=24000))
 
         # Chỉ ghi dữ liệu đầu vào một lần mỗi file, không ghi lại ở từng lần
         # run() khi chạy theo giai đoạn.
@@ -1323,6 +1400,18 @@ class PipelineService:
                 audio=audio_data.waveform,
                 sample_rate=audio_data.sample_rate,
             )
+
+        # The fresh-compute stage-major path already returned above after
+        # scheduling its CPU post-processing.  This shared boundary is for a
+        # checkpoint hit (or a disabled stage): it must not fall through into
+        # separation, ASR, or the lazy refinement/vLLM worker.
+        if getattr(args, "stop_after", None) == "diarization":
+            if self.logger:
+                self.logger.info(
+                    "Stopping pipeline after diarization as requested by --stop_after.")
+            stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
+                                      "stopped_after": "diarization"})
+            return None
 
         # 4. Tách giọng tại vùng overlap
         speech_segments = None
