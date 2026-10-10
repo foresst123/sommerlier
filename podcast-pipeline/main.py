@@ -972,7 +972,13 @@ def main():
         # Freeze the files visible at startup. Every full-pipeline pass below is
         # duration-bounded, including stage-major passes. Files copied in during
         # the run wait for the next invocation instead of extending this run.
-        ledger = ProgressLedger(args.audio_dir, logger=logger)
+        # A single --audio file has no input directory to keep a ledger in, and a
+        # one-off run must be repeatable: use an in-memory ledger for it.
+        if args.audio_dir:
+            ledger = ProgressLedger(args.audio_dir, logger=logger)
+        else:
+            ledger = ProgressLedger(os.path.dirname(os.path.abspath(args.audio)),
+                                    logger=logger, persist=False)
         if ledger.done or ledger.failed:
             logger.info(f"Resuming: {ledger.summary(len(paths))} "
                         f"(ledger: {os.path.basename(ledger.path)})")
