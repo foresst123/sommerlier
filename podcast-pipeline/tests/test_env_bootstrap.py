@@ -149,3 +149,29 @@ def test_default_env_root_is_outside_the_repository(monkeypatch):
     repo = os.path.dirname(os.path.dirname(os.path.abspath(env_bootstrap.__file__)))
     root = env_bootstrap.env_root()
     assert os.path.dirname(os.path.dirname(repo)) == root
+
+
+def test_ffmpeg_present_installs_nothing():
+    assert env_bootstrap.ensure_ffmpeg(
+        LOG, which=lambda name: "/usr/bin/ffmpeg",
+        run=lambda c, l: pytest.fail("must not install")) is False
+
+
+def test_ffmpeg_missing_in_conda_env_is_installed(monkeypatch):
+    found = {"ffmpeg": False}
+    ran = []
+    which = lambda name: ("/x/conda" if name == "conda" else
+                          ("/env/bin/ffmpeg" if found["ffmpeg"] else None))
+
+    def run(cmd, logger):
+        ran.append(cmd)
+        found["ffmpeg"] = True
+
+    monkeypatch.setenv("PATH", "/usr/bin")
+    assert env_bootstrap.ensure_ffmpeg(LOG, which=which, run=run, conda_prefix="/env") is True
+    assert ran[0][:2] == ["conda", "install"] and "ffmpeg" in ran[0] and "/env" in ran[0]
+
+
+def test_ffmpeg_missing_outside_conda_explains_what_to_do():
+    with pytest.raises(RuntimeError, match="apt install ffmpeg"):
+        env_bootstrap.ensure_ffmpeg(LOG, which=lambda name: None, conda_prefix="")

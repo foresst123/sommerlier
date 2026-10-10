@@ -127,6 +127,34 @@ def ensure_main_env(logger, requirements, missing=None, python=None, ensure_uv=N
     return True
 
 
+def ensure_ffmpeg(logger, which=None, run=None, conda_prefix=None):
+    """Make sure `ffmpeg` is on PATH; inside a conda env, install it from conda-forge.
+
+    audio-separator (BS-RoFormer) shells out to ffmpeg, so without it every music span fails
+    and the mixture is kept. Without a conda env there is nothing installed here: apt needs
+    root, so the missing binary is reported with the command to run.
+    """
+    import shutil
+    which = which or shutil.which
+    if which("ffmpeg"):
+        return False
+    conda_prefix = os.environ.get("CONDA_PREFIX") if conda_prefix is None else conda_prefix
+    if not conda_prefix or not which("conda"):
+        raise RuntimeError(
+            "ffmpeg is not installed and this is not a conda environment. Install it with "
+            "`sudo apt install ffmpeg` (or `conda install -c conda-forge ffmpeg`) and rerun.")
+    logger.warning("[bootstrap] ffmpeg is missing; installing it from conda-forge")
+    (run or _run)(["conda", "install", "-y", "-p", conda_prefix, "-c", "conda-forge", "ffmpeg"],
+                  logger)
+    # conda puts it in <prefix>/bin, which is on PATH only for an activated env.
+    bin_dir = os.path.join(conda_prefix, "bin")
+    if bin_dir not in os.environ.get("PATH", "").split(os.pathsep):
+        os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+    if not which("ffmpeg"):
+        raise RuntimeError("ffmpeg is still not on PATH after installing it with conda")
+    return True
+
+
 # ---------------------------------------------------------------- per-worker installers
 
 def _install_qwen3(env_dir, logger):
