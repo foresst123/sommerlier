@@ -224,7 +224,7 @@
       "gpu_1": 0,
       "gpu_2": 1,
       "outputs": {
-        "clean_two_channel_dir": "/home/lamkd2/output_fullduplex_data"
+        "clean_two_channel_dir": "/home/lamkd2/data/data_output/data_output_v2"
       },
       "steps": {
         "music_analysis": true,
@@ -275,7 +275,7 @@
           "model_name": "openai/whisper-large-v3",
           "torch_dtype": "bfloat16",
           "batch_size": 16,
-          "gpu_memory_utilization": 0.25,
+          "gpu_memory_utilization": 0.3,
           "kv_cache_memory_bytes": 6442450944,
           "max_new_tokens": 256
         },
@@ -288,7 +288,7 @@
           "model_name": "Qwen/Qwen3-ASR-1.7B",
           "batch_size": 32,
           "torch_dtype": "bfloat16",
-          "gpu_memory_utilization": 0.4,
+          "gpu_memory_utilization": 0.5,
           "kv_cache_memory_bytes": 5368709120,
           "max_model_len": 8192,
           "max_new_tokens": 256
