@@ -73,6 +73,58 @@ def _ensure_uv(logger):
         _run([sys.executable, "-m", "pip", "install", "-q", "uv"], logger)
 
 
+# ---------------------------------------------------------------- the main interpreter
+
+# One import per heavy requirement; if any is missing the whole requirements file is applied.
+MAIN_PROBES = ("torch", "torchaudio", "numpy", "librosa", "soundfile", "transformers",
+               "pyannote.audio", "whisperx", "faster_whisper", "audio_separator")
+ORT_GPU = ["onnxruntime-gpu==1.23.2", "nvidia-npp-cu12", "wrapt==2.3.0"]
+
+
+def missing_main_modules(find_spec=None):
+    """Modules from MAIN_PROBES the running interpreter cannot import."""
+    import importlib.util
+    find_spec = find_spec or importlib.util.find_spec
+    missing = []
+    for name in MAIN_PROBES:
+        try:
+            found = find_spec(name)
+        except (ImportError, ValueError):       # a parent package that is itself missing
+            found = None
+        if found is None:
+            missing.append(name)
+    return missing
+
+
+def ensure_main_env(logger, requirements, missing=None, python=None, ensure_uv=None, run=None):
+    """Install the pipeline's own requirements into the running interpreter when any is missing.
+
+    Must run before the first ``import torch``. Torch is installed first, pinned, from the
+    CUDA 12.6 index; the CPU ``onnxruntime`` some audio packages pull in is then replaced by
+    the GPU wheel, which owns the same module tree.
+    """
+    missing = missing_main_modules() if missing is None else missing
+    if not missing:
+        logger.info("[bootstrap] main environment OK")
+        return False
+    python = python or sys.executable
+    ensure_uv = ensure_uv or _ensure_uv
+    run = run or _run
+    logger.warning(f"[bootstrap] main environment is missing {', '.join(missing)}; "
+                   f"installing {requirements} into {python}")
+    ensure_uv(logger)
+    run(["uv", "pip", "install", "--python", python, *TORCH_PINS, *TORCH_INDEX], logger)
+    run(["uv", "pip", "install", "--python", python, "-r", requirements, *TORCH_INDEX,
+         "--index-strategy", "unsafe-best-match"], logger)
+    run(["uv", "pip", "install", "--python", python, *ORT_GPU, "--reinstall", "--no-deps"],
+        logger)
+    still = missing_main_modules()
+    if still:
+        raise RuntimeError(f"main environment still lacks {', '.join(still)} after installing "
+                           f"{requirements}")
+    return True
+
+
 # ---------------------------------------------------------------- per-worker installers
 
 def _install_qwen3(env_dir, logger):

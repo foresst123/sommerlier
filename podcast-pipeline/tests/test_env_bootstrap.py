@@ -114,3 +114,29 @@ def test_non_interactive_uses_config_silently():
     cfg = _cfg("/out")
     args = env_bootstrap.ask_paths(_args(), cfg, interactive=False)
     assert args.audio_dir == "/in"
+
+
+def test_main_env_complete_installs_nothing():
+    ran = []
+    changed = env_bootstrap.ensure_main_env(
+        LOG, "req.txt", missing=[], run=lambda cmd, logger: ran.append(cmd))
+    assert changed is False and ran == []
+
+
+def test_main_env_missing_torch_installs_pins_then_requirements_then_gpu_ort(monkeypatch):
+    ran = []
+    monkeypatch.setattr(env_bootstrap, "missing_main_modules", lambda: [])   # fine after install
+    changed = env_bootstrap.ensure_main_env(
+        LOG, "req.txt", missing=["torch"], python="/py", ensure_uv=lambda l: None,
+        run=lambda cmd, logger: ran.append(cmd))
+    assert changed is True and len(ran) == 3
+    assert "torch==2.8.0" in ran[0] and "/py" in ran[0]
+    assert "-r" in ran[1] and "unsafe-best-match" in ran[1]
+    assert "onnxruntime-gpu==1.23.2" in ran[2] and "--no-deps" in ran[2]
+
+
+def test_main_env_still_broken_after_install_raises(monkeypatch):
+    monkeypatch.setattr(env_bootstrap, "missing_main_modules", lambda: ["torch"])
+    with pytest.raises(RuntimeError, match="still lacks"):
+        env_bootstrap.ensure_main_env(LOG, "req.txt", missing=["torch"], python="/py",
+                                      ensure_uv=lambda l: None, run=lambda c, l: None)

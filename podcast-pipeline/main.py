@@ -158,7 +158,12 @@ with open(args.config, 'r', encoding='utf-8') as f:
     config = json.load(f)
 
 if not args.skip_bootstrap:
-    from utils.env_bootstrap import ask_paths
+    import logging as _logging
+    from utils.env_bootstrap import ask_paths, ensure_main_env
+    # Before the first `import torch` below; the logger proper is not built yet.
+    _logging.basicConfig(level=_logging.INFO, format="%(message)s")
+    ensure_main_env(_logging.getLogger("bootstrap"),
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)), "requirements.txt"))
     ask_paths(args, config)
 
 if not args.audio and not args.audio_dir:
