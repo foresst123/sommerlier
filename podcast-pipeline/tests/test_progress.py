@@ -140,3 +140,31 @@ def test_a_failed_file_is_offered_again_next_pass(tmp_path):
 
     fresh = ProgressLedger(str(tmp_path))
     assert files[0] in fresh.pending(files), "a failure must not count as done"
+
+
+def test_a_memory_only_ledger_neither_reads_nor_writes(tmp_path):
+    # `--audio` runs one file with no input folder of its own: its ledger must not
+    # leave a record, or the next run of the same file would be skipped as done.
+    audio = tmp_path / "a.wav"
+    audio.write_bytes(b"x")
+    first = ProgressLedger(str(tmp_path), persist=False)
+    first.mark_done(str(audio), seconds=3)
+    first.save()
+    assert not (tmp_path / "_sommelier_progress.json").exists()
+    assert first.pending([str(audio)]) == []
+
+    again = ProgressLedger(str(tmp_path), persist=False)
+    assert again.pending([str(audio)]) == [str(audio)]
+
+
+def test_a_memory_only_ledger_ignores_an_existing_file(tmp_path):
+    real = ProgressLedger(str(tmp_path))
+    real.mark_done(str(tmp_path / "a.wav"))
+    real.save()
+    assert ProgressLedger(str(tmp_path), persist=False).pending([str(tmp_path / "a.wav")])
+
+
+def test_main_gives_a_single_audio_file_a_memory_only_ledger():
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "main.py"), encoding="utf-8").read()
+    assert "persist=False" in src and "ProgressLedger(args.audio_dir" in src

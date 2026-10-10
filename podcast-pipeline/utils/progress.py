@@ -23,8 +23,12 @@ LEDGER_NAME = "_sommelier_progress.json"
 class ProgressLedger:
     """Records completed and failed files for one input directory."""
 
-    def __init__(self, directory: str, name: str = LEDGER_NAME, logger=None):
+    def __init__(self, directory: str, name: str = LEDGER_NAME, logger=None,
+                 persist: bool = True):
         self.path = os.path.join(directory, name)
+        # False keeps the ledger in memory only: nothing is read or written, so a
+        # one-off run of a single file neither skips itself nor leaves a record.
+        self.persist = persist
         self.logger = logger
         self.done = {}       # relative path -> {finished, seconds}
         self.failed = {}     # relative path -> {error, attempts, last_tried}
@@ -33,7 +37,7 @@ class ProgressLedger:
 
     # -- persistence ---------------------------------------------------
     def _load(self):
-        if not os.path.exists(self.path):
+        if not self.persist or not os.path.exists(self.path):
             return
         try:
             with open(self.path, encoding="utf-8") as f:
@@ -49,6 +53,8 @@ class ProgressLedger:
 
     def save(self):
         """Write atomically: a run killed mid-write must not lose the ledger."""
+        if not self.persist:
+            return
         payload = {
             "directory": self.directory,
             "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
