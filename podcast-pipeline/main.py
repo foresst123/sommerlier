@@ -94,6 +94,9 @@ def _build_parser():
                              "instead of when their stage runs. Hides their "
                              "load time behind earlier stages, at the cost of "
                              "holding their VRAM for the whole run.")
+    parser.add_argument("--skip_bootstrap", action="store_true",
+                        help="Do not check or build the worker virtualenvs or ask for a "
+                             "HuggingFace token at start-up.")
     parser.add_argument("--kill_orphans", action="store_true",
                         help="At start-up, kill this user's leftover vLLM engines and "
                              "pipeline workers from an earlier run (parent gone, still "
@@ -151,12 +154,16 @@ def parse_args():
 # ==========================================
 args = parse_args()
 
+with open(args.config, 'r', encoding='utf-8') as f:
+    config = json.load(f)
+
+if not args.skip_bootstrap:
+    from utils.env_bootstrap import ask_paths
+    ask_paths(args, config)
+
 if not args.audio and not args.audio_dir:
     parser_error = "one of --audio or --audio_dir is required"
     raise SystemExit(f"main.py: error: {parser_error}")
-
-with open(args.config, 'r', encoding='utf-8') as f:
-    config = json.load(f)
 
 # --- Fetch HuggingFace Token from Environment or Kaggle Secrets ---
 hf_token = os.environ.get("HUGGINGFACE_TOKEN") or os.environ.get("HF_TOKEN")
@@ -386,6 +393,14 @@ def main():
     logger.info(f"Starting Sommelier Pipeline for Job: {args.job_id}")
     from utils import preflight
     preflight.run(logger, kill_orphans=args.kill_orphans)
+    if not args.skip_bootstrap:
+        from utils import env_bootstrap
+        env_bootstrap.ensure_hf_token(config, logger)
+        qwen_backend = str(env_profile.get("models", {}).get("qwen3", {})
+                           .get("backend", "transformers")).lower()
+        env_bootstrap.ensure_worker_envs(
+            ["sidon", "diarizen", "refinement", "vllm" if qwen_backend == "vllm" else "qwen3"],
+            logger)
     logger.info(f"Steps ({args.env} profile{', +--steps' if args.steps else ''}): {_STEPS_NOTE}")
     from utils.cpu_plan import usable_cores
     # Workers inherit this through os.environ.copy() in base_worker_service.
@@ -666,6 +681,10 @@ def main():
     # 1c'. Speaker-assignment workers (Silero VAD + WeSpeaker), one or more
     # per GPU. Started by the separation stage; see assignment_worker.py.
     assignment_service = None
+    # These are constructed inside the main try block, but the outer finally
+    # must be able to clean a partially-started vLLM engine if initialization or
+    # its first stage raises.
+    refinement_svc = None
     _assign_per_gpu = int(perf_cfg["stages"]["separation"].get(
         "assignment_workers_per_gpu", 0))
     if (perf_cfg["enabled"] and _assign_per_gpu > 0 and getattr(args, "bss", False)
@@ -1000,14 +1019,32 @@ def main():
             logger.info(f"All {len(paths)} file(s) completed")
 
     finally:
-        if qwen3_service:
-            qwen3_service.stop()
-        if diarizen_service:
-            diarizen_service.stop()
-        if sidon_service:
-            sidon_service.stop()
-        if assignment_service:
-            assignment_service.stop()
+        # Final safety net.  Normal stage boundaries release these earlier,
+        # but startup OOMs happen before a stage can register its deferred
+        # release.  In particular Whisper-vLLM and refinement used to be absent
+        # here, leaving an engine process/VRAM allocation behind after a failed
+        # cycle.
+        if refinement_svc is not None:
+            try:
+                refinement_svc.unload()
+            except Exception as e:
+                logger.warning(f"Failed to unload refinement during shutdown: {e}")
+        _shutdown_workers = (
+            qwen3_service, qwen3_replica_service, whisper_service,
+            phowhisper_service, diarizen_service, sidon_service,
+            assignment_service,
+        )
+        _seen_workers = set()
+        for _service in _shutdown_workers:
+            if _service is None or id(_service) in _seen_workers:
+                continue
+            _seen_workers.add(id(_service))
+            try:
+                _service.stop()
+            except Exception as e:
+                logger.warning(
+                    f"Failed to stop {getattr(_service, 'name', 'worker')} "
+                    f"during shutdown: {e}")
         performance_monitor.stop()
         if perf_cfg["enabled"]:
             from utils import profiling
