@@ -51,20 +51,50 @@ class WorkerPoolService:
 
     def spawn(self):
         self._reset_stats()
-        for service in self.services:
-            service.spawn()
+        try:
+            for service in self.services:
+                service.spawn()
+        except BaseException:
+            # A pool is one logical model.  If replica N cannot even spawn,
+            # replicas 0..N-1 must not remain resident and poison the retry.
+            try:
+                self.stop()
+            except Exception:
+                # Preserve the startup cause. stop() has still attempted every
+                # replica before reporting its own first cleanup error.
+                pass
+            raise
 
     def wait_ready(self):
         # Models load concurrently after spawn(); only readiness waits here.
-        with ThreadPoolExecutor(max_workers=len(self.services)) as executor:
-            futures = [executor.submit(service.wait_ready)
-                       for service in self.services]
-            for future in futures:
-                future.result()
+        try:
+            with ThreadPoolExecutor(max_workers=len(self.services)) as executor:
+                futures = [executor.submit(service.wait_ready)
+                           for service in self.services]
+                for future in futures:
+                    future.result()
+        except BaseException:
+            # One failed replica makes the pool unusable.  Stop the replicas
+            # that did become ready as well, otherwise their VRAM survives the
+            # failed stage and the next cycle cannot restart the pool.
+            try:
+                self.stop()
+            except Exception:
+                pass
+            raise
 
     def stop(self):
+        first_error = None
         for service in self.services:
-            service.stop()
+            try:
+                service.stop()
+            except Exception as exc:
+                # Cleanup is best-effort per replica, not fail-fast.  A broken
+                # stop on GPU0 must never prevent GPU1 from being released.
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
     def next_service(self):
         with self._pick_lock:

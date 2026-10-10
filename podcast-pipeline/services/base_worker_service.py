@@ -323,8 +323,20 @@ class WorkerProcessService:
                 raise RuntimeError(f"{self.name} worker was never spawned")
             try:
                 self._wait_for_ready()
-            except Exception as exc:
-                self._ready_error = exc
+            except BaseException as exc:
+                # Starting a worker is transactional.  Most ordinary startup
+                # failures pass through _fail_start(), which already stops the
+                # process group, but an unexpected pipe/readiness exception did
+                # not.  That is especially costly for vLLM: its engine child can
+                # keep the allocation after the Python worker failed to become
+                # ready, so the next batch immediately OOMs too.
+                try:
+                    self.stop()
+                finally:
+                    # stop() resets lifecycle state.  Retain the original
+                    # startup error for every waiter until spawn() begins a new
+                    # attempt and deliberately clears it.
+                    self._ready_error = exc
                 raise
             self._ready = True
 

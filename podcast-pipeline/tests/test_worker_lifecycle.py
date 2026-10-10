@@ -461,3 +461,50 @@ def test_workers_of_one_stage_are_spawned_before_any_is_waited_on():
     pipe._register_worker_pids = lambda name, service: []
     pipe._ensure_workers(("qwen3", "whisper"))
     assert events == ["spawn qwen3", "spawn whisper", "ready qwen3", "ready whisper"]
+
+
+def test_one_failed_stage_worker_stops_every_started_peer():
+    """Whisper must not retain VRAM when Qwen (or the reverse) startup OOMs."""
+    class Service:
+        def __init__(self, name, failure=None):
+            self.name, self.failure = name, failure
+            self.process = None
+            self.stops = 0
+
+        def spawn(self):
+            self.process = object()
+
+        def wait_ready(self):
+            if self.failure:
+                raise RuntimeError(self.failure)
+
+        def stop(self):
+            self.stops += 1
+            self.process = None
+
+    qwen = Service("qwen3")
+    whisper = Service("whisper", "CUDA out of memory")
+    pipe = _pipeline(None)
+    pipe.worker_services = {"qwen3": qwen, "whisper": whisper}
+    pipe._register_worker_pids = lambda name, service: []
+
+    try:
+        pipe._ensure_workers(("qwen3", "whisper"))
+    except RuntimeError as exc:
+        assert "out of memory" in str(exc)
+    else:
+        raise AssertionError("the failed vLLM startup should stop the stage")
+
+    assert qwen.process is None and whisper.process is None
+    assert qwen.stops >= 1 and whisper.stops >= 1
+
+
+def test_outer_shutdown_covers_every_vllm_owner():
+    """A startup failure can occur before the normal stage release is registered."""
+    source = open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "main.py"), encoding="utf-8").read()
+    shutdown = source[source.rindex("    finally:"):]
+
+    assert "refinement_svc.unload()" in shutdown
+    for service in ("qwen3_service", "qwen3_replica_service", "whisper_service"):
+        assert service in shutdown

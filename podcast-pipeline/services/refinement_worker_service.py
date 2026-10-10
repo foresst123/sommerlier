@@ -184,19 +184,38 @@ class RefinementWorkerPoolService:
         return total
 
     def start(self):
-        for service in self.services:
-            service.spawn()
-        with ThreadPoolExecutor(max_workers=len(self.services)) as executor:
-            futures = [executor.submit(service.wait_ready)
-                       for service in self.services]
-            for future in futures:
-                future.result()
-        self._ensure_threads()
+        try:
+            for service in self.services:
+                service.spawn()
+            with ThreadPoolExecutor(max_workers=len(self.services)) as executor:
+                futures = [executor.submit(service.wait_ready)
+                           for service in self.services]
+                for future in futures:
+                    future.result()
+            self._ensure_threads()
+        except BaseException:
+            # Do not leave the healthy vLLM replica alive when its peer OOMs
+            # during startup.  Both replicas belong to one refinement engine
+            # pool and the following batch needs both cards clean.
+            try:
+                self.stop()
+            except Exception as cleanup_error:
+                if self.logger:
+                    self.logger.warning(
+                        f"Refinement startup cleanup was incomplete: {cleanup_error}")
+            raise
 
     def stop(self):
         self._stop_threads()
+        first_error = None
         for service in self.services:
-            service.stop()
+            try:
+                service.stop()
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
     def ping(self):
         return all(service.ping() for service in self.services)

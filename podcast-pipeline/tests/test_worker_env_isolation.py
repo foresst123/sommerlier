@@ -85,6 +85,34 @@ def test_a_start_up_failure_reports_more_than_the_last_ten_stderr_lines(tmp_path
     assert "trace-line-05" in message          # beyond the old 10-line tail
 
 
+def test_an_unexpected_ready_error_still_reaps_the_worker(tmp_path):
+    """A protocol/parser error must be as transactional as a reported OOM.
+
+    _fail_start handles the expected exit/error paths itself.  This exercises
+    the formerly-uncovered exception path around readiness parsing, where a
+    live worker (and a vLLM engine child in production) was left behind.
+    """
+    service = _service(tmp_path, """
+        import json, sys
+        print(json.dumps({"status": "ready"}), flush=True)
+        for line in sys.stdin:
+            pass
+    """)
+
+    def broken_protocol(_line):
+        raise ValueError("broken ready message")
+
+    service.is_ready_line = broken_protocol
+    try:
+        service.start()
+    except ValueError as exc:
+        assert "broken ready message" in str(exc)
+    else:
+        raise AssertionError("readiness parsing should have failed")
+
+    assert service.process is None, "failed startup left its process group alive"
+
+
 # --- which workers are isolated ------------------------------------------------
 
 def test_vllm_workers_do_not_inherit_the_main_environments_libraries():
