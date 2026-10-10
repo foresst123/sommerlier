@@ -104,6 +104,7 @@ class StageOutputService:
         "asr": "05_asr",
         "refinement": "06_refinement",
         "relabel": "07_relabel",
+        "transcript_review": "07b_transcript_review",
         "word_alignment": "08_word_alignment",
         "conversation_exports": "09_conversation_exports",
     }
@@ -482,6 +483,35 @@ class StageOutputService:
                    "replies.json": report.get("replies", []),
                    "report.json": {k: v for k, v in report.items() if k != "replies"}})
 
+    def write_review(self, report: dict):
+        """What the transcript review pass flagged. It changes no transcript data.
+
+        `flags.json` lists the flagged segments (segment index -> flags);
+        `report.json` is the full report including the rejected-flag counts.
+        """
+        stats = {k: report.get(k) for k in (
+            "segments", "windows", "failed_windows", "unreadable_windows",
+            "cut_in_thought_windows", "proposed", "thinking", "reviewed",
+            "flagged_segments", "flags", "by_kind", "rejected", "skipped")}
+        warnings = []
+        if report.get("failed_windows"):
+            warnings.append(
+                f"{report['failed_windows']} of {report.get('windows', 0)} "
+                "window(s) got no answer; those segments were not reviewed")
+        if report.get("cut_in_thought_windows"):
+            warnings.append(
+                f"{report['cut_in_thought_windows']} window(s) ran out of tokens while the "
+                "model was still thinking; raise models.transcript_review.max_new_tokens")
+        if report.get("unreadable_windows"):
+            warnings.append(
+                f"{report['unreadable_windows']} of {report.get('windows', 0)} "
+                "window(s) were answered without any JSON")
+        if warnings:
+            stats["warnings"] = warnings
+        return self._finish(
+            "transcript_review", "flags.json", [report.get("flagged", {})], stats,
+            extra={"report.json": report})
+
     def write_word_alignment(self, transcripts, report: dict):
         """Final refined text with Wav2Vec2 timestamps for every aligned word."""
         stats = {key: report.get(key) for key in (
@@ -506,8 +536,9 @@ class StageOutputService:
         """What the conversation-export pass found, judged and wrote.
 
         The audio and per-item JSON live in `conversation_exports/` beside the final
-        export, one folder per conversation filed under its tier
-        (`tier_1_S/conversation_1/`); this directory holds the accounting:
+        export, one folder per conversation filed by category
+        (`full_duplex/interruption/<name>/`, `half_duplex/<name>/`, `quarantine/<name>/`)
+        with a `manifest.jsonl`; this directory holds the accounting:
         `exports.json` is one row per item written, `report.json` carries the finder's counts (how many blocks
         each rule ended, how many windows each noise or music gate refused, how
         many the model turned down), which is where to look when a recording
@@ -527,7 +558,8 @@ class StageOutputService:
             "noise_measured": finder.get("noise_measured"),
             "word_alignment_missing": (finder.get("breaks") or {}).get(
                 "word_alignment_missing", 0),
-            "tiers": report.get("tiers"),
+            "categories": report.get("categories"),
+            "not_exported": report.get("not_exported"),
             "verification_failed": report.get("verification_failed"),
         }
         warnings = []

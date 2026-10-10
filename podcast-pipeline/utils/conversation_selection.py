@@ -16,7 +16,7 @@ What makes a candidate:
     conversation is split around a lawnmower instead of being thrown away whole.
     Voices in the background are held to the strictest level: they are the ones
     that break diarization and put words in the transcript nobody said.
-  * 60-240 seconds, starting and ending on a turn or a pause.
+  * `min_seconds`-`max_seconds`, starting and ending on a turn or a pause.
 
 This module is a filter, not a repair: nothing is denoised, because a denoiser
 alters the recording (see utils/noise_map.py). What noise cannot be excluded is
@@ -61,6 +61,29 @@ DEFAULT_WEIGHTS = {
     "cleanliness": 20.0,
 }
 
+# Mirror transcript_review_service.HARD_FLAG_KINDS (not imported on purpose).
+HARD_REVIEW_KINDS = frozenset({"speaker_turn", "asr_hallucination", "asr_garbage"})
+SOFT_REVIEW_KINDS = frozenset({"speaker_phrase"})
+MAX_SOFT_PENALTY_FLAGS = 4
+
+
+def review_flags_of(seg) -> List[dict]:
+    """The segment's review flags; None (never reviewed) counts as clean."""
+    flags = getattr(seg, "review_flags", None)
+    return [f for f in flags if isinstance(f, dict)] if flags else []
+
+
+def hard_review_kind(seg) -> Optional[str]:
+    for flag in review_flags_of(seg):
+        if flag.get("kind") in HARD_REVIEW_KINDS:
+            return str(flag["kind"])
+    return None
+
+
+def soft_review_count(seg) -> int:
+    return sum(1 for f in review_flags_of(seg) if f.get("kind") in SOFT_REVIEW_KINDS)
+
+
 TIERS = ((85.0, "S"), (70.0, "A"), (55.0, "B"), (40.0, "C"))
 
 
@@ -85,8 +108,16 @@ class ConversationSelectionConfig:
     min_semantic: int = 4                # the model's self-contained score, 1-5
     require_semantic: bool = True        # no verdict is not a yes; off accepts un-judged items
     # A selected training item must carry timestamps for the final, refined
-    # text, not stale Whisper words from before the text was edited.
+    # text, not stale Whisper words from before the text was edited. This does
+    # not gate selection (alignment runs after it); the export service enforces
+    # it when writing, see ConversationExportService.write.
     require_word_alignment: bool = False
+    # Transcript-review flags (TranscriptSegment.review_flags): a hard flag
+    # rejects the range; each soft flag costs `review_soft_penalty` score points
+    # (at most MAX_SOFT_PENALTY_FLAGS of them count).
+    review_soft_penalty: float = 5.0
+    review_hard_reject: bool = True
+    max_soft_flags: int = 2              # more soft flags than this in a range rejects it
     # Legacy scan knobs are kept for backward compatibility, but the normal
     # export path now asks the LLM to FIND conversation spans first and uses this
     # module only to validate/score what the model proposes.
@@ -118,14 +149,32 @@ class ConversationSelectionConfig:
     music_patched_max: float = 0.15      # share of the item whose music bed was replaced
 
     # -- where an excerpt is filed (used by the service)
-    # An excerpt in which the two spoke at once is the hardest thing to get and the
-    # most useful, so it is filed apart from the rest: in `overlap_good` when the
-    # separator pulled the two voices apart cleanly (each ear holds one voice), in
-    # `overlap_bad` when it did not. Off, everything is filed by score alone.
-    overlap_first: bool = True
-    overlap_min_seconds: float = 0.3     # how much overlap makes an excerpt "with overlap"
+    # Filing is by category (full_duplex/interruption, full_duplex/backchannel,
+    # half_duplex), not by score; see utils/conversation_events.py. The two
+    # `overlap_good_*` knobs are the separation gate of the full-duplex categories:
+    # wherever the voices overlap the tracks must be separated that well, else the
+    # excerpt goes to quarantine/ (or is not exported when `keep_quarantine` is off).
     overlap_good_min_similarity: float = 0.6   # the weakest separated span still counts as clean
     overlap_good_min_coverage: float = 0.9     # share of the overlap that must have been separated
+    # Superseded by the category rules; still accepted so older profiles load, and ignored.
+    overlap_first: bool = True
+    overlap_min_seconds: float = 0.3
+
+    # -- roles, events and categories (utils/conversation_events.py). The
+    # thresholds marked heuristic in the design have no published precedent.
+    role_min_conf: float = 0.7           # below this the assistant/user roles are "symmetric"
+    keep_symmetric: bool = True          # false drops excerpts whose roles are not locked
+    keep_quarantine: bool = True         # false drops, instead of quarantining, a failed separation gate
+    assistant_channel: str = "left"      # which ear holds the assistant in stereo_2ch.wav
+    ipu_gap: float = 0.2                 # silence that ends an inter-pausal unit
+    overlap_min: float = 0.2             # both speaking at least this long is an overlap
+    backchannel_max_seconds: float = 1.0
+    backchannel_max_words: int = 2
+    backchannel_context: float = 1.0     # the other speaker talks this close before and after
+    yield_within_seconds: float = 1.5    # heuristic: stopping this soon after the cut-in is a yield
+    min_backchannels: int = 2            # backchannels needed for full_duplex/backchannel
+    half_duplex_max_overlap: float = 0.2 # half duplex has no overlap this long
+    context_turns_around_interruption: int = 2   # turns the finder keeps on each side of one
 
     # -- writing the audio (used by the service)
     fade_ms: float = 50.0
@@ -144,6 +193,8 @@ class ConversationSelectionConfig:
             raise ValueError(f"unknown conversation-export weight(s): {sorted(unknown)}")
         if self.min_seconds > self.max_seconds:
             raise ValueError("min_seconds is above max_seconds")
+        if self.assistant_channel not in ("left", "right"):
+            raise ValueError("assistant_channel must be 'left' or 'right'")
 
     @property
     def resolved_weights(self) -> Dict[str, float]:
@@ -396,8 +447,10 @@ class ConversationSelectionFinder:
         seg = self.segs[i]
         if self.state[i] == INVALID:
             return f"invalid_{self.reason[i]}"
-        if self.cfg.require_word_alignment and not has_complete_word_alignment(seg):
-            return "word_alignment_missing"
+        if self.cfg.review_hard_reject:
+            kind = hard_review_kind(seg)
+            if kind:
+                return f"review_flag_{kind}"
         if self.timeline.crosses_cut(float(seg.start), float(seg.end)):
             return "seam_inside_segment"
         if self._in_lasting_noise(float(seg.start), float(seg.end)):
@@ -630,8 +683,10 @@ class ConversationSelectionFinder:
             hard_flags.append("noise_unmeasured")
         if patched is not None and patched > self.cfg.music_patched_max:
             hard_flags.append("music_patched")
-        if self.cfg.require_word_alignment and not has_complete_word_alignment(seg):
-            hard_flags.append("word_alignment_missing")
+        if self.cfg.review_hard_reject:
+            kind = hard_review_kind(seg)
+            if kind:
+                hard_flags.append(f"review_flag_{kind}")
 
         out = {
             "duration": round(duration, 3),
@@ -778,6 +833,13 @@ class ConversationSelectionFinder:
 
         components = self._components(metrics, noise, patched)
         score = self._score(components)
+        soft = sum(soft_review_count(s) for s in self.segs[i:j + 1])
+        metrics["review_soft_flags"] = soft
+        if soft > cfg.max_soft_flags:
+            return None, "too_many_soft_flags"
+        if soft and cfg.review_soft_penalty > 0:
+            penalty = cfg.review_soft_penalty * min(soft, MAX_SOFT_PENALTY_FLAGS)
+            score = round(max(0.0, score - penalty), 1)
         if score < cfg.min_score:
             return None, "low_score"
         return Candidate(

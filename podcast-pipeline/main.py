@@ -140,8 +140,8 @@ def _build_parser():
     parser.add_argument(
         "--stop_after", type=str,
         choices=["music", "diarization", "separation", "music_removal", "asr",
-                 "captioning", "refinement", "speaker_relabel", "word_alignment",
-                 "conversation_exports"],
+                 "captioning", "refinement", "speaker_relabel", "transcript_review",
+                 "word_alignment", "conversation_exports"],
         help="Stop pipeline gracefully after this stage")
     return parser
 
@@ -285,7 +285,7 @@ install_torch_load_shim()
 
 from utils.batch import audio_duration, find_audio_files, find_name_collisions, plan_batches, run_batch_by_stage
 from utils.progress import ProgressLedger
-from utils.steps import will_run
+from utils.steps import will_run, opt_in_step_enabled
 from utils.worker_env import resolve_worker_python
 # Separation thresholds live in the profile, but separation_service and bss_model read
 # them at import time. Publish them as environment variables here -- before those
@@ -879,6 +879,22 @@ def main():
         relabel_svc = SpeakerRelabelService(
             refinement_svc, logger=logger,
             **dict(env_profile.get("models", {}).get("relabel", {})))
+        # Review only flags; same resident LLM. Built only when the step is on, so
+        # a profile without it never imports or validates its settings. Settings
+        # come from models.transcript_review, falling back to the window settings
+        # of models.relabel; an unknown key raises like relabel's.
+        review_svc = None
+        if opt_in_step_enabled(args, "transcript_review"):
+            from services.transcript_review_service import TranscriptReviewService
+            models_cfg = env_profile.get("models", {})
+            review_cfg = dict(models_cfg.get("transcript_review", {}))
+            relabel_cfg = models_cfg.get("relabel", {})
+            for key in ("window_tokens", "overlap_segments", "max_window_segments",
+                        "min_confidence", "thinking", "max_new_tokens"):
+                if key not in review_cfg and key in relabel_cfg:
+                    review_cfg[key] = relabel_cfg[key]
+            review_svc = TranscriptReviewService(
+                refinement_svc, logger=logger, **review_cfg)
         conversation_export_svc = ConversationExportService(
             refinement_svc, logger=logger,
             **dict(env_profile.get("models", {}).get("conversation_selection", {})))
@@ -916,6 +932,7 @@ def main():
             },
             performance_monitor=performance_monitor,
             relabel_svc=relabel_svc,
+            review_svc=review_svc,
             conversation_export_svc=conversation_export_svc,
             word_alignment_svc=word_alignment_svc,
             clean_dataset_svc=clean_dataset_svc,

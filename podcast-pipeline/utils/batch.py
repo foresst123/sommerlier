@@ -141,8 +141,8 @@ def split_final_failures(failures, is_done):
 # reachable on its own.
 PIPELINE_STAGES = (
     "music", "diarization", "separation", "asr",
-    "captioning", "refinement", "speaker_relabel", "word_alignment",
-    "conversation_exports", None,
+    "captioning", "refinement", "speaker_relabel", "transcript_review",
+    "word_alignment", "conversation_exports", None,
 )
 
 
@@ -166,10 +166,22 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
     failures = {}
     original_stop = getattr(args, "stop_after", None)
 
+    # With conversation exports on, alignment is part of the conversation_exports
+    # pass (select -> align the selected segments -> write), so selection runs
+    # exactly once per file and there is no separate whole-file word_alignment
+    # pass. "--stop_after word_alignment" then means: run that pass up to and
+    # including alignment of the selected segments, and write nothing.
+    exports_on = opt_in_step_enabled(args, "conversation_exports")
+    stop_gate = original_stop
+    if original_stop == "word_alignment" and exports_on:
+        stop_gate = "conversation_exports"
+
     for stage in stages:
-        if stage is not None and original_stop is not None:
+        if stage == "word_alignment" and exports_on:
+            continue
+        if stage is not None and stop_gate is not None:
             # The caller asked to stop early; do not run past their request.
-            if _stage_index(stage) > _stage_index(original_stop):
+            if _stage_index(stage) > _stage_index(stop_gate):
                 break
 
         label = label_of(stage)
@@ -186,7 +198,8 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
             "captioning": "captioning",
             "refinement": "refinement",
         }
-        _opt_in_stages = {"speaker_relabel", "word_alignment", "conversation_exports"}
+        _opt_in_stages = {"speaker_relabel", "transcript_review", "word_alignment",
+                          "conversation_exports"}
         if stage is not None:
             enabled = (opt_in_step_enabled(args, stage)
                        if stage in _opt_in_stages else
@@ -235,9 +248,11 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
 
         stage_args = copy.copy(args)
         stage_args.stop_after = stage
+        if stage == "conversation_exports" and original_stop == "word_alignment":
+            stage_args.stop_after = "word_alignment"
         # Whether this batch goes on past this stage; a stage that hands the LLM
         # to the next one only keeps it when there is a next one.
-        stage_args.batch_continues = original_stop != stage
+        stage_args.batch_continues = stop_gate != stage
         # The final pass re-enters run() to restore checkpointed state before
         # export. Clip judging has no checkpoint, so mark this invocation to
         # prevent a second LLM judgement after its dedicated corpus-wide pass.
@@ -339,7 +354,7 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
                     label, __import__("time").time() - stage_started,
                     len(pending), sum(1 for path in pending if path in failures))
 
-        if stage is not None and original_stop == stage:
+        if stage is not None and stop_gate == stage:
             break
 
     # Safety net for a run that stops before the 'separation' stage (most
@@ -440,7 +455,7 @@ def _stage_parallelism(args, stage) -> int:
         # Files in flight keep every ASR model's queue fed while another file
         # waits for its slowest model (services/asr_scheduler.py).
         return max(1, int(stages["asr"].get("files_in_flight", 3)))
-    if stage == "speaker_relabel":
+    if stage in ("speaker_relabel", "transcript_review"):
         return max(1, int(stages.get("refinement", {}).get("relabel_files_in_flight", 1)))
     if stage == "diarization" and not getattr(args, "dia3", False):
         return max(1, min(2, int(

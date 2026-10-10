@@ -49,7 +49,7 @@ def test_the_prompt_says_to_take_durations_from_the_timestamps():
 def test_the_prompt_carries_three_worked_examples():
     examples = _examples(_prompt())
     assert len(examples) == 3
-    assert [len(lines) for lines, _ in examples] == [7, 7, 3]
+    assert [len(lines) for lines, _ in examples] == [8, 13, 3]
 
 
 def test_each_example_answer_covers_its_lines_exactly_and_is_valid_json_of_the_right_shape():
@@ -74,7 +74,7 @@ def test_the_durations_in_the_examples_match_their_timestamps():
 def test_the_second_example_isolates_a_single_line_and_the_third_rejects_a_monologue():
     (_, one), (_, two), (_, three) = _examples(_prompt())
     assert [(r["start_line"], r["end_line"], r["keep"]) for r in two] == [
-        (1, 3, True), (4, 4, False), (5, 7, True)]
+        (1, 6, True), (7, 7, False), (8, 13, True)]
     assert [r["keep"] for r in one] == [True] and [r["keep"] for r in three] == [False]
 
 

@@ -24,38 +24,40 @@ Audio is cut from the waveform the pipeline actually worked on -- music already
 stripped, cuts already made -- so timestamps line up with it, and an excerpt never
 holds a join (the finder does not let one in).
 
-Each excerpt gets a folder of its own, filed by quality, and everything in it is
-cut from the same samples so the files can be laid against one another:
+Each excerpt gets a folder of its own, filed by what happens in it (not by score),
+and everything in it is cut from the same samples so the files can be laid against
+one another. The roles are fixed per excerpt: the finder names the assistant (the
+one who follows and answers) and the other is the user; code checks that against
+how each behaves when interrupted (utils/conversation_events.py).
 
-  tier_1_overlap_good/ the two spoke at once and the separator pulled the voices
-                       apart cleanly: each ear holds one voice.
-  tier_2_S/            no overlap (or `overlap_first` off), filed by score:
-  tier_3_A/            S from 85, A from 70, B from 55, C from 40.
-  tier_4_B/
-  tier_6_overlap_bad/  the two spoke at once and the separation is not to be
-                       trusted (failed, low similarity, part left unseparated, or
-                       no separated tracks at all); conversation.json says why.
-                       Inside a folder the best score comes first.
-    conversation_1/
-      mixture.wav          mono, the recording of record: both voices as recorded.
-      speaker_A.wav        one channel, one person: A alone (the separated track).
-      speaker_B.wav        one channel, one person: B alone.
-      stereo_2ch.wav       A in the left ear, B in the right: exactly the two files
-                           above, sample for sample.
-      conversation.json    the transcript with times from the start of these files,
-                           who is who, scores, noise, the overlap, how each file was
-                           made, and the checks that were run on them.
-      transcript.txt       the same conversation, one line per turn.
+  full_duplex/interruption/  at least one interruption (listener cuts in, overlap >= 0.2 s).
+  full_duplex/backchannel/   at least two backchannels, no interruption.
+  half_duplex/               no overlap and no backchannel.
+  quarantine/                a full-duplex excerpt whose overlap the separator did not
+                             pull apart cleanly (conversation.json says why).
+  manifest.jsonl             one line per trainable excerpt written for this recording;
+  manifest_quarantine.jsonl  the quarantined ones, so a trainer reading the first never sees them.
+    <name>/                  <recording>_<start second>s
+      stereo_2ch.wav         assistant in the left ear (configurable), user in the right.
+      assistant.wav          the assistant alone (the separated track), mono.
+      user.wav               the user alone, mono.
+      mixture.wav            mono, the recording of record: both voices as recorded.
+      stereo_2ch.json        moshi-finetune alignments: the assistant's words only.
+      conversation.json      roles, events, tags, summary, quality, the transcript with
+                             times from the start of these files, and the checks run.
+      transcript.txt         the same conversation, one line per turn, events marked.
 
-The speaker files come from the separation stage's speaker tracks, so where the two
+The role files come from the separation stage's speaker tracks, so where the two
 spoke at once each is heard alone. A stretch whose separation failed is silent in
 both instead of carrying the other speaker's voice. Without those tracks (no
 separation output at hand, or a track that comes out silent) they fall back to
 gating the mixture -- each speaker heard only during their own turns, both voices
-in both ears where they overlap -- and conversation.json says which.
+in both ears where they overlap -- and conversation.json says which. Only half
+duplex excerpts are accepted from the fallback: a full-duplex excerpt needs the
+separated tracks wherever the voices overlap.
 
 After writing, every file is read back: same length, same rate, mono or stereo as
-named, and the two stereo channels equal to the two speaker files. The result and
+named, and the two stereo channels equal to the two role files. The result and
 a SHA-256 of each file go into conversation.json, so the alignment can be checked
 rather than trusted.
 """
@@ -68,19 +70,22 @@ import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from utils.conversation_events import (
+    INTERRUPTION_INTENTS, EventParams, analyze, categorize, decide_roles, event_counts,
+    label_events, tags_of)
 from utils.conversation_selection import (
-    TIERS, Candidate, ConversationSelectionConfig, ConversationSelectionFinder,
-    pick_non_overlapping, shortlist)
+    Candidate, ConversationSelectionConfig, ConversationSelectionFinder,
+    has_complete_word_alignment, pick_non_overlapping, review_flags_of, shortlist)
 from utils.llm_batches import ask_in_batches, reply_budget
 from utils.llm_json import clean_reply, is_cut_in_thought, is_readable, objects_in
 from utils.transcript_windows import line_number
 
 # Bump when the prompt or the acceptance rules change.
-CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v7-bounded-thinking"
+CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v9-fullduplex"
 
 _TEMPLATE_SLACK_TOKENS = 64
 
@@ -108,18 +113,32 @@ _EXAMPLE_TOPICS = {_topic_key(_EXAMPLE_GOOD["topic"]), _topic_key(_EXAMPLE_BAD["
 _FINDER_EXAMPLE_TOPICS = {_topic_key(t) for t in (
     "chuyện chạy bộ mỗi sáng", "khám sức khỏe định kỳ", "kể chuyện khởi nghiệp một chiều")}
 
+# Summaries of the worked examples in CONVERSATION_FINDER_SYSTEM_PROMPT. A kept region
+# whose summary is one of these was copied from the prompt, so it is stored as null.
+_FINDER_EXAMPLE_SUMMARIES = (
+    "Người hỏi mở chuyện chạy bộ buổi sáng, người đáp kể quen dần sau hai tuần. "
+    "Người hỏi cắt ngang để chuyển sang chuyện đau gối, người đáp giải thích cách khởi động "
+    "và đổi giày, rồi cuộc trò chuyện khép lại bằng lời cảm ơn.",
+    "Người hỏi nêu chuyện nhiều người ngại khám định kỳ, người đáp kể vì sao mình từng ngại, "
+    "đã thay đổi thế nào và khám sáu tháng một lần kèm xét nghiệm máu.",
+    "Người hỏi hỏi về chi phí và chuyện nên bắt đầu từ đâu, người đáp khuyên khám tổng quát "
+    "rồi giữ nhịp đều, và cả hai chốt rằng quan trọng là đi đều.",
+)
+_EXAMPLE_SUMMARY_KEYS = {_topic_key(t) for t in _FINDER_EXAMPLE_SUMMARIES}
+
 CONVERSATION_FINDER_SYSTEM_PROMPT = (
-    "Bạn là bộ PHÂN VÙNG + TÌM ĐOẠN hội thoại tiếng Việt để tạo dữ liệu huấn luyện full-duplex. "
+    "Bạn là bộ PHÂN VÙNG + TÌM ĐOẠN hội thoại tiếng Việt để tạo dữ liệu huấn luyện full-duplex: "
+    "một trợ lý (assistant) trò chuyện với một người dùng (user) và có thể nói chen, ngắt lời, đệm lời. "
     "Bạn nhận một cửa sổ dài của transcript sau diarization/ASR. Cửa sổ có thể có nhiều người nói.\n"
     "\n"
     "## NHIỆM VỤ BẮT BUỘC: PHỦ TOÀN BỘ CỬA SỔ\n"
-    "Hãy chia TOÀN BỘ các dòng 1..N thành các vùng liên tiếp theo mạch hội thoại/chủ đề, rồi quyết định keep=true/false cho từng vùng.\n"
+    "Hãy chia TOÀN BỘ các dòng 1..N thành các vùng liên tiếp theo mạch hội thoại, rồi quyết định keep=true/false cho từng vùng.\n"
     "- Mọi dòng từ 1 đến N phải xuất hiện trong đúng MỘT vùng.\n"
     "- Các vùng phải theo thứ tự, không chồng nhau, không để hở: vùng đầu start_line=1; vùng sau bắt đầu ngay sau vùng trước; "
     "vùng cuối end_line=N.\n"
     "- KHÔNG được trả [] khi cửa sổ có dòng. Nếu không có đoạn nào đáng giữ, vẫn phải chia vùng và đặt keep=false kèm lý do.\n"
-    "- Không chia vụn từng segment. Hãy chia theo chủ đề/mạch hội thoại và cố gắng tạo vùng có kích thước hữu ích.\n"
-    "- Nếu một vùng dài hơn {max_seconds}s hoặc đổi chủ đề rõ ràng, hãy tách thành nhiều vùng. Nếu các ý liền nhau và cùng mạch, "
+    "- Không chia vụn từng segment. Hãy chia theo mạch hội thoại và cố gắng tạo vùng có kích thước hữu ích.\n"
+    "- Nếu một vùng dài hơn {max_seconds}s hoặc mạch hội thoại đứt, hãy tách thành nhiều vùng. Nếu các ý liền nhau và cùng mạch, "
     "có thể gộp để đạt khoảng {min_seconds}-{max_seconds}s.\n"
     "\n"
     "## DỮ LIỆU MỖI DÒNG\n"
@@ -137,15 +156,19 @@ CONVERSATION_FINDER_SYSTEM_PROMPT = (
     "Validator sau bạn tự đo lại các chỉ số này (noise <= {noise_max}, ns <= {noise_speech_max}, ne <= {noise_env_max}, "
     "nr <= {noise_room_max}, music <= {music_patched_max}, noisy < {noisy_share_max}, run < {noisy_run_seconds}s). "
     "Bạn KHÔNG tính lại từng dòng: chỉ tránh những dòng có chỉ số rõ ràng vượt xa ngưỡng.\n"
-    "có thể mỗi dòng có từ không hợp lý, đó là dấu hiệu của label speaker sai cần loại bỏ segment đó, chọn conversation lại sao cho hợp lý hơn ví dụ. 'My là một người rất điềm tĩnh đúng rồi và cẩn thận khi đó vô tình mình đi phải...' vậy chữ đúng rồi ở đây khả năng là backchannel của spk khác nên rất có thể câu này không tách được backchannel, cần dựa vào các câu trước và sau đấy để cho phán đoán chuẩn hơn, câu nào khả năng các từ trong câu không thuộc về spk đó thì phải bỏ"
+    "- review: cờ từ bước rà soát transcript. Dòng không có review= là sạch. speaker_turn / asr_hallucination / asr_garbage là cờ CỨNG "
+    "(cả dòng thuộc người kia, hoặc ASR bịa/vô nghĩa); speaker_phrase:\"...\" là cờ MỀM (cụm từ trong dòng có thể là backchannel của người kia).\n"
+    "Dòng có cờ CỨNG phải nằm NGOÀI mọi vùng keep=true: đặt biên vùng quanh chúng (tách vùng tại dòng đó). "
+    "Dòng có cờ MỀM vẫn được phép nằm trong vùng keep=true nhưng làm vùng kém chất lượng hơn, nên tránh nếu có cách đặt biên tốt hơn.\n"
     "\n"
     "## CÁCH SUY NGHĨ (vừa đủ, ngắn gọn)\n"
     "Suy nghĩ ngắn theo đúng 3 bước, rồi trả JSON. KHÔNG chép lại hay đọc lại từng dòng của cửa sổ.\n"
-    "1. Tìm ĐIỂM NGẮT, chỉ ghi số dòng: đổi chủ đề, seam_before=1, người thứ ba xuất hiện, một dòng xấu chen giữa, "
-    "intro/outro/quảng cáo, đoạn độc thoại dài.\n"
+    "1. Tìm ĐIỂM NGẮT, chỉ ghi số dòng: seam_before=1, người thứ ba xuất hiện, cờ CỨNG, intro/outro/quảng cáo, "
+    "đoạn độc thoại dài, chỗ mạch hội thoại đứt (không ai đáp lại, hai đoạn không liên quan bị ghép).\n"
     "2. Với mỗi vùng giữa hai điểm ngắt, tính thời lượng = end của dòng cuối trừ start của dòng đầu, "
     "và đếm số người nói. Chỉ kiểm tra kỹ những vùng có vẻ giữ được; vùng rõ ràng bỏ thì ghi một dòng lý do.\n"
-    "3. Quyết định keep và self_contained MỘT lần cho mỗi vùng, kiểm tra cả câu mỗi vùng để tránh label sai, rồi viết JSON. Không quay lại xét lại vùng đã chốt.\n"
+    "3. Quyết định keep, self_contained, vai (assistant), các dòng ngắt lời MỘT lần cho mỗi vùng, rồi viết JSON. "
+    "Không quay lại xét lại vùng đã chốt.\n"
     "Khi vùng ở gần ngưỡng hoặc phân vân: nghiêng về keep=true nếu đúng hai người và đủ dài, vì validator sẽ kiểm tra lại. "
     "Đừng tốn suy nghĩ vào transcript sai vài từ, nhãn A/B/C hay số thông số nhỏ lệch.\n"
     "\n"
@@ -157,88 +180,122 @@ CONVERSATION_FINDER_SYSTEM_PROMPT = (
     "## KHI NÀO keep=true\n"
     "Đặt keep=true khi vùng có TIỀM NĂNG làm một mẫu hội thoại tốt. Validator phía sau sẽ kiểm tra lại bằng số liệu, "
     "vì vậy đừng quá bảo thủ chỉ vì noise/music hơi xấu hoặc một chỉ số gần ngưỡng.\n"
-    "Một vùng keep=true nên:\n"
-    "- dài khoảng {min_seconds}-{max_seconds} giây;\n"
-    "- từ start_line đến end_line chỉ có đúng HAI người nói;\n"
-    "- mỗi người có ít nhất {min_turns_each} lượt nói thật;\n"
-    "- mở đầu/kết thúc tự nhiên, nghe độc lập vẫn hiểu;\n"
-    "- có một chủ đề/câu chuyện tương đối liền mạch và có nội dung thực;\n"
-    "- ưu tiên tương tác full-duplex: nhiều lượt đổi người, hỏi-đáp, backchannel hoặc overlap tự nhiên, nhưng không bắt buộc phải có overlap.\n"
+    "Một vùng keep=true phải:\n"
+    "- có đúng HAI người nói từ start_line đến end_line, mỗi người ít nhất {min_turns_each} lượt nói thật;\n"
+    "- có DÒNG CHẢY hội thoại liên tục: mỗi lượt đáp lại lượt trước, người kia theo mạch chứ không nói chuyện riêng;\n"
+    "- nghe độc lập vẫn hiểu: không bắt đầu giữa một ý đang dở, kết thúc bằng một ý trọn hoặc một cặp hỏi-đáp trọn;\n"
+    "- có nội dung thật (kiến thức, câu chuyện, trao đổi), không phải chào hỏi, quảng cáo, đọc kịch bản, intro/outro;\n"
+    "- là tiếng Việt (chen vài từ tiếng Anh thì được);\n"
+    "- dài khoảng {min_seconds}-{max_seconds} giây, tính từ mốc thời gian.\n"
+    "Ưu tiên vùng có tương tác full-duplex (ngắt lời, đệm lời ừ/dạ, nói chồng tự nhiên) nhưng không bắt buộc.\n"
+    "\n"
+    "## ĐỔI CHỦ ĐỀ VÀ NGẮT LỜI\n"
+    "- Đổi chủ đề ĐƯỢC PHÉP khi một người chủ động đổi (ngắt lời, hỏi chuyện khác, phản đối) VÀ người kia theo sang chủ đề mới.\n"
+    "- Phải tách vùng hoặc bỏ khi đổi chủ đề do seam, music, hai đoạn không liên quan bị ghép lại, hoặc không ai phản ứng.\n"
+    "- KHÔNG đặt biên vùng ngay tại chỗ ngắt lời: giữ ít nhất {context_turns} lượt trước và {context_turns} lượt sau chỗ ngắt lời trong cùng vùng.\n"
+    "- Bắt buộc tách vùng tại: seam_before=1 / seam_inside=1 (seam_inside không được nằm trong vùng keep=true), "
+    "người thứ ba (tách tại đó hoặc co biên để cứu phần hai người), dòng có cờ CỨNG (dòng đó nằm ngoài vùng giữ), "
+    "quảng cáo/intro/outro, đoạn độc thoại dài không ai đáp. Dòng có cờ MỀM speaker_phrase được phép nằm trong vùng.\n"
+    "- Vài dòng noise/music xấu nằm giữa: tách quanh chúng khi vẫn giữ được mạch; nếu không thì keep=false vùng đó. "
+    "Khoảng im lặng vài giây không tự làm hỏng hội thoại nếu nội dung vẫn cùng mạch. Transcript sai vài từ thì không loại.\n"
     "\n"
     "## KHI NÀO keep=false\n"
     "Đặt keep=false khi vùng chỉ là cầu nối/intro/outro/quảng cáo, quá ngắn, quá dài không thể chia hợp lý, một người nói gần như độc thoại, "
-    "nội dung bị cụt, có hơn hai người không thể tránh bằng đổi biên, không phải hội thoại tiếng Việt (xem mục NGÔN NGỮ), "
+    "mạch hội thoại đứt hoặc cụt, có hơn hai người không thể tránh bằng đổi biên, không phải hội thoại tiếng Việt, "
     "hoặc chất lượng kỹ thuật rõ ràng quá xấu. "
     "reason phải nói NGẮN GỌN nguyên nhân chính để người vận hành debug được.\n"
+    "Nếu một vùng nói gần như toàn bộ bằng tiếng Anh hoặc ngôn ngữ khác, reason ghi \"không phải hội thoại tiếng Việt\".\n"
     "\n"
-    "## NGÔN NGỮ\n"
-    "Đoạn phải là hội thoại TIẾNG VIỆT. Chen một vài từ, cụm từ tiếng Anh (tên riêng, thuật ngữ chuyên ngành, từ mượn thông dụng) "
-    "giữa câu tiếng Việt là bình thường, không bị trừ điểm.\n"
-    "Nhưng nếu một vùng nói gần như toàn bộ bằng tiếng Anh hoặc một ngôn ngữ khác, hoặc chứa quá nhiều từ/câu ngoại ngữ liên tiếp "
-    "khiến nó nghe giống một cuộc hội thoại bằng tiếng khác hơn là tiếng Việt có chen từ mượn, đặt keep=false, "
-    "reason ghi \"không phải hội thoại tiếng Việt\".\n"
-    "\n"
-    "## CÁCH XỬ LÝ SEAM / NGƯỜI THỨ BA / ĐOẠN XẤU\n"
-    "- seam_inside=1: không được để keep=true chứa segment đó.\n"
-    "- seam_before=1: coi đó là biên rất mạnh; ưu tiên kết thúc vùng trước và bắt đầu vùng mới tại dòng đó.\n"
-    "- Nếu xuất hiện người thứ ba, hãy tách vùng tại đó hoặc co biên để cứu phần hai người ở trước/sau; đừng bỏ cả khoảng dài nếu còn phần tốt.\n"
-    "- Nếu vài dòng noise/music xấu nằm giữa, tách quanh chúng khi điều đó vẫn giữ được mạch nghĩa; nếu không thì keep=false vùng đó.\n"
-    "- Khoảng im lặng vài giây không tự động làm hỏng hội thoại nếu nội dung vẫn cùng mạch.\n"
-    "- Transcript có thể sai vài từ; đừng loại chỉ vì lỗi ASR nhỏ.\n"
-    "\n"
-    "## self_contained\n"
-    "5 = xuất sắc, mở và kết rất tự nhiên, chủ đề rõ và hoàn chỉnh. Chỉ dùng 5 khi thực sự nổi bật.\n"
+    "## self_contained (chấm dòng chảy hội thoại, KHÔNG phải 'chỉ một chủ đề')\n"
+    "5 = mở và kết rất tự nhiên, dòng chảy rõ, nội dung thật. Chỉ dùng 5 khi thực sự nổi bật.\n"
     "4 = tốt, dùng được, có thể hơi thừa/thiếu nhẹ ở biên. Đây thường là mức của một đoạn tốt.\n"
     "3 = theo dõi được nhưng còn cụt/mơ hồ hoặc biên chưa đẹp.\n"
-    "1-2 = không phù hợp khi tách riêng.\n"
+    "1-2 = không dùng được riêng, hoặc không phải tiếng Việt.\n"
     "keep=true chỉ khi self_contained >= {min_semantic}. keep=false vẫn phải chấm self_contained để debug.\n"
+    "\n"
+    "## VAI (chỉ cho vùng keep=true)\n"
+    "- user = người DẪN: mở chủ đề, hỏi, yêu cầu, chuyển hướng.\n"
+    "- assistant = người THEO và ĐÁP: trả lời, giải thích, xác nhận, đệm lời khi nghe, nhường lời khi bị ngắt.\n"
+    "- KHÔNG xét theo thời gian nói: assistant có thể nói ít hơn. Nếu hai người hỏi và đáp ngang nhau thì role_conf thấp.\n"
+    "- assistant là nhãn người nói ('A', 'B', ...) đúng như trong cửa sổ này. role_conf từ 0 đến 1. "
+    "role_why tối đa 20 từ.\n"
+    "\n"
+    "## NGẮT LỜI (chỉ cho vùng keep=true)\n"
+    "interruptions là các dòng mà một người nói chen vào ngắt lời người kia (không tính đệm lời ngắn như ừ/dạ). "
+    "Mỗi phần tử {\"line\": số dòng của câu ngắt lời, \"intent\": ...} với intent là một trong "
+    "topic_shift (chuyển chủ đề), clarify (hỏi lại/làm rõ), disagree (phản đối), complete (nói tiếp/hoàn thành ý người kia). "
+    "Thời điểm và việc người kia có nhường lời hay không do code đo, bạn KHÔNG ghi. Không có thì để [].\n"
+    "\n"
+    "## summary (chỉ cho vùng keep=true)\n"
+    "1-3 câu tiếng Việt, tối đa khoảng 50 từ: hai người nói về gì, diễn biến ra sao (ai ngắt lời, rẽ ở đâu), kết thúc thế nào. "
+    "Gọi theo vai (\"người hỏi\"/\"người đáp\"), không đoán tên hay giới tính, không thêm gì ngoài transcript.\n"
     "\n"
     "## VÍ DỤ (chỉ minh họa cách quyết định; KHÔNG sao chép nội dung hay chủ đề vào câu trả lời)\n"
     "Các dòng dưới đây bớt thông số cho gọn; cửa sổ thật có đủ thông số.\n"
     "\n"
-    "Ví dụ 1 - hội thoại liền mạch, thời lượng tính từ mốc thời gian:\n"
-    "[1] 0:00-0:12 (d=12.0s) A {gap=0.0s ov=0.00s flags=-}: dạo này bạn chạy bộ buổi sáng hay buổi tối\n"
-    "[2] 0:13-0:24 (d=11.0s) B {gap=0.6s ov=0.00s flags=-}: mình chạy sáng, năm rưỡi dậy, ban đầu khổ lắm\n"
-    "[3] 0:24-0:26 (d=1.6s) A {gap=-0.2s ov=0.40s flags=-}: ừm ừm\n"
-    "[4] 0:26-0:52 (d=26.0s) B {gap=0.1s ov=0.00s flags=-}: nhưng hai tuần là quen, giờ không chạy là thấy thiếu\n"
-    "[5] 0:53-1:10 (d=17.0s) A {gap=0.9s ov=0.00s flags=-}: còn chuyện đau gối thì sao\n"
-    "[6] 1:11-1:34 (d=23.0s) B {gap=0.7s ov=0.00s flags=-}: mình khởi động kỹ và đổi giày, đỡ hẳn\n"
-    "[7] 1:35-1:42 (d=7.0s) A {gap=0.6s ov=0.00s flags=-}: hay quá, cảm ơn bạn nhé\n"
-    "-> [{\"start_line\": 1, \"end_line\": 7, \"keep\": true, \"self_contained\": 4, \"topic\": \"chuyện chạy bộ mỗi sáng\", "
-    "\"reason\": \"hỏi đáp liền mạch, có backchannel, hai người, dài 102s\"}]\n"
-    "(102s = 1:42 trừ 0:00, không phải số dòng nhân vài giây.)\n"
+    "Ví dụ 1 - hội thoại liền mạch, có đệm lời và một lần ngắt lời; mỗi người có từ 3 lượt thật trở lên; thời lượng tính từ mốc thời gian:\n"
+    "[1] 0:00-0:09 (d=9.0s) A {gap=0.0s ov=0.00s flags=-}: dạo này bạn chạy bộ buổi sáng hay buổi tối\n"
+    "[2] 0:10-0:24 (d=14.0s) B {gap=1.0s ov=0.00s flags=-}: mình chạy sáng, năm rưỡi dậy, ban đầu khổ lắm\n"
+    "[3] 0:22-0:23 (d=0.8s) A {gap=-2.0s ov=0.80s flags=-}: ừ\n"
+    "[4] 0:25-0:34 (d=9.0s) A {gap=2.0s ov=0.00s flags=-}: vậy mất bao lâu thì bạn quen\n"
+    "[5] 0:35-0:50 (d=15.0s) B {gap=1.0s ov=0.00s flags=-}: hai tuần là quen, giờ không chạy là thấy thiếu\n"
+    "[6] 0:49-1:05 (d=16.0s) A {gap=-1.0s ov=1.00s flags=-}: còn chuyện đau gối thì sao\n"
+    "[7] 1:06-1:25 (d=19.0s) B {gap=1.0s ov=0.00s flags=-}: mình khởi động kỹ và đổi giày, đỡ hẳn\n"
+    "[8] 1:26-1:34 (d=8.0s) A {gap=1.0s ov=0.00s flags=-}: hay quá, cảm ơn bạn nhé\n"
+    "-> [{\"start_line\": 1, \"end_line\": 8, \"keep\": true, \"self_contained\": 4, \"topic\": \"chuyện chạy bộ mỗi sáng\", "
+    "\"reason\": \"hỏi đáp liền mạch, có đệm lời, hai người, dài 94s\", "
+    "\"assistant\": \"B\", \"role_conf\": 0.9, \"role_why\": \"A hỏi và chuyển hướng, B đáp và giải thích\", "
+    "\"interruptions\": [{\"line\": 6, \"intent\": \"topic_shift\"}], "
+    "\"summary\": \"" + _FINDER_EXAMPLE_SUMMARIES[0] + "\"}]\n"
+    "(94s = 1:34 trừ 0:00, không phải số dòng nhân vài giây. Dòng 6 ngắt lời dòng 5 để đổi sang chuyện khác và B theo sang. "
+    "Dòng 3 chỉ 0.8s và là từ đệm \"ừ\" nên là đệm lời, không phải lượt nói và không ghi vào interruptions. "
+    "A có 4 lượt, B có 3 lượt; vùng mở bằng câu hỏi và kết bằng lời chốt.)\n"
     "\n"
-    "Ví dụ 2 - một dòng xấu giữa mạch: tách riêng dòng đó, giữ hai phần tốt hai bên:\n"
-    "[1] 0:00-0:16 (d=16.0s) A {gap=0.0s ov=0.00s flags=-}: nhiều người ngại đi khám định kỳ, bạn nghĩ sao\n"
-    "[2] 0:17-0:35 (d=18.0s) B {gap=0.8s ov=0.00s flags=-}: mình từng ngại, đến khi ba mình phát hiện bệnh muộn\n"
-    "[3] 0:36-0:58 (d=22.0s) A {gap=0.7s ov=0.00s flags=-}: vậy bạn khám mấy tháng một lần\n"
-    "[4] 0:58-1:03 (d=5.0s) B {gap=0.1s ov=0.00s flags=-}: hãy đăng ký cho kênh để không bỏ lỡ những video hấp dẫn\n"
-    "[5] 1:04-1:30 (d=26.0s) B {gap=0.8s ov=0.00s flags=-}: sáu tháng một lần, kèm xét nghiệm máu cơ bản\n"
-    "[6] 1:31-1:49 (d=18.0s) A {gap=0.8s ov=0.00s flags=-}: nghe có vẻ đơn giản hơn mình tưởng\n"
-    "[7] 1:50-2:14 (d=24.0s) B {gap=0.6s ov=0.00s flags=-}: đúng, quan trọng là đi đều\n"
-    "-> [{\"start_line\": 1, \"end_line\": 3, \"keep\": true, \"self_contained\": 4, \"topic\": \"khám sức khỏe định kỳ\", "
-    "\"reason\": \"hỏi đáp mạch lạc, hai người\"}, "
-    "{\"start_line\": 4, \"end_line\": 4, \"keep\": false, \"self_contained\": 1, \"topic\": \"lời kêu gọi đăng ký kênh\", "
+    "Ví dụ 2 - một dòng xấu giữa mạch: tách riêng dòng đó, giữ hai phần tốt hai bên (mỗi phần mở bằng câu hỏi, kết bằng câu đáp, mỗi người 3 lượt):\n"
+    "[1] 0:00-0:12 (d=12.0s) A {gap=0.0s ov=0.00s flags=-}: nhiều người ngại đi khám định kỳ, bạn nghĩ sao\n"
+    "[2] 0:13-0:30 (d=17.0s) B {gap=1.0s ov=0.00s flags=-}: mình từng ngại, đến khi ba mình phát hiện bệnh muộn\n"
+    "[3] 0:31-0:40 (d=9.0s) A {gap=1.0s ov=0.00s flags=-}: vậy sau đó bạn thay đổi thế nào\n"
+    "[4] 0:41-0:58 (d=17.0s) B {gap=1.0s ov=0.00s flags=-}: mình đặt lịch khám đều và rủ cả nhà đi cùng\n"
+    "[5] 0:59-1:07 (d=8.0s) A {gap=1.0s ov=0.00s flags=-}: bạn khám mấy tháng một lần\n"
+    "[6] 1:08-1:26 (d=18.0s) B {gap=1.0s ov=0.00s flags=-}: sáu tháng một lần, kèm xét nghiệm máu cơ bản\n"
+    "[7] 1:26-1:31 (d=5.0s) B {gap=0.1s ov=0.00s flags=-}: hãy đăng ký cho kênh để không bỏ lỡ những video hấp dẫn\n"
+    "[8] 1:32-1:44 (d=12.0s) A {gap=1.0s ov=0.00s flags=-}: còn chi phí khám thì có đắt không\n"
+    "[9] 1:45-2:02 (d=17.0s) B {gap=1.0s ov=0.00s flags=-}: gói cơ bản không đắt, có bảo hiểm thì rẻ hơn nhiều\n"
+    "[10] 2:03-2:11 (d=8.0s) A {gap=1.0s ov=0.00s flags=-}: bạn có khuyên người ngại nên bắt đầu từ đâu không\n"
+    "[11] 2:12-2:30 (d=18.0s) B {gap=1.0s ov=0.00s flags=-}: bắt đầu bằng một lần khám tổng quát, rồi giữ nhịp đều\n"
+    "[12] 2:31-2:39 (d=8.0s) A {gap=1.0s ov=0.00s flags=-}: nghe có vẻ đơn giản hơn mình tưởng\n"
+    "[13] 2:40-2:58 (d=18.0s) B {gap=1.0s ov=0.00s flags=-}: đúng, quan trọng là đi đều\n"
+    "-> [{\"start_line\": 1, \"end_line\": 6, \"keep\": true, \"self_contained\": 4, \"topic\": \"khám sức khỏe định kỳ\", "
+    "\"reason\": \"hỏi đáp mạch lạc, hai người, kết bằng câu đáp\", "
+    "\"assistant\": \"B\", \"role_conf\": 0.85, \"role_why\": \"A hỏi dẫn dắt, B kể và đáp\", "
+    "\"interruptions\": [], \"summary\": \"" + _FINDER_EXAMPLE_SUMMARIES[1] + "\"}, "
+    "{\"start_line\": 7, \"end_line\": 7, \"keep\": false, \"self_contained\": 1, \"topic\": \"lời kêu gọi đăng ký kênh\", "
     "\"reason\": \"câu quảng cáo chen giữa mạch, có thể là ảo giác ASR\"}, "
-    "{\"start_line\": 5, \"end_line\": 7, \"keep\": true, \"self_contained\": 4, \"topic\": \"khám sức khỏe định kỳ\", "
-    "\"reason\": \"tiếp mạch câu trả lời, hai người\"}]\n"
-    "(Vùng chỉ có MỘT dòng được phép; mỗi vùng còn lại phải đủ dài để dùng.)\n"
+    "{\"start_line\": 8, \"end_line\": 13, \"keep\": true, \"self_contained\": 4, \"topic\": \"khám sức khỏe định kỳ\", "
+    "\"reason\": \"mở bằng câu hỏi mới, hai người, mỗi người 3 lượt\", "
+    "\"assistant\": \"B\", \"role_conf\": 0.8, \"role_why\": \"B đáp câu hỏi, A phản hồi\", "
+    "\"interruptions\": [], \"summary\": \"" + _FINDER_EXAMPLE_SUMMARIES[2] + "\"}]\n"
+    "(Vùng chỉ có MỘT dòng được phép; mỗi vùng còn lại phải đủ dài và đủ lượt để dùng: 86s, 3 lượt mỗi người.)\n"
     "\n"
     "Ví dụ 3 - một người nói gần hết thời lượng thì keep=false:\n"
     "[1] 0:00-0:07 (d=7.0s) A {gap=0.0s ov=0.00s flags=-}: mời anh chia sẻ về hành trình của mình\n"
     "[2] 0:08-1:21 (d=73.0s) B {gap=0.7s ov=0.00s flags=-}: hồi đó tôi bỏ việc, đi vay vốn, rồi thất bại ba lần liền...\n"
-    "[3] 1:22-1:26 (d=4.0s) A {gap=0.7s ov=0.00s flags=-}: dạ vâng\n"
+    "[3] 1:22-1:23 (d=0.9s) A {gap=0.7s ov=0.00s flags=-}: dạ vâng\n"
     "-> [{\"start_line\": 1, \"end_line\": 3, \"keep\": false, \"self_contained\": 3, \"topic\": \"kể chuyện khởi nghiệp một chiều\", "
-    "\"reason\": \"B nói 73s trên 84s, gần như độc thoại\"}]\n"
+    "\"reason\": \"B nói 73s trên 83s, gần như độc thoại\"}]\n"
     "\n"
     "## ĐẦU RA\n"
-    "Chỉ trả MỘT JSON ARRAY, không markdown, không giải thích ngoài JSON. Mỗi phần tử đúng 6 khóa:\n"
+    "Chỉ trả MỘT JSON ARRAY, không markdown, không giải thích ngoài JSON. Mọi vùng có 6 khóa:\n"
     "start_line, end_line, keep, self_contained, topic, reason.\n"
+    "Vùng keep=true thêm 5 khóa: assistant, role_conf, role_why, interruptions, summary.\n"
     "- start_line/end_line: số dòng trong cửa sổ hiện tại.\n"
     "- keep: boolean JSON true/false, không dùng chuỗi.\n"
     "- self_contained: số nguyên 1..5.\n"
     "- topic: tối đa 10 từ.\n"
     "- reason: tối đa 20 từ, nêu lý do GIỮ hoặc LOẠI.\n"
+    "- assistant: \"A\"/\"B\"/... (nhãn người nói trong cửa sổ); role_conf: số 0..1; role_why: tối đa 20 từ.\n"
+    "- interruptions: mảng {\"line\": int, \"intent\": \"topic_shift|clarify|disagree|complete\"}, dòng nằm trong vùng.\n"
+    "- summary: 1-3 câu tiếng Việt, tối đa khoảng 50 từ.\n"
     "- Các vùng phải phủ đủ 1..N như quy tắc ở trên.\n"
     "- Tối đa {max_proposals} vùng; nếu cần, gộp các vùng keep=false liền nhau có cùng lý do để vẫn phủ đủ cửa sổ."
 )
@@ -426,6 +483,9 @@ def parse_finder_reply(raw: Optional[str]) -> List[dict]:
         if score is not None and not 1 <= score <= 5:
             score = None
 
+        # Older cached replies have none of the role fields: they parse as "unknown".
+        letter = str(obj.get("assistant") or "").strip().upper()
+        interruptions, dropped = _clean_interruptions(obj.get("interruptions"), start, end)
         out.append({
             "start_line": start,
             "end_line": end,
@@ -434,8 +494,67 @@ def parse_finder_reply(raw: Optional[str]) -> List[dict]:
             "self_contained": score,
             "topic": str(obj.get("topic") or "").strip()[:120],
             "reason": str(obj.get("reason") or "").strip()[:240],
+            "assistant": letter if re.fullmatch(r"[A-Z]|S\d{1,2}", letter) else None,
+            "role_conf": _clean_role_conf(obj.get("role_conf")),
+            "role_why": str(obj.get("role_why") or "").strip()[:240],
+            "interruptions": interruptions,
+            "interruptions_dropped": dropped,
+            "summary": _clean_summary(obj.get("summary")),
         })
     return out
+
+
+SUMMARY_MAX_WORDS = 60
+
+
+def _clean_summary(value) -> Optional[str]:
+    """The finder's summary, cut at the last sentence end within ~60 words; None if empty or copied."""
+    text = " ".join(str(value or "").split())
+    if not text or text.lower() in ("null", "none") or _topic_key(text) in _EXAMPLE_SUMMARY_KEYS:
+        return None
+    words = text.split()
+    if len(words) > SUMMARY_MAX_WORDS:
+        head = " ".join(words[:SUMMARY_MAX_WORDS])
+        ends = [m.end() for m in re.finditer(r"[.!?…](?=\s|$)", head)]
+        text = head[:ends[-1]] if ends else head + "…"
+    return text
+
+
+def _clean_role_conf(value) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
+    try:
+        conf = float(value)
+    except (TypeError, ValueError):
+        return None
+    if conf != conf:
+        return None
+    if 1.0 < conf <= 100.0:
+        conf /= 100.0                    # "85" means 85 %
+    return round(conf, 3) if 0.0 <= conf <= 1.0 else None
+
+
+def _clean_interruptions(value, start: int, end: int) -> Tuple[List[dict], Dict[str, int]]:
+    """(kept entries, dropped counts by reason): lines outside the region or odd intents go."""
+    kept: List[dict] = []
+    dropped: Dict[str, int] = {}
+
+    def drop(reason: str):
+        dropped[reason] = dropped.get(reason, 0) + 1
+
+    for item in value if isinstance(value, list) else []:
+        if not isinstance(item, dict):
+            drop("bad_entry")
+            continue
+        line = line_number(item.get("line"))
+        intent = str(item.get("intent") or "").strip().lower()
+        if line is None or not start <= line <= end:
+            drop("outside_region")
+        elif intent not in INTERRUPTION_INTENTS:
+            drop("unknown_intent")
+        elif all(k["line"] != line for k in kept):
+            kept.append({"line": line, "intent": intent})
+    return kept, dropped
 
 
 def _ranges_where(counts: List[int], predicate) -> List[List[int]]:
@@ -489,24 +608,23 @@ def coverage_of_regions(regions: List[dict], line_count: int) -> dict:
 # Writing audio
 # ---------------------------------------------------------------------------
 
-# The files of one conversation folder.
+# The files of one excerpt folder.
 MIXTURE_FILE = "mixture.wav"
-SPEAKER_FILES = {"A": "speaker_A.wav", "B": "speaker_B.wav"}
+ASSISTANT_FILE = "assistant.wav"
+USER_FILE = "user.wav"
 STEREO_FILE = "stereo_2ch.wav"
+ALIGNMENTS_FILE = "stereo_2ch.json"      # moshi-finetune: assistant words, next to the wav
 JSON_FILE = "conversation.json"
 TEXT_FILE = "transcript.txt"
+MANIFEST_FILE = "manifest.jsonl"
+QUARANTINE_MANIFEST_FILE = "manifest_quarantine.jsonl"   # kept apart: never train on these
 
-
-OVERLAP_GOOD = "overlap_good"
-OVERLAP_BAD = "overlap_bad"
-# Best folder first: the clean overlaps, then the tiers by score, then the doubtful overlaps.
-FOLDER_ORDER = (OVERLAP_GOOD,) + tuple(name for _floor, name in TIERS) + (OVERLAP_BAD,)
-
-
-def tier_folder(tier: str) -> str:
-    """`tier_2_S`: numbered, so the best folder sorts first in any file browser."""
-    rank = FOLDER_ORDER.index(tier) + 1 if tier in FOLDER_ORDER else len(FOLDER_ORDER) + 1
-    return f"tier_{rank}_{tier}"
+# Filed by what happens in the conversation, not by score.
+CATEGORIES = ("full_duplex/interruption", "full_duplex/backchannel", "half_duplex")
+QUARANTINE = "quarantine"
+FOLDER_ORDER = CATEGORIES + (QUARANTINE,)
+# Folders `_clear_previous` removes: ours, and the score tiers older runs wrote.
+_OWN_ROOTS = ("full_duplex", "half_duplex", QUARANTINE)
 
 
 def _merge(spans):
@@ -708,6 +826,24 @@ class ConversationExportRun:
 
 
 @dataclass
+class ConversationSelection:
+    """What `select` decided: nothing is written until `write`."""
+    finder: Any
+    judged: List["_Judged"] = field(default_factory=list)
+    kept: Dict[int, "_Judged"] = field(default_factory=dict)   # id(candidate) -> verdict
+    final: List[Candidate] = field(default_factory=list)       # non-overlapping, to export
+    report: dict = field(default_factory=dict)
+
+    def segments_to_align(self) -> list:
+        """Unique segments of every selected excerpt, in timeline order."""
+        segs = self.finder.segs
+        wanted = set()
+        for cand in self.final:
+            wanted.update(range(cand.first, cand.last + 1))
+        return [segs[pos] for pos in sorted(wanted)]
+
+
+@dataclass
 class _Judged:
     original: Candidate
     candidate: Optional[Candidate] = None     # None when rejected
@@ -717,6 +853,12 @@ class _Judged:
     reason: Optional[str] = None              # why it was rejected
     why: str = ""                             # the model's own reason for its score
     trim_ignored: Optional[str] = None        # a trim that could not be honoured, and why
+    # What the finder says about roles and events; none of it is trusted blindly.
+    assistant: Optional[str] = None           # speaker id of the assistant, if it named one
+    role_conf: Optional[float] = None
+    role_why: str = ""
+    interruptions: Dict[str, str] = field(default_factory=dict)   # segment index -> intent
+    summary: Optional[str] = None
 
 
 @dataclass
@@ -725,8 +867,8 @@ class _Render:
     lo: int                                   # first sample in the pipeline's waveform
     hi: int
     mixture: np.ndarray
-    left: Optional[np.ndarray] = None         # speaker A alone
-    right: Optional[np.ndarray] = None        # speaker B alone
+    left: Optional[np.ndarray] = None         # the track of cand.speakers[0]
+    right: Optional[np.ndarray] = None        # the track of cand.speakers[1]
     method: Optional[str] = None              # how left/right were made
 
 
@@ -736,10 +878,15 @@ class _Plan:
     cand: Candidate
     item: _Judged
     method: Optional[str]
-    overlaps: List[tuple]                     # (start, end) in the pipeline's clock
+    overlaps: List[tuple]                     # where the voices overlap, in the pipeline's clock
     overlap_seconds: float
-    tier: str                                 # the folder it goes in
-    overlap_quality: Optional[str] = None     # "good" / "bad" when there is an overlap
+    category: Optional[str]                   # the folder: a category or QUARANTINE
+    intended: Optional[str] = None            # the category the events earned
+    skip: Optional[str] = None                # why it is not exported at all
+    analysis: Any = None                      # utils.conversation_events.Analysis
+    roles: Any = None                         # utils.conversation_events.RoleResult
+    gate: str = "not_applicable"              # separation gate: "applied" | "no_overlap" | "not_applicable"
+    overlap_quality: Optional[str] = None     # "good" / "bad" when voices overlap
     overlap_reasons: List[str] = field(default_factory=list)   # why "bad"
     separated_share: Optional[float] = None   # share of the overlap the separator covered
     min_similarity: Optional[float] = None    # the weakest separated span in the overlap
@@ -772,6 +919,7 @@ class ConversationExportService:
         # arrays either way; off keeps the earlier behaviour.
         self.reuse_render = bool(reuse_render)
         self.cfg = ConversationSelectionConfig.from_settings(settings)
+        self.events = EventParams.from_config(self.cfg)
         # A finder reply can contain many candidates, so never use the tiny budget
         # that was sufficient for the old one-candidate semantic judge.
         self.max_new_tokens = reply_budget(max(1536, self.cfg.max_new_tokens), self.cfg.thinking)
@@ -791,6 +939,7 @@ class ConversationExportService:
                   .replace("{min_seconds}", f"{self.cfg.min_seconds:g}")
                   .replace("{max_seconds}", f"{self.cfg.max_seconds:g}")
                   .replace("{min_turns_each}", str(self.cfg.min_turns_each))
+                  .replace("{context_turns}", str(self.cfg.context_turns_around_interruption))
                   .replace("{min_semantic}", str(self.cfg.min_semantic))
                   .replace("{max_proposals}", str(self.cfg.finder_max_proposals_per_window)))
         for key, value in limits.items():
@@ -823,6 +972,21 @@ class ConversationExportService:
         except (TypeError, ValueError):
             return "na"
 
+    @staticmethod
+    def _review_text(seg) -> str:
+        """Review flags of one segment for the finder; '' when clean or never reviewed."""
+        parts = []
+        for flag in review_flags_of(seg):
+            kind = str(flag.get("kind"))
+            phrase = " ".join(str(flag.get("phrase") or "").split())
+            if kind == "speaker_phrase" and phrase:
+                if len(phrase) > 24:
+                    phrase = phrase[:23] + "…"
+                parts.append(f'{kind}:"{phrase}"')
+            else:
+                parts.append(kind)
+        return ",".join(parts)
+
     def _finder_line(self, finder, pos: int, number: int, names: Dict[str, str]) -> str:
         seg = finder.segs[pos]
         q = finder.segment_quality(pos)
@@ -840,12 +1004,14 @@ class ConversationExportService:
         ns = self._fmt_metric(by_kind.get("noise_speech"), 3)
         ne = self._fmt_metric(by_kind.get("noise_env"), 3)
         nr = self._fmt_metric(by_kind.get("noise_room"), 3)
+        review = self._review_text(seg)
         meta = (
             f"gap={gap}s ov={ov}s noise={combined} ns={ns} ne={ne} nr={nr} "
             f"noisy={noisy} run={run}s music={music} "
             f"bss={int(bool(q.get('bss')))} unsep={self._fmt_metric(q.get('unseparated_share'), 3)} "
             f"seam_before={int(bool(q.get('seam_before')))} "
             f"seam_inside={int(bool(q.get('seam_inside')))} flags={flags}"
+            + (f" review={review}" if review else "")
         )
         length = max(0.0, float(seg.end) - float(seg.start))
         return (f"[{number}] {self._clock(float(seg.start))}-{self._clock(float(seg.end))} "
@@ -924,6 +1090,8 @@ class ConversationExportService:
             return []
 
         names = self._speaker_labels(finder)
+        letter_to_id = {letter: speaker for speaker, letter in names.items()}
+        interruptions_dropped: Dict[str, int] = {}
         windows = self._finder_windows(finder, names)
         messages = [self._finder_message(finder, w, names) for w in windows]
         replies, unanswered = ask_in_batches(
@@ -1057,6 +1225,10 @@ class ConversationExportService:
                     "self_contained": region.get("self_contained"),
                     "topic": region.get("topic", ""),
                     "reason": region.get("reason", ""),
+                    "assistant": region.get("assistant"),
+                    "role_conf": region.get("role_conf"),
+                    "interruptions": region.get("interruptions", []),
+                    "summary": region.get("summary"),
                 }
 
                 if a < 1 or b < a or b > line_count:
@@ -1076,6 +1248,9 @@ class ConversationExportService:
                     detail["validator"] = "model_rejected"
                     row["proposal_results"].append(detail)
                     continue
+
+                for reason, n in (region.get("interruptions_dropped") or {}).items():
+                    interruptions_dropped[reason] = interruptions_dropped.get(reason, 0) + n
 
                 if _topic_key(detail["topic"]) in _FINDER_EXAMPLE_TOPICS:
                     detail["validator"] = "copied_example"
@@ -1112,12 +1287,23 @@ class ConversationExportService:
                     "metrics": cand.metrics,
                 })
                 row["proposal_results"].append(detail)
+                # The letter is only meaningful for this window; back to a speaker id now.
+                assistant = letter_to_id.get(region.get("assistant") or "")
+                if assistant not in cand.speakers:
+                    assistant = None
                 item = _Judged(
                     original=cand,
                     candidate=cand,
                     semantic=score,
                     topic=region.get("topic", ""),
-                    why=region.get("reason", ""))
+                    why=region.get("reason", ""),
+                    assistant=assistant,
+                    role_conf=region.get("role_conf") if assistant else None,
+                    role_why=region.get("role_why", ""),
+                    interruptions={
+                        str(finder.segs[start + k["line"] - 1].index): k["intent"]
+                        for k in region.get("interruptions", [])},
+                    summary=region.get("summary"))
                 key = (i, j)
                 old = accepted_by_range.get(key)
                 if old is None or (item.semantic or 0) > (old.semantic or 0):
@@ -1151,6 +1337,7 @@ class ConversationExportService:
         report["unreadable"] = sum(1 for r in rows if r["answered"] and not r["readable"])
         report["cut_in_thought"] = sum(1 for r in rows if r["cut_in_thought"])
         report["trims_ignored"] = {}
+        report["interruptions_dropped"] = interruptions_dropped
         return judged
 
     # -- legacy one-candidate judge (kept for compatibility) ----------------------
@@ -1356,21 +1543,41 @@ class ConversationExportService:
         return out
 
     def _plan(self, finder, cand: Candidate, item: _Judged, waveform, sample_rate: int,
-              speech_segments=None, separation_service=None) -> Optional[_Plan]:
-        """Which tier folder the excerpt goes in, and why."""
+              speech_segments=None, separation_service=None) -> _Plan:
+        """Events, roles and category of one aligned excerpt; cuts the audio only if it is exported."""
+        analysis = analyze(finder.segs[cand.first:cand.last + 1], self.events, item.interruptions)
+        roles = decide_roles(analysis.events, cand.speakers, item.assistant, item.role_conf,
+                             self.events, analysis.units)
+        category, why = categorize(analysis.events, analysis.max_overlap, self.events)
+        plan = _Plan(cand, item, None, list(analysis.gate_spans),
+                     sum(b - a for a, b in analysis.overlaps), category, category,
+                     analysis=analysis, roles=roles)
+        if category is None:
+            plan.skip = why
+            return plan
+        if roles.role != "locked" and not self.cfg.keep_symmetric:
+            plan.category, plan.skip = None, "symmetric_roles"
+            return plan
         render = self._render(finder, cand, waveform, sample_rate,
                               speech_segments, separation_service)
         if render is None:
-            return None
-        overlaps = cross_speaker_overlaps(finder.segs[cand.first:cand.last + 1])
-        seconds = sum(b - a for a, b in overlaps)
-        plan = _Plan(cand, item, render.method, overlaps, seconds, cand.tier)
+            plan.category, plan.skip = None, "too_short"
+            return plan
+        plan.method = render.method
         if self._keep_render(render):
             plan.render = render
-        if seconds >= self.cfg.overlap_min_seconds:
+        # Where the voices overlap, each ear must hold one voice; half duplex has no overlap.
+        if category.startswith("full_duplex") and not plan.overlaps:
+            plan.gate = "no_overlap"           # in-turn backchannels only: nothing to separate
+        if category.startswith("full_duplex") and plan.overlaps:
+            plan.gate = "applied"
             self._judge_overlap(plan, speech_segments)
-            if self.cfg.overlap_first:
-                plan.tier = OVERLAP_GOOD if plan.overlap_quality == "good" else OVERLAP_BAD
+            if plan.overlap_quality == "bad":
+                if self.cfg.keep_quarantine:
+                    plan.category = QUARANTINE
+                else:
+                    self._release_render(plan)
+                    plan.category, plan.skip = None, "separation_gate"
         return plan
 
     def _keep_render(self, render: _Render) -> bool:
@@ -1441,20 +1648,21 @@ class ConversationExportService:
 
     @staticmethod
     def _clear_previous(out_dir: str) -> None:
-        """Remove the tier folders an earlier run left, so the two do not mix."""
+        """Remove what an earlier run of this file left (also the old tier folders)."""
         if not os.path.isdir(out_dir):
             return
         for name in os.listdir(out_dir):
             path = os.path.join(out_dir, name)
-            if re.fullmatch(r"tier_\d+_[A-Za-z_]+", name) and os.path.isdir(path):
+            if os.path.isdir(path) and (name in _OWN_ROOTS
+                                        or re.fullmatch(r"tier_\d+_[A-Za-z_]+", name)):
                 shutil.rmtree(path, ignore_errors=True)
 
     def _verify(self, directory: str, files: Dict[str, str], sample_rate: int,
-                num_samples: int) -> dict:
+                num_samples: int, assistant_channel: str = "left") -> dict:
         """Read every file back and check that they are the same length and the same clock.
 
         Compared as the 16-bit samples that were written, so "equal" means the
-        stereo channels are the speaker files, bit for bit.
+        stereo channels are the role files, bit for bit.
         """
         import soundfile as sf
         info, data = {}, {}
@@ -1471,52 +1679,75 @@ class ConversationExportService:
             "mixture_is_mono": info["mixture"]["channels"] == 1,
         }
         if "stereo_2ch" in info:
-            checks["speaker_files_are_mono"] = (info["speaker_A"]["channels"] == 1
-                                                and info["speaker_B"]["channels"] == 1)
+            checks["role_files_are_mono"] = (info["assistant"]["channels"] == 1
+                                             and info["user"]["channels"] == 1)
             checks["stereo_is_two_channels"] = info["stereo_2ch"]["channels"] == 2
             stereo = data["stereo_2ch"]
-            checks["stereo_left_is_speaker_A"] = bool(
-                stereo.shape[1] == 2 and np.array_equal(stereo[:, 0], data["speaker_A"][:, 0]))
-            checks["stereo_right_is_speaker_B"] = bool(
-                stereo.shape[1] == 2 and np.array_equal(stereo[:, 1], data["speaker_B"][:, 0]))
+            mine, other = (0, 1) if assistant_channel == "left" else (1, 0)
+            checks["stereo_assistant_channel_is_assistant"] = bool(
+                stereo.shape[1] == 2 and np.array_equal(stereo[:, mine], data["assistant"][:, 0]))
+            checks["stereo_user_channel_is_user"] = bool(
+                stereo.shape[1] == 2 and np.array_equal(stereo[:, other], data["user"][:, 0]))
         return {"ok": all(checks.values()), "sample_rate": sample_rate,
                 "num_samples": num_samples,
                 "duration": round(num_samples / float(sample_rate), 6),
                 "files": info, "checks": checks}
 
+    def _alignments(self, finder, plan: _Plan, origin: float) -> dict:
+        """moshi-finetune sidecar: the assistant's words, timed from the start of the audio."""
+        rows = []
+        for pos in range(plan.cand.first, plan.cand.last + 1):
+            seg = finder.segs[pos]
+            if str(seg.speaker) != plan.roles.assistant:
+                continue
+            for word in getattr(seg, "words", None) or []:
+                try:
+                    rows.append([str(word.get("word") or word.get("text") or ""),
+                                 [round(float(word["start"]) - origin, 3),
+                                  round(float(word["end"]) - origin, 3)], "SPEAKER_MAIN"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+        return {"alignments": rows}
+
     def _write_conversation(self, finder, plan: _Plan, directory: str, folder: str,
                             export_id: str, waveform, sample_rate: int,
                             speech_segments=None, separation_service=None) -> dict:
-        """Write one conversation folder and return its conversation.json content."""
+        """Write one excerpt folder and return its conversation.json content."""
         import soundfile as sf
-        cand = plan.cand
+        cand, roles = plan.cand, plan.roles
         render = self._release_render(plan) or self._render(
             finder, cand, waveform, sample_rate, speech_segments, separation_service)
         os.makedirs(directory, exist_ok=True)
         files = {"mixture": MIXTURE_FILE}
+        audio_files = {"mixture": MIXTURE_FILE}
         sf.write(os.path.join(directory, MIXTURE_FILE), render.mixture,
                  sample_rate, subtype="PCM_16")
         if render.left is not None:
-            files.update({"speaker_A": SPEAKER_FILES["A"], "speaker_B": SPEAKER_FILES["B"],
-                          "stereo_2ch": STEREO_FILE})
-            sf.write(os.path.join(directory, SPEAKER_FILES["A"]), render.left,
+            # The render holds the tracks in cand.speakers order; files are by role.
+            first_is_assistant = roles.assistant == cand.speakers[0]
+            assistant, user = ((render.left, render.right) if first_is_assistant
+                               else (render.right, render.left))
+            pair = (assistant, user) if self.cfg.assistant_channel == "left" else (user, assistant)
+            sf.write(os.path.join(directory, ASSISTANT_FILE), assistant,
                      sample_rate, subtype="PCM_16")
-            sf.write(os.path.join(directory, SPEAKER_FILES["B"]), render.right,
+            sf.write(os.path.join(directory, USER_FILE), user, sample_rate, subtype="PCM_16")
+            sf.write(os.path.join(directory, STEREO_FILE), np.column_stack(pair),
                      sample_rate, subtype="PCM_16")
-            sf.write(os.path.join(directory, STEREO_FILE),
-                     np.column_stack((render.left, render.right)),
-                     sample_rate, subtype="PCM_16")
+            audio_files.update({"assistant": ASSISTANT_FILE, "user": USER_FILE,
+                                "stereo_2ch": STEREO_FILE})
+        files.update(audio_files)
+        files["alignments"] = ALIGNMENTS_FILE
+        origin = render.lo / float(sample_rate)
+        with open(os.path.join(directory, ALIGNMENTS_FILE), "w", encoding="utf-8") as fh:
+            json.dump(self._alignments(finder, plan, origin), fh, ensure_ascii=False, indent=2)
         meta = self._metadata(
-            finder, finder.timeline, export_id, cand, plan.item,
+            finder, finder.timeline, export_id, plan,
             len(render.mixture) / float(sample_rate),
-            audio_start=render.lo / float(sample_rate),
-            audio_end=render.hi / float(sample_rate),
+            audio_start=origin, audio_end=render.hi / float(sample_rate),
             two_channel=render.method, speech_segments=speech_segments,
-            folder=folder, tier=plan.tier, overlaps=plan.overlaps, files=files,
-            overlap_info={"quality": plan.overlap_quality, "reasons": plan.overlap_reasons,
-                          "separated_share": plan.separated_share,
-                          "min_similarity": plan.min_similarity},
-            verification=self._verify(directory, files, sample_rate, len(render.mixture)))
+            folder=folder, files=files,
+            verification=self._verify(directory, audio_files, sample_rate, len(render.mixture),
+                                      self.cfg.assistant_channel))
         with open(os.path.join(directory, JSON_FILE), "w", encoding="utf-8") as fh:
             json.dump(meta, fh, ensure_ascii=False, indent=2)
         with open(os.path.join(directory, TEXT_FILE), "w", encoding="utf-8") as fh:
@@ -1525,31 +1756,50 @@ class ConversationExportService:
 
     @staticmethod
     def _transcript_text(meta: dict) -> str:
-        """The conversation as plain text, one line per turn, timed from item start."""
+        """The conversation as plain text, one line per turn, timed from item start.
+
+        Backchannels, interruptions and a backchannel merged into the other
+        speaker's turn are marked on the turn they belong to.
+        """
+        by_segment: Dict[str, List[dict]] = {}
+        for event in meta.get("events", []):
+            by_segment.setdefault(str(event.get("segment")), []).append(event)
         lines = []
         for row in meta["conversation"]:
             t = max(0.0, float(row["start"]))
-            lines.append(f"[{int(t // 60):02d}:{t % 60:04.1f}] {row['speaker']}: {row['text']}")
+            marks, tail = "", ""
+            for event in by_segment.get(str(row["index"]), []):
+                kind = event["type"]
+                if kind == "backchannel":
+                    marks += "(backchannel) "
+                elif kind in ("interruption", "competitive_overlap"):
+                    intent = f"/{event['intent']}" if event.get("intent") else ""
+                    marks += f">> ({kind}{intent}) "
+                elif kind == "merged_backchannel":
+                    tail += f" [merged_bc: {event['text']}]"
+            lines.append(f"[{int(t // 60):02d}:{t % 60:04.1f}] [{row['role']}] "
+                         f"{marks}{row['text']}{tail}")
         return "\n".join(lines) + "\n"
 
     # -- metadata ------------------------------------------------------------------
-    def _metadata(self, finder, timeline, export_id, cand: Candidate, judged: _Judged,
-                  audio_seconds: float, audio_start: Optional[float] = None,
-                  audio_end: Optional[float] = None, two_channel: Optional[str] = None,
-                  speech_segments=None, folder: Optional[str] = None,
-                  tier: Optional[str] = None, overlaps=None, files: Optional[dict] = None,
-                  verification: Optional[dict] = None, overlap_info: Optional[dict] = None) -> dict:
+    def _metadata(self, finder, timeline, export_id, plan: _Plan, audio_seconds: float,
+                  audio_start: Optional[float] = None, audio_end: Optional[float] = None,
+                  two_channel: Optional[str] = None, speech_segments=None,
+                  folder: Optional[str] = None, files: Optional[dict] = None,
+                  verification: Optional[dict] = None) -> dict:
+        cand, judged, roles = plan.cand, plan.item, plan.roles
+        overlaps = plan.overlaps
         # cut_bounds may move each edge inward by a few milliseconds to the
         # nearest zero crossing. All item-relative timestamps must use the
         # sample actually written, not the requested padding edge.
         origin = cand.pad_start if audio_start is None else float(audio_start)
         source_end = cand.pad_end if audio_end is None else float(audio_end)
-        names = self._names(cand)
+        role_of = {roles.assistant: "assistant", roles.user: "user"}
         conversation = []
         for pos in range(cand.first, cand.last + 1):
             seg = finder.segs[pos]
             row = {"index": seg.index,
-                   "speaker": names.get(seg.speaker, "?"),
+                   "role": role_of.get(seg.speaker, "?"),
                    "speaker_id": seg.speaker,
                    "start": round(float(seg.start) - origin, 3),
                    "end": round(float(seg.end) - origin, 3),
@@ -1568,12 +1818,29 @@ class ConversationExportService:
                     row["words"].append(timed)
             if getattr(seg, "speaker_original", None) is not None:
                 row["speaker_original"] = seg.speaker_original
+            flags = review_flags_of(seg)
+            if flags:
+                row["review_flags"] = [dict(f) for f in flags]
             conversation.append(row)
         m = cand.metrics
+        events = label_events(plan.analysis.events, role_of, origin)
+        quarantined = plan.category == QUARANTINE
         out = {
             "id": export_id,
             "folder": folder,
             "files": dict(files or {}),
+            "category": plan.category,
+            "intended_category": plan.intended,
+            "tags": tags_of(plan.analysis.events),
+            "event_counts": event_counts(plan.analysis.events),
+            "events": events,
+            "role": roles.role,
+            "role_conf": roles.role_conf,
+            "role_conf_finder": judged.role_conf,
+            "role_why": judged.role_why,
+            "role_source": roles.source,
+            "role_violations": roles.violations,
+            "swappable": roles.swappable,
             "start": round(cand.start - origin, 3),
             "end": round(cand.end - origin, 3),
             "duration": round(audio_seconds, 3),
@@ -1581,8 +1848,7 @@ class ConversationExportService:
             "source_end": round(source_end, 3),
             "orig_spans": [{"start": round(a, 3), "end": round(b, 3)}
                            for a, b in timeline.spans_to_original(origin, source_end)],
-            "speakers": ["A", "B"],
-            "speaker_ids": {"A": cand.speakers[0], "B": cand.speakers[1]},
+            "speakers": {"assistant": roles.assistant, "user": roles.user},
             "turn_count": m["turn_count"],
             "speaker_balance": m["speaker_balance"],
             "switch_count": m["switch_count"],
@@ -1591,17 +1857,26 @@ class ConversationExportService:
             "pacing_wpm": m["pacing_wpm"],
             "turn_latency_avg": m["turn_latency_avg"],
             "score": cand.score,
-            "tier": tier or cand.tier,
-            "tier_by_score": cand.tier,
-            "overlap_quality": (overlap_info or {}).get("quality"),
-            "overlap_reasons": (overlap_info or {}).get("reasons", []),
-            "overlap_separated_share": (overlap_info or {}).get("separated_share"),
-            "overlap_min_similarity": (overlap_info or {}).get("min_similarity"),
-            "overlap_seconds": round(sum(b - a for a, b in (overlaps or [])), 3),
+            "quality": {
+                "self_contained": judged.semantic,
+                "score": cand.score,
+                "soft_flags": m.get("review_soft_flags", 0),
+                "gates_passed": ["self_contained", "two_speakers", "duration", "min_turns",
+                                 "soft_flags", "noise", "music", "score"]
+                                + (["separation"] if plan.overlap_quality == "good" else []),
+                "separation_gate": plan.gate,
+                "quarantine_reason": list(plan.overlap_reasons) if quarantined else None,
+            },
+            "overlap_quality": plan.overlap_quality,
+            "overlap_reasons": list(plan.overlap_reasons),
+            "overlap_separated_share": plan.separated_share,
+            "overlap_min_similarity": plan.min_similarity,
+            "overlap_seconds": round(plan.overlap_seconds, 3),
             "overlap_spans": [{"start": round(a - origin, 3), "end": round(b - origin, 3)}
                               for a, b in (overlaps or [])],
             "components": cand.components,
             "topic": judged.topic,
+            "summary": judged.summary,
             "semantic_score": judged.semantic,
             "semantic_reason": judged.why,
             "trimmed_by_model": judged.trimmed,
@@ -1614,9 +1889,11 @@ class ConversationExportService:
         }
         if self.cfg.stereo:
             method = two_channel or TIME_GATED
-            out["channels_2ch"] = {
-                "left": "A", "right": "B", "method": method,
-                "left_file": SPEAKER_FILES["A"], "right_file": SPEAKER_FILES["B"],
+            left, right = (("assistant", "user") if self.cfg.assistant_channel == "left"
+                           else ("user", "assistant"))
+            out["channels"] = {
+                "left": left, "right": right, "method": method,
+                "assistant_file": ASSISTANT_FILE, "user_file": USER_FILE,
                 "note": self._TWO_CHANNEL_NOTES[method],
             }
             if method == STRICT_TRACKS and speech_segments:
@@ -1636,32 +1913,26 @@ class ConversationExportService:
         return out
 
     _TWO_CHANNEL_NOTES = {
-        STRICT_TRACKS: ("speaker_A.wav and speaker_B.wav are each one person's separated "
-                        "track, one channel each, and stereo_2ch.wav is those two files with "
-                        "A on the left and B on the right, sample for sample. Where the two "
-                        "spoke at once each is heard alone. A stretch whose separation "
-                        "failed is silent in both rather than carrying the other voice. "
-                        "mixture.wav keeps both voices as recorded."),
-        TIME_GATED: ("No separated tracks were used, so speaker_A.wav and speaker_B.wav are "
+        STRICT_TRACKS: ("assistant.wav and user.wav are each one person's separated "
+                        "track, one channel each, and stereo_2ch.wav is those two files "
+                        "(the assistant on the channel named in `channels`), sample for sample. "
+                        "Where the two spoke at once each is heard alone. A stretch whose "
+                        "separation failed is silent in both rather than carrying the other "
+                        "voice. mixture.wav keeps both voices as recorded."),
+        TIME_GATED: ("No separated tracks were used, so assistant.wav and user.wav are "
                      "the mixture gated to each person's turns, and stereo_2ch.wav is those "
-                     "two files, A left and B right. Each is heard only during their own "
-                     "turns; where the two speak at once both carry the same mixture. "
+                     "two files. Each is heard only during their own turns; where the two "
+                     "speak at once both carry the same mixture. "
                      "mixture.wav keeps both voices as recorded."),
     }
 
     # -- the pass ---------------------------------------------------------------------
-    def run(self, transcripts, *, timeline, noise, music_map, waveform,
-            sample_rate: int, out_dir: str, base_name: str,
-            speech_segments=None, separation_service=None) -> ConversationExportRun:
-        """Find, judge and write selected conversation excerpts of one recording.
-
-        `speech_segments` and `separation_service` are what the separation stage
-        produced and the object that can lay its speaker tracks out; with both,
-        the two-channel file is built from those tracks (see the module doc).
-        """
+    def select(self, transcripts, *, timeline, noise, music_map, waveform,
+               sample_rate: int, base_name: str,
+               speech_segments=None) -> "ConversationSelection":
+        """Find, judge and validate excerpts of one recording; writes no files."""
         cfg = self.cfg
         finder = ConversationSelectionFinder(transcripts, timeline, noise, music_map, cfg)
-        result = ConversationExportRun()
         report = {"prompt_version": CONVERSATION_EXPORT_PROMPT_VERSION,
                   "thinking": cfg.thinking, "mode": "llm_finder_then_validator",
                   "skipped": None, "windows": 0,
@@ -1669,44 +1940,98 @@ class ConversationExportService:
                   "regions": 0, "model_kept": 0, "model_rejected": 0,
                   "candidates": 0, "shortlisted": 0, "validated": 0,
                   "judged_rejected": {}, "accepted": 0, "exported": 0,
-                  "tiers": {}, "verification_failed": 0}
-        result.report = report
+                  "categories": {}, "not_exported": {}, "verification_failed": 0}
+        selection = ConversationSelection(finder=finder, report=report)
 
         # Qwen sees the transcript first and proposes semantic spans. The numeric
         # finder no longer destroys context by pre-splitting on silence/third-speaker.
         # It is now the validator/scorer for each model-proposed range.
         report["finder"] = finder.report()   # diagnostics only; not a pre-filter
+        if cfg.require_noise and not finder.noise_measured:
+            # Not measured is not clean, and every proposal would be refused for it.
+            report["skipped"] = "noise_not_measured"
+            self._log(f"[conversation-exports] {base_name}: no noise labels, nothing selected")
+            return selection
         judged = self._find_with_llm(finder, report)
         if report.get("llm_available") is False:
             report["skipped"] = "llm_unavailable"
-            return result
+            return selection
         if not judged:
             report["skipped"] = "no_valid_model_proposals"
             self._log(f"[conversation-exports] {base_name}: no validated LLM proposal")
-            return result
+            return selection
+        selection.judged = judged
 
-        kept: Dict[int, _Judged] = {
+        selection.kept = {
             id(item.candidate): item for item in judged if item.candidate is not None
         }
-        report["accepted"] = len(kept)
+        report["accepted"] = len(selection.kept)
 
         # Only after Qwen has found and the validator has checked every proposal do
         # we resolve overlaps, so the same source audio is not exported twice.
-        final = pick_non_overlapping([j.candidate for j in kept.values()])
+        selection.final = pick_non_overlapping([j.candidate for j in selection.kept.values()])
         if waveform is None:
             report["skipped"] = "no_audio"
-            return result
+        return selection
 
-        self._plan_and_write(finder, final, kept, result, report, waveform, sample_rate,
-                             out_dir, base_name, speech_segments, separation_service)
+    def write(self, selection: "ConversationSelection", *, waveform, sample_rate: int,
+              out_dir: str, base_name: str, speech_segments=None,
+              separation_service=None) -> ConversationExportRun:
+        """Write the excerpts `select` chose.
+
+        `speech_segments` and `separation_service` are what the separation stage
+        produced and the object that can lay its speaker tracks out; with both,
+        the two-channel file is built from those tracks (see the module doc).
+        When `require_word_alignment` is on, an excerpt with any segment lacking
+        complete word timestamps (checked now, after alignment) is dropped.
+        """
+        report = dict(selection.report)
+        report["categories"] = dict(report.get("categories") or {})
+        report["not_exported"] = dict(report.get("not_exported") or {})
+        result = ConversationExportRun(report=report)
+        skipped = report.get("skipped")
+        if skipped == "llm_unavailable":
+            # Probably transient: keep what an earlier run wrote rather than wipe it.
+            self._log(f"[conversation-exports] {base_name}: LLM unavailable, "
+                      f"earlier output in {out_dir} left as it is")
+            return result
+        if skipped:
+            # Nothing found this time: the earlier run's excerpts and manifests are stale.
+            self._clear_previous(out_dir)
+            self._write_manifests(out_dir, [], [])
+            return result
+        final = list(selection.final)
+        if self.cfg.require_word_alignment:
+            segs = selection.finder.segs
+            complete = [c for c in final
+                        if all(has_complete_word_alignment(segs[pos])
+                               for pos in range(c.first, c.last + 1))]
+            report["dropped_unaligned"] = len(final) - len(complete)
+            final = complete
+        self._plan_and_write(selection.finder, final, selection.kept, result, report,
+                             waveform, sample_rate, out_dir, base_name,
+                             speech_segments, separation_service)
         return result
+
+    def run(self, transcripts, *, timeline, noise, music_map, waveform,
+            sample_rate: int, out_dir: str, base_name: str,
+            speech_segments=None, separation_service=None) -> ConversationExportRun:
+        """Find, judge and write selected conversation excerpts: `write(select(...))`."""
+        selection = self.select(
+            transcripts, timeline=timeline, noise=noise, music_map=music_map,
+            waveform=waveform, sample_rate=sample_rate, base_name=base_name,
+            speech_segments=speech_segments)
+        return self.write(
+            selection, waveform=waveform, sample_rate=sample_rate, out_dir=out_dir,
+            base_name=base_name, speech_segments=speech_segments,
+            separation_service=separation_service)
 
     def _plan_and_write(self, finder, final, kept, result, report, waveform, sample_rate,
                         out_dir, base_name, speech_segments, separation_service) -> None:
         """Cut, file and write every accepted excerpt on a bounded CPU pool.
 
-        Decisions were all made before this point; here each excerpt is
-        independent CPU/disk work. Numbering, tier counts and the result rows
+        Each excerpt is independent CPU/disk work: events, roles and category are
+        decided in `_plan`, then the files are written. Numbering, category counts and the result rows
         follow the sorted plan order whatever order the workers finish in, and
         the pool is drained before this returns.
         """
@@ -1727,32 +2052,34 @@ class ConversationExportService:
 
         plans = []
         for plan in planned:
-            if plan is None:
-                self._log(f"[conversation-exports] {base_name}: an excerpt shorter "
-                          "than a second was skipped")
+            if plan.skip is not None:
+                report["not_exported"][plan.skip] = report["not_exported"].get(plan.skip, 0) + 1
+                self._log(f"[conversation-exports] {base_name}: an excerpt at "
+                          f"{plan.cand.start:.0f}s was not exported ({plan.skip})")
                 continue
             plans.append(plan)
 
-        # The best folder first; inside one, the excerpts with overlap, then by score.
+        # Interruptions first, then the other categories, quarantine last; best score first inside.
         rank = {name: k for k, name in enumerate(FOLDER_ORDER)}
-        plans.sort(key=lambda p: (rank.get(p.tier, len(rank)), -p.cand.score))
+        plans.sort(key=lambda p: (rank.get(p.category, len(rank)), -p.cand.score))
         self._clear_previous(out_dir)
 
         safe = re.sub(r"[^A-Za-z0-9._-]+", "_", base_name)
-        filed: Dict[str, int] = {}
+        taken: set = set()
         jobs = []
         for global_number, plan in enumerate(plans, start=1):
-            tier_dir = tier_folder(plan.tier)
-            filed[tier_dir] = filed.get(tier_dir, 0) + 1
-            name = f"conversation_{filed[tier_dir]}"
-            jobs.append((plan, tier_dir, name, f"{tier_dir}/{name}",
-                         f"{safe}_conversation_{global_number:06d}"))
+            name = f"{safe}_{int(plan.cand.start)}s"
+            while f"{plan.category}/{name}" in taken:
+                name += "_b"
+            taken.add(f"{plan.category}/{name}")
+            folder = f"{plan.category}/{name}"
+            jobs.append((plan, folder, f"{safe}_conversation_{global_number:06d}"))
 
         def write_one(job):
-            plan, tier_dir, name, folder, export_id = job
+            plan, folder, export_id = job
             try:
                 return self._write_conversation(
-                    finder, plan, os.path.join(out_dir, tier_dir, name), folder, export_id,
+                    finder, plan, os.path.join(out_dir, *folder.split("/")), folder, export_id,
                     waveform, sample_rate, speech_segments, separation_service), None
             except Exception as exc:                       # pragma: no cover - disk problems
                 return None, exc
@@ -1764,7 +2091,8 @@ class ConversationExportService:
         else:
             written = [write_one(job) for job in jobs]
 
-        for (plan, tier_dir, _name, folder, export_id), (meta, error) in zip(jobs, written):
+        manifest, quarantined = [], []
+        for (plan, folder, export_id), (meta, error) in zip(jobs, written):
             cand, item = plan.cand, plan.item
             if error is not None:
                 if self.logger:
@@ -1776,23 +2104,42 @@ class ConversationExportService:
                     bad = [k for k, ok in meta["verification"]["checks"].items() if not ok]
                     self.logger.error(
                         f"[conversation-exports] {folder}: failed {bad}; do not trust these files")
-            report["tiers"][tier_dir] = report["tiers"].get(tier_dir, 0) + 1
+            report["categories"][plan.category] = report["categories"].get(plan.category, 0) + 1
+            has_stereo = "stereo_2ch" in meta["files"]
             result.exports.append({
-                "id": export_id, "folder": folder, "tier": plan.tier, "tier_by_score": cand.tier,
+                "id": export_id, "folder": folder, "category": plan.category,
+                "intended_category": plan.intended, "quarantined": plan.category == QUARANTINE,
+                "tags": meta["tags"], "event_counts": meta["event_counts"],
+                "role": meta["role"], "swappable": meta["swappable"],
                 "overlap_quality": plan.overlap_quality, "overlap_reasons": plan.overlap_reasons,
                 "overlap_seconds": meta["overlap_seconds"], "score": cand.score,
                 "files": {key: f"{folder}/{file}" for key, file in meta["files"].items()},
                 "audio": f"{folder}/{MIXTURE_FILE}",
-                "audio_2ch": (f"{folder}/{STEREO_FILE}" if "stereo_2ch" in meta["files"] else None),
-                "duration": meta["duration"], "topic": item.topic,
+                "audio_2ch": (f"{folder}/{STEREO_FILE}" if has_stereo else None),
+                "duration": meta["duration"], "topic": item.topic, "summary": meta["summary"],
                 "semantic_score": item.semantic, "trimmed_by_model": item.trimmed,
                 "source_start": meta["source_start"], "source_end": meta["source_end"],
-                "speaker_ids": meta["speaker_ids"], "verified": meta["verification"]["ok"],
+                "speaker_ids": meta["speakers"], "verified": meta["verification"]["ok"],
                 "noise_kind": (cand.noise or {}).get("dominant_kind"),
             })
+            (quarantined if plan.category == QUARANTINE else manifest).append({
+                "path": f"{folder}/{STEREO_FILE if has_stereo else MIXTURE_FILE}",
+                "duration": meta["duration"], "category": plan.category, "tags": meta["tags"],
+                "event_counts": meta["event_counts"], "role": meta["role"],
+                "swappable": meta["swappable"], "topic": item.topic, "summary": meta["summary"]})
+        # Rewritten whole on every run of this file, like the folders it lists.
+        self._write_manifests(out_dir, manifest, quarantined)
         report["exported"] = len(result.exports)
         self._log(
             f"[conversation-exports] {base_name}: {len(result.exports)} item(s) written to {out_dir}")
+
+    @staticmethod
+    def _write_manifests(out_dir: str, manifest: List[dict], quarantined: List[dict]) -> None:
+        os.makedirs(out_dir, exist_ok=True)
+        for name, rows in ((MANIFEST_FILE, manifest), (QUARANTINE_MANIFEST_FILE, quarantined)):
+            with open(os.path.join(out_dir, name), "w", encoding="utf-8") as fh:
+                for row in rows:
+                    fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     def _log(self, message: str):
         if self.logger:

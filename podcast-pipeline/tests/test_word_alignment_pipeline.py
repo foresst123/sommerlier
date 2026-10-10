@@ -61,12 +61,27 @@ def test_wav2vec_aligns_the_final_text_and_restores_global_timestamps(monkeypatc
     assert result.report["word_coverage"] == 1.0
 
 
-def test_clean_clip_filter_rejects_a_segment_without_complete_word_times():
+def test_write_drops_an_excerpt_whose_segments_lack_complete_word_times():
+    """Selection no longer gates on word alignment; write() enforces it afterwards."""
+    from types import SimpleNamespace as NS
+    from services.conversation_export_service import ConversationExportService
+
     seg = _segment(start=0.0, end=5.0)
-    cfg = ConversationSelectionConfig(min_seconds=1, max_seconds=20, require_noise=False,
-                     require_word_alignment=True)
-    finder = ConversationSelectionFinder([seg], TimelineMap(), None, None, cfg)
-    assert finder.report()["breaks"]["word_alignment_missing"] == 1
+    cand = NS(first=0, last=0)
+    selection = NS(report={"skipped": None}, final=[cand], kept={},
+                   finder=NS(segs=[seg]))
+
+    class _LLM:
+        pass
+
+    svc = ConversationExportService(_LLM(), min_seconds=1, max_seconds=20,
+                                    require_noise=False, require_word_alignment=True)
+    written = []
+    svc._plan_and_write = lambda finder, final, *a, **k: written.append(list(final))
+
+    result = svc.write(selection, waveform=None, sample_rate=16000,
+                       out_dir="unused", base_name="x")
+    assert written == [[]] and result.report["dropped_unaligned"] == 1
 
     seg.words = [
         {"word": "xin", "start": 0.2, "end": 0.5},
@@ -74,6 +89,10 @@ def test_clean_clip_filter_rejects_a_segment_without_complete_word_times():
         {"word": "bạn", "start": 1.0, "end": 1.2},
     ]
     assert has_complete_word_alignment(seg)
+    written.clear()
+    result = svc.write(selection, waveform=None, sample_rate=16000,
+                       out_dir="unused", base_name="x")
+    assert written == [[cand]] and result.report["dropped_unaligned"] == 0
 
 
 def test_alignment_checkpoint_changes_when_final_text_changes():

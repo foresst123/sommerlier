@@ -19,7 +19,7 @@ def _service(**kwargs):
 
 
 def _cand(i, score):
-    return SimpleNamespace(score=score, tier="S", noise=None, i=i)
+    return SimpleNamespace(score=score, tier="S", noise=None, i=i, start=100.0 * i)
 
 
 def _drive(svc, tmp_path, count=6, fail=()):
@@ -29,7 +29,7 @@ def _drive(svc, tmp_path, count=6, fail=()):
     lock = threading.Lock()
 
     def plan(finder, cand, item, *a, **k):
-        p = _Plan(cand, item, None, [], 0.0, "S")
+        p = _Plan(cand, item, None, [], 0.0, "half_duplex")
         p.render = _Render(0, 8, np.zeros(8, np.float32))
         svc._keep_render(p.render)
         return p
@@ -47,10 +47,12 @@ def _drive(svc, tmp_path, count=6, fail=()):
             raise OSError("disk full")
         return {"verification": {"ok": True, "checks": {}}, "overlap_seconds": 0.0,
                 "files": {"mixture": "mixture.wav"}, "duration": 1.0,
-                "source_start": 0.0, "source_end": 1.0, "speaker_ids": {}}
+                "source_start": 0.0, "source_end": 1.0, "speakers": {},
+                "tags": [], "event_counts": {}, "role": "locked", "swappable": False,
+                "summary": None}
 
     svc._plan, svc._write_conversation = plan, write
-    result, report = ConversationExportRun(), {"verification_failed": 0, "tiers": {}}
+    result, report = ConversationExportRun(), {"verification_failed": 0, "categories": {}}
     svc._plan_and_write(None, cands, kept, result, report, np.zeros(8, np.float32), 8000,
                         str(tmp_path), "ep 01", None, None)
     return result, report, threads, peak[0]
@@ -78,7 +80,7 @@ def test_cut_cache_is_bounded_and_released(tmp_path):
     svc.RENDER_CACHE_BYTES = 40           # room for one 8-sample cut (32 bytes)
     first, second = _Render(0, 8, np.zeros(8, np.float32)), _Render(0, 8, np.zeros(8, np.float32))
     assert svc._keep_render(first) and not svc._keep_render(second)
-    svc._release_render(_Plan(None, None, None, [], 0.0, "S", render=first))
+    svc._release_render(_Plan(None, None, None, [], 0.0, "half_duplex", render=first))
     assert svc._render_bytes == 0 and svc._keep_render(second)
 
 

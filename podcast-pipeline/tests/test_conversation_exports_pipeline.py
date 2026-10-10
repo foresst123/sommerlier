@@ -10,6 +10,7 @@ Run:  python -m pytest tests/test_conversation_exports_pipeline.py -q     (from 
 """
 import json
 import os
+import re
 import sys
 from types import SimpleNamespace
 
@@ -59,9 +60,16 @@ class _LLM:
         return len(text.split())
 
     def generate_texts(self, system_prompt, user_messages, max_new_tokens=512,
-                       use_prefix=False, labels=None):
-        return True, [json.dumps({"self_contained": 5, "topic": "t"})
-                      for _ in user_messages]
+                       use_prefix=False, labels=None, **extra):
+        # One kept region over the whole window; N comes from the message ("N=30 dòng").
+        replies = []
+        for message in user_messages:
+            n = int(re.search(r"N=(\d+) dòng", message).group(1))
+            replies.append(json.dumps([{
+                "start_line": 1, "end_line": n, "keep": True, "self_contained": 5,
+                "topic": "chủ đề thử", "reason": "ok", "assistant": "B", "role_conf": 0.9,
+                "role_why": "B đáp", "interruptions": [], "summary": "Hai người trao đổi."}]))
+        return True, replies
 
 
 class _StageOut:
@@ -104,7 +112,8 @@ def test_a_finished_file_is_cut_into_the_output_folder(tmp_path):
                                  str(tmp_path), "/data/episode 7.mp3")
     assert result.exports
     root = tmp_path / "conversation_exports"
-    assert [p.name for p in root.glob("tier_*")], "conversations are filed in tier folders"
+    assert (root / "half_duplex").is_dir(), "conversations are filed by category"
+    assert (root / "manifest.jsonl").is_file()
     first = root / result.exports[0]["folder"]
     assert (first / "conversation.json").is_file() and (first / "mixture.wav").is_file()
     assert result.exports[0]["id"].startswith("episode_7_conversation_")
@@ -118,7 +127,7 @@ def test_without_a_noise_track_nothing_is_cut_and_it_says_so(tmp_path):
                                  str(tmp_path), "ep.mp3")
     assert result.exports == []
     assert out.calls[0][0]["skipped"] == "noise_not_measured"
-    assert not list((tmp_path / "conversation_exports").glob("tier_*"))
+    assert not list((tmp_path / "conversation_exports").glob("*/*"))
 
 
 def test_the_music_map_is_moved_into_the_cut_timeline_before_it_is_used(tmp_path):
@@ -162,6 +171,8 @@ def test_the_step_is_opt_in_and_keeps_the_llm_loaded_for_it():
 def test_the_pass_runs_after_relabel_and_before_the_llm_is_released():
     source = open(os.path.join(ROOT, "services", "pipeline_service.py"),
                   encoding="utf-8").read()
+    # Only the order inside run(); helpers above it name the same steps.
+    source = source[source.index("    def run(self, args"):]
     relabel = source.index('opt_in_step_enabled(args, "speaker_relabel")')
     alignment = source.index('opt_in_step_enabled(args, "word_alignment")')
     exports = source.index('opt_in_step_enabled(args, "conversation_exports")')

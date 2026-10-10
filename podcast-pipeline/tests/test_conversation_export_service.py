@@ -81,8 +81,31 @@ class FakeLLM:
         self.system_prompts.append(system_prompt)
         self.thinking_seen.append(extra.get("thinking", False))
         self.budgets.append(max_new_tokens)
-        return True, [self.reply(m) if callable(self.reply) else self.reply
+        return True, [self._finder_form(m, self.reply(m) if callable(self.reply) else self.reply)
                       for m in user_messages]
+
+    @staticmethod
+    def _finder_form(message, reply):
+        """A one-verdict reply ({"self_contained", "topic"}) as the finder's region array.
+
+        The finder asks for a partition of N lines; the verdict style used throughout
+        this file becomes one kept region over the whole window, so these tests go
+        through the real select/write path instead of exporting nothing.
+        """
+        match = re.search(r"N=(\d+) dòng", message)
+        if not match or not isinstance(reply, str):
+            return reply
+        try:
+            verdict = json.loads(reply)
+        except ValueError:
+            return reply
+        if not isinstance(verdict, dict) or "self_contained" not in verdict:
+            return reply
+        return json.dumps([{
+            "start_line": 1, "end_line": int(match.group(1)), "keep": True,
+            "self_contained": verdict["self_contained"], "topic": verdict.get("topic", ""),
+            "reason": verdict.get("reason", "ok"), "assistant": "B", "role_conf": 0.9,
+            "role_why": "B đáp", "interruptions": [], "summary": "Hai người trao đổi."}])
 
 
 def _good(score=5, topic="chủ đề thử"):
@@ -103,12 +126,8 @@ def _run(tmp_path, llm, segs=None, noise="quiet", timeline=None, run_kwargs=None
 
 
 def _folders(root):
-    """The conversation folders under an export root: best tier first, in number order."""
-    out = []
-    for tier in sorted(p for p in root.glob("tier_*") if p.is_dir()):
-        out.extend(sorted((c for c in tier.glob("conversation_*") if c.is_dir()),
-                          key=lambda c: int(c.name.rsplit("_", 1)[1])))
-    return out
+    """The excerpt folders under an export root: every folder that holds a conversation.json."""
+    return sorted(p.parent for p in root.rglob("conversation.json"))
 
 
 def _doc_of(folder):
@@ -200,19 +219,18 @@ def test_a_self_contained_clip_is_written_as_a_folder_of_audio_and_metadata(tmp_
     assert result.exports
     folders = _folders(tmp_path)
     assert folders and len(folders) == len(result.exports)
-    assert folders[0].name == "conversation_1"
 
     info = sf.info(str(folders[0] / "mixture.wav"))
     assert info.samplerate == SR and info.channels == 1
     doc = _doc_of(folders[0])
     assert doc["id"].startswith("ep_01_conversation_000001")
     assert doc["topic"] == "chuyện nấu ăn" and doc["semantic_score"] == 5
-    assert doc["speakers"] == ["A", "B"]
-    assert set(doc["speaker_ids"].values()) == {A, B}
+    assert set(doc["speakers"]) == {"assistant", "user"}
+    assert set(doc["speakers"].values()) == {A, B}
     assert 60.0 <= doc["source_end"] - doc["source_start"] <= 241.0
     assert info.duration == pytest.approx(doc["duration"], abs=0.01)
     assert doc["conversation"][0]["start"] >= 0.0
-    assert {row["speaker"] for row in doc["conversation"]} == {"A", "B"}
+    assert {row["role"] for row in doc["conversation"]} == {"assistant", "user"}
     assert doc["noise"]["dominant_kind"] == "clean"
     assert doc["orig_spans"]
 
@@ -578,7 +596,7 @@ def _read(path):
 
 
 def _first_clip(tmp_path):
-    """(folder, conversation.json) of the first conversation, best tier first."""
+    """(folder, conversation.json) of the first conversation, first by path."""
     folder = _folders(tmp_path)[0]
     return folder, _doc_of(folder)
 
@@ -589,8 +607,8 @@ def test_the_service_writes_the_speaker_files_and_the_stereo_beside_the_mixture(
     folder, doc = _first_clip(tmp_path)
     mono, sr_m = _read(folder / "mixture.wav")
     both, sr_s = _read(folder / "stereo_2ch.wav")
-    spk_a, _ = _read(folder / "speaker_A.wav")
-    spk_b, _ = _read(folder / "speaker_B.wav")
+    spk_a, _ = _read(folder / "assistant.wav")
+    spk_b, _ = _read(folder / "user.wav")
     assert mono.shape[1] == spk_a.shape[1] == spk_b.shape[1] == 1 and both.shape[1] == 2
     assert sr_m == sr_s == SR
     assert len(mono) == len(both) == len(spk_a) == len(spk_b)     # sample for sample
@@ -603,25 +621,25 @@ def test_speaker_a_is_the_left_ear_and_b_the_right_and_the_mixture_is_unchanged(
     folder, doc = _first_clip(tmp_path)
     mono, _ = _read(folder / "mixture.wav")
     both, _ = _read(folder / "stereo_2ch.wav")
-    assert doc["channels_2ch"]["left"] == "A" and doc["channels_2ch"]["right"] == "B"
-    checked = {"A": 0, "B": 0}
+    assert doc["channels"]["left"] == "assistant" and doc["channels"]["right"] == "user"
+    checked = {"assistant": 0, "user": 0}
     for row in doc["conversation"]:
         lo, hi = int((row["start"] + 0.3) * SR), int((row["end"] - 0.3) * SR)
         if hi <= lo or lo < 0 or hi > len(both):
             continue
-        mine, other = (0, 1) if row["speaker"] == "A" else (1, 0)
+        mine, other = (0, 1) if row["role"] == "assistant" else (1, 0)
         np.testing.assert_allclose(both[lo:hi, mine], mono[lo:hi, 0], atol=1e-4)
         assert not np.abs(both[lo:hi, other]).max() > 1e-4
-        checked[row["speaker"]] += 1
-    assert checked["A"] >= 2 and checked["B"] >= 2
+        checked[row["role"]] += 1
+    assert checked["assistant"] >= 2 and checked["user"] >= 2
 
 
 def test_the_stereo_channels_are_the_speaker_files_sample_for_sample(tmp_path):
     _run(tmp_path, FakeLLM(_good()))
     folder, _ = _first_clip(tmp_path)
     both, _ = sf.read(str(folder / "stereo_2ch.wav"), dtype="int16", always_2d=True)
-    a, _ = sf.read(str(folder / "speaker_A.wav"), dtype="int16")
-    b, _ = sf.read(str(folder / "speaker_B.wav"), dtype="int16")
+    a, _ = sf.read(str(folder / "assistant.wav"), dtype="int16")
+    b, _ = sf.read(str(folder / "user.wav"), dtype="int16")
     assert np.array_equal(both[:, 0], a) and np.array_equal(both[:, 1], b)
 
 
@@ -635,9 +653,10 @@ def test_the_two_channel_file_starts_and_ends_silent_like_the_mono(tmp_path):
 def test_the_speakers_in_the_two_channel_file_match_the_metadata_ids(tmp_path):
     _run(tmp_path, FakeLLM(_good()))
     _, doc = _first_clip(tmp_path)
-    assert doc["speaker_ids"] == {"A": A, "B": B} or doc["speaker_ids"] == {"A": B, "B": A}
-    names = {row["speaker"]: row["speaker_id"] for row in doc["conversation"]}
-    assert names == doc["speaker_ids"]
+    assert set(doc["speakers"]) == {"assistant", "user"}
+    assert set(doc["speakers"].values()) == {A, B}
+    names = {row["role"]: row["speaker_id"] for row in doc["conversation"]}
+    assert names == doc["speakers"]
 
 
 def test_each_clip_has_a_plain_text_transcript_naming_both_speakers(tmp_path):
@@ -646,7 +665,7 @@ def test_each_clip_has_a_plain_text_transcript_naming_both_speakers(tmp_path):
     text = (folder / doc["transcript"]).read_text(encoding="utf-8")
     lines = [l for l in text.splitlines() if l]
     assert len(lines) == len(doc["conversation"])
-    assert any("] A: " in l for l in lines) and any("] B: " in l for l in lines)
+    assert any("] [assistant] " in l for l in lines) and any("] [user] " in l for l in lines)
     assert lines[0].startswith("[00:")
     assert doc["conversation"][0]["text"] in lines[0]
 
@@ -656,8 +675,8 @@ def test_switching_stereo_off_writes_only_the_mixture(tmp_path):
     assert result.exports
     folder, doc = _first_clip(tmp_path)
     assert sorted(p.name for p in folder.iterdir()) == [
-        "conversation.json", "mixture.wav", "transcript.txt"]
-    assert set(doc["files"]) == {"mixture"} and "channels_2ch" not in doc
+        "conversation.json", "mixture.wav", "stereo_2ch.json", "transcript.txt"]
+    assert set(doc["files"]) == {"mixture", "alignments"} and "channels" not in doc
     assert result.exports[0]["audio_2ch"] is None
 
 
@@ -791,10 +810,12 @@ def _tracks(tmp_path, **kw):
 def test_each_ear_carries_that_speakers_separated_track(tmp_path):
     _, meta, mono, stereo, fake = _tracks(tmp_path)
     mid = len(stereo) // 2
-    assert stereo[mid, 0] == pytest.approx(0.25, abs=1e-3)
-    assert stereo[mid, 1] == pytest.approx(-0.25, abs=1e-3)
-    assert meta["channels_2ch"]["method"] == "strict_separation_tracks"
-    assert "separated" in meta["channels_2ch"]["note"]
+    # The fake lays +0.25 on the first speaker (the user) and -0.25 on the second (the
+    # finder's assistant, B): the assistant is the left ear.
+    assert stereo[mid, 0] == pytest.approx(-0.25, abs=1e-3)
+    assert stereo[mid, 1] == pytest.approx(0.25, abs=1e-3)
+    assert meta["channels"]["method"] == "strict_separation_tracks"
+    assert "separated" in meta["channels"]["note"]
 
 
 def test_the_two_channel_file_is_exactly_as_long_as_the_mono(tmp_path):
@@ -804,11 +825,11 @@ def test_the_two_channel_file_is_exactly_as_long_as_the_mono(tmp_path):
 
 def test_the_tracks_are_asked_for_strictly_for_this_pair_over_exactly_the_cut(tmp_path):
     _, meta, mono, _, fake = _tracks(tmp_path)
-    # Asked twice -- once to decide the tier, once to write -- and the same way both times.
+    # Asked twice -- once to decide the category, once to write -- and the same way both times.
     assert fake.calls and all(c == fake.calls[0] for c in fake.calls)
     call = fake.calls[0]
     assert call["strict"] is True
-    assert call["speakers"] == (meta["speaker_ids"]["A"], meta["speaker_ids"]["B"])
+    assert set(call["speakers"]) == set(meta["speakers"].values())
     lo, hi = call["time_range"]
     assert round((hi - lo) * SR) == len(mono)
     assert lo == pytest.approx(meta["source_start"], abs=1e-3)
@@ -825,14 +846,14 @@ def test_the_mono_recording_is_the_mixture_whatever_the_tracks_are(tmp_path):
 def test_without_separation_output_the_mixture_is_gated_as_before(tmp_path):
     _run(tmp_path, FakeLLM(_good()), max_candidates=1)
     _, meta = _only(tmp_path)
-    assert meta["channels_2ch"]["method"] == "time_gated"
+    assert meta["channels"]["method"] == "time_gated"
     assert "separated_spans" not in meta
 
 
 def test_a_silent_separated_track_falls_back_to_the_gated_mixture_and_says_so(tmp_path):
     log = Logger()
     _, meta, _, stereo, _ = _tracks(tmp_path, fake=FakeSeparation(left=0.0), logger=log)
-    assert meta["channels_2ch"]["method"] == "time_gated"
+    assert meta["channels"]["method"] == "time_gated"
     assert np.any(np.abs(stereo) > 1e-3), "the fallback is the gated mixture, not silence"
     assert any("silent" in m for m in log.warnings)
 
@@ -841,7 +862,7 @@ def test_a_separation_service_that_fails_does_not_lose_the_excerpt(tmp_path):
     log = Logger()
     result, meta, _, _, _ = _tracks(
         tmp_path, fake=FakeSeparation(fail=RuntimeError("boom")), logger=log)
-    assert result.exports and meta["channels_2ch"]["method"] == "time_gated"
+    assert result.exports and meta["channels"]["method"] == "time_gated"
     assert any("boom" in m for m in log.warnings)
 
 
@@ -852,7 +873,7 @@ def test_a_track_shorter_than_the_cut_is_padded_not_broadcast(tmp_path):
             return left[:-50], right[:-50]
 
     _, meta, mono, stereo, _ = _tracks(tmp_path, fake=Short())
-    assert stereo.shape == (len(mono), 2) and meta["channels_2ch"]["method"] == "strict_separation_tracks"
+    assert stereo.shape == (len(mono), 2) and meta["channels"]["method"] == "strict_separation_tracks"
 
 
 def test_where_the_separator_worked_and_where_it_failed_is_written_into_the_metadata(tmp_path):
@@ -884,7 +905,7 @@ def test_with_the_real_track_builder_an_overlap_is_heard_one_voice_to_an_ear(tmp
     real.logger = None
 
     result, meta, mono, stereo, _ = _tracks(tmp_path, segs=segs, speech_segments=speech, fake=real)
-    assert meta["channels_2ch"]["method"] == "strict_separation_tracks"
+    assert meta["channels"]["method"] == "strict_separation_tracks"
     # Inside the overlap [seg 21 start, seg 20 end] both are speaking; each ear is one constant.
     src = meta["source_start"]
     assert src < segs[21].start and segs[20].end < meta["source_end"], "the excerpt must hold the overlap"
@@ -920,22 +941,17 @@ def test_the_pass_is_given_the_separation_output_by_the_pipeline(tmp_path):
     assert pipe.conversation_export_svc.kwargs["separation_service"] == "the-separation-service"
 
 
-# --- the folders: tiers, numbering, overlap first ---------------------------------------
+# --- the folders: categories ------------------------------------------------------------
 
 from services import conversation_export_service
 from services.conversation_export_service import (
-    FOLDER_ORDER, OVERLAP_BAD, OVERLAP_GOOD, cross_speaker_overlaps, tier_folder)
+    CATEGORIES, FOLDER_ORDER, QUARANTINE, cross_speaker_overlaps)
 
 
-def test_tier_folders_are_numbered_so_the_best_one_sorts_first():
-    names = [tier_folder(t) for t in FOLDER_ORDER]
-    assert names == ["tier_1_overlap_good", "tier_2_S", "tier_3_A", "tier_4_B",
-                     "tier_5_C", "tier_6_overlap_bad"]
-    assert names == sorted(names)
-
-
-def test_a_folder_that_is_not_a_known_tier_sorts_after_all_of_them():
-    assert tier_folder("odd") == "tier_7_odd" and tier_folder("odd") > tier_folder(OVERLAP_BAD)
+def test_the_folder_order_is_the_categories_then_quarantine():
+    assert FOLDER_ORDER == ("full_duplex/interruption", "full_duplex/backchannel",
+                            "half_duplex", "quarantine")
+    assert CATEGORIES == FOLDER_ORDER[:3] and QUARANTINE == FOLDER_ORDER[3]
 
 
 def test_overlap_is_where_two_different_speakers_are_heard_at_once():
@@ -958,18 +974,8 @@ def test_every_conversation_folder_holds_exactly_the_agreed_files(tmp_path):
     _run(tmp_path, FakeLLM(_good()))
     for folder in _folders(tmp_path):
         assert sorted(p.name for p in folder.iterdir()) == [
-            "conversation.json", "mixture.wav", "speaker_A.wav", "speaker_B.wav",
-            "stereo_2ch.wav", "transcript.txt"]
-
-
-def test_conversations_are_numbered_from_one_within_each_tier_and_the_json_says_where_it_is(tmp_path):
-    _, result, _ = _run(tmp_path, FakeLLM(_good()), segs=_talk(60), max_candidates=40)
-    assert len(result.exports) >= 2
-    for tier in tmp_path.glob("tier_*"):
-        numbers = sorted(int(c.name.rsplit("_", 1)[1]) for c in tier.glob("conversation_*"))
-        assert numbers == list(range(1, len(numbers) + 1)), tier.name
-    for folder in _folders(tmp_path):
-        assert _doc_of(folder)["folder"] == f"{folder.parent.name}/{folder.name}"
+            "assistant.wav", "conversation.json", "mixture.wav", "stereo_2ch.json",
+            "stereo_2ch.wav", "transcript.txt", "user.wav"]
 
 
 def test_the_export_rows_point_at_files_that_exist_under_the_export_root(tmp_path):
@@ -980,10 +986,13 @@ def test_the_export_rows_point_at_files_that_exist_under_the_export_root(tmp_pat
         assert row["verified"] is True
 
 
-def test_the_report_counts_the_tier_folders(tmp_path):
+def test_the_report_counts_the_category_folders(tmp_path):
     _, result, _ = _run(tmp_path, FakeLLM(_good()), segs=_talk(60), max_candidates=40)
-    counted = {t.name: len(list(t.glob("conversation_*"))) for t in tmp_path.glob("tier_*")}
-    assert result.report["tiers"] == counted
+    counted = {}
+    for folder in _folders(tmp_path):
+        key = folder.parent.relative_to(tmp_path).as_posix()
+        counted[key] = counted.get(key, 0) + 1
+    assert result.report["categories"] == counted
     assert result.report["verification_failed"] == 0
 
 
@@ -1001,6 +1010,12 @@ def test_a_folder_that_is_not_ours_is_left_alone_when_the_old_ones_are_cleared(t
     assert (tmp_path / "notes" / "keep.txt").read_text(encoding="utf-8") == "mine"
 
 
+def test_the_old_score_tier_folders_of_an_earlier_run_are_cleared(tmp_path):
+    (tmp_path / "tier_2_S" / "conversation_1").mkdir(parents=True)
+    ConversationExportService._clear_previous(str(tmp_path))
+    assert not (tmp_path / "tier_2_S").exists()
+
+
 # --- the read-back check ----------------------------------------------------------------
 
 def test_every_file_is_read_back_and_the_result_is_in_the_json(tmp_path):
@@ -1009,12 +1024,13 @@ def test_every_file_is_read_back_and_the_result_is_in_the_json(tmp_path):
     check = doc["verification"]
     assert check["ok"] is True and all(check["checks"].values())
     assert set(check["checks"]) >= {"same_sample_rate", "same_length", "mixture_is_mono",
-                                    "speaker_files_are_mono", "stereo_is_two_channels",
-                                    "stereo_left_is_speaker_A", "stereo_right_is_speaker_B"}
+                                    "role_files_are_mono", "stereo_is_two_channels",
+                                    "stereo_assistant_channel_is_assistant",
+                                    "stereo_user_channel_is_user"}
     frames = {v["frames"] for v in check["files"].values()}
     assert frames == {check["num_samples"]}
     assert check["files"]["stereo_2ch"]["channels"] == 2
-    assert check["files"]["speaker_A"]["channels"] == 1
+    assert check["files"]["assistant"]["channels"] == 1
     assert check["sample_rate"] == SR
 
 
@@ -1029,19 +1045,19 @@ def test_the_recorded_hash_is_the_hash_of_the_file_on_disk(tmp_path):
 def test_a_file_that_has_drifted_from_the_others_fails_the_check(tmp_path):
     svc, _, _ = _run(tmp_path, FakeLLM(_good()), max_candidates=1)
     folder, doc = _only(tmp_path)
-    b, sr = sf.read(str(folder / "speaker_B.wav"), dtype="int16")
-    sf.write(str(folder / "speaker_B.wav"), np.roll(b, 5), sr, subtype="PCM_16")   # 5 samples late
+    b, sr = sf.read(str(folder / "user.wav"), dtype="int16")
+    sf.write(str(folder / "user.wav"), np.roll(b, 5), sr, subtype="PCM_16")   # 5 samples late
     files = {k: v["file"] for k, v in doc["verification"]["files"].items()}
     check = svc._verify(str(folder), files, SR, doc["verification"]["num_samples"])
-    assert check["ok"] is False and check["checks"]["stereo_right_is_speaker_B"] is False
+    assert check["ok"] is False and check["checks"]["stereo_user_channel_is_user"] is False
     assert check["checks"]["same_length"] is True
 
 
 def test_a_file_of_the_wrong_length_fails_the_check(tmp_path):
     svc, _, _ = _run(tmp_path, FakeLLM(_good()), max_candidates=1)
     folder, doc = _only(tmp_path)
-    a, sr = sf.read(str(folder / "speaker_A.wav"), dtype="int16")
-    sf.write(str(folder / "speaker_A.wav"), a[:-3], sr, subtype="PCM_16")
+    a, sr = sf.read(str(folder / "assistant.wav"), dtype="int16")
+    sf.write(str(folder / "assistant.wav"), a[:-3], sr, subtype="PCM_16")
     files = {k: v["file"] for k, v in doc["verification"]["files"].items()}
     check = svc._verify(str(folder), files, SR, doc["verification"]["num_samples"])
     assert check["ok"] is False and check["checks"]["same_length"] is False
@@ -1058,229 +1074,3 @@ def test_a_failed_check_is_counted_and_reported_as_an_error(tmp_path, monkeypatc
     assert result.report["verification_failed"] == 1
     assert result.exports[0]["verified"] is False
     assert any("same_length" in m for m in log.errors)
-
-
-# --- overlap folders --------------------------------------------------------------------
-
-def _speech_for(segs, similarity=0.8, covered=1.0):
-    """Separation output for `segs`: A at one level, B at another, nothing failed.
-
-    Each segment that takes part in an overlap carries the span the separator worked
-    on, with its similarity; `covered` is the share of the overlap it managed.
-    """
-    overlaps = cross_speaker_overlaps(segs)
-    out = []
-    for seg in segs:
-        n = round((seg.end - seg.start) * SR)
-        spans = []
-        for a, b in overlaps:
-            lo, hi = max(a, seg.start), min(b, seg.end)
-            if hi > lo:
-                spans.append((lo, lo + (hi - lo) * covered, similarity))
-        out.append(SimpleNamespace(
-            index=seg.index, speaker=seg.speaker, start=seg.start, end=seg.end,
-            audio=np.full(n, 0.1 if seg.speaker == A else 0.2, dtype=np.float32),
-            bss_spans=spans, bss_failed_spans=[]))
-    return out
-
-
-def _real_tracks():
-    from services.separation_service import SeparationService
-    real = SeparationService.__new__(SeparationService)
-    real.logger = None
-    return real
-
-
-class _Item:
-    topic, semantic, trimmed, reason, why, trim_ignored, candidate = "t", 5, False, None, "", None, None
-
-
-def _planned(overlap=True, tier="B", fake=None, speech=None, speech_args=None, **settings):
-    """The plan for the first candidate of a talk in which B breaks in on A (or does not)."""
-    from utils.conversation_selection import ConversationSelectionFinder
-    segs = _talk(30)
-    if overlap:
-        segs[21].start -= 3.0            # B starts 3s before A (seg 20) has finished
-    svc = ConversationExportService(FakeLLM(_good()), **settings)
-    finder = ConversationSelectionFinder(segs, TimelineMap(), _quiet(), None, svc.cfg)
-    cand = next(c for c in finder.candidates()
-                if finder.segs[c.first].index <= "00020" and finder.segs[c.last].index >= "00022")
-    cand.tier = tier
-    speech = speech if speech is not None else _speech_for(segs, **(speech_args or {}))
-    return svc._plan(finder, cand, _Item(), _wave(), SR, speech,
-                     fake if fake is not None else _real_tracks())
-
-
-def test_a_cleanly_separated_overlap_is_filed_apart_whatever_its_score():
-    for tier in ("S", "B"):
-        plan = _planned(overlap=True, tier=tier)
-        assert plan.overlap_seconds > 0.3
-        assert plan.method == "strict_separation_tracks"
-        assert plan.tier == OVERLAP_GOOD and plan.overlap_quality == "good"
-        assert plan.overlap_reasons == []
-        assert plan.separated_share == pytest.approx(1.0) and plan.min_similarity == 0.8
-
-
-def test_without_overlap_the_tier_is_the_one_the_score_gives():
-    plan = _planned(overlap=False, tier="B")
-    assert plan.overlap_seconds == 0.0 and plan.tier == "B" and plan.overlap_quality is None
-
-
-def test_the_folders_are_by_score_alone_when_overlap_first_is_off():
-    plan = _planned(overlap=True, tier="B", overlap_first=False)
-    assert plan.tier == "B"
-    assert plan.overlap_quality == "good", "how good the overlap is is still recorded"
-
-
-def test_an_overlap_shorter_than_the_threshold_is_not_an_overlap_excerpt():
-    plan = _planned(overlap=True, tier="B", overlap_min_seconds=10.0)
-    assert plan.tier == "B" and plan.overlap_quality is None
-
-
-def test_an_overlap_that_was_only_gated_from_the_mixture_is_a_bad_one():
-    """Both voices are still in both ears there."""
-    class NoTracks(FakeSeparation):
-        def export_sdlm_dual_channel(self, *a, **k):
-            raise RuntimeError("no tracks")
-    plan = _planned(overlap=True, tier="S", fake=NoTracks())
-    assert plan.method == "time_gated" and plan.overlap_seconds > 0.3
-    assert plan.tier == OVERLAP_BAD and plan.overlap_reasons == ["not_separated_tracks"]
-
-
-def test_an_overlap_with_no_separation_output_at_all_is_a_bad_one():
-    plan = _planned(overlap=True, tier="S", speech=[])
-    assert plan.tier == OVERLAP_BAD and plan.overlap_reasons == ["not_separated_tracks"]
-
-
-def test_an_overlap_the_separator_failed_on_is_a_bad_one():
-    segs = _talk(30)
-    segs[21].start -= 3.0
-    speech = _speech_for(segs)
-    speech[21].bss_failed_spans = [(165.0, 166.0, "low_similarity", "sim 0.1")]
-    plan = _planned(overlap=True, tier="S", speech=speech)
-    assert plan.tier == OVERLAP_BAD and "separation_failed" in plan.overlap_reasons
-
-
-def test_an_overlap_separated_with_a_weak_match_is_a_bad_one():
-    plan = _planned(overlap=True, tier="S", speech_args={"similarity": 0.3})
-    assert plan.tier == OVERLAP_BAD and plan.overlap_reasons == ["low_similarity"]
-    assert plan.min_similarity == 0.3
-
-
-def test_an_overlap_only_partly_separated_is_a_bad_one():
-    plan = _planned(overlap=True, tier="S", speech_args={"covered": 0.5})
-    assert plan.tier == OVERLAP_BAD and plan.overlap_reasons == ["overlap_not_separated"]
-    assert plan.separated_share == pytest.approx(0.5, abs=0.02)
-
-
-def test_the_bar_for_a_good_overlap_is_configurable():
-    assert _planned(overlap=True, tier="S", speech_args={"similarity": 0.3},
-                    overlap_good_min_similarity=0.2).tier == OVERLAP_GOOD
-    assert _planned(overlap=True, tier="S", speech_args={"covered": 0.5},
-                    overlap_good_min_coverage=0.4).tier == OVERLAP_GOOD
-
-
-def test_every_reason_an_overlap_is_bad_is_listed_not_just_the_first():
-    segs = _talk(30)
-    segs[21].start -= 3.0
-    speech = _speech_for(segs, similarity=0.3, covered=0.5)
-    speech[21].bss_failed_spans = [(165.0, 166.0, "low_similarity", "x")]
-    plan = _planned(overlap=True, tier="S", speech=speech)
-    assert set(plan.overlap_reasons) == {"separation_failed", "low_similarity",
-                                         "overlap_not_separated"}
-
-
-def test_the_json_says_how_good_the_overlap_is(tmp_path):
-    segs = _talk(30)
-    segs[21].start -= 3.0
-    result, meta, _, _, _ = _tracks(tmp_path, segs=segs, speech_segments=_speech_for(segs),
-                                    fake=_real_tracks())
-    assert meta["tier"] == OVERLAP_GOOD and meta["folder"].startswith("tier_1_overlap_good/")
-    assert meta["overlap_quality"] == "good" and meta["overlap_reasons"] == []
-    assert meta["overlap_separated_share"] == pytest.approx(1.0)
-    assert meta["overlap_min_similarity"] == 0.8
-    assert meta["overlap_seconds"] > 0.3 and meta["overlap_spans"]
-    span = meta["overlap_spans"][0]
-    assert 0.0 <= span["start"] < span["end"] <= meta["duration"]
-    assert meta["tier_by_score"] in ("S", "A", "B", "C")
-    assert result.exports[0]["overlap_quality"] == "good"
-
-
-def test_the_json_says_why_a_bad_overlap_is_bad(tmp_path):
-    segs = _talk(30)
-    segs[21].start -= 3.0
-    result, meta, _, _, _ = _tracks(tmp_path, segs=segs,
-                                    speech_segments=_speech_for(segs, similarity=0.3),
-                                    fake=_real_tracks())
-    assert meta["tier"] == OVERLAP_BAD and meta["folder"].startswith("tier_6_overlap_bad/")
-    assert meta["overlap_quality"] == "bad" and meta["overlap_reasons"] == ["low_similarity"]
-    assert result.exports[0]["overlap_reasons"] == ["low_similarity"]
-
-
-def test_conversations_with_overlap_leave_the_score_tiers_and_the_rest_stay(tmp_path):
-    segs = _talk(60)
-    segs[41].start -= 3.0                          # an overlap far into the recording
-    _, result, _ = _run(tmp_path, FakeLLM(_good()), segs=segs, max_candidates=40,
-                        max_seconds=100.0,
-                        run_kwargs={"speech_segments": _speech_for(segs),
-                                    "separation_service": _real_tracks()})
-    with_overlap = [r for r in result.exports if r["overlap_seconds"] > 0]
-    without = [r for r in result.exports if r["overlap_seconds"] == 0]
-    assert with_overlap and without
-    assert {r["tier"] for r in with_overlap} == {OVERLAP_GOOD}
-    assert not {r["tier"] for r in without} & {OVERLAP_GOOD, OVERLAP_BAD}
-    names = sorted(p.name for p in tmp_path.glob("tier_*"))
-    assert names[0] == "tier_1_overlap_good"
-
-
-def test_the_bad_overlaps_sort_after_every_score_tier(tmp_path):
-    segs = _talk(60)
-    segs[41].start -= 3.0
-    _, result, _ = _run(tmp_path, FakeLLM(_good()), segs=segs, max_candidates=40,
-                        max_seconds=100.0,
-                        run_kwargs={"speech_segments": _speech_for(segs, similarity=0.2),
-                                    "separation_service": _real_tracks()})
-    names = sorted(p.name for p in tmp_path.glob("tier_*"))
-    assert names[-1] == "tier_6_overlap_bad" and len(names) >= 2
-
-
-def test_the_report_counts_the_overlap_folders_too(tmp_path):
-    segs = _talk(60)
-    segs[41].start -= 3.0
-    _, result, _ = _run(tmp_path, FakeLLM(_good()), segs=segs, max_candidates=40,
-                        max_seconds=100.0,
-                        run_kwargs={"speech_segments": _speech_for(segs),
-                                    "separation_service": _real_tracks()})
-    assert result.report["tiers"].get("tier_1_overlap_good", 0) >= 1
-
-
-def _refiled(monkeypatch, assign):
-    """Give the picked excerpts the tier and score `assign(k, candidate)` says."""
-    real = conversation_export_service.pick_non_overlapping
-
-    def picked(candidates):
-        chosen = real(candidates)
-        for k, cand in enumerate(chosen):
-            cand.tier, cand.score = assign(k, cand)
-        return chosen
-
-    monkeypatch.setattr(conversation_export_service, "pick_non_overlapping", picked)
-
-
-def test_each_tier_folder_is_numbered_from_one_and_ids_follow_the_folder_order(tmp_path, monkeypatch):
-    tiers = ["A", "S", "B", "A", "B", "B", "S"]
-    _refiled(monkeypatch, lambda k, c: (tiers[k % len(tiers)], 90.0 - k))
-    _, result, _ = _run(tmp_path, FakeLLM(_good()), segs=_talk(60), max_candidates=40,
-                        max_seconds=100.0)
-    assert len(result.exports) >= 4
-    folders = sorted(p.name for p in tmp_path.glob("tier_*"))
-    assert len(folders) >= 2 and folders == sorted(folders)
-    for tier in tmp_path.glob("tier_*"):
-        numbers = sorted(int(c.name.rsplit("_", 1)[1]) for c in tier.glob("conversation_*"))
-        assert numbers == list(range(1, len(numbers) + 1)), tier.name
-        for conv in tier.glob("conversation_*"):
-            assert _doc_of(conv)["tier"] == tier.name.split("_", 2)[2]
-    ranks = [tier_folder(row["tier"]) for row in result.exports]
-    assert ranks == sorted(ranks), "the best folder is written and numbered first"
-    ids = [row["id"] for row in result.exports]
-    assert ids == sorted(ids) and len(set(ids)) == len(ids)
