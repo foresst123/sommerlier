@@ -64,3 +64,8 @@ class TranscriptSegment:
     # `speaker`. None means the label is untouched. Nothing but `speaker` is ever
     # rewritten by that pass, so this is the one trace that it ran on a segment.
     speaker_original: Optional[str] = None
+
+    # Flags from the transcript review pass: dicts of kind / phrase / conf / why.
+    # None means the review did not run on this segment; [] means it ran and
+    # found nothing. Nothing else about the segment is ever changed by it.
+    review_flags: Optional[List[dict]] = None
