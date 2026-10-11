@@ -69,7 +69,7 @@
       },
       "audio_quality": {
         "enabled": true,
-        "min_normalized_quality": 0.3,
+        "min_normalized_quality": 0.5,
         "on_error": "reject"
       },
       "models": {
@@ -278,7 +278,7 @@
       },
       "audio_quality": {
         "enabled": true,
-        "min_normalized_quality": 0.3,
+        "min_normalized_quality": 0.5,
         "on_error": "reject"
       },
       "models": {
