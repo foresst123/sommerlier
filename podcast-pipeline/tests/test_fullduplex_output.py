@@ -338,7 +338,8 @@ def test_every_shipped_profile_still_builds_and_a100_has_the_designed_values():
     assert built >= 2
     a100 = ConversationSelectionConfig.from_settings(
         profiles["a100"]["models"]["conversation_selection"])
-    assert (a100.max_seconds, a100.min_turns_each, a100.min_score) == (120, 3, 70)
+    assert (a100.max_seconds, a100.min_turns_each, a100.min_turns_total,
+            a100.count_backchannels_as_turns, a100.min_score) == (120, 1, 3, True, 70)
 
 
 # --- selection: letters back to ids, lines to segments -------------------------------------

@@ -203,6 +203,36 @@ def test_one_turn_each_is_enough_when_the_setting_says_so():
     assert finder.stats["candidates_rejected"].get("too_few_turns", 0) == 0
 
 
+def test_a_b_a_with_a_backchannel_is_a_minimum_conversation():
+    segs = [
+        _seg(0, A, 0.0, 8.0),
+        _seg(1, B, 8.2, 8.7, "ừ"),
+        _seg(2, A, 8.9, 16.9),
+    ]
+    finder = _finder(
+        segs,
+        min_seconds=10.0,
+        max_seconds=30.0,
+        min_turns_each=1,
+        min_turns_total=3,
+        count_backchannels_as_turns=True,
+    )
+    assert finder.evaluate(0, 2)[0] is not None
+
+
+def test_a_b_without_a_return_fails_the_three_turn_policy():
+    segs = [_seg(0, A, 0.0, 8.0), _seg(1, B, 8.2, 8.7, "ừ")]
+    finder = _finder(
+        segs,
+        min_seconds=5.0,
+        max_seconds=30.0,
+        min_turns_each=1,
+        min_turns_total=3,
+        count_backchannels_as_turns=True,
+    )
+    assert finder.evaluate(0, 1)[1] == "too_few_turns"
+
+
 def test_a_hallucinated_segment_ends_the_block():
     segs = _talk(14)
     segs[7] = _seg(7, B, 56.0, 63.0, "Hãy subscribe cho kênh")

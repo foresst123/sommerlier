@@ -387,7 +387,9 @@
           "finder_overlap_segments": 40,
           "max_silence": 3.0,
           "max_monologue": 0,
-          "min_turns_each": 3,
+          "min_turns_each": 1,
+          "min_turns_total": 3,
+          "count_backchannels_as_turns": true,
           "min_score": 70,
           "weights": {
             "interaction": 25

@@ -110,7 +110,9 @@ class ConversationSelectionConfig:
     max_silence: float = 3.0             # a longer pause ends the block
     max_monologue: float = 45.0          # one person without an answer this long ends it; 0 = no limit
     boundary_gap: float = 0.6            # a pause this long is a place to start or stop
-    min_turns_each: int = 2              # each of the two must have real turns
+    min_turns_each: int = 2              # minimum counted turns for each speaker
+    min_turns_total: int = 0             # 0 keeps legacy per-speaker-only policy
+    count_backchannels_as_turns: bool = False
     ends_per_start: int = 3
     pad_seconds: float = 0.2
 
@@ -578,8 +580,11 @@ class ConversationSelectionFinder:
             speaking[s.speaker] += max(0.0, float(s.end) - float(s.start))
 
         runs: List[List] = []           # [speaker, first_start, last_end]
+        counted_states = {NORMAL}
+        if self.cfg.count_backchannels_as_turns:
+            counted_states.add(BACKCHANNEL)
         for pos in range(i, j + 1):
-            if self.state[pos] != NORMAL:
+            if self.state[pos] not in counted_states:
                 continue
             s = self.segs[pos]
             if runs and runs[-1][0] == s.speaker:
@@ -832,7 +837,9 @@ class ConversationSelectionFinder:
         metrics, speakers = self._metrics(i, j, start, end)
         if len(speakers) != 2:
             return None, "not_two_speakers"
-        if min(metrics["turns_each"].get(spk, 0) for spk in speakers) < cfg.min_turns_each:
+        if (min(metrics["turns_each"].get(spk, 0) for spk in speakers) < cfg.min_turns_each
+                or (cfg.min_turns_total > 0
+                    and metrics["turn_count"] < cfg.min_turns_total)):
             return None, "too_few_turns"
 
         foreign_spans = [
