@@ -107,7 +107,8 @@ def test_every_file_finishes_a_stage_before_the_next_stage_starts():
     for stage, _path in pipe.calls:
         if not seen or seen[-1] != stage:
             seen.append(stage)
-    expected = [s for s in PIPELINE_STAGES if s != "conversation_exports"]
+    expected = [s for s in PIPELINE_STAGES
+                if s not in {"conversation_selection", "conversation_exports"}]
     assert seen == expected, (
         f"stages ran as {seen}; each stage must cover the whole batch before the next"
     )
@@ -117,20 +118,21 @@ def test_every_file_finishes_a_stage_before_the_next_stage_starts():
 
 def test_pass_order_puts_review_after_relabel_and_before_alignment():
     assert PIPELINE_STAGES.index("speaker_relabel") < PIPELINE_STAGES.index(
-        "transcript_review") < PIPELINE_STAGES.index("word_alignment") \
+        "transcript_review") < PIPELINE_STAGES.index("conversation_selection") \
+        < PIPELINE_STAGES.index("word_alignment") \
         < PIPELINE_STAGES.index("conversation_exports")
 
 
-def test_with_exports_on_there_is_no_whole_file_alignment_pass():
+def test_with_exports_on_selection_and_alignment_are_separate_passes():
     files = ["f1", "f2"]
     pipe = FakePipeline()
     run_batch_by_stage(pipe, _args(
         step_speaker_relabel=False, step_transcript_review=True,
         step_word_alignment=True, step_conversation_exports=True), {}, files)
     stages = [s for s, _ in pipe.calls]
-    assert "word_alignment" not in stages
+    assert stages.count("conversation_selection") == len(files)
+    assert stages.count("word_alignment") == len(files)
     assert stages.count("transcript_review") == 2
-    # selection lives in the conversation_exports pass: one call per file
     assert [p for s, p in pipe.calls if s == "conversation_exports"] == files
 
 
@@ -142,8 +144,7 @@ def test_selection_runs_once_per_file_across_the_batch_passes():
         def run(self, args, config, path):
             super().run(args, config, path)
             stop = args.stop_after
-            reaches_select = stop in (None, "conversation_exports", "word_alignment")
-            if reaches_select and args.step_conversation_exports \
+            if stop == "conversation_selection" and args.step_conversation_exports \
                     and not args.postprocess_only:
                 selections.append((path, stop))
 
@@ -158,7 +159,19 @@ def test_selection_runs_once_per_file_across_the_batch_passes():
         stop_after="word_alignment", step_transcript_review=True,
         step_word_alignment=True, step_conversation_exports=True), {}, files)
     assert sorted(p for p, _ in selections) == files
-    assert {stop for _, stop in selections} == {"word_alignment"}
+    assert {stop for _, stop in selections} == {"conversation_selection"}
+
+
+def test_stop_after_conversation_selection_stops_before_alignment_and_writing():
+    pipe = FakePipeline()
+    run_batch_by_stage(pipe, _args(
+        stop_after="conversation_selection", step_transcript_review=True,
+        step_word_alignment=True, step_conversation_exports=True), {}, ["f1"])
+    stages = [s for s, _ in pipe.calls]
+    assert stages[-1] == "conversation_selection"
+    assert "word_alignment" not in stages
+    assert "conversation_exports" not in stages
+    assert None not in stages
 
 
 def test_stop_after_word_alignment_with_exports_stops_before_writing():
@@ -167,7 +180,8 @@ def test_stop_after_word_alignment_with_exports_stops_before_writing():
         stop_after="word_alignment", step_transcript_review=True,
         step_word_alignment=True, step_conversation_exports=True), {}, ["f1"])
     stages = [s for s, _ in pipe.calls]
-    assert stages[-1] == "word_alignment"       # the exports pass, told to stop after alignment
+    assert stages[-1] == "word_alignment"
+    assert stages.count("conversation_selection") == 1
     assert stages.count("word_alignment") == 1 and "conversation_exports" not in stages
     assert None not in stages
 
@@ -209,7 +223,8 @@ def test_captioning_is_skipped_when_its_model_is_off():
     assert [s for s, _ in pipe.calls] == [
         s for s in PIPELINE_STAGES
         if s not in {"captioning", "speaker_relabel", "transcript_review",
-                     "word_alignment", "conversation_exports"}]
+                     "conversation_selection", "word_alignment",
+                     "conversation_exports"}]
 
 
 def test_captioning_runs_when_its_model_is_on():

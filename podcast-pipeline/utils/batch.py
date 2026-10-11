@@ -131,8 +131,10 @@ def split_final_failures(failures, is_done):
 # Stage order must match the pipeline's own sequence; `None` means "run to the
 # end" after all model-backed post-processing, covering clean-data selection
 # and export. Every GPU-backed post-ASR operation has its own corpus-wide pass:
-# refinement -> relabel -> forced alignment -> conversation-export judging. This keeps a model
-# resident for the entire corpus instead of swapping model families per file.
+# refinement -> relabel -> transcript review -> conversation selection -> forced
+# alignment -> conversation exports.  Selection is deliberately its own pass:
+# it is the last LLM-backed conversation stage, while alignment and writing can
+# run after the LLM has been released.
 #
 # "music" leads because it is a stage like any other: it loads PANNs and a
 # vocal separator, and running it as its own pass loads them once for the whole
@@ -142,7 +144,7 @@ def split_final_failures(failures, is_done):
 PIPELINE_STAGES = (
     "music", "diarization", "separation", "asr",
     "captioning", "refinement", "speaker_relabel", "transcript_review",
-    "word_alignment", "conversation_exports", None,
+    "conversation_selection", "word_alignment", "conversation_exports", None,
 )
 
 
@@ -166,19 +168,13 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
     failures = {}
     original_stop = getattr(args, "stop_after", None)
 
-    # With conversation exports on, alignment is part of the conversation_exports
-    # pass (select -> align the selected segments -> write), so selection runs
-    # exactly once per file and there is no separate whole-file word_alignment
-    # pass. "--stop_after word_alignment" then means: run that pass up to and
-    # including alignment of the selected segments, and write nothing.
-    exports_on = opt_in_step_enabled(args, "conversation_exports")
+    # Each item in PIPELINE_STAGES is a real pass.  In particular, conversation
+    # selection is separate from word alignment and exports: this lets the
+    # pipeline release the resident LLM after selection and makes every
+    # --stop_after value an actual stage boundary.
     stop_gate = original_stop
-    if original_stop == "word_alignment" and exports_on:
-        stop_gate = "conversation_exports"
 
     for stage in stages:
-        if stage == "word_alignment" and exports_on:
-            continue
         if stage is not None and stop_gate is not None:
             # The caller asked to stop early; do not run past their request.
             if _stage_index(stage) > _stage_index(stop_gate):
@@ -198,12 +194,21 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
             "captioning": "captioning",
             "refinement": "refinement",
         }
-        _opt_in_stages = {"speaker_relabel", "transcript_review", "word_alignment",
-                          "conversation_exports"}
+        _opt_in_stages = {"speaker_relabel", "transcript_review", "conversation_selection",
+                          "word_alignment", "conversation_exports"}
         if stage is not None:
-            enabled = (opt_in_step_enabled(args, stage)
-                       if stage in _opt_in_stages else
-                       step_enabled(args, _stage_step_map.get(stage, stage)))
+            if stage == "conversation_selection":
+                # Selection is the model-backed half of the existing
+                # conversation_exports opt-in.  Accept a dedicated switch
+                # when present, while keeping old profiles compatible.
+                explicit_selection = getattr(args, "step_conversation_selection", None)
+                enabled = (bool(explicit_selection)
+                           if explicit_selection is not None else
+                           opt_in_step_enabled(args, "conversation_exports"))
+            else:
+                enabled = (opt_in_step_enabled(args, stage)
+                           if stage in _opt_in_stages else
+                           step_enabled(args, _stage_step_map.get(stage, stage)))
             if not enabled:
                 # Without diarization there is no segment timeline for the
                 # downstream stages; the music pass is the complete useful run.
@@ -248,8 +253,6 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
 
         stage_args = copy.copy(args)
         stage_args.stop_after = stage
-        if stage == "conversation_exports" and original_stop == "word_alignment":
-            stage_args.stop_after = "word_alignment"
         # Whether this batch goes on past this stage; a stage that hands the LLM
         # to the next one only keeps it when there is a next one.
         stage_args.batch_continues = stop_gate != stage

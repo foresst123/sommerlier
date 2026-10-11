@@ -80,7 +80,7 @@ def _review(segments, llm, **kw):
 # --- contract constants --------------------------------------------------------
 
 def test_constants_match_the_contract():
-    assert REVIEW_PROMPT_VERSION == "review-v2"
+    assert REVIEW_PROMPT_VERSION == "review-v3"
     assert FLAG_KINDS == ("speaker_phrase", "speaker_turn", "asr_hallucination", "asr_garbage",
                           "not_vietnamese")
     assert HARD_FLAG_KINDS == ("speaker_turn", "asr_hallucination", "asr_garbage")

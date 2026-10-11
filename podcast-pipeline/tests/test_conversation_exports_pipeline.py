@@ -165,7 +165,7 @@ def test_the_step_is_opt_in_and_keeps_the_llm_loaded_for_it():
                   encoding="utf-8").read()
     assert 'opt_in_step_enabled(args, "conversation_exports")' in source
     assert 'self.step_enabled(args, "conversation_exports")' not in source
-    assert "relabel_on or conversation_exports_on" in source
+    assert "relabel_on or exports_planned" in source
 
 
 def test_the_pass_runs_after_relabel_and_before_the_llm_is_released():
@@ -176,7 +176,7 @@ def test_the_pass_runs_after_relabel_and_before_the_llm_is_released():
     relabel = source.index('opt_in_step_enabled(args, "speaker_relabel")')
     alignment = source.index('opt_in_step_enabled(args, "word_alignment")')
     exports = source.index('opt_in_step_enabled(args, "conversation_exports")')
-    unload = source.index("relabel_on or conversation_exports_on")
+    unload = source.index("relabel_on or exports_planned")
     assert relabel < alignment < exports < unload
 
 

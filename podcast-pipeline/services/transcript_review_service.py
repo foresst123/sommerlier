@@ -8,10 +8,14 @@ finder can keep its ranges away from it:
   * `speaker_phrase`   words inside a turn that belong to the other speaker
                        (a backchannel merged into a long turn). Soft.
   * `speaker_turn`     the whole turn belongs to the other speaker. Hard.
-  * `asr_hallucination` boilerplate or invented text unrelated to the talk that
-                       `algorithms/asr/hallucination.py` did not catch. Hard.
+  * `asr_hallucination` boilerplate or invented text the speaker did not say,
+                       unrelated to the talk around it, that
+                       `algorithms/asr/hallucination.py` did not catch. A line
+                       that stays on topic (misheard, repeated, hesitant) is not
+                       one. Hard.
   * `asr_garbage`      gibberish or disconnected ASR words, rather than a
-                       coherent foreign-language sentence. Hard.
+                       coherent foreign-language sentence, that laughter, a
+                       filler, a stutter or a repeat cannot explain. Hard.
   * `not_vietnamese`   the whole line is in English or another Latin-script
                        language (the code filters only non-Latin scripts). Not a
                        hard flag: the selector rejects an excerpt only when such
@@ -42,7 +46,7 @@ from utils.transcript_windows import build_windows, format_line, line_number
 
 # Part of the checkpoint namespace: a changed prompt or rule recomputes instead of
 # reusing flags an older one produced.
-REVIEW_PROMPT_VERSION = "review-v2"
+REVIEW_PROMPT_VERSION = "review-v3"
 
 FLAG_KINDS = ("speaker_phrase", "speaker_turn", "asr_hallucination", "asr_garbage",
               "not_vietnamese")
@@ -85,10 +89,15 @@ REVIEW_SYSTEM_PROMPT = (
     'BẮT BUỘC có "phrase".\n'
     '2. "speaker_turn": CẢ dòng rõ ràng là của người kia (tự hỏi rồi tự trả lời, xưng hô ngược hẳn với cả đoạn). '
     '"phrase" là null.\n'
-    '3. "asr_hallucination": văn bản ASR bịa ra hoặc câu mẫu không liên quan gì tới cuộc hội thoại '
-    "(lời chào kênh, lời cảm ơn người xem, tên kênh, chữ lặp vô nghĩa chèn giữa câu chuyện). "
-    '"phrase" là cụm sai, hoặc null nếu cả dòng sai.\n'
-    '4. "asr_garbage": chuỗi âm tiết vô nghĩa hoặc từ rời rạc không thành câu; đây không phải là một câu tiếng nước ngoài có nghĩa. '
+    '3. "asr_hallucination": ASR BỊA RA nội dung mà người nói KHÔNG hề nói. Đó là một câu hoặc cụm có dạng văn mẫu '
+    "(lời chào kênh, kêu gọi đăng ký/bấm chuông, cảm ơn người xem, tên kênh, đoạn phụ đề/quảng cáo) hoặc một câu trôi chảy, "
+    "đủ ngữ pháp nhưng hoàn toàn lạc chủ đề so với các dòng trước và sau, chèn vào giữa câu chuyện. "
+    "Dấu hiệu bắt buộc: nội dung KHÔNG liên quan mạch hội thoại xung quanh. "
+    "Một dòng vẫn bám chủ đề (dù sai chính tả, nghe nhầm từ, lặp từ, ngập ngừng) thì KHÔNG phải hallucination. "
+    '"phrase" là cụm bịa, hoặc null nếu cả dòng bịa.\n'
+    '4. "asr_garbage": chuỗi âm tiết vô nghĩa hoặc từ rời rạc không thành câu, và KHÔNG thể giải thích được bằng tiếng cười, '
+    "tiếng đệm, nói lắp hay lặp từ do ngập ngừng; đây cũng không phải là một câu tiếng nước ngoài có nghĩa. "
+    "Nếu có thể hiểu đó là người nói đang cười, ngập ngừng hoặc nhắc lại cho rõ thì KHÔNG gắn cờ. "
     '"phrase" là cụm sai, hoặc null nếu cả dòng sai.\n'
     '5. "not_vietnamese": CẢ dòng nói gần như toàn bằng tiếng Anh hoặc một ngôn ngữ khác viết bằng chữ Latin '
     "(Pháp, Tây Ban Nha...), đọc lên không phải tiếng Việt. Chen vài từ tiếng Anh, tên riêng, thuật ngữ hay từ mượn "
@@ -98,6 +107,10 @@ REVIEW_SYSTEM_PROMPT = (
     "### CHỈ GẮN CỜ KHI CỰC KỲ BẤT HỢP LÝ. KHÔNG GẮN CỜ:\n"
     "- Lỗi chính tả, dấu thanh sai, từ đồng âm, thiếu hoặc thừa dấu câu, tên riêng viết sai.\n"
     "- Câu nói lủng củng, ngập ngừng, lặp từ do người nói tự nhiên, từ địa phương, tiếng lóng.\n"
+    "- Tiếng cười và âm phản ứng bằng miệng (\"ha ha\", \"hì hì\", \"hề hề\", \"ừm\", \"ờ\", \"à\", \"ồ\"), và câu bị lặp lại "
+    "hoặc nói lắp vì người nói vừa nói vừa cười hay nói chưa rõ nên phải nhắc lại. Đây là lời nói THẬT, không phải ASR bịa hay rác. "
+    "Lặp lại do người nói khác với bịa: hallucination là nội dung người nói không nói, còn lặp lại là họ có nói.\n"
+    "- Đoạn mơ hồ, không chắc là cười, nói không rõ hay rác: bỏ qua, không gắn cờ.\n"
     "- Một người nói liền nhiều dòng (lượt nói dài) là bình thường. Một chữ chỉ xuất hiện ở vài dòng không có nghĩa là sai: "
     "đó có thể là khách mời hoặc giọng trong đoạn video chèn vào.\n"
     "- Những thứ mã đã tự lọc trước đó: danh sách câu mẫu quen thuộc (đăng ký kênh, hẹn gặp lại, bấm chuông...), "
@@ -125,9 +138,11 @@ REVIEW_SYSTEM_PROMPT = (
     "[904] 00:33.5-00:38.0 B (gap +0.4s) Chắc là vì mình thấy mình làm được điều có ích.\n"
     "[905] 00:38.4-00:41.0 A (gap +0.4s) xờ ky pờ lanh bu đê mon tơ nhây\n"
     "[906] 00:41.4-00:47.0 B (gap +0.4s) Yeah I think that is really interesting, let me explain why this works\n"
+    "[907] 00:47.4-00:51.0 A (gap +0.4s) ha ha ha thì đúng là vậy đó, đúng là vậy đó ha ha\n"
     "Dòng 902 có \"đúng rồi\" là lời đệm của người nghe bị gộp vào lượt của B. "
     "Dòng 903 là câu hỏi mang chữ B ngay trước câu trả lời của chính B, nên cả lượt là của người kia. "
-    "Dòng 905 là chuỗi âm tiết không phải tiếng Việt. Dòng 906 là cả một câu tiếng Anh. Kết quả đúng là:\n"
+    "Dòng 905 là chuỗi âm tiết không phải tiếng Việt. Dòng 906 là cả một câu tiếng Anh. "
+    "Dòng 907 có tiếng cười và câu nhắc lại nhưng là lời nói thật, nên KHÔNG gắn cờ. Kết quả đúng là:\n"
     '[{"i": 902, "kind": "speaker_phrase", "phrase": "đúng rồi", "conf": 0.85, "why": "lời đệm của người nghe bị gộp vào lượt nói"}, '
     '{"i": 903, "kind": "speaker_turn", "phrase": null, "conf": 0.9, "why": "câu hỏi mang chữ của người vừa trả lời"}, '
     '{"i": 905, "kind": "asr_garbage", "phrase": null, "conf": 0.9, "why": "âm tiết không phải tiếng Việt"}, '

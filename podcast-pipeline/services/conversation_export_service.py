@@ -69,7 +69,7 @@ import re
 import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -86,6 +86,7 @@ from utils.transcript_windows import line_number
 
 # Bump when the prompt or the acceptance rules change.
 CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v10-foreign-review"
+CONVERSATION_SELECTION_CHECKPOINT_VERSION = 1
 
 _TEMPLATE_SLACK_TOKENS = 64
 
@@ -842,6 +843,32 @@ class ConversationSelection:
         return [segs[pos] for pos in sorted(wanted)]
 
 
+def _json_safe(value):
+    """Return ``value`` made only of JSON primitives.
+
+    Candidate diagnostics normally contain Python numbers, but noise backends and
+    NumPy reductions are allowed to return NumPy scalar values.  Keeping this
+    conversion here means selection checkpoints are deterministic and do not
+    depend on pickle's ability to import a particular NumPy class later.
+    """
+    if value is None or isinstance(value, (str, bool, int, float)):
+        if isinstance(value, float) and not np.isfinite(value):
+            return None
+        return value
+    if isinstance(value, np.generic):
+        return _json_safe(value.item())
+    if isinstance(value, np.ndarray):
+        return [_json_safe(item) for item in value.tolist()]
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    # A checkpoint must never contain an opaque model/backend object.  This is a
+    # useful last resort for diagnostics, while the actual candidate fields are
+    # all covered by the primitive cases above.
+    return str(value)
+
+
 @dataclass
 class _Judged:
     original: Candidate
@@ -922,6 +949,247 @@ class ConversationExportService:
         # A finder reply can contain many candidates, so never use the tiny budget
         # that was sufficient for the old one-candidate semantic judge.
         self.max_new_tokens = reply_budget(max(1536, self.cfg.max_new_tokens), self.cfg.thinking)
+
+    @property
+    def checkpoint_namespace(self) -> str:
+        """Path-safe namespace for semantic selection checkpoints.
+
+        Selection is model output, so a checkpoint made with another prompt,
+        model, thinking mode, or validator setting is not interchangeable.  The
+        full settings are included in the digest rather than relying on a short
+        hand-written subset of the config (which is easy to forget when a new
+        acceptance rule is added).
+        """
+        model = getattr(self.llm, "model_name", None) or "unknown"
+        settings = {
+            item.name: getattr(self.cfg, item.name)
+            for item in fields(self.cfg)
+        }
+        identity = {
+            "prompt_version": CONVERSATION_EXPORT_PROMPT_VERSION,
+            "model": model,
+            "thinking": bool(self.cfg.thinking),
+            "max_new_tokens": self.max_new_tokens,
+            "settings": _json_safe(settings),
+        }
+        encoded = json.dumps(identity, ensure_ascii=False, sort_keys=True,
+                             separators=(",", ":")).encode("utf-8")
+        digest = hashlib.sha256(encoded).hexdigest()[:16]
+        model_slug = re.sub(r"[^A-Za-z0-9._-]+", "_", str(model)).strip("_") or "unknown"
+        mode = "think" if self.cfg.thinking else "nothink"
+        return f"{CONVERSATION_SELECTION_CHECKPOINT_VERSION}-{CONVERSATION_EXPORT_PROMPT_VERSION}-{model_slug}-{mode}-{digest}"
+
+    @staticmethod
+    def _candidate_key(finder, candidate: Candidate) -> Tuple[str, str]:
+        try:
+            return (str(finder.segs[candidate.first].index),
+                    str(finder.segs[candidate.last].index))
+        except (IndexError, AttributeError, TypeError) as exc:
+            raise ValueError("candidate does not reference finder segments") from exc
+
+    @classmethod
+    def _candidate_to_checkpoint(cls, finder, candidate: Candidate) -> dict:
+        first_index, last_index = cls._candidate_key(finder, candidate)
+        return {
+            "first_index": first_index,
+            "last_index": last_index,
+            # Positions are diagnostic only; indexes are the stable identity used
+            # when loading against a freshly materialised transcript.
+            "first": int(candidate.first),
+            "last": int(candidate.last),
+            "start": float(candidate.start),
+            "end": float(candidate.end),
+            "pad_start": float(candidate.pad_start),
+            "pad_end": float(candidate.pad_end),
+            "speakers": [str(speaker) for speaker in candidate.speakers],
+            "metrics": _json_safe(candidate.metrics),
+            "noise": _json_safe(candidate.noise),
+            "music_patched_share": _json_safe(candidate.music_patched_share),
+            "components": _json_safe(candidate.components),
+            "score": float(candidate.score),
+            "tier": str(candidate.tier),
+        }
+
+    @classmethod
+    def _candidate_from_checkpoint(cls, finder, payload: dict,
+                                   cache: Optional[dict] = None) -> Candidate:
+        if not isinstance(payload, dict):
+            raise ValueError("selection checkpoint candidate is not an object")
+        first_index, last_index = str(payload.get("first_index")), str(payload.get("last_index"))
+        by_index = {}
+        for pos, seg in enumerate(finder.segs):
+            key = str(getattr(seg, "index", ""))
+            if key in by_index:
+                raise ValueError(f"duplicate transcript segment index in selection restore: {key}")
+            by_index[key] = pos
+        try:
+            first, last = by_index[first_index], by_index[last_index]
+        except KeyError as exc:
+            raise ValueError(
+                f"selection checkpoint refers to missing segment index {exc.args[0]!r}") from exc
+        if first > last:
+            raise ValueError("selection checkpoint candidate range is backwards")
+        key = (first_index, last_index)
+        if cache is not None and key in cache:
+            return cache[key]
+        try:
+            speakers = tuple(str(speaker) for speaker in payload["speakers"])
+            if len(speakers) != 2:
+                raise ValueError("candidate must have exactly two speakers")
+            candidate = Candidate(
+                first=first, last=last,
+                start=float(payload["start"]), end=float(payload["end"]),
+                pad_start=float(payload["pad_start"]), pad_end=float(payload["pad_end"]),
+                speakers=speakers,
+                metrics=dict(payload.get("metrics") or {}),
+                noise=dict(payload.get("noise") or {}),
+                music_patched_share=payload.get("music_patched_share"),
+                components=dict(payload.get("components") or {}),
+                score=float(payload["score"]), tier=str(payload["tier"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("malformed candidate in selection checkpoint") from exc
+        if cache is not None:
+            cache[key] = candidate
+        return candidate
+
+    @classmethod
+    def _judged_to_checkpoint(cls, finder, judged: _Judged) -> dict:
+        return {
+            "original": cls._candidate_to_checkpoint(finder, judged.original),
+            "candidate": (cls._candidate_to_checkpoint(finder, judged.candidate)
+                           if judged.candidate is not None else None),
+            "semantic": _json_safe(judged.semantic),
+            "topic": judged.topic,
+            "trimmed": bool(judged.trimmed),
+            "reason": judged.reason,
+            "why": judged.why,
+            "trim_ignored": judged.trim_ignored,
+            "assistant": judged.assistant,
+            "role_conf": _json_safe(judged.role_conf),
+            "role_why": judged.role_why,
+            "interruptions": _json_safe(judged.interruptions),
+            "summary": judged.summary,
+        }
+
+    @classmethod
+    def _judged_from_checkpoint(cls, finder, payload: dict, cache: dict) -> _Judged:
+        if not isinstance(payload, dict):
+            raise ValueError("selection checkpoint judged row is not an object")
+        try:
+            original = cls._candidate_from_checkpoint(finder, payload["original"], cache)
+            candidate_payload = payload.get("candidate")
+            candidate = (cls._candidate_from_checkpoint(finder, candidate_payload, cache)
+                         if candidate_payload is not None else None)
+            interruptions = payload.get("interruptions") or {}
+            if not isinstance(interruptions, dict):
+                raise TypeError("interruptions must be an object")
+            return _Judged(
+                original=original, candidate=candidate,
+                semantic=payload.get("semantic"), topic=str(payload.get("topic") or ""),
+                trimmed=bool(payload.get("trimmed", False)),
+                reason=payload.get("reason"), why=str(payload.get("why") or ""),
+                trim_ignored=payload.get("trim_ignored"),
+                assistant=payload.get("assistant"),
+                role_conf=payload.get("role_conf"),
+                role_why=str(payload.get("role_why") or ""),
+                interruptions={str(k): str(v) for k, v in interruptions.items()},
+                summary=payload.get("summary"),
+            )
+        except (KeyError, TypeError) as exc:
+            raise ValueError("malformed judged row in selection checkpoint") from exc
+
+    def selection_is_complete(self, selection: "ConversationSelection") -> bool:
+        """Whether selection is safe to persist and replay in a later stage.
+
+        A missing/unreadable/cut-off coverage response is incomplete even if a
+        different window produced valid candidates.  A complete response that
+        deterministically yielded no candidates (including ``[]`` after the
+        required partition response) is valid and is intentionally checkpointed
+        so the writer can clear stale exports.
+        """
+        report = selection.report if selection is not None else None
+        if not isinstance(report, dict) or report.get("llm_available") is False:
+            return False
+        if report.get("skipped") == "llm_unavailable":
+            return False
+        for key in ("unanswered", "coverage_retry_unanswered", "unreadable", "cut_in_thought"):
+            if int(report.get(key) or 0) > 0:
+                return False
+        windows = int(report.get("windows") or 0)
+        replies = report.get("replies") or []
+        if windows and len(replies) != windows:
+            return False
+        for row in replies:
+            if not row.get("answered") or not row.get("readable") or row.get("cut_in_thought"):
+                return False
+            if row.get("coverage_fraction") != 1.0 or row.get("overlap_ranges"):
+                return False
+        coverage = report.get("coverage") or {}
+        if windows and (coverage.get("total_windows") != windows
+                        or coverage.get("complete_windows") != windows
+                        or float(coverage.get("min_fraction", 0.0)) < 1.0):
+            return False
+        return True
+
+    def selection_checkpoint(self, selection: "ConversationSelection") -> Optional[dict]:
+        """Serialize a completed selection, or return ``None`` if incomplete."""
+        if not self.selection_is_complete(selection):
+            return None
+        finder = selection.finder
+        kept = list(selection.kept.values())
+        payload = {
+            "schema_version": CONVERSATION_SELECTION_CHECKPOINT_VERSION,
+            "namespace": self.checkpoint_namespace,
+            "prompt_version": CONVERSATION_EXPORT_PROMPT_VERSION,
+            "complete": True,
+            "report": _json_safe(selection.report),
+            "judged": [self._judged_to_checkpoint(finder, item)
+                       for item in selection.judged],
+            "kept": [list(self._candidate_key(finder, item.candidate))
+                     for item in kept if item.candidate is not None],
+            "final": [list(self._candidate_key(finder, candidate))
+                      for candidate in selection.final],
+        }
+        return _json_safe(payload)
+
+    def selection_from_checkpoint(self, payload: dict, transcripts, *, timeline,
+                                  noise, music_map) -> "ConversationSelection":
+        """Rebuild selection objects against the current transcript/timeline."""
+        if not isinstance(payload, dict) or payload.get("schema_version") != CONVERSATION_SELECTION_CHECKPOINT_VERSION:
+            raise ValueError("unsupported conversation selection checkpoint")
+        if payload.get("namespace") != self.checkpoint_namespace:
+            raise ValueError("conversation selection checkpoint namespace does not match configuration")
+        if payload.get("complete") is not True:
+            raise ValueError("conversation selection checkpoint is incomplete")
+        finder = ConversationSelectionFinder(transcripts, timeline, noise, music_map, self.cfg)
+        cache = {}
+        judged = [self._judged_from_checkpoint(finder, row, cache)
+                  for row in (payload.get("judged") or [])]
+        by_key = {(str(first), str(last)): candidate for (first, last), candidate in cache.items()}
+
+        def range_candidate(raw):
+            if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+                raise ValueError("malformed candidate range in selection checkpoint")
+            try:
+                return by_key[(str(raw[0]), str(raw[1]))]
+            except KeyError as exc:
+                raise ValueError(f"selection checkpoint range {tuple(raw)!r} was not judged") from exc
+
+        kept_ranges = payload.get("kept") or []
+        kept_candidates = {id(item.candidate): item for item in judged if item.candidate is not None}
+        kept = {}
+        for raw in kept_ranges:
+            candidate = range_candidate(raw)
+            item = kept_candidates.get(id(candidate))
+            if item is None:
+                raise ValueError("selection checkpoint kept range has no judged candidate")
+            kept[id(candidate)] = item
+        final = [range_candidate(raw) for raw in (payload.get("final") or [])]
+        report = dict(payload.get("report") or {})
+        report["checkpoint_complete"] = True
+        return ConversationSelection(finder=finder, judged=judged, kept=kept,
+                                     final=final, report=report)
 
     # -- LLM candidate finder ------------------------------------------------------
     def _finder_system_prompt(self) -> str:

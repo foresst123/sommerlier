@@ -484,23 +484,26 @@ class PipelineService:
     def _next_llm_step_after(self, args, stage: str):
         """The next opt-in pass after `stage` that reuses the resident LLM, or None.
 
-        Order: refinement, speaker_relabel, transcript_review, conversation_exports.
+        Order: refinement, speaker_relabel, transcript_review,
+        conversation_selection.  Conversation exports are deliberately a
+        writer-only pass and must not be treated as an LLM consumer.
         Each reads the transcript with the same replicas.
         """
         relabel_on = (getattr(self, "relabel_svc", None) is not None
                       and opt_in_step_enabled(args, "speaker_relabel"))
         review_on = (getattr(self, "review_svc", None) is not None
                      and opt_in_step_enabled(args, "transcript_review"))
+        selection_on = (getattr(self, "conversation_export_svc", None) is not None
+                        and opt_in_step_enabled(args, "conversation_exports"))
         if stage == "refinement":
             return "speaker_relabel" if relabel_on else (
-                "transcript_review" if review_on else None)
-        exports_on = (getattr(self, "conversation_export_svc", None) is not None
-                      and opt_in_step_enabled(args, "conversation_exports"))
+                "transcript_review" if review_on else (
+                    "conversation_selection" if selection_on else None))
         if stage == "speaker_relabel":
             return "transcript_review" if review_on else (
-                "conversation_exports" if exports_on else None)
+                "conversation_selection" if selection_on else None)
         if stage == "transcript_review":
-            return "conversation_exports" if exports_on else None
+            return "conversation_selection" if selection_on else None
         return None
 
     def _keep_llm_between_passes(self, args) -> bool:
@@ -588,7 +591,8 @@ class PipelineService:
     # Thứ tự các điểm dừng của run(); None (chạy hết) tới được mọi bước.
     _STOP_ORDER = ("music", "diarization", "separation", "music_removal",
                    "asr", "captioning", "refinement", "speaker_relabel",
-                   "transcript_review", "word_alignment", "conversation_exports")
+                   "transcript_review", "conversation_selection",
+                   "word_alignment", "conversation_exports")
 
     @classmethod
     def _reaches(cls, args, stage: str) -> bool:
@@ -1005,7 +1009,7 @@ class PipelineService:
         return transcripts
 
     def _align_words(self, checkpoint, stage_out, transcripts, audio_data,
-                     speech_segments):
+                     speech_segments, *, allow_compute=True):
         """Attach final-text word times, reapplying a cached result on resume.
 
         `transcripts` may be any list of segment objects (the whole file, or only
@@ -1024,6 +1028,11 @@ class PipelineService:
                     f"Loading word alignment from checkpoint ({applied} segment(s))")
             return transcripts
 
+        if not allow_compute:
+            raise RuntimeError(
+                "Word-alignment checkpoint is missing for the selected conversation "
+                "segments; run the word_alignment stage before conversation_exports.")
+
         result = svc.align(transcripts, audio_data, speech_segments)
         checkpoint.save("word_alignment", {
             "words_by_index": result.words_by_index,
@@ -1034,7 +1043,7 @@ class PipelineService:
 
 
     def _align_selected(self, args, checkpoint, stage_out, selection, audio_data,
-                        speech_segments):
+                        speech_segments, *, allow_compute=True):
         """Word-align only the segments of the selected conversations.
 
         Same checkpoint key as the whole-file pass, but the namespace is derived
@@ -1050,10 +1059,170 @@ class PipelineService:
         if not checkpoint.exists("word_alignment", verify_digest=False):
             self._release_llm_before(args, "word alignment")
         try:
-            self._align_words(checkpoint, stage_out, subset, audio_data, speech_segments)
+            self._align_words(checkpoint, stage_out, subset, audio_data, speech_segments,
+                              allow_compute=allow_compute)
         finally:
-            if not getattr(args, "keep_models", False):
+            if allow_compute and not getattr(args, "keep_models", False):
                 self._defer_or_run(svc.unload)
+
+    # -- conversation selection checkpoint -----------------------------------------
+
+    def _conversation_selection_namespace(self, service, transcripts):
+        """Return the service's versioned selection namespace.
+
+        The selection service owns the prompt/config fingerprint.  Keep the
+        adapter here deliberately small so the pipeline does not know how a
+        candidate is represented.  ``checkpoint_namespace_for`` is preferred
+        because it can include the transcript/review fingerprint; the plain
+        ``checkpoint_namespace`` property keeps the review-style API usable by
+        lightweight services and tests.
+        """
+        method = getattr(service, "checkpoint_namespace_for", None)
+        if callable(method):
+            return method(transcripts)
+        namespace = getattr(service, "checkpoint_namespace", None)
+        if callable(namespace):
+            return namespace(transcripts)
+        if namespace:
+            return namespace
+        raise RuntimeError(
+            "ConversationExportService must expose a versioned "
+            "checkpoint_namespace or checkpoint_namespace_for(transcripts)")
+
+    @staticmethod
+    def _serialize_selection(service, selection):
+        """Convert a selection into the service-owned checkpoint DTO."""
+        method = getattr(service, "selection_checkpoint", None)
+        if callable(method):
+            return method(selection)
+        for owner, name in ((selection, "to_checkpoint"),
+                            (service, "selection_to_checkpoint"),
+                            (service, "serialize_selection")):
+            method = getattr(owner, name, None)
+            if callable(method):
+                return method(selection) if owner is not selection else method()
+        raise RuntimeError(
+            "ConversationExportService must expose selection_to_checkpoint() "
+            "or ConversationSelection.to_checkpoint()")
+
+    @staticmethod
+    def _deserialize_selection(service, payload, transcripts, *, timeline=None,
+                               noise=None, music_map=None):
+        """Rebuild a selection against the current transcript objects."""
+        for name in ("selection_from_checkpoint", "deserialize_selection"):
+            method = getattr(service, name, None)
+            if callable(method):
+                try:
+                    return method(payload, transcripts, timeline=timeline, noise=noise,
+                                  music_map=music_map)
+                except TypeError as exc:
+                    # Keep the adapter compatible with small test/dummy services
+                    # that only need the transcript list.
+                    if name != "selection_from_checkpoint" or "unexpected keyword" not in str(exc):
+                        raise
+                    return method(payload, transcripts)
+        method = getattr(type(payload), "from_checkpoint", None)
+        if callable(method):
+            return method(payload, transcripts)
+        raise RuntimeError(
+            "ConversationExportService must expose selection_from_checkpoint() "
+            "to reload a conversation selection checkpoint")
+
+    def _load_conversation_selection(self, checkpoint, transcripts, *, music_map=None):
+        service = self.conversation_export_svc
+        checkpoint.namespaces["conversation_selection"] = (
+            self._conversation_selection_namespace(service, transcripts))
+        payload = checkpoint.load_if_committed("conversation_selection")
+        if payload is None:
+            return None
+        music_cut = (music_map.remap(self.timeline)
+                     if music_map is not None and self.timeline else music_map)
+        try:
+            selection = self._deserialize_selection(
+                service, payload, transcripts, timeline=self.timeline,
+                noise=getattr(self, "noise_track", None), music_map=music_cut)
+            try:
+                selection._checkpoint_complete = True
+            except AttributeError:
+                pass
+            return selection
+        except Exception as exc:
+            raise RuntimeError(
+                "Conversation selection checkpoint exists but could not be "
+                f"reloaded: {exc}") from exc
+
+    def _select_conversation(self, checkpoint, stage_out, transcripts, audio_data,
+                             music_map, output_dir, audio_path, speech_segments):
+        """Run the LLM finder once and atomically checkpoint a complete result."""
+        service = self.conversation_export_svc
+        cached = self._load_conversation_selection(checkpoint, transcripts,
+                                                   music_map=music_map)
+        if cached is not None:
+            return cached
+
+        music_cut = (music_map.remap(self.timeline)
+                     if music_map is not None and self.timeline else music_map)
+        base_name = os.path.splitext(os.path.basename(audio_path))[0]
+        selection = service.select(
+            transcripts, timeline=self.timeline,
+            noise=getattr(self, "noise_track", None), music_map=music_cut,
+            waveform=audio_data.waveform, sample_rate=audio_data.sample_rate,
+            base_name=base_name, speech_segments=speech_segments)
+        report = getattr(selection, "report", {}) or {}
+        # Only complete answers may be persisted.  The service marks transient
+        # failures explicitly; keeping this guard in the orchestrator prevents
+        # a partial result from being mistaken for an intentional empty result.
+        incomplete = (report.get("skipped") in {
+            "llm_unavailable", "unanswered", "incomplete", "partial"}
+            or report.get("unanswered", 0)
+            or report.get("unreadable", 0)
+            or report.get("unreadable_windows", 0)
+            or report.get("failed_windows", 0)
+            or report.get("cut_in_thought", 0)
+            or report.get("cut_in_thought_windows", 0)
+            or report.get("incomplete_windows", 0))
+        payload = None if incomplete else self._serialize_selection(service, selection)
+        if payload is None:
+            if self.logger:
+                self.logger.warning(
+                    "Conversation selection was incomplete; checkpoint will not be saved")
+        else:
+            checkpoint.save("conversation_selection", payload)
+        # Keep the distinction alive for a single-file run, where selection,
+        # alignment and writing happen in one call.  A missing checkpoint must
+        # never fall through to ConversationExportService.write(), whose valid
+        # empty-result branch is allowed to clear old output.
+        try:
+            selection._checkpoint_complete = payload is not None
+        except AttributeError:
+            pass
+        write_selection = getattr(stage_out, "write_conversation_selection", None)
+        if callable(write_selection):
+            write_selection(report)
+        return selection
+
+    def _write_conversation_exports(self, stage_out, selection, audio_data,
+                                    output_dir, audio_path, speech_segments=None):
+        """Write a previously selected/aligned result without invoking the LLM."""
+        service = self.conversation_export_svc
+        if selection is None:
+            raise RuntimeError(
+                "Conversation selection checkpoint is missing or incomplete; "
+                "run the conversation_selection stage before conversation_exports.")
+        if getattr(selection, "_checkpoint_complete", True) is False:
+            raise RuntimeError(
+                "Conversation selection did not complete; no checkpoint was written, "
+                "so conversation_exports cannot safely overwrite previous output.")
+        base_name = os.path.splitext(os.path.basename(audio_path))[0]
+        out_dir = os.path.join(output_dir, "conversation_exports")
+        result = service.write(
+            selection,
+            waveform=audio_data.waveform, sample_rate=audio_data.sample_rate,
+            out_dir=out_dir, base_name=base_name,
+            speech_segments=speech_segments,
+            separation_service=getattr(self, "separation_svc", None))
+        stage_out.write_conversation_exports(result.report, result.exports)
+        return result
 
     def _resolve_output_dir(self, args, audio_path: str) -> str:
         """Xác định duy nhất thư mục đầu ra riêng cho mỗi file.
@@ -1648,22 +1817,39 @@ class PipelineService:
         # Vietnamese Wav2Vec2 before any clean-data selection reads it.
         alignment_on = (self.word_alignment_svc is not None
                         and opt_in_step_enabled(args, "word_alignment"))
-        conversation_exports_on = (self.conversation_export_svc is not None
-                    and opt_in_step_enabled(args, "conversation_exports")
-                    # The final export pass replays checkpointed state. Clip
-                    # judging is deliberately not checkpointed, therefore its
-                    # dedicated stage is the only invocation allowed to ask
-                    # the LLM and write its files.
-                    and not getattr(args, "postprocess_only", False))
-        # With conversation exports on, alignment moves into 7d: it runs on the
-        # selected segments only, after selection. The whole-file pass below is
-        # for runs that align without exporting conversations (or in the final
-        # post-process pass, which replays checkpoints and selects nothing).
-        # Exports planned for this run, counting the final post-process pass that
-        # replays them: their alignment lives in subset checkpoints, so a
-        # whole-file pass here would realign every file for nothing.
         exports_planned = (self.conversation_export_svc is not None
                            and opt_in_step_enabled(args, "conversation_exports"))
+        postprocess_only = bool(getattr(args, "postprocess_only", False))
+
+        # Conversation judging is its own LLM stage.  Every later invocation
+        # (word_alignment, conversation_exports, and the final post-process
+        # pass) loads this checkpoint; none of those paths calls the finder.
+        selection = None
+        if exports_planned and transcripts is not None:
+            stop_after = getattr(args, "stop_after", None)
+            if not postprocess_only and stop_after != "conversation_exports":
+                selection = self._select_conversation(
+                    checkpoint, stage_out, transcripts, audio_data, music_map,
+                    output_dir, audio_path, speech_segments)
+            else:
+                selection = self._load_conversation_selection(
+                    checkpoint, transcripts, music_map=music_map)
+
+            if getattr(args, "stop_after", None) == "conversation_selection":
+                self._release_llm_after(args, "conversation_selection")
+                if self.logger:
+                    self.logger.info(
+                        "Stopping pipeline after conversation_selection as requested "
+                        "by --stop_after.")
+                stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
+                                          "stopped_after": "conversation_selection"})
+                return transcripts
+            if getattr(selection, "_checkpoint_complete", True) is False:
+                raise RuntimeError(
+                    "Conversation selection did not complete; no checkpoint was written, "
+                    "so later alignment/export stages cannot continue safely.")
+
+        # Without conversation exports, alignment remains a whole-file stage.
         if alignment_on and not exports_planned and transcripts is not None:
             # The refinement model can span both GPUs. Free it before loading
             # Wav2Vec2, then the conversation-export pass below reloads it only if it is needed.
@@ -1680,11 +1866,23 @@ class PipelineService:
                 if not getattr(args, "keep_models", False):
                     self._defer_or_run(self.word_alignment_svc.unload)
 
-        # "word_alignment" means "stop after alignment, wherever it ran": here
-        # for the whole-file pass, or inside 7d (after select + align of the
-        # selected segments, before anything is written) when exports are on.
-        if (getattr(args, "stop_after", None) == "word_alignment"
-                and not (conversation_exports_on and transcripts is not None)):
+        # For conversation exports, alignment is restricted to selected
+        # segments. The dedicated writer pass only reapplies a committed
+        # checkpoint and therefore cannot accidentally load the alignment model.
+        if exports_planned and transcripts is not None and alignment_on:
+            allow_compute = not postprocess_only and (
+                getattr(args, "stop_after", None) != "conversation_exports")
+            if selection is None:
+                raise RuntimeError(
+                    "Conversation selection checkpoint is missing or incomplete; "
+                    "cannot align selected segments.")
+            self._align_selected(
+                args, checkpoint, stage_out, selection, audio_data, speech_segments,
+                allow_compute=allow_compute)
+
+        # "word_alignment" is a stop point after either whole-file alignment or
+        # selected-segment alignment.
+        if getattr(args, "stop_after", None) == "word_alignment":
             if self.logger:
                 self.logger.info(
                     "Stopping pipeline after word_alignment as requested by --stop_after.")
@@ -1692,29 +1890,23 @@ class PipelineService:
                                       "stopped_after": "word_alignment"})
             return transcripts
 
-        # 7d. Conversation exports: select self-contained two-person stretches
-        # (judged by the same resident LLM, reading the review flags), word-align
-        # only those segments, then cut and write them. Opt-in per the profile.
-        if conversation_exports_on and transcripts is not None:
-            stop_here = getattr(args, "stop_after", None) == "word_alignment"
-            self._export_conversation_exports(
-                stage_out, transcripts, audio_data, music_map, output_dir, audio_path,
-                speech_segments=speech_segments,
-                align=((lambda selection: self._align_selected(
-                            args, checkpoint, stage_out, selection, audio_data,
-                            speech_segments)) if alignment_on else None),
-                stop_before_write=stop_here)
-            if stop_here:
-                self._release_llm_after(args, "word_alignment")
-                if self.logger:
-                    self.logger.info(
-                        "Stopping pipeline after word_alignment as requested by --stop_after.")
-                stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
-                                          "stopped_after": "word_alignment"})
-                return transcripts
+        # Conversation exports is now writer-only. A missing checkpoint is a
+        # pipeline error rather than an empty selection: ConversationExportService.write
+        # intentionally clears old output for a *valid* empty result.
+        if exports_planned and transcripts is not None:
+            if getattr(args, "stop_after", None) == "conversation_exports":
+                self._write_conversation_exports(
+                    stage_out, selection, audio_data, output_dir, audio_path,
+                    speech_segments=speech_segments)
+                self._release_llm_after(args, "conversation_selection")
+            elif not postprocess_only and getattr(args, "stop_after", None) is None:
+                # Single-file runs do not go through utils.batch's stage-major
+                # loop, so finish the same stages inline.
+                self._write_conversation_exports(
+                    stage_out, selection, audio_data, output_dir, audio_path,
+                    speech_segments=speech_segments)
 
         if getattr(args, "stop_after", None) == "conversation_exports":
-            self._release_llm_after(args, "conversation_exports")
             if self.logger:
                 self.logger.info(
                     "Stopping pipeline after conversation_exports as requested by --stop_after.")
@@ -1722,7 +1914,7 @@ class PipelineService:
                                       "stopped_after": "conversation_exports"})
             return transcripts
 
-        if (self.step_enabled(args, "refinement") or relabel_on or conversation_exports_on
+        if (self.step_enabled(args, "refinement") or relabel_on or exports_planned
                 or review_on):
             if not getattr(args, "keep_models", False):
                 self._defer_or_run(self.refinement_svc.unload)

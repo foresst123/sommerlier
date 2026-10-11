@@ -8,6 +8,8 @@ import os
 import sys
 import types
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from services.pipeline_service import PipelineService
@@ -44,6 +46,9 @@ class _StageOut:
 
     def write_review(self, report):
         self.log.append("write_review")
+
+    def write_conversation_selection(self, report):
+        self.log.append("write_selection")
 
     def write_word_alignment(self, transcripts, report):
         self.log.append("write_word_alignment")
@@ -124,8 +129,13 @@ class _Selection:
     def segments_to_align(self):
         return self._segs
 
+    def to_checkpoint(self):
+        return {"indexes": [s.index for s in self._segs], "report": {}}
+
 
 class _Export:
+    checkpoint_namespace = "selection-ns"
+
     def __init__(self, log, selected):
         self.log, self.selected = log, selected
 
@@ -137,6 +147,10 @@ class _Export:
     def write(self, selection, **kw):
         self.log.append("write")
         return types.SimpleNamespace(report={}, exports=[])
+
+    def selection_from_checkpoint(self, payload, transcripts):
+        wanted = set(payload["indexes"])
+        return _Selection([s for s in transcripts if s.index in wanted])
 
 
 class _Align:
@@ -213,6 +227,31 @@ def test_stop_before_write_returns_the_selection_after_alignment():
     assert log == ["select", "align"] and isinstance(sel, _Selection)
 
 
+def test_selection_is_checkpointed_and_reloaded_without_calling_the_finder():
+    log = []
+    segs = [_seg(i) for i in range(3)]
+    export = _Export(log, segs[1:])
+    pipe = _pipeline(conversation_export_svc=export)
+    ckpt, out = _Checkpoint(), _StageOut(log)
+
+    first = pipe._select_conversation(
+        ckpt, out, segs, _audio(), None, "/tmp/x", "/tmp/ep.mp3", None)
+    assert isinstance(first, _Selection)
+    assert log == ["select", "write_selection"]
+    assert ("conversation_selection", "selection-ns") in ckpt.store
+
+    resumed = pipe._load_conversation_selection(ckpt, [_seg(i) for i in range(3)])
+    assert [s.index for s in resumed.segments_to_align()] == [1, 2]
+    assert log == ["select", "write_selection"]
+
+
+def test_writer_requires_a_selection_checkpoint_instead_of_treating_it_as_empty():
+    pipe = _pipeline(conversation_export_svc=_Export([], []))
+    with pytest.raises(RuntimeError, match="selection checkpoint"):
+        pipe._write_conversation_exports(
+            _StageOut(), None, _audio(), "/tmp/x", "/tmp/ep.mp3")
+
+
 # --- run() body and stop points ----------------------------------------------------------
 
 def _source():
@@ -225,21 +264,20 @@ def test_run_order_relabel_review_whole_file_alignment_then_exports():
     body = src[src.index("    def run(self, args"):]
     relabel = body.index('opt_in_step_enabled(args, "speaker_relabel")')
     review = body.index('opt_in_step_enabled(args, "transcript_review")')
-    alignment = body.index('opt_in_step_enabled(args, "word_alignment")')
-    exports = body.index('opt_in_step_enabled(args, "conversation_exports")')
-    assert relabel < review < alignment < exports
-    # The whole-file alignment only runs when exports are not planned at all --
-    # including the final post-process pass, whose exports flag is forced off.
+    selection = body.index("Conversation judging is its own LLM stage")
+    alignment = body.index("self._align_selected(", selection)
+    exports = body.index("self._write_conversation_exports(", alignment)
+    assert relabel < review < selection < alignment < exports
+    # The whole-file alignment only runs when exports are not planned at all.
     assert "alignment_on and not exports_planned" in body
-    planned = body[body.index("exports_planned = ("):body.index("if alignment_on and not exports_planned")]
-    assert "postprocess_only" not in planned
-    assert body.index("self._review_transcript(") < body.index("self._export_conversation_exports(")
+    assert body.index("self._review_transcript(") < selection
 
 
 def test_stop_after_transcript_review_is_a_stop_point_between_relabel_and_alignment():
     order = PipelineService._STOP_ORDER
     assert order.index("speaker_relabel") < order.index("transcript_review") \
-        < order.index("word_alignment") < order.index("conversation_exports")
+        < order.index("conversation_selection") < order.index("word_alignment") \
+        < order.index("conversation_exports")
     args = types.SimpleNamespace(stop_after="transcript_review")
     assert PipelineService._reaches(args, "transcript_review")
     assert not PipelineService._reaches(args, "word_alignment")
@@ -287,7 +325,7 @@ def test_the_resident_llm_is_kept_from_review_into_selection():
     args = types.SimpleNamespace(performance_config=perf, batch_continues=True,
                                  step_transcript_review=True, step_conversation_exports=True,
                                  keep_models=False)
-    assert pipe._next_llm_step_after(args, "transcript_review") == "conversation_exports"
+    assert pipe._next_llm_step_after(args, "transcript_review") == "conversation_selection"
     unloaded = []
     pipe.refinement_svc = types.SimpleNamespace(unload=lambda: unloaded.append(1))
     pipe._defer_or_run = lambda fn: fn()
