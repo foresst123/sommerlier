@@ -244,7 +244,7 @@
         "asr": true,
         "captioning": false,
         "refinement": true,
-        "speaker_relabel": false,
+        "speaker_relabel": true,
         "word_alignment": true,
         "conversation_exports": true,
         "export": true,
