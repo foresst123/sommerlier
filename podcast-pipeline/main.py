@@ -51,6 +51,10 @@ def _build_parser():
                              "output folder.")
     parser.add_argument("--max_hours", type=float,
                         help="Override batch.max_hours_per_run for this run.")
+    parser.add_argument("--target_output_hours", type=float, default=None,
+                        help="Stop the run once this many hours of conversation have been "
+                             "exported in total (all runs, counted from each file's "
+                             "conversation_exports manifest). 0/unset = off.")
     parser.add_argument("--config", default="config.json", help="Path to config file")
     parser.add_argument("--job_id", default="default", help="Job ID for checkpointing")
     parser.add_argument("--cache_dir", default="cache", help="Cache directory")
@@ -982,6 +986,9 @@ def main():
         batch_cfg.update(env_profile.get("batch") or {})
         max_hours = args.max_hours if args.max_hours is not None else \
             float(batch_cfg.get("max_hours_per_run", 5.0))
+        from utils.output_budget import enforced, resolve_target
+        target_output_hours = resolve_target(args.target_output_hours,
+                                             batch_cfg.get("target_output_hours"))
 
         if args.audio_dir:
             exts = batch_cfg.get("audio_extensions",
@@ -1030,8 +1037,22 @@ def main():
                         "continues from the checkpoints")
         pass_no = 0
         run_snapshot = list(paths)
+        use_target = enforced(target_output_hours, partial_run)
+        if target_output_hours is not None and partial_run:
+            logger.info(f"target_output_hours={target_output_hours:g} is ignored for "
+                        "stop_after runs")
+        if use_target:
+            from utils.output_budget import total_conversation_hours, target_reached
+            _out_dir_of = lambda p: pipeline._resolve_output_dir(args, p)
+            _total = total_conversation_hours(run_snapshot, _out_dir_of)
+            if target_reached(_total, target_output_hours):
+                logger.info(f"Output target already reached: {_total:.2f} h of conversation "
+                            f"exported (target {target_output_hours:g} h); nothing to process. "
+                            "Raise it with --target_output_hours or batch.target_output_hours.")
         while True:
             pass_no += 1
+            if use_target and target_reached(_total, target_output_hours):
+                break
             todo = ledger.pending(run_snapshot, exclude=attempted)
             if not todo:
                 break
@@ -1080,6 +1101,14 @@ def main():
             ledger.save()
             logger.info(f"Pass {pass_no} finished in {(time.time() - started) / 60:.1f} min "
                         f"({ledger.summary()})")
+
+            if use_target:
+                _total = total_conversation_hours(run_snapshot, _out_dir_of)
+                logger.info(f"Output so far: {_total:.2f} h of conversation "
+                            f"(target {target_output_hours:g} h)")
+                if target_reached(_total, target_output_hours):
+                    logger.info("Output target reached; stopping the run")
+                    break
 
             if args.only_batch is not None:
                 logger.info("--only_batch was given; stopping after this pass")

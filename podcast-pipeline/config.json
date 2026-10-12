@@ -224,7 +224,8 @@
         }
       },
       "batch": {
-        "max_hours_per_run": 5.0
+        "max_hours_per_run": 5.0,
+        "target_output_hours": null
       }
     },
     "a100": {
@@ -509,12 +510,14 @@
         }
       },
       "batch": {
-        "max_hours_per_run": 20.0
+        "max_hours_per_run": 20.0,
+        "target_output_hours": null
       }
     }
   },
   "batch": {
     "max_hours_per_run": 5.0,
+    "target_output_hours": null,
     "audio_extensions": [
       ".mp3",
       ".wav",
