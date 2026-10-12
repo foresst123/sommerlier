@@ -156,3 +156,23 @@ def test_pipeline_cache_is_bound_to_the_current_source_file(tmp_path):
     third, decoded = service._check_input_audio_quality(gate, checkpoint, str(source))
     assert decoded is not None and gate.calls == 2 and service.audio_svc.calls == 2
     assert third["source_size"] == source.stat().st_size
+
+
+def test_files_scored_at_once_share_one_scorer():
+    import threading
+    import time
+    built = []
+
+    def factory():
+        time.sleep(0.05)              # wide enough for every thread to race in
+        built.append(1)
+        return lambda _audio, _sr: {"OVRL": 3.0}
+
+    gate = DNSMOSInputGate(scorer_factory=factory)
+    threads = [threading.Thread(target=gate.check, args=([0.1], 24000))
+               for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(built) == 1

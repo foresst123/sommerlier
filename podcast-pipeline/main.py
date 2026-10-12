@@ -143,7 +143,8 @@ def _build_parser():
                              "without saying so.")
     parser.add_argument(
         "--stop_after", type=str,
-        choices=["music", "diarization", "separation", "music_removal", "asr",
+        choices=["input_quality", "music", "diarization", "separation",
+                 "music_removal", "asr",
                  "captioning", "refinement", "speaker_relabel", "transcript_review",
                  "persona_profile", "word_alignment", "conversation_exports", "none"],
         help="Stop pipeline gracefully after this stage. The profile's "

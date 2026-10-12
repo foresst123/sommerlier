@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import os
+import threading
 from typing import Any, Callable, Mapping, Optional
 
 
@@ -71,6 +72,8 @@ class DNSMOSInputGate:
         self.on_error = on_error
         self._scorer = scorer
         self._scorer_factory = scorer_factory
+        # Files scored at once must share one ONNX session, not build one each.
+        self._scorer_lock = threading.Lock()
 
     @property
     def config_fingerprint(self) -> dict:
@@ -79,30 +82,32 @@ class DNSMOSInputGate:
 
     def _get_scorer(self):
         if self._scorer is None:
-            if self._scorer_factory is not None:
-                self._scorer = self._scorer_factory()
-            else:
-                if not self.model_path:
-                    raise ValueError("DNSMOS model path is required")
-                model_path = os.fspath(self.model_path)
-                if not os.path.isabs(model_path):
-                    project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                    model_path = os.path.abspath(os.path.join(project_dir, model_path))
-                if not os.path.isfile(model_path):
-                    raise FileNotFoundError(
-                        f"DNSMOS model not found: {model_path}; run "
-                        "download_offline_weights.py to provision it")
+            with self._scorer_lock:
+                if self._scorer is None:
+                    if self._scorer_factory is not None:
+                        self._scorer = self._scorer_factory()
+                    else:
+                        if not self.model_path:
+                            raise ValueError("DNSMOS model path is required")
+                        model_path = os.fspath(self.model_path)
+                        if not os.path.isabs(model_path):
+                            project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                            model_path = os.path.abspath(os.path.join(project_dir, model_path))
+                        if not os.path.isfile(model_path):
+                            raise FileNotFoundError(
+                                f"DNSMOS model not found: {model_path}; run "
+                                "download_offline_weights.py to provision it")
 
-                # This is the repository's checked-in DNSMOS adapter.  Keep the
-                # import and ONNX session lazy so disabled profiles and unit tests
-                # neither load the model nor require an execution provider.
-                from models.dnsmos import ComputeScore
-                model = ComputeScore(model_path, device=self.device)
+                        # This is the repository's checked-in DNSMOS adapter.  Keep the
+                        # import and ONNX session lazy so disabled profiles and unit tests
+                        # neither load the model nor require an execution provider.
+                        from models.dnsmos import ComputeScore
+                        model = ComputeScore(model_path, device=self.device)
 
-                def score(audio, sample_rate):
-                    return model(audio, sample_rate, is_personalized_MOS=False)
+                        def score(audio, sample_rate):
+                            return model(audio, sample_rate, is_personalized_MOS=False)
 
-                self._scorer = score
+                        self._scorer = score
         return self._scorer
 
     def assess(self, waveform, sample_rate: int, source_path: Optional[str] = None) -> dict:

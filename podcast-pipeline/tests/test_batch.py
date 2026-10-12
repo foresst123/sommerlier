@@ -108,7 +108,7 @@ def test_every_file_finishes_a_stage_before_the_next_stage_starts():
         if not seen or seen[-1] != stage:
             seen.append(stage)
     expected = [s for s in PIPELINE_STAGES
-                if s not in {"persona_profile", "conversation_selection",
+                if s not in {"input_quality", "persona_profile", "conversation_selection",
                              "conversation_exports"}]
     assert seen == expected, (
         f"stages ran as {seen}; each stage must cover the whole batch before the next"
@@ -223,7 +223,7 @@ def test_captioning_is_skipped_when_its_model_is_off():
     # Every always-on stage still runs; optional postprocessing stays opt-in.
     assert [s for s, _ in pipe.calls] == [
         s for s in PIPELINE_STAGES
-        if s not in {"captioning", "speaker_relabel", "transcript_review",
+        if s not in {"input_quality", "captioning", "speaker_relabel", "transcript_review",
                      "persona_profile", "conversation_selection", "word_alignment",
                      "conversation_exports"}]
 
@@ -685,3 +685,29 @@ def test_performance_report_knows_the_persona_stage():
     from utils.performance_report import _STAGE_ORDER
     assert _STAGE_ORDER.index("transcript_review") < _STAGE_ORDER.index(
         "persona_profile") < _STAGE_ORDER.index("word_alignment")
+
+
+# --- input_quality: a pass that only scores DNSMOS --------------------------
+
+def test_input_quality_is_the_first_pass_and_can_be_the_only_one():
+    assert PIPELINE_STAGES[0] == "input_quality"
+    files = ["f1", "f2"]
+    pipe = FakePipeline()
+    gate_on = {"environments": {"a100": {"audio_quality": {"enabled": True}}}}
+    run_batch_by_stage(pipe, _args(stop_after="input_quality", env="a100"), gate_on, files)
+    assert pipe.calls == [("input_quality", "f1"), ("input_quality", "f2")]
+
+
+def test_without_the_dnsmos_gate_there_is_no_input_quality_pass():
+    pipe = FakePipeline()
+    run_batch_by_stage(pipe, _args(stop_after="music"), {}, ["f1"])
+    assert [s for s, _ in pipe.calls] == ["music"]
+
+
+def test_input_quality_scores_several_files_at_once_on_the_performance_path():
+    from utils.batch import _stage_parallelism
+    perf = {"enabled": True, "stages": {"input_quality": {"files_in_flight": 6}}}
+    assert _stage_parallelism(_args(performance_config=perf), "input_quality") == 6
+    on = {"enabled": True, "stages": {}}
+    assert _stage_parallelism(_args(performance_config=on), "input_quality") == 4
+    assert _stage_parallelism(_args(), "input_quality") == 1

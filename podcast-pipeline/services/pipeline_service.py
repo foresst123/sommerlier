@@ -602,7 +602,7 @@ class PipelineService:
         return pids
 
     # Thứ tự các điểm dừng của run(); None (chạy hết) tới được mọi bước.
-    _STOP_ORDER = ("music", "diarization", "separation", "music_removal",
+    _STOP_ORDER = ("input_quality", "music", "diarization", "separation", "music_removal",
                    "asr", "captioning", "refinement", "speaker_relabel",
                    "transcript_review", "persona_profile", "conversation_selection",
                    "word_alignment", "conversation_exports")
@@ -1346,6 +1346,14 @@ class PipelineService:
         # reuse below.
         _, preflight_audio = self._check_input_audio_quality(
             self._resolve_input_audio_gate(config, args), checkpoint, audio_path)
+
+        if getattr(args, "stop_after", None) == "input_quality":
+            if self.logger:
+                self.logger.info("Stopping after the DNSMOS input-quality gate as "
+                                 "requested by --stop_after.")
+            stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
+                                      "stopped_after": "input_quality"})
+            return None
 
         # Các dịch vụ được tạo một lần rồi dùng lại cho mọi file trong batch.
         for svc in (self.separation_svc, self.refinement_svc):

@@ -142,7 +142,7 @@ def split_final_failures(failures, is_done):
 # stage a run keeps when everything after it is switched off, so it has to be
 # reachable on its own.
 PIPELINE_STAGES = (
-    "music", "diarization", "separation", "asr",
+    "input_quality", "music", "diarization", "separation", "asr",
     "captioning", "refinement", "speaker_relabel", "transcript_review",
     "persona_profile", "conversation_selection", "word_alignment", "conversation_exports", None,
 )
@@ -197,7 +197,15 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
         _opt_in_stages = {"speaker_relabel", "transcript_review", "persona_profile",
                           "conversation_selection", "word_alignment",
                           "conversation_exports"}
-        if stage is not None:
+        if stage == "input_quality":
+            # Only a profile with the DNSMOS gate on has anything to score.
+            profile = ((config.get("environments") or {})
+                       .get(getattr(args, "env", ""), {}))
+            if not (profile.get("audio_quality") or {}).get("enabled", False):
+                if stop_gate == "input_quality" and logger:
+                    logger.info("audio_quality is off in the profile; nothing to score")
+                continue
+        elif stage is not None:
             if stage == "conversation_selection":
                 # Selection is the model-backed half of the existing
                 # conversation_exports opt-in.  Accept a dedicated switch
@@ -455,6 +463,9 @@ def _stage_parallelism(args, stage) -> int:
     if not perf.get("enabled", False):
         return 1
     stages = perf.get("stages", {})
+    if stage == "input_quality":
+        # DNSMOS runs on the CPU, one ONNX session shared by every file in flight.
+        return max(1, int(stages.get("input_quality", {}).get("files_in_flight", 4)))
     if stage == "asr" and _asr_cross_file(args):
         # Files in flight keep every ASR model's queue fed while another file
         # waits for its slowest model (services/asr_scheduler.py).

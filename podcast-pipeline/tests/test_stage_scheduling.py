@@ -402,3 +402,20 @@ def test_music_service_is_constructed_with_a_performance_config():
         "MusicService must receive performance_config the same way "
         "SeparationService/ASRService already do, or the async runtime "
         "can never turn on in production")
+
+
+def test_input_quality_stops_right_after_the_dnsmos_gate():
+    src = _source("services/pipeline_service.py")
+    gate = src.index("self._check_input_audio_quality(")
+    stop = src.index('getattr(args, "stop_after", None) == "input_quality"')
+    assert gate < stop < src.index('checkpoint.load_if_committed("music_map")'), (
+        "the input_quality pass must return before any music work or audio cache")
+
+
+def test_input_quality_is_a_stop_point_on_the_command_line_and_in_run():
+    from services.pipeline_service import PipelineService
+    assert PipelineService._STOP_ORDER[0] == "input_quality"
+    choices = _source("main.py").split('"--stop_after"', 1)[1].split("]", 1)[0]
+    assert '"input_quality"' in choices
+    args = type("A", (), {"stop_after": "input_quality"})()
+    assert not PipelineService._reaches(args, "music")
