@@ -1978,7 +1978,8 @@ class ConversationExportService:
 
     def _write_conversation(self, finder, plan: _Plan, directory: str, folder: str,
                             export_id: str, waveform, sample_rate: int,
-                            speech_segments=None, separation_service=None) -> dict:
+                            speech_segments=None, separation_service=None,
+                            base_name: str = "") -> dict:
         """Write one excerpt folder and return its conversation.json content."""
         import soundfile as sf
         cand, roles = plan.cand, plan.roles
@@ -2014,7 +2015,9 @@ class ConversationExportService:
             two_channel=render.method, speech_segments=speech_segments,
             folder=folder, files=files,
             verification=self._verify(directory, audio_files, sample_rate, len(render.mixture),
-                                      self.cfg.assistant_channel))
+                                      self.cfg.assistant_channel),
+            sample_rate=int(sample_rate), num_samples=int(len(render.mixture)),
+            source_stem=base_name)
         with open(os.path.join(directory, JSON_FILE), "w", encoding="utf-8") as fh:
             json.dump(meta, fh, ensure_ascii=False, indent=2)
         with open(os.path.join(directory, TEXT_FILE), "w", encoding="utf-8") as fh:
@@ -2053,7 +2056,8 @@ class ConversationExportService:
                   audio_start: Optional[float] = None, audio_end: Optional[float] = None,
                   two_channel: Optional[str] = None, speech_segments=None,
                   folder: Optional[str] = None, files: Optional[dict] = None,
-                  verification: Optional[dict] = None) -> dict:
+                  verification: Optional[dict] = None, sample_rate: Optional[int] = None,
+                  num_samples: Optional[int] = None, source_stem: Optional[str] = None) -> dict:
         cand, judged, roles = plan.cand, plan.item, plan.roles
         overlaps = plan.overlaps
         # cut_bounds may move each edge inward by a few milliseconds to the
@@ -2154,6 +2158,13 @@ class ConversationExportService:
             "transcript": TEXT_FILE,
             "verification": verification,
         }
+        # Explicit audio facts and the source recording, for converters and split-by-source.
+        if sample_rate is not None:
+            out["sample_rate"] = int(sample_rate)
+        if num_samples is not None:
+            out["num_samples"] = int(num_samples)
+        if source_stem is not None:
+            out["source_stem"] = source_stem
         if self.cfg.stereo:
             method = two_channel or TIME_GATED
             left, right = (("assistant", "user") if self.cfg.assistant_channel == "left"
@@ -2347,7 +2358,8 @@ class ConversationExportService:
             try:
                 return self._write_conversation(
                     finder, plan, os.path.join(out_dir, *folder.split("/")), folder, export_id,
-                    waveform, sample_rate, speech_segments, separation_service), None
+                    waveform, sample_rate, speech_segments, separation_service,
+                    base_name=base_name), None
             except Exception as exc:                       # pragma: no cover - disk problems
                 return None, exc
 
@@ -2388,12 +2400,14 @@ class ConversationExportService:
                 "source_start": meta["source_start"], "source_end": meta["source_end"],
                 "speaker_ids": meta["speakers"], "verified": meta["verification"]["ok"],
                 "noise_kind": (cand.noise or {}).get("dominant_kind"),
+                "source_stem": base_name, "sample_rate": int(sample_rate),
             })
             (quarantined if plan.category == QUARANTINE else manifest).append({
                 "path": f"{folder}/{STEREO_FILE if has_stereo else MIXTURE_FILE}",
                 "duration": meta["duration"], "category": plan.category, "tags": meta["tags"],
                 "event_counts": meta["event_counts"], "role": meta["role"],
-                "swappable": meta["swappable"], "topic": item.topic, "summary": meta["summary"]})
+                "swappable": meta["swappable"], "topic": item.topic, "summary": meta["summary"],
+                "source_stem": base_name, "sample_rate": int(sample_rate)})
         # Rewritten whole on every run of this file, like the folders it lists.
         self._write_manifests(out_dir, manifest, quarantined)
         report["exported"] = len(result.exports)

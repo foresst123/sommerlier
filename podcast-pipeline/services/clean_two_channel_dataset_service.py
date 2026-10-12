@@ -211,7 +211,7 @@ class CleanTwoChannelDatasetService:
         if had_old:
             shutil.rmtree(backup, ignore_errors=True)
 
-    def _export_item(self, finder, candidate, item_number, *, source_id, staging,
+    def _export_item(self, finder, candidate, item_number, *, source_id, source_stem, staging,
                      total_samples, audio_duration, sample_rate, speech_segments,
                      separation_service):
         """Write one item; returns (summary row, False) or (None, True) when a channel is empty."""
@@ -250,6 +250,10 @@ class CleanTwoChannelDatasetService:
         metadata = {
             "schema_version": SCHEMA_VERSION,
             "source_id": source_id,
+            # The recording's file stem: unlike the registry's numbered id above,
+            # it does not depend on registry order, so it can group items by
+            # recording across machines and re-exports.
+            "source_stem": source_stem,
             "item_id": item_id,
             "tier": candidate.tier,
             "score": candidate.score,
@@ -283,7 +287,7 @@ class CleanTwoChannelDatasetService:
         }
         _write_json(os.path.join(item_dir, "metadata.json"), metadata)
         return {
-            "id": item_id, "tier": candidate.tier,
+            "id": item_id, "source_stem": source_stem, "tier": candidate.tier,
             "score": candidate.score,
             "folder": rel_dir,
             "speaker_ids": {"SP1": pair[0], "SP2": pair[1]},
@@ -320,7 +324,9 @@ class CleanTwoChannelDatasetService:
             def export_one(numbered):
                 item_number, candidate = numbered
                 return self._export_item(
-                    finder, candidate, item_number, source_id=source_id, staging=staging,
+                    finder, candidate, item_number, source_id=source_id,
+                    source_stem=os.path.splitext(source_facts["original_name"])[0],
+                    staging=staging,
                     total_samples=total_samples, audio_duration=audio_duration,
                     sample_rate=sample_rate, speech_segments=speech_segments,
                     separation_service=separation_service)

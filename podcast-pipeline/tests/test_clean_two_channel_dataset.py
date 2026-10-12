@@ -210,4 +210,15 @@ def test_pooled_export_matches_sequential_tree(tmp_path, monkeypatch):
     assert seq["item_count"] == par["item_count"] == 5
     assert seq["skipped_empty_channel"] == par["skipped_empty_channel"]
     assert seq_files.keys() == par_files.keys()
-    assert all(seq_files[k] == par_files[k] for k in seq_files if not k.endswith("source.json"))
+
+    def comparable(name, data):
+        # The two runs read differently named sources, so the recording stem is the
+        # one field of metadata.json that is meant to differ.
+        if name.endswith("metadata.json"):
+            doc = json.loads(data)
+            doc.pop("source_stem", None)
+            return doc
+        return data
+
+    assert all(comparable(k, seq_files[k]) == comparable(k, par_files[k])
+               for k in seq_files if not k.endswith("source.json"))
