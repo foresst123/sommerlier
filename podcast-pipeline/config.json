@@ -70,7 +70,8 @@
       "audio_quality": {
         "enabled": true,
         "min_normalized_quality": 0.5,
-        "on_error": "reject"
+        "on_error": "reject",
+        "device": "cuda"
       },
       "models": {
         "dnsmos": {
@@ -283,7 +284,8 @@
       "audio_quality": {
         "enabled": true,
         "min_normalized_quality": 0.5,
-        "on_error": "reject"
+        "on_error": "reject",
+        "device": "cuda"
       },
       "models": {
         "dnsmos": {

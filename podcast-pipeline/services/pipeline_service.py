@@ -125,6 +125,7 @@ class PipelineService:
             min_normalized_quality=quality.get("min_normalized_quality", 0.3),
             enabled=True,
             on_error=quality.get("on_error", "reject"),
+            device=quality.get("device", "cpu"),
         )
         return self.input_audio_gate
 

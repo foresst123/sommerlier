@@ -50,6 +50,7 @@ class DNSMOSInputGate:
         min_normalized_quality: float = DEFAULT_MIN_NORMALIZED_QUALITY,
         enabled: bool = True,
         on_error: str = "reject",
+        device: str = "cpu",
         scorer: Optional[Callable[[Any, int], Mapping[str, Any]]] = None,
         scorer_factory: Optional[Callable[[], Callable[[Any, int], Mapping[str, Any]]]] = None,
     ):
@@ -58,7 +59,12 @@ class DNSMOSInputGate:
             raise ValueError("min_normalized_quality must be a finite value in [0, 1]")
         if on_error not in {"reject", "skip"}:
             raise ValueError("on_error must be 'reject' or 'skip'")
+        if device not in {"cpu", "cuda"}:
+            raise ValueError("device must be 'cpu' or 'cuda'")
         self.profile = profile or {}
+        # Not part of config_fingerprint: both devices give the same score, so
+        # moving the scorer must not re-score every checkpointed file.
+        self.device = device
         self.model_path = model_path
         self.threshold = threshold
         self.enabled = bool(enabled)
@@ -91,7 +97,7 @@ class DNSMOSInputGate:
                 # import and ONNX session lazy so disabled profiles and unit tests
                 # neither load the model nor require an execution provider.
                 from models.dnsmos import ComputeScore
-                model = ComputeScore(model_path, device="cpu")
+                model = ComputeScore(model_path, device=self.device)
 
                 def score(audio, sample_rate):
                     return model(audio, sample_rate, is_personalized_MOS=False)

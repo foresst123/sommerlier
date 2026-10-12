@@ -49,7 +49,8 @@ class ComputeScore:
             self.onnx_sess = ort.InferenceSession(
                 primary_model_path,
                 sess_options=sess_options,
-                providers=["CUDAExecutionProvider"],
+                # CPU listed second so a machine without CUDA still scores.
+                providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
             )
             print("Using CUDA:", self.onnx_sess.get_providers())
         else:

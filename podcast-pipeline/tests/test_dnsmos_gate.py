@@ -102,6 +102,43 @@ def test_empty_audio_fails_before_loading_the_scorer():
     assert loaded == []
 
 
+def test_gate_loads_the_scorer_on_the_configured_device(tmp_path, monkeypatch):
+    import models.dnsmos
+    model = tmp_path / "dnsmos.onnx"
+    model.write_bytes(b"")
+    seen = []
+
+    class _Score:
+        def __init__(self, path, device="cpu"):
+            seen.append(device)
+
+        def __call__(self, audio, sample_rate, is_personalized_MOS):
+            return {"OVRL": 3.0}
+
+    monkeypatch.setattr(models.dnsmos, "ComputeScore", _Score)
+    DNSMOSInputGate(model_path=str(model), device="cuda").check([0.1], 24000)
+    assert seen == ["cuda"]
+
+
+def test_gate_rejects_an_unknown_device():
+    with pytest.raises(ValueError, match="device"):
+        DNSMOSInputGate(device="tpu")
+
+
+def test_device_does_not_invalidate_checkpointed_scores():
+    # CPU and CUDA give the same score, so moving devices must not re-score a corpus.
+    assert DNSMOSInputGate(device="cuda").config_fingerprint == \
+        DNSMOSInputGate(device="cpu").config_fingerprint
+
+
+def test_pipeline_reads_the_device_from_the_profile():
+    service = PipelineService.__new__(PipelineService)
+    service.input_audio_gate = None
+    config = {"environments": {"a100": {"audio_quality": {"enabled": True, "device": "cuda"}}}}
+    gate = service._resolve_input_audio_gate(config, SimpleNamespace(env="a100"))
+    assert gate.device == "cuda"
+
+
 def test_pipeline_cache_is_bound_to_the_current_source_file(tmp_path):
     source = tmp_path / "input.wav"
     source.write_bytes(b"first")
