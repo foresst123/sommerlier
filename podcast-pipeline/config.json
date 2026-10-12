@@ -511,7 +511,7 @@
       },
       "batch": {
         "max_hours_per_run": 20.0,
-        "target_output_hours": null
+        "target_output_hours": 50.0
       }
     }
   },
