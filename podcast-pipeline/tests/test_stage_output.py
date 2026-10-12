@@ -337,3 +337,11 @@ def test_write_manifest_creates_missing_output_dir(tmp_path):
     path = so.write_manifest({"audio_file": "a.mp3", "stopped_after": "input_quality"})
     assert path == str(out / "manifest.json")
     assert (out / "manifest.json").exists()
+
+
+def test_a_manifest_is_written_for_a_file_with_no_output_folder_yet(tmp_path):
+    # --stop_after input_quality stops before any stage creates the folder.
+    out = tmp_path / "not" / "created"
+    path = StageOutputService(str(out)).write_manifest(
+        {"audio_file": "a.wav", "stopped_after": "input_quality"})
+    assert path and json.load(open(path))["metadata"]["stopped_after"] == "input_quality"
