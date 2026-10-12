@@ -13,6 +13,7 @@ import time
 from collections import deque
 from typing import Callable, Dict, List, Optional
 
+from services.base_worker_service import WorkerDiedError
 from utils.asr_progress import AsrProgress
 
 
@@ -154,7 +155,7 @@ class FileTicket:
         with self._lock:
             if self._error is None:
                 self._error = RuntimeError(
-                    f"ASR lane '{lane}' could not start: {error}")
+                    f"ASR lane '{lane}' has no working model: {error}")
             self._callbacks = []
             self._event.set()
             settled = [] if self._settled else self._settled_callbacks
@@ -344,6 +345,27 @@ class AsrScheduler:
         for job in stranded:
             job.ticket._fail(lane.name, error)
 
+    def _worker_died(self, lane: Lane, worker: LaneWorker, jobs, error):
+        """`worker`'s process is gone mid-run. Its batch goes back to the lane for
+        the other workers; with none left, the files fail rather than receive
+        empty transcripts that would be checkpointed as real ones."""
+        self._log("error", f"[ASR scheduler] a {lane.name} worker died: {error}")
+        self._record("asr_worker_died", lane=lane.name, error=str(error))
+        with self._cond:
+            lane.inflight -= len(jobs)
+            worker.failed = True
+            if any(not w.failed for w in lane.workers):
+                lane.queue.extendleft(reversed(jobs))
+                self._cond.notify_all()
+                return
+            lane.failed, lane.error = True, error
+            self.progress.lane_failed(lane.name)
+            stranded = list(jobs) + list(lane.queue)
+            lane.queue.clear()
+            self._cond.notify_all()
+        for job in stranded:
+            job.ticket._fail(lane.name, error)
+
     def _run_worker(self, lane: Lane, worker: LaneWorker):
         if worker.ready is not None:
             try:
@@ -367,6 +389,9 @@ class AsrScheduler:
             began = time.monotonic()
             try:
                 results = list(worker.run_batch([job.payload for job in jobs], size))
+            except WorkerDiedError as exc:
+                self._worker_died(lane, worker, jobs, exc)
+                return
             except Exception as exc:
                 self._log("error", f"[ASR scheduler] {lane.name} batch failed "
                                    f"({type(exc).__name__}: {exc}); leaving it empty")

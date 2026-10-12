@@ -523,3 +523,43 @@ def test_a_two_gpu_model_gets_the_bigger_batch_and_no_extra_process_when_a_gpu_f
     finally:
         gate.set()
         sched.shutdown()
+
+
+# --- a worker process that dies mid-run must not turn into empty transcripts ---
+
+def test_a_worker_that_dies_mid_run_fails_the_files_instead_of_leaving_them_empty():
+    from services.base_worker_service import WorkerDiedError
+
+    def dead(payloads, size):
+        raise WorkerDiedError("PhoWhisper worker closed stdout")
+
+    sched = _scheduler([_lane("m", 0, dead, batch=2)])
+    sched.expect_files(2)
+    first = sched.submit("a", {"m": [1, 2, 3]})
+    try:
+        with pytest.raises(RuntimeError, match="closed stdout"):
+            first.wait(5)
+        late = sched.submit("b", {"m": [4]})           # the lane is dead: fail at once
+        with pytest.raises(RuntimeError, match="closed stdout"):
+            late.wait(5)
+    finally:
+        sched.shutdown()
+
+
+def test_the_jobs_of_a_dead_worker_go_to_the_lanes_other_workers():
+    from services.base_worker_service import WorkerDiedError
+
+    def dead(payloads, size):
+        raise WorkerDiedError("worker is not running")
+
+    good = LaneWorker("m", 0, _tag("m"), 2)
+    bad = LaneWorker("m", 1, dead, 2)
+    lane = Lane("m", 0, bad, empty="")
+    lane.workers.append(good)
+    sched = _scheduler([lane])
+    sched.expect_files(1)
+    ticket = sched.submit("a", {"m": [1, 2, 3, 4]})
+    try:
+        assert ticket.wait(5)["m"] == ["m:1", "m:2", "m:3", "m:4"]
+    finally:
+        sched.shutdown()

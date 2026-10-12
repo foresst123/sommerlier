@@ -1,5 +1,6 @@
 import atexit
 import collections
+import glob
 import json
 import os
 import signal
@@ -31,6 +32,26 @@ def foreign_library_paths_removed(ld_library_path, python_bin) -> str:
         if not foreign:
             kept.append(entry)
     return ":".join(kept)
+
+
+def own_cuda_library_paths(python_bin, packages) -> List[str]:
+    """`nvidia/<package>/lib` directories inside the worker's own environment.
+
+    torch finds the cuDNN/cuBLAS wheels by itself; CTranslate2 only searches
+    LD_LIBRARY_PATH, and aborts the whole process on its first batch when
+    libcudnn_ops.so.9 is not there. Missing packages are skipped.
+    """
+    prefix = os.path.dirname(os.path.dirname(os.path.abspath(str(python_bin))))
+    found = []
+    for package in packages:
+        found.extend(sorted(glob.glob(os.path.join(
+            prefix, "lib", "python*", "site-packages", "nvidia", package, "lib"))))
+    return found
+
+
+class WorkerDiedError(RuntimeError):
+    """The worker process is gone. Unlike an error reply, no later request can
+    succeed, so callers must not answer the batch with empty results."""
 
 
 # Process groups of workers that are running. A worker gets a group of its own so that
@@ -112,10 +133,13 @@ class WorkerProcessService:
         ready_timeout: float = 900.0,
         logger=None,
         isolate_library_path: bool = False,
+        cuda_library_packages: Sequence[str] = (),
     ):
         self.name = name
         # True for workers whose interpreter has its own torch/CUDA (vLLM).
         self.isolate_library_path = bool(isolate_library_path)
+        # nvidia wheels whose lib/ goes first on the worker's LD_LIBRARY_PATH.
+        self.cuda_library_packages = tuple(cuda_library_packages)
         self.python_bin = python_bin
         self.worker_script = worker_script
         self.extra_args = list(extra_args or [])
@@ -272,6 +296,13 @@ class WorkerProcessService:
                 env["LD_LIBRARY_PATH"] = cleaned
             else:
                 env.pop("LD_LIBRARY_PATH", None)
+        if self.cuda_library_packages:
+            current = [p for p in env.get("LD_LIBRARY_PATH", "").split(":") if p]
+            own = [p for p in own_cuda_library_paths(self.python_bin,
+                                                     self.cuda_library_packages)
+                   if p not in current]
+            if own:
+                env["LD_LIBRARY_PATH"] = ":".join(own + current)
         visible_devices = self.cuda_visible_devices
         if visible_devices is not None:
             env["CUDA_VISIBLE_DEVICES"] = visible_devices
@@ -445,6 +476,26 @@ class WorkerProcessService:
         if self.logger:
             self.logger.info(f"{self.name} worker terminated.")
 
+    def _died(self, how: str) -> WorkerDiedError:
+        """The error for a worker that is gone, carrying what it last wrote to stderr
+        (a native abort such as a missing libcudnn says why only there)."""
+        process = self.process
+        if process is not None and process.poll() is None:
+            try:
+                process.wait(timeout=2)
+            except Exception:
+                pass
+        if self._stderr_thread is not None and process is not None \
+                and process.poll() is not None:
+            self._stderr_thread.join(timeout=2)
+        message = f"{self.name} worker {how}"
+        if process is not None and process.poll() is not None:
+            message += f" (exit code {process.returncode})"
+        tail = self.stderr_tail(5)
+        if tail:
+            message += f"; stderr: {tail}"
+        return WorkerDiedError(message)
+
     def request(self, payload: dict, *, response_id=None) -> dict:
         """Send one JSON request without allowing concurrent pipe corruption.
 
@@ -454,13 +505,16 @@ class WorkerProcessService:
         """
         with self._io_lock:
             if self.process is None or self.process.poll() is not None:
-                raise RuntimeError(f"{self.name} worker is not running")
-            self.process.stdin.write(json.dumps(payload) + "\n")
-            self.process.stdin.flush()
+                raise self._died("is not running")
+            try:
+                self.process.stdin.write(json.dumps(payload) + "\n")
+                self.process.stdin.flush()
+            except (BrokenPipeError, OSError) as exc:
+                raise self._died(f"stopped reading requests ({exc})") from exc
             while True:
                 line = self.process.stdout.readline()
                 if not line:
-                    raise RuntimeError(f"{self.name} worker closed stdout")
+                    raise self._died("closed stdout")
                 try:
                     response = json.loads(line)
                 except json.JSONDecodeError:

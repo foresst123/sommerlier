@@ -298,3 +298,36 @@ def test_a_pool_of_real_workers_serves_concurrent_batches(tmp_path):
     for tag in (100, 200, 300):
         assert results[tag] == [f"len{tag + i}" for i in range(6)]
     assert sum(item["calls"] for item in pool.profile()["workers"]) == 6
+
+
+class _Model:
+    def __init__(self, error):
+        self.error = error
+
+    def transcribe_batch(self, payloads, batch_size=None, logger=None, callback=None):
+        raise self.error
+
+
+def _asr_service():
+    from services.asr_service import ASRService
+    service = ASRService.__new__(ASRService)
+    service.logger = None
+    service.keep_models = True
+    return service
+
+
+def test_a_dead_pho_worker_is_not_turned_into_empty_transcripts():
+    from services.base_worker_service import WorkerDiedError
+    service = _asr_service()
+    run = service._phowhisper_runner({"model": _Model(WorkerDiedError("closed stdout"))})
+    with pytest.raises(WorkerDiedError):
+        run([np.zeros(10)], 4)
+    service.phowhisper = _Model(WorkerDiedError("closed stdout"))
+    with pytest.raises(WorkerDiedError):
+        service._run_phowhisper_batch([np.zeros(10)])
+
+
+def test_an_ordinary_pho_batch_error_still_leaves_that_batch_empty():
+    service = _asr_service()
+    run = service._phowhisper_runner({"model": _Model(ValueError("bad clip"))})
+    assert run([np.zeros(10), np.zeros(10)], 4) == ["", ""]

@@ -13,6 +13,7 @@ import numpy as np
 from algorithms.asr.hallucination import filter_short_segment_outputs
 from utils.audio_normalize import normalize_for_asr, remove_dc, measure
 from services.asr_scheduler import AsrScheduler, ByteBudget, Lane, LaneWorker
+from services.base_worker_service import WorkerDiedError
 from utils import profiling
 from utils.asr_progress import AsrProgress
 
@@ -306,6 +307,8 @@ class ASRService:
             if getattr(self, "model_loader", None) and not self.keep_models:
                 self.model_loader.unload("phowhisper")
             return res
+        except WorkerDiedError:
+            raise                    # empty text would be checkpointed as a transcript
         except Exception as e:
             if self.logger: self.logger.error(f"PhoWhisper batch error: {e}")
             return [""] * len(audios_16k)
@@ -771,6 +774,8 @@ class ASRService:
             try:
                 return list(model.transcribe_batch(
                     list(payloads), batch_size=batch_size, logger=self.logger))
+            except WorkerDiedError:
+                raise                # the scheduler moves the jobs or fails the files
             except Exception as e:
                 if self.logger:
                     self.logger.error(f"PhoWhisper batch error: {e}")

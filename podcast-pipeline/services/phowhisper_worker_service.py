@@ -21,4 +21,6 @@ class PhoWhisperWorkerService(WorkerProcessService):
             device_id=device_id,
             logger=logger,
             ready_timeout=900.0,
+            # CTranslate2 loads cuDNN by name on its first batch, not at start.
+            cuda_library_packages=("cudnn", "cublas"),
         )
