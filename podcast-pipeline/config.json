@@ -71,7 +71,7 @@
         "enabled": true,
         "min_normalized_quality": 0.5,
         "on_error": "reject",
-        "device": "cuda"
+        "device": "cpu"
       },
       "models": {
         "dnsmos": {
@@ -285,7 +285,7 @@
         "enabled": true,
         "min_normalized_quality": 0.5,
         "on_error": "reject",
-        "device": "cuda"
+        "device": "cpu"
       },
       "models": {
         "dnsmos": {
