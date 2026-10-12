@@ -274,7 +274,8 @@
         "clust_th": 0.5,
         "asr_models": [
           "qwen3"
-        ]
+        ],
+        "stop_after": "music"
       },
       "audio_quality": {
         "enabled": true,

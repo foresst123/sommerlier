@@ -141,8 +141,10 @@ def _build_parser():
         "--stop_after", type=str,
         choices=["music", "diarization", "separation", "music_removal", "asr",
                  "captioning", "refinement", "speaker_relabel", "transcript_review",
-                 "word_alignment", "conversation_exports"],
-        help="Stop pipeline gracefully after this stage")
+                 "word_alignment", "conversation_exports", "none"],
+        help="Stop pipeline gracefully after this stage. The profile's "
+             "pipeline.stop_after sets a default; 'none' runs every stage even "
+             "when the profile asks to stop early.")
     return parser
 
 
@@ -217,6 +219,10 @@ def _from_config(key, value):
 # thresholds can live in the profile instead of the command line.
 for k, v in env_profile.get("pipeline", {}).items():
     _from_config(k, v)
+
+# "none" is how the command line cancels a profile that stops early.
+if getattr(args, "stop_after", None) == "none":
+    args.stop_after = None
 
 # "steps" is the on/off list, kept apart from the tuning values above: each key
 # is one stage, and false skips it. Landed as step_<name> so a stage's switch
@@ -395,6 +401,25 @@ def _discard_partial(ledger, args, audio_path, logger, pipeline=None):
             except Exception as exc:
                 if logger:
                     logger.warning(f"Could not release {worker_name} worker after failure: {exc}")
+
+
+def _record_failure(ledger, args, path, err, logger, pipeline, failures, rejections):
+    """Clear a file's partial work and record why it did not finish.
+
+    A file the input quality gate rejected is final: it goes to `rejections` and the
+    ledger will not offer it again. Any other failure may succeed on a retry.
+    """
+    from utils.progress import is_input_rejection
+    name = os.path.basename(path)
+    if is_input_rejection(err):
+        logger.warning(f"REJECTED {name}: {err} (input audio quality; not retried)")
+    else:
+        logger.error(f"FAILED {name}: {err}")
+    _discard_partial(ledger, args, path, logger, pipeline)
+    if ledger.record_failure(path, err) == "rejected":
+        rejections.append((path, err))
+    else:
+        failures.append((path, err))
 
 
 def main():
@@ -979,16 +1004,26 @@ def main():
         else:
             ledger = ProgressLedger(os.path.dirname(os.path.abspath(args.audio)),
                                     logger=logger, persist=False)
-        if ledger.done or ledger.failed:
+        if ledger.done or ledger.failed or ledger.rejected:
             logger.info(f"Resuming: {ledger.summary(len(paths))} "
                         f"(ledger: {os.path.basename(ledger.path)})")
 
         failures = []
+        rejections = []
+        # --stop_after ends every file part-way, so the file is not "done": marking
+        # it would make the next run skip the stages that were never run. Such a run
+        # leaves the ledger's done list alone and visits each file once.
+        partial_run = getattr(args, "stop_after", None) is not None
+        attempted = set()
+        if partial_run:
+            logger.info(f"stop_after={args.stop_after}: files are not marked done; "
+                        "a later run without it (or with --stop_after none) "
+                        "continues from the checkpoints")
         pass_no = 0
         run_snapshot = list(paths)
         while True:
             pass_no += 1
-            todo = ledger.pending(run_snapshot)
+            todo = ledger.pending(run_snapshot, exclude=attempted)
             if not todo:
                 break
 
@@ -1010,12 +1045,10 @@ def main():
                     pipeline, args, config, group, logger=logger)
                 failed_paths = {p for p, _ in pass_failures}
                 for path, err in pass_failures:
-                    logger.error(f"FAILED {os.path.basename(path)}: {err}")
-                    _discard_partial(ledger, args, path, logger, pipeline)
-                    ledger.mark_failed(path, err)
-                    failures.append((path, err))
+                    _record_failure(ledger, args, path, err, logger, pipeline,
+                                    failures, rejections)
                 for path in group:
-                    if path not in failed_paths:
+                    if path not in failed_paths and not partial_run:
                         ledger.mark_done(path)
             else:
                 for path in group:
@@ -1023,15 +1056,16 @@ def main():
                     file_started = time.time()
                     try:
                         pipeline.run(args, config, path)
-                        ledger.mark_done(path, time.time() - file_started)
+                        if not partial_run:
+                            ledger.mark_done(path, time.time() - file_started)
                     except Exception as e:
                         # One bad file must not cost the rest of the pass.
                         err = f"{type(e).__name__}: {e}"
-                        logger.error(f"FAILED {os.path.basename(path)}: {err}")
-                        _discard_partial(ledger, args, path, logger, pipeline)
-                        ledger.mark_failed(path, err)
-                        failures.append((path, err))
+                        _record_failure(ledger, args, path, err, logger, pipeline,
+                                        failures, rejections)
 
+            if partial_run:
+                attempted.update(group)
             # Written after every pass, so a run killed between passes resumes
             # from the last completed group rather than the beginning.
             ledger.save()
@@ -1049,11 +1083,16 @@ def main():
         for path, err in recovered:
             logger.info(f"Recovered on retry: {os.path.basename(path)} "
                         f"(earlier failure: {err})")
+        if rejections:
+            logger.warning(f"{len(rejections)}/{len(paths)} file(s) rejected by input "
+                           "audio quality (final, not retried):")
+            for path, err in rejections:
+                logger.warning(f"  {os.path.basename(path)}: {err}")
         if still_failed:
             logger.warning(f"{len(still_failed)}/{len(paths)} file(s) failed:")
             for path, err in still_failed:
                 logger.warning(f"  {os.path.basename(path)}: {err}")
-        else:
+        elif not ledger.rejected:
             logger.info(f"All {len(paths)} file(s) completed")
 
     finally:
