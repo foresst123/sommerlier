@@ -293,7 +293,7 @@ def test_main_accepts_the_stop_point_and_the_a100_profile_turns_review_on():
     with open(os.path.join(ROOT, "config.json"), encoding="utf-8") as fh:
         a100 = json.load(fh)["environments"]["a100"]
     assert a100["steps"]["transcript_review"] is True
-    assert a100["steps"]["speaker_relabel"] is False
+    assert a100["steps"]["speaker_relabel"] is True
     assert a100["models"]["transcript_review"]["window_tokens"] == 32000
 
 
