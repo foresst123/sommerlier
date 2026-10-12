@@ -278,8 +278,7 @@
           "qwen3",
           "whisper",
           "phowhisper"
-        ],
-        "stop_after": "music"
+        ]
       },
       "audio_quality": {
         "enabled": true,

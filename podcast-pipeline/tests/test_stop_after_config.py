@@ -1,4 +1,4 @@
-"""The a100 profile pauses after the music step; the command line can undo that.
+"""Where a run stops is chosen on the command line, not by the a100 profile.
 
 main.py parses sys.argv at import time, so its source text is read, as in
 tests/test_main_discard.py.
@@ -14,9 +14,9 @@ def _main_src():
     return open(os.path.join(ROOT, "main.py"), encoding="utf-8").read()
 
 
-def test_the_a100_profile_stops_after_the_music_step():
+def test_the_a100_profile_runs_every_stage_unless_told_to_stop():
     config = json.load(open(os.path.join(ROOT, "config.json"), encoding="utf-8"))
-    assert config["environments"]["a100"]["pipeline"]["stop_after"] == "music"
+    assert "stop_after" not in config["environments"]["a100"]["pipeline"]
 
 
 def test_the_configured_stop_is_a_stage_the_command_line_accepts():
