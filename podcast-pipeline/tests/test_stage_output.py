@@ -7,6 +7,7 @@ import os
 import sys
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -292,3 +293,38 @@ def test_a_corrupt_manifest_does_not_stop_the_run(tmp_path):
     service.write_manifest({"audio_file": "a.mp3"})
 
     assert json.loads((tmp_path / "manifest.json").read_text())["flow"]
+
+
+def test_persona_profile_writes_exactly_two_files(tmp_path):
+    so = StageOutputService(str(tmp_path))
+    profile = {"schema_version": 1, "speakers": {"A": {"x": None, "y": 0.0, "z": []}}}
+    so.write_persona_profile(profile, {"warnings": []})
+    d = tmp_path / "07c_persona_profile"
+    assert sorted(p.name for p in d.iterdir()) == ["profile.json", "stats.json"]
+    back = json.loads((d / "profile.json").read_text(encoding="utf-8"))
+    assert back["speakers"]["A"] == {"x": None, "y": 0.0, "z": []}
+    assert "persona_profile" in so.manifest["stages"]
+
+
+def test_persona_profile_keeps_vietnamese_text_unescaped(tmp_path):
+    so = StageOutputService(str(tmp_path))
+    so.write_persona_profile({"d": "Nói nhanh"}, {})
+    assert "Nói nhanh" in (tmp_path / "07c_persona_profile" / "profile.json").read_text(encoding="utf-8")
+
+
+def test_persona_profile_with_nan_raises_and_leaves_no_half_written_file(tmp_path):
+    so = StageOutputService(str(tmp_path))
+    with pytest.raises(RuntimeError):
+        so.write_persona_profile({"v": float("nan")}, {})
+    assert not (tmp_path / "07c_persona_profile" / "profile.json").exists()
+
+
+def test_other_stages_still_allow_nan(tmp_path):
+    so = StageOutputService(str(tmp_path))
+    assert so._write_json(str(tmp_path / "x.json"), {"v": float("nan")}) is True
+
+
+def test_persona_profile_is_a_noop_when_stage_output_is_disabled(tmp_path):
+    so = StageOutputService(str(tmp_path), enabled=False)
+    assert so.write_persona_profile({"a": 1}, {}) is None
+    assert not (tmp_path / "07c_persona_profile").exists()

@@ -105,6 +105,7 @@ class StageOutputService:
         "refinement": "06_refinement",
         "relabel": "07_relabel",
         "transcript_review": "07b_transcript_review",
+        "persona_profile": "07c_persona_profile",
         "word_alignment": "08_word_alignment",
         "conversation_exports": "09_conversation_exports",
     }
@@ -122,10 +123,12 @@ class StageOutputService:
         os.makedirs(d, exist_ok=True)
         return d
 
-    def _write_json(self, path: str, payload) -> bool:
+    def _write_json(self, path: str, payload, *, allow_nan: bool = True) -> bool:
         try:
+            # Serialize first: a payload that cannot be written must not leave a half file.
+            text = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=allow_nan)
             with open(path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
+                f.write(text)
             return True
         except Exception as e:
             if self.logger:
@@ -482,6 +485,20 @@ class StageOutputService:
             extra={"rejected.json": report.get("rejected", []),
                    "replies.json": report.get("replies", []),
                    "report.json": {k: v for k, v in report.items() if k != "replies"}})
+
+    def write_persona_profile(self, profile: dict, stats: dict) -> Optional[str]:
+        """profile.json + stats.json of the persona stage; NaN/inf is an error, not a file."""
+        if not self.enabled:
+            return None
+        d = self.stage_dir("persona_profile")
+        for name, payload in (("profile.json", profile), ("stats.json", stats)):
+            if not self._write_json(os.path.join(d, name), payload, allow_nan=False):
+                raise RuntimeError(f"persona_profile: could not write {name}")
+        self.manifest["stages"]["persona_profile"] = {
+            "dir": self.STAGES["persona_profile"], "stats": stats}
+        if self.logger:
+            self.logger.info(f"[stage-out] persona_profile -> {d}")
+        return d
 
     def write_review(self, report: dict):
         """What the transcript review pass flagged. It changes no transcript data.

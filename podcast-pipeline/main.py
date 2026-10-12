@@ -141,7 +141,7 @@ def _build_parser():
         "--stop_after", type=str,
         choices=["music", "diarization", "separation", "music_removal", "asr",
                  "captioning", "refinement", "speaker_relabel", "transcript_review",
-                 "word_alignment", "conversation_exports", "none"],
+                 "persona_profile", "word_alignment", "conversation_exports", "none"],
         help="Stop pipeline gracefully after this stage. The profile's "
              "pipeline.stop_after sets a default; 'none' runs every stage even "
              "when the profile asks to stop early.")
@@ -920,6 +920,14 @@ def main():
                     review_cfg[key] = relabel_cfg[key]
             review_svc = TranscriptReviewService(
                 refinement_svc, logger=logger, **review_cfg)
+        # Persona profile: per-speaker habits; same resident LLM. Built only when the
+        # step is on. Its three settings come from models.persona_profile alone, and an
+        # unknown key raises like relabel's.
+        persona_svc = None
+        if opt_in_step_enabled(args, "persona_profile"):
+            from services.persona_profile_service import PersonaProfileService
+            persona_cfg = dict(env_profile.get("models", {}).get("persona_profile", {}))
+            persona_svc = PersonaProfileService(refinement_svc, logger=logger, **persona_cfg)
         conversation_export_svc = ConversationExportService(
             refinement_svc, logger=logger,
             **dict(env_profile.get("models", {}).get("conversation_selection", {})))
@@ -958,6 +966,7 @@ def main():
             performance_monitor=performance_monitor,
             relabel_svc=relabel_svc,
             review_svc=review_svc,
+            persona_svc=persona_svc,
             conversation_export_svc=conversation_export_svc,
             word_alignment_svc=word_alignment_svc,
             clean_dataset_svc=clean_dataset_svc,

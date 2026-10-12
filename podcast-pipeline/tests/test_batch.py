@@ -108,7 +108,8 @@ def test_every_file_finishes_a_stage_before_the_next_stage_starts():
         if not seen or seen[-1] != stage:
             seen.append(stage)
     expected = [s for s in PIPELINE_STAGES
-                if s not in {"conversation_selection", "conversation_exports"}]
+                if s not in {"persona_profile", "conversation_selection",
+                             "conversation_exports"}]
     assert seen == expected, (
         f"stages ran as {seen}; each stage must cover the whole batch before the next"
     )
@@ -223,7 +224,7 @@ def test_captioning_is_skipped_when_its_model_is_off():
     assert [s for s, _ in pipe.calls] == [
         s for s in PIPELINE_STAGES
         if s not in {"captioning", "speaker_relabel", "transcript_review",
-                     "conversation_selection", "word_alignment",
+                     "persona_profile", "conversation_selection", "word_alignment",
                      "conversation_exports"}]
 
 
@@ -651,3 +652,36 @@ def test_asr_stays_one_file_at_a_time_when_cross_file_is_off():
                        ["f1", "f2", "f3"], stages=("asr",))
     assert pipe.max_inside == 1
     assert pipe.asr_svc.begun is None
+
+
+def test_persona_profile_pass_sits_between_review_and_selection():
+    assert PIPELINE_STAGES.index("transcript_review") < PIPELINE_STAGES.index(
+        "persona_profile") < PIPELINE_STAGES.index("conversation_selection")
+
+
+def test_persona_profile_pass_is_skipped_unless_opted_in():
+    files = ["f1", "f2"]
+    pipe = FakePipeline()
+    run_batch_by_stage(pipe, _args(
+        step_speaker_relabel=False, step_transcript_review=True,
+        step_word_alignment=True, step_conversation_exports=False), {}, files)
+    assert "persona_profile" not in [s for s, _ in pipe.calls]
+
+
+def test_persona_profile_pass_runs_for_every_file_before_the_next_stage():
+    files = ["f1", "f2", "f3"]
+    pipe = FakePipeline()
+    run_batch_by_stage(pipe, _args(
+        step_speaker_relabel=False, step_transcript_review=True, step_persona_profile=True,
+        step_word_alignment=True, step_conversation_exports=True), {}, files)
+    order = [s for s, _ in pipe.calls]
+    assert [p for s, p in pipe.calls if s == "persona_profile"] == files
+    last_persona = max(i for i, s in enumerate(order) if s == "persona_profile")
+    first_after = min(i for i, s in enumerate(order) if s == "conversation_selection")
+    assert last_persona < first_after
+
+
+def test_performance_report_knows_the_persona_stage():
+    from utils.performance_report import _STAGE_ORDER
+    assert _STAGE_ORDER.index("transcript_review") < _STAGE_ORDER.index(
+        "persona_profile") < _STAGE_ORDER.index("word_alignment")

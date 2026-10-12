@@ -48,7 +48,8 @@ class PipelineService:
                  word_alignment_svc=None,
                  clean_dataset_svc=None,
                  review_svc=None,
-                 input_audio_gate=None):
+                 input_audio_gate=None,
+                 persona_svc=None):
         self.audio_svc = audio_svc
         self.diarization_svc = diarization_svc
         self.separation_svc = separation_svc
@@ -62,6 +63,7 @@ class PipelineService:
         # opt-in: passing a service does not switch its step on.
         self.relabel_svc = relabel_svc
         self.review_svc = review_svc
+        self.persona_svc = persona_svc
         self.conversation_export_svc = conversation_export_svc
         self.word_alignment_svc = word_alignment_svc
         self.clean_dataset_svc = clean_dataset_svc
@@ -217,7 +219,8 @@ class PipelineService:
             # its own timeline and noise track while it runs concurrently.
             # Speaker relabel shares the LLM replicas across files too, and reads
             # the timeline for each file's gaps.
-            cross_file = (stage in ("speaker_relabel", "transcript_review") or (stage == "asr" and getattr(
+            cross_file = (stage in ("speaker_relabel", "transcript_review", "persona_profile")
+                          or (stage == "asr" and getattr(
                 getattr(self, "asr_svc", None), "cross_file_enabled", False)))
             if not cross_file:
                 return self
@@ -484,7 +487,7 @@ class PipelineService:
     def _next_llm_step_after(self, args, stage: str):
         """The next opt-in pass after `stage` that reuses the resident LLM, or None.
 
-        Order: refinement, speaker_relabel, transcript_review,
+        Order: refinement, speaker_relabel, transcript_review, persona_profile,
         conversation_selection.  Conversation exports are deliberately a
         writer-only pass and must not be treated as an LLM consumer.
         Each reads the transcript with the same replicas.
@@ -493,16 +496,25 @@ class PipelineService:
                       and opt_in_step_enabled(args, "speaker_relabel"))
         review_on = (getattr(self, "review_svc", None) is not None
                      and opt_in_step_enabled(args, "transcript_review"))
+        # Without the LLM the persona stage only counts, so it is no LLM consumer.
+        persona_on = (getattr(self, "persona_svc", None) is not None
+                      and bool(getattr(self.persona_svc, "llm_enabled", False))
+                      and opt_in_step_enabled(args, "persona_profile"))
         selection_on = (getattr(self, "conversation_export_svc", None) is not None
                         and opt_in_step_enabled(args, "conversation_exports"))
         if stage == "refinement":
             return "speaker_relabel" if relabel_on else (
                 "transcript_review" if review_on else (
-                    "conversation_selection" if selection_on else None))
+                    "persona_profile" if persona_on else (
+                        "conversation_selection" if selection_on else None)))
         if stage == "speaker_relabel":
             return "transcript_review" if review_on else (
-                "conversation_selection" if selection_on else None)
+                "persona_profile" if persona_on else (
+                    "conversation_selection" if selection_on else None))
         if stage == "transcript_review":
+            return "persona_profile" if persona_on else (
+                "conversation_selection" if selection_on else None)
+        if stage == "persona_profile":
             return "conversation_selection" if selection_on else None
         return None
 
@@ -524,7 +536,7 @@ class PipelineService:
                     "Keeping the refinement LLM resident for "
                     f"{self._next_llm_step_after(args, 'refinement')}")
             return
-        if (stage in ("speaker_relabel", "transcript_review")
+        if (stage in ("speaker_relabel", "transcript_review", "persona_profile")
                 and self._next_llm_step_after(args, stage) is not None
                 and self._keep_llm_between_passes(args)):
             if self.logger:
@@ -591,7 +603,7 @@ class PipelineService:
     # Thứ tự các điểm dừng của run(); None (chạy hết) tới được mọi bước.
     _STOP_ORDER = ("music", "diarization", "separation", "music_removal",
                    "asr", "captioning", "refinement", "speaker_relabel",
-                   "transcript_review", "conversation_selection",
+                   "transcript_review", "persona_profile", "conversation_selection",
                    "word_alignment", "conversation_exports")
 
     @classmethod
@@ -1007,6 +1019,46 @@ class PipelineService:
                             {"flags_by_index": result.flags_by_index, "report": report})
         stage_out.write_review(report)
         return transcripts
+
+    def _profile_personas(self, args, checkpoint, stage_out, transcripts, audio_path, *,
+                          allow_compute=True):
+        """Per-speaker habits of this recording; reads the transcript, changes nothing.
+
+        Later passes of a batch only reload the checkpoint (`allow_compute` false), so
+        the LLM is never loaded again just to find nothing to do.
+        """
+        svc = self.persona_svc
+        if not transcripts:
+            return
+        try:
+            prepared = svc.prepare(transcripts, getattr(self, "timeline", None),
+                                   getattr(self, "noise_track", None))
+            checkpoint.namespaces["persona_profile"] = svc.checkpoint_namespace_for(
+                svc.source_digest(prepared))
+            payload = checkpoint.load_if_committed("persona_profile")
+            if payload and payload.get("profile") is not None and payload.get("stats") is not None:
+                if self.logger:
+                    self.logger.info("Loading persona profile from checkpoint")
+                stage_out.write_persona_profile(payload["profile"], payload["stats"])
+                return
+            if not allow_compute:
+                if self.logger:
+                    self.logger.info("Persona profile has no checkpoint for this pass; skipped")
+                return
+            recording_id = os.path.splitext(os.path.basename(audio_path))[0]
+            result = svc.profile(prepared, recording_id)
+            if result.skipped:
+                if self.logger:
+                    self.logger.info(f"Persona profile skipped: {result.skipped}")
+                return
+            # An unanswered LLM window must be retried next time, not remembered.
+            if result.complete:
+                checkpoint.save("persona_profile",
+                                {"profile": result.profile, "stats": result.stats})
+            stage_out.write_persona_profile(result.profile, result.stats)
+        except Exception as exc:
+            if self.logger:
+                self.logger.error(f"[persona] profile failed, later stages go on: {exc}")
 
     def _align_words(self, checkpoint, stage_out, transcripts, audio_data,
                      speech_segments, *, allow_compute=True):
@@ -1812,6 +1864,28 @@ class PipelineService:
                                       "stopped_after": "transcript_review"})
             return transcripts
 
+        # 7b''. Persona profile: per-speaker habits of the whole recording. Reads the
+        # transcript (on copies) and writes two files; it changes no data. Opt-in.
+        persona_on = (self.persona_svc is not None
+                      and opt_in_step_enabled(args, "persona_profile"))
+        if persona_on and transcripts is not None:
+            # postprocess_only is assigned further down, so read it from args. A batch
+            # pass computes only in its own persona_profile pass; later passes reload.
+            allow_compute = (not bool(getattr(args, "postprocess_only", False))
+                             and (getattr(args, "batch_continues", None) is None
+                                  or getattr(args, "stop_after", None) == "persona_profile"))
+            self._profile_personas(args, checkpoint, stage_out, transcripts, audio_path,
+                                   allow_compute=allow_compute)
+
+        if getattr(args, "stop_after", None) == "persona_profile":
+            self._release_llm_after(args, "persona_profile")
+            if self.logger:
+                self.logger.info(
+                    "Stopping pipeline after persona_profile as requested by --stop_after.")
+            stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
+                                      "stopped_after": "persona_profile"})
+            return transcripts
+
         # 7c. Forced alignment: refinement may have changed Whisper's words, so
         # its old word timestamps are no longer valid. Align the final text with
         # Vietnamese Wav2Vec2 before any clean-data selection reads it.
@@ -1915,7 +1989,7 @@ class PipelineService:
             return transcripts
 
         if (self.step_enabled(args, "refinement") or relabel_on or exports_planned
-                or review_on):
+                or review_on or persona_on):
             if not getattr(args, "keep_models", False):
                 self._defer_or_run(self.refinement_svc.unload)
 

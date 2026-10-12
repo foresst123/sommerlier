@@ -8,7 +8,7 @@ events. Nothing here touches the console log -- the report is a file.
 from collections import defaultdict
 
 _STAGE_ORDER = ("music", "diarization", "separation", "music_removal", "asr", "refinement",
-                "speaker_relabel", "transcript_review", "word_alignment",
+                "speaker_relabel", "transcript_review", "persona_profile", "word_alignment",
                 "conversation_exports",
                 "clean-data+export")
 

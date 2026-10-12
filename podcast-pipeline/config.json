@@ -242,12 +242,13 @@
         "separation": true,
         "asr": true,
         "captioning": false,
-        "refinement": false,
+        "refinement": true,
         "speaker_relabel": false,
         "word_alignment": true,
         "conversation_exports": true,
         "export": true,
-        "transcript_review": true
+        "transcript_review": true,
+        "persona_profile": false
       },
       "pipeline": {
         "vad": true,
@@ -273,7 +274,9 @@
         "min_cluster_size": 11,
         "clust_th": 0.5,
         "asr_models": [
-          "qwen3"
+          "qwen3",
+          "whisper",
+          "phowhisper"
         ],
         "stop_after": "music"
       },
@@ -370,6 +373,11 @@
           "min_confidence": 0.7,
           "thinking": false,
           "max_new_tokens": 4096
+        },
+        "persona_profile": {
+          "llm_enabled": true,
+          "thinking": false,
+          "max_new_tokens": 1024
         },
         "word_alignment": {
           "model_name": "nguyenvulebinh/wav2vec2-base-vi-vlsp2020",

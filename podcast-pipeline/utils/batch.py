@@ -144,7 +144,7 @@ def split_final_failures(failures, is_done):
 PIPELINE_STAGES = (
     "music", "diarization", "separation", "asr",
     "captioning", "refinement", "speaker_relabel", "transcript_review",
-    "conversation_selection", "word_alignment", "conversation_exports", None,
+    "persona_profile", "conversation_selection", "word_alignment", "conversation_exports", None,
 )
 
 
@@ -194,8 +194,9 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
             "captioning": "captioning",
             "refinement": "refinement",
         }
-        _opt_in_stages = {"speaker_relabel", "transcript_review", "conversation_selection",
-                          "word_alignment", "conversation_exports"}
+        _opt_in_stages = {"speaker_relabel", "transcript_review", "persona_profile",
+                          "conversation_selection", "word_alignment",
+                          "conversation_exports"}
         if stage is not None:
             if stage == "conversation_selection":
                 # Selection is the model-backed half of the existing
@@ -458,7 +459,7 @@ def _stage_parallelism(args, stage) -> int:
         # Files in flight keep every ASR model's queue fed while another file
         # waits for its slowest model (services/asr_scheduler.py).
         return max(1, int(stages["asr"].get("files_in_flight", 3)))
-    if stage in ("speaker_relabel", "transcript_review"):
+    if stage in ("speaker_relabel", "transcript_review", "persona_profile"):
         return max(1, int(stages.get("refinement", {}).get("relabel_files_in_flight", 1)))
     if stage == "diarization" and not getattr(args, "dia3", False):
         return max(1, min(2, int(

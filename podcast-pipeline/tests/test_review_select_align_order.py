@@ -334,3 +334,70 @@ def test_the_resident_llm_is_kept_from_review_into_selection():
     args.batch_continues = False
     pipe._release_llm_after(args, "transcript_review")
     assert unloaded
+
+
+# --- persona_profile placement -----------------------------------------------------------
+
+def test_stop_order_places_persona_profile_between_review_and_selection():
+    order = PipelineService._STOP_ORDER
+    assert order.index("transcript_review") < order.index("persona_profile") \
+        < order.index("conversation_selection")
+    args = types.SimpleNamespace(stop_after="persona_profile")
+    assert PipelineService._reaches(args, "persona_profile")
+    assert not PipelineService._reaches(args, "conversation_selection")
+    assert not PipelineService._reaches(args, "word_alignment")
+
+
+class _Persona:
+    llm_enabled = True
+
+
+def test_next_llm_step_passes_through_persona_when_it_uses_the_llm():
+    pipe = _pipeline(review_svc=object(), persona_svc=_Persona(),
+                     conversation_export_svc=object())
+    args = types.SimpleNamespace(step_transcript_review=True, step_persona_profile=True,
+                                 step_conversation_exports=True)
+    assert pipe._next_llm_step_after(args, "transcript_review") == "persona_profile"
+    assert pipe._next_llm_step_after(args, "persona_profile") == "conversation_selection"
+    assert pipe._next_llm_step_after(args, "refinement") == "transcript_review"
+
+
+def test_a_persona_stage_without_llm_is_not_an_llm_consumer():
+    off = _Persona()
+    off.llm_enabled = False
+    pipe = _pipeline(review_svc=object(), persona_svc=off, conversation_export_svc=object())
+    args = types.SimpleNamespace(step_transcript_review=True, step_persona_profile=True,
+                                 step_conversation_exports=True)
+    assert pipe._next_llm_step_after(args, "transcript_review") == "conversation_selection"
+
+
+def test_persona_profile_off_changes_nothing_for_existing_stages():
+    pipe = _pipeline(review_svc=object(), persona_svc=_Persona(),
+                     conversation_export_svc=object())
+    args = types.SimpleNamespace(step_transcript_review=True, step_conversation_exports=True)
+    assert pipe._next_llm_step_after(args, "transcript_review") == "conversation_selection"
+
+
+def test_the_llm_is_kept_from_review_into_persona_then_released_after_it():
+    pipe = _pipeline(review_svc=object(), persona_svc=_Persona())
+    perf = {"enabled": True, "stages": {"refinement": {"keep_llm_across_relabel": True}}}
+    args = types.SimpleNamespace(performance_config=perf, batch_continues=True,
+                                 step_transcript_review=True, step_persona_profile=True,
+                                 keep_models=False)
+    unloaded = []
+    pipe.refinement_svc = types.SimpleNamespace(unload=lambda: unloaded.append(1))
+    pipe._defer_or_run = lambda fn: fn()
+    pipe._release_llm_after(args, "transcript_review")
+    assert not unloaded                                   # kept for persona_profile
+    pipe._release_llm_after(args, "persona_profile")      # nothing after it uses the LLM
+    assert unloaded
+    unloaded.clear()
+    args.batch_continues = False
+    pipe._release_llm_after(args, "transcript_review")
+    assert unloaded
+
+
+def test_persona_profile_is_a_cross_file_stage_view():
+    pipe = _pipeline(persona_svc=_Persona())
+    pipe.diarization_svc = object()
+    assert pipe.parallel_stage_view("persona_profile") is not pipe
