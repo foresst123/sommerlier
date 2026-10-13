@@ -328,3 +328,12 @@ def test_persona_profile_is_a_noop_when_stage_output_is_disabled(tmp_path):
     so = StageOutputService(str(tmp_path), enabled=False)
     assert so.write_persona_profile({"a": 1}, {}) is None
     assert not (tmp_path / "07c_persona_profile").exists()
+
+
+def test_write_manifest_creates_missing_output_dir(tmp_path):
+    """--stop_after input_quality ghi manifest trước khi có stage nào tạo thư mục."""
+    out = tmp_path / "chua_ton_tai" / "tên có ｜ và, dấu"
+    so = StageOutputService(str(out))
+    path = so.write_manifest({"audio_file": "a.mp3", "stopped_after": "input_quality"})
+    assert path == str(out / "manifest.json")
+    assert (out / "manifest.json").exists()

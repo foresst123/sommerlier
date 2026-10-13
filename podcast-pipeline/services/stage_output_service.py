@@ -127,6 +127,8 @@ class StageOutputService:
         try:
             # Serialize first: a payload that cannot be written must not leave a half file.
             text = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=allow_nan)
+            # --stop_after input_quality dừng trước khi stage nào tạo thư mục.
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
                 f.write(text)
             return True
@@ -731,7 +733,7 @@ class StageOutputService:
                 for msg in payload["warnings"]:
                     self.logger.warning(f"[stage-out] {msg}")
 
-        self._write_json(path, payload)
-        if self.logger:
+        ok = self._write_json(path, payload)
+        if ok and self.logger:
             self.logger.info(f"[stage-out] manifest -> {path}")
-        return path
+        return path if ok else None
