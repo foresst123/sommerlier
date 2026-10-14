@@ -1,12 +1,13 @@
 import os
 import threading
+import time
 from typing import List
 from difflib import SequenceMatcher
 from utils.worker_env import resolve_worker_python
 from algorithms.asr.hallucination import diacritic_ratio, foreign_script_ratio
 from algorithms.asr.rover import normalize_token
 from schemas.transcript import TranscriptSegment
-from utils import profiling
+from utils import llm_trace, profiling
 from utils.llm_sampling import hf_generate_kwargs
 import torch
 import re
@@ -775,8 +776,9 @@ class DiarizationRefinementService:
         if len(indices) >= max(8, workers * 2) and workers > 1:
             from concurrent.futures import ThreadPoolExecutor
             with ThreadPoolExecutor(max_workers=workers) as ex:
-                messages = list(ex.map(lambda i: self._build_user_message(segments, i),
-                                       indices))
+                messages = list(ex.map(
+                    llm_trace.bind(lambda i: self._build_user_message(segments, i)),
+                    indices))
         else:
             # Below that, the pool costs more to start than the work it saves.
             messages = [self._build_user_message(segments, i) for i in indices]
@@ -1227,12 +1229,25 @@ class DiarizationRefinementService:
         # set here too and put back afterwards.
         original_padding_side = tokenizer.padding_side
         tokenizer.padding_side = "left"
+        trace = llm_trace.current()
+        started = time.perf_counter()
+        ok, decoded, raised = False, [], None
         try:
-            return self._generate_batch(
+            ok, decoded = self._generate_batch(
                 system_prompt, user_messages, max_new_tokens, use_prefix, tag,
                 thinking)
+            return ok, decoded
+        except Exception as exc:
+            raised = f"{type(exc).__name__}: {exc}"
+            raise
         finally:
             tokenizer.padding_side = original_padding_side
+            llm_trace.record_call(
+                trace, system_prompt=system_prompt, user_messages=user_messages,
+                outputs=decoded if ok else None, details=None, ok=ok,
+                error=None if ok else (raised or getattr(self, "last_failure", None)),
+                thinking=bool(thinking), max_new_tokens=max_new_tokens,
+                duration_s=time.perf_counter() - started, backend="in_process")
 
     def _generate_batch(self, system_prompt, user_messages, max_new_tokens,
                         use_prefix, tag, thinking=False):

@@ -8,6 +8,7 @@ import json
 import threading
 from typing import Any
 from utils.checkpoint import CheckpointManager
+from utils import llm_trace
 from utils.music_map import MusicMap, build_maps
 from utils.noise_map import NoiseTrack
 from utils.excise import TimelineMap, excise
@@ -310,6 +311,12 @@ class PipelineService:
     def step_enabled(cls, args, name: str) -> bool:
         """Kiểm tra bước có chạy không; bước không được liệt kê vẫn chạy như trước."""
         return step_enabled(args, name)
+
+    @staticmethod
+    def _llm_trace(args, stage, output_dir):
+        """Record every Qwen call made inside the block under this file's llm_trace/."""
+        return llm_trace.trace_to(stage, output_dir,
+                                  enabled=getattr(args, "llm_trace", True))
 
     def _free(self, args, *model_names):
         """Giải phóng model khi xong, trừ khi bật --keep_models.
@@ -1836,9 +1843,10 @@ class PipelineService:
         else:
             import copy
             before = copy.deepcopy(transcripts)
-            transcripts = self.refinement_svc.refine(
-                transcripts, getattr(args, "llm_prompt", None) or None
-            )
+            with self._llm_trace(args, "refinement", output_dir):
+                transcripts = self.refinement_svc.refine(
+                    transcripts, getattr(args, "llm_prompt", None) or None
+                )
             checkpoint.save("refinement", transcripts)
             computed.add("refinement")
             stage_out.write_refinement(transcripts, before=before)
@@ -1858,8 +1866,9 @@ class PipelineService:
         relabel_on = (self.relabel_svc is not None
                       and opt_in_step_enabled(args, "speaker_relabel"))
         if relabel_on and transcripts is not None:
-            transcripts = self._relabel_speakers(
-                checkpoint, stage_out, transcripts, speech_segments)
+            with self._llm_trace(args, "speaker_relabel", output_dir):
+                transcripts = self._relabel_speakers(
+                    checkpoint, stage_out, transcripts, speech_segments)
 
         if getattr(args, "stop_after", None) == "speaker_relabel":
             self._release_llm_after(args, "speaker_relabel")
@@ -1876,7 +1885,8 @@ class PipelineService:
         review_on = (self.review_svc is not None
                      and opt_in_step_enabled(args, "transcript_review"))
         if review_on and transcripts is not None:
-            transcripts = self._review_transcript(checkpoint, stage_out, transcripts)
+            with self._llm_trace(args, "transcript_review", output_dir):
+                transcripts = self._review_transcript(checkpoint, stage_out, transcripts)
 
         if getattr(args, "stop_after", None) == "transcript_review":
             self._release_llm_after(args, "transcript_review")
@@ -1897,8 +1907,9 @@ class PipelineService:
             allow_compute = (not bool(getattr(args, "postprocess_only", False))
                              and (getattr(args, "batch_continues", None) is None
                                   or getattr(args, "stop_after", None) == "persona_profile"))
-            self._profile_personas(args, checkpoint, stage_out, transcripts, audio_path,
-                                   allow_compute=allow_compute)
+            with self._llm_trace(args, "persona_profile", output_dir):
+                self._profile_personas(args, checkpoint, stage_out, transcripts, audio_path,
+                                       allow_compute=allow_compute)
 
         if getattr(args, "stop_after", None) == "persona_profile":
             self._release_llm_after(args, "persona_profile")
@@ -1925,9 +1936,10 @@ class PipelineService:
         if exports_planned and transcripts is not None:
             stop_after = getattr(args, "stop_after", None)
             if not postprocess_only and stop_after != "conversation_exports":
-                selection = self._select_conversation(
-                    checkpoint, stage_out, transcripts, audio_data, music_map,
-                    output_dir, audio_path, speech_segments)
+                with self._llm_trace(args, "conversation_selection", output_dir):
+                    selection = self._select_conversation(
+                        checkpoint, stage_out, transcripts, audio_data, music_map,
+                        output_dir, audio_path, speech_segments)
             else:
                 selection = self._load_conversation_selection(
                     checkpoint, transcripts, music_map=music_map)

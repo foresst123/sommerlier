@@ -17,9 +17,11 @@ Cách dùng:
 import json
 import queue
 import threading
+import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from services.base_worker_service import WorkerProcessService
+from utils import llm_trace
 
 
 class RefinementWorkerService(WorkerProcessService):
@@ -94,6 +96,20 @@ class RefinementWorkerService(WorkerProcessService):
         if not user_messages or not self.process:
             return False, []
 
+        trace = llm_trace.current()
+        started = time.perf_counter()
+        ok, texts, details, error = self._request(
+            system_prompt, user_messages, max_new_tokens, thinking)
+        llm_trace.record_call(
+            trace, system_prompt=system_prompt, user_messages=user_messages,
+            outputs=texts if ok else None, details=details if ok else None,
+            ok=ok, error=error, thinking=thinking, max_new_tokens=max_new_tokens,
+            duration_s=time.perf_counter() - started, backend="worker",
+            replica=getattr(self, "replica", None))
+        return ok, texts
+
+    def _request(self, system_prompt, user_messages, max_new_tokens, thinking):
+        """(ok, texts, details, error) for one generate request."""
         req_id = str(uuid.uuid4())[:8]
         req = {
             "cmd": "generate",
@@ -113,23 +129,21 @@ class RefinementWorkerService(WorkerProcessService):
             if not line:
                 if self.logger:
                     self.logger.warning("[refinement_worker] empty response")
-                return False, []
+                return False, [], None, "empty response"
 
             resp = json.loads(line.strip())
             if resp.get("ok"):
                 self._add_usage(resp.get("usage"), len(user_messages))
-                return True, resp.get("texts", [])
-            else:
-                if self.logger:
-                    self.logger.warning(
-                        f"[refinement_worker] generate failed: "
-                        f"{resp.get('error', 'unknown')}")
-                return False, []
+                return True, resp.get("texts", []), resp.get("details"), None
+            error = resp.get("error", "unknown")
+            if self.logger:
+                self.logger.warning(f"[refinement_worker] generate failed: {error}")
+            return False, [], None, str(error)
 
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[refinement_worker] IPC error: {e}")
-            return False, []
+            return False, [], None, f"IPC error: {e}"
 
     def ping(self) -> bool:
         """Kiểm tra worker còn sống không."""
@@ -255,10 +269,13 @@ class RefinementWorkerPoolService:
             if not future.set_running_or_notify_cancel():
                 continue
             try:
-                ok, texts = service.generate_texts(
-                    request["system_prompt"], request["user_messages"],
-                    max_new_tokens=request["max_new_tokens"],
-                    thinking=request["thinking"])
+                # The trace belongs to the file that queued the job, not to this thread.
+                service.replica = index
+                with llm_trace.activate(request.get("trace")):
+                    ok, texts = service.generate_texts(
+                        request["system_prompt"], request["user_messages"],
+                        max_new_tokens=request["max_new_tokens"],
+                        thinking=request["thinking"])
             except Exception:
                 ok, texts = False, []
             tried = tried | {index}
@@ -287,7 +304,8 @@ class RefinementWorkerPoolService:
         self._ensure_threads()
         request = {"system_prompt": system_prompt,
                    "user_messages": list(user_messages),
-                   "max_new_tokens": max_new_tokens, "thinking": thinking}
+                   "max_new_tokens": max_new_tokens, "thinking": thinking,
+                   "trace": llm_trace.current()}
         self._jobs.put((future, request, frozenset()))
         return future
 

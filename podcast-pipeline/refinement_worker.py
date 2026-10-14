@@ -29,6 +29,8 @@ Protocol (stdin/stdout, line-delimited JSON):
         {"status": "shutdown"}             # quit
         {"id": "req-001",
          "texts": ["...", "..."],
+         "details": [{"finish_reason": "stop", "prompt_tokens": 0,
+                      "completion_tokens": 0}, ...],   # một phần tử mỗi text
          "usage": {"prompt_tokens": 0, "completion_tokens": 0},
          "ok": true}                       # generate thành công
         {"id": "req-001", "ok": false,
@@ -223,8 +225,31 @@ def generate_with_usage(model, tokenizer, system_prompt: str, user_messages: lis
                         max_new_tokens: int = 512, thinking: bool = False,
                         backend: str = "transformers"):
     """(texts, usage): usage counts the tokens the engine really processed."""
+    return generate_with_details(model, tokenizer, system_prompt, user_messages,
+                                 max_new_tokens, thinking, backend)[:2]
+
+
+def _hf_details(generated, attention_mask, pad_token_id, max_new_tokens):
+    """Per-row finish_reason / token counts for the Transformers path.
+
+    A row that used the whole budget is "length"; otherwise it ended on its own.
+    """
+    details = []
+    for row, mask in zip(generated, attention_mask):
+        completion = int((row != pad_token_id).sum())
+        details.append({
+            "finish_reason": "length" if completion >= max_new_tokens else "stop",
+            "prompt_tokens": int(mask.sum()),
+            "completion_tokens": completion})
+    return details
+
+
+def generate_with_details(model, tokenizer, system_prompt: str, user_messages: list,
+                          max_new_tokens: int = 512, thinking: bool = False,
+                          backend: str = "transformers"):
+    """(texts, usage, details): details[i] describes output i for the call trace."""
     if not user_messages:
-        return [], {"prompt_tokens": 0, "completion_tokens": 0}
+        return [], {"prompt_tokens": 0, "completion_tokens": 0}, []
 
     # Tokenize
     if tokenizer.pad_token_id is None:
@@ -252,7 +277,11 @@ def generate_with_usage(model, tokenizer, system_prompt: str, user_messages: lis
                 1 for o in outputs
                 if getattr(o.outputs[0], "finish_reason", None) == "repetition"),
         }
-        return [output.outputs[0].text for output in outputs], usage
+        details = [{
+            "finish_reason": getattr(o.outputs[0], "finish_reason", None),
+            "prompt_tokens": len(o.prompt_token_ids or ()),
+            "completion_tokens": len(o.outputs[0].token_ids or ())} for o in outputs]
+        return [output.outputs[0].text for output in outputs], usage, details
 
     inputs = tokenizer(texts, return_tensors="pt", padding=True)
     inputs = inputs.to(_entry_device(model))
@@ -274,7 +303,9 @@ def generate_with_usage(model, tokenizer, system_prompt: str, user_messages: lis
         # Padding after the first end token is not generated text.
         "completion_tokens": int((generated != tokenizer.pad_token_id).sum()),
     }
-    return decoded, usage
+    details = _hf_details(generated, inputs.attention_mask, tokenizer.pad_token_id,
+                           max_new_tokens)
+    return decoded, usage, details
 
 
 def main():
@@ -335,7 +366,7 @@ def main():
         # cmd == "generate"
         req_id = req.get("id", "")
         try:
-            texts, usage = generate_with_usage(
+            texts, usage, details = generate_with_details(
                 model, tokenizer,
                 system_prompt=req.get("system_prompt", ""),
                 user_messages=req.get("user_messages", []),
@@ -344,7 +375,7 @@ def main():
                 backend=args.backend,
             )
             print(json.dumps({"id": req_id, "ok": True, "texts": texts,
-                              "usage": usage}), flush=True)
+                              "usage": usage, "details": details}), flush=True)
         except torch.cuda.OutOfMemoryError as e:
             torch.cuda.empty_cache()
             print(json.dumps({"id": req_id, "ok": False,

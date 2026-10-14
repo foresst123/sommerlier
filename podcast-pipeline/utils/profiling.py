@@ -19,6 +19,8 @@ import os
 import threading
 import time
 
+from utils import llm_trace
+
 _monitor = None
 _local = threading.local()
 _installed = []      # (owner, attribute, original descriptor)
@@ -135,6 +137,7 @@ def bind(function):
     afterwards, since the same thread serves other files.
     """
     stage, file = _context().stage, _context().file
+    function = llm_trace.bind(function)   # the LLM trace follows the same hand-over
 
     @functools.wraps(function)
     def bound(*args, **kwargs):
