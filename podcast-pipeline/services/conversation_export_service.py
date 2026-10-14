@@ -114,20 +114,102 @@ _EXAMPLE_TOPICS = {_topic_key(_EXAMPLE_GOOD["topic"]), _topic_key(_EXAMPLE_BAD["
 # above, a keep=true region carrying one of them was written from the prompt, not
 # from the window, and is refused.
 _FINDER_EXAMPLE_TOPICS = {_topic_key(t) for t in (
-    "chuyện chạy bộ mỗi sáng", "khám sức khỏe định kỳ", "kể chuyện khởi nghiệp một chiều")}
+    "nuôi mèo và chi phí", "chuyến xe đêm đi Đà Lạt", "tự học tiếng Anh",
+    "kể chuyện khởi nghiệp một chiều")}
 
 # Summaries of the worked examples in CONVERSATION_FINDER_SYSTEM_PROMPT. A kept region
 # whose summary is one of these was copied from the prompt, so it is stored as null.
 _FINDER_EXAMPLE_SUMMARIES = (
-    "Người hỏi mở chuyện chạy bộ buổi sáng, người đáp kể quen dần sau hai tuần. "
-    "Người hỏi cắt ngang để chuyển sang chuyện đau gối, người đáp giải thích cách khởi động "
-    "và đổi giày, rồi cuộc trò chuyện khép lại bằng lời cảm ơn.",
-    "Người hỏi nêu chuyện nhiều người ngại khám định kỳ, người đáp kể vì sao mình từng ngại, "
-    "đã thay đổi thế nào và khám sáu tháng một lần kèm xét nghiệm máu.",
-    "Người hỏi hỏi về chi phí và chuyện nên bắt đầu từ đâu, người đáp khuyên khám tổng quát "
-    "rồi giữ nhịp đều, và cả hai chốt rằng quan trọng là đi đều.",
+    "Người hỏi mở chuyện nuôi mèo, người đáp kể nhận mèo hoang. Người hỏi cắt ngang hỏi tiền ăn "
+    "hằng tháng, người đáp dừng lại và trả lời theo hướng đó.",
+    "Người hỏi nhờ kể chuyến đi Đà Lạt, người đáp kể chuyến xe đêm trong khi người hỏi chỉ đệm lời.",
+    "Hai người hỏi đáp luân phiên về cách tự học tiếng Anh, mỗi người nói trọn lượt.",
+    "Hai người tiếp tục hỏi đáp luân phiên về việc luyện nghe mỗi ngày.",
 )
 _EXAMPLE_SUMMARY_KEYS = {_topic_key(t) for t in _FINDER_EXAMPLE_SUMMARIES}
+
+def _example_lines(rows):
+    return "\n".join(
+        f"[{n}] {t} (d={d:.1f}s) {who} {{ov={ov:.2f}s flags={flags}}}: {text}"
+        for n, (t, d, who, ov, flags, text) in enumerate(rows, start=1)) + "\n"
+
+
+def _example_region(**fields):
+    return json.dumps(fields, ensure_ascii=False)
+
+
+_FINDER_EXAMPLES = (
+    "Ví dụ 1 - interrupt: dòng 3 chen vào lúc B còn đang nói dở (ov=1.00s), B dừng ngay và A chuyển sang chuyện khác:\n"
+    + _example_lines([
+        ("0:00-0:10", 10.0, "A", 0.0, "-", "bạn nuôi mèo từ bao giờ"),
+        ("0:11-0:35", 24.0, "B", 0.0, "-", "mình nhận một bé mèo hoang năm ngoái, ban đầu nó sợ người lắm, phải"),
+        ("0:34-0:44", 10.0, "A", 1.0, "-", "khoan, mỗi tháng tiền ăn hết bao nhiêu"),
+        ("0:45-0:58", 13.0, "B", 0.0, "-", "khoảng ba trăm nghìn, mình mua hạt bao lớn cho rẻ"),
+        ("0:59-1:06", 7.0, "A", 0.0, "-", "còn đi khám thú y thì sao"),
+        ("1:07-1:25", 18.0, "B", 0.0, "-", "mỗi năm tiêm phòng một lần, tốn thêm khoảng hai trăm"),
+    ])
+    + "-> [" + _example_region(
+        start_line=1, end_line=6, keep=True, self_contained=4, topic="nuôi mèo và chi phí",
+        reason="hai người, B bị cắt ngang rồi dừng", category="interrupt", assistant="B",
+        role_conf=0.8, role_why="A dẫn dắt và chuyển hướng, B đáp",
+        interruptions=[{"line": 3, "intent": "topic_shift"}],
+        summary=_FINDER_EXAMPLE_SUMMARIES[0]) + "]\n"
+    "\n"
+    "Ví dụ 2 - backchannel: A giữ lượt, B chỉ đệm \"ừ\" chồng lên (dòng 3), không ai bị cắt:\n"
+    + _example_lines([
+        ("0:00-0:09", 9.0, "B", 0.0, "-", "bạn kể mình nghe lần đầu đi Đà Lạt đi"),
+        ("0:10-0:44", 34.0, "A", 0.0, "-", "lần đó mình đi xe khách đêm, tới nơi sáu giờ sáng trời lạnh lắm, phải mua vội cái áo"),
+        ("0:25-0:26", 0.8, "B", 0.8, "-", "ừ"),
+        ("0:45-0:51", 6.0, "B", 0.0, "-", "rồi sau đó bạn đi đâu"),
+        ("0:52-1:12", 20.0, "A", 0.0, "-", "mình lên đồi chè ngắm mặt trời mọc, đẹp nhất chuyến đi"),
+        ("1:13-1:19", 6.0, "B", 0.0, "-", "nghe thích thật, ở lại mấy ngày"),
+        ("1:20-1:30", 10.0, "A", 0.0, "-", "ba ngày hai đêm thôi"),
+    ])
+    + "-> [" + _example_region(
+        start_line=1, end_line=7, keep=True, self_contained=4, topic="chuyến xe đêm đi Đà Lạt",
+        reason="A kể liền mạch, B đệm lời", category="backchannel", assistant="A",
+        role_conf=0.6, role_why="B hỏi, A kể", interruptions=[],
+        summary=_FINDER_EXAMPLE_SUMMARIES[1]) + "]\n"
+    "\n"
+    "Ví dụ 3 - turn_by_turn, và một dòng lỗi tách giọng (flags=bad_separation) là seam: loại dòng đó, mỗi bên là một vùng riêng:\n"
+    + _example_lines([
+        ("0:00-0:08", 8.0, "A", 0.0, "-", "bạn tự học tiếng Anh bằng cách nào"),
+        ("0:09-0:20", 11.0, "B", 0.0, "-", "mình xem phim phụ đề tiếng Anh mỗi tối"),
+        ("0:21-0:27", 6.0, "A", 0.0, "-", "có hiệu quả không"),
+        ("0:28-0:40", 12.0, "B", 0.0, "-", "sau ba tháng mình nghe hiểu được một nửa"),
+        ("0:41-0:47", 6.0, "A", 0.0, "-", "còn từ mới thì sao"),
+        ("0:48-1:00", 12.0, "B", 0.0, "-", "mình ghi vào sổ rồi ôn mỗi cuối tuần"),
+        ("1:01-1:05", 4.0, "A", 1.5, "bad_separation", "ừ thế à"),
+        ("1:06-1:14", 8.0, "A", 0.0, "-", "vậy bạn luyện nghe mỗi ngày bao lâu"),
+        ("1:15-1:30", 15.0, "B", 0.0, "-", "khoảng một tiếng, chia hai buổi sáng và tối"),
+        ("1:31-1:38", 7.0, "A", 0.0, "-", "nghe cũng không quá nặng"),
+        ("1:39-1:52", 13.0, "B", 0.0, "-", "đúng, quan trọng là làm đều mỗi ngày"),
+        ("1:53-2:00", 7.0, "A", 0.0, "-", "mình sẽ thử xem"),
+        ("2:01-2:12", 11.0, "B", 0.0, "-", "nhớ bắt đầu từ video có phụ đề nhé"),
+    ])
+    + "-> [" + _example_region(
+        start_line=1, end_line=6, keep=True, self_contained=4, topic="tự học tiếng Anh",
+        reason="luân phiên, không chồng tiếng", category="turn_by_turn", assistant="B",
+        role_conf=0.7, role_why="A hỏi, B đáp", interruptions=[],
+        summary=_FINDER_EXAMPLE_SUMMARIES[2]) + ", "
+    + _example_region(start_line=7, end_line=7, keep=False, self_contained=1,
+                      topic="dòng lỗi tách giọng", reason="bad_separation, bỏ dòng này") + ", "
+    + _example_region(
+        start_line=8, end_line=13, keep=True, self_contained=4, topic="tự học tiếng Anh",
+        reason="luân phiên, mỗi người ba lượt", category="turn_by_turn", assistant="B",
+        role_conf=0.7, role_why="A hỏi, B đáp", interruptions=[],
+        summary=_FINDER_EXAMPLE_SUMMARIES[3]) + "]\n"
+    "\n"
+    "Ví dụ 4 - một người nói gần hết thời lượng thì keep=false:\n"
+    + _example_lines([
+        ("0:00-0:07", 7.0, "A", 0.0, "-", "mời anh chia sẻ về hành trình của mình"),
+        ("0:08-1:21", 73.0, "B", 0.0, "-", "hồi đó tôi bỏ việc, đi vay vốn, rồi thất bại ba lần liền..."),
+        ("1:22-1:23", 0.9, "A", 0.0, "-", "dạ vâng"),
+    ])
+    + "-> [" + _example_region(
+        start_line=1, end_line=3, keep=False, self_contained=3,
+        topic="kể chuyện khởi nghiệp một chiều", reason="B nói 73s trên 83s, gần như độc thoại") + "]\n"
+)
 
 CONVERSATION_FINDER_SYSTEM_PROMPT = (
     "Bạn là bộ PHÂN VÙNG + TÌM ĐOẠN hội thoại tiếng Việt để tạo dữ liệu huấn luyện full-duplex: "
@@ -248,61 +330,9 @@ CONVERSATION_FINDER_SYSTEM_PROMPT = (
     "Gọi theo vai (\"người hỏi\"/\"người đáp\"), không đoán tên hay giới tính, không thêm gì ngoài transcript.\n"
     "\n"
     "## VÍ DỤ (chỉ minh họa cách quyết định; KHÔNG sao chép nội dung hay chủ đề vào câu trả lời)\n"
-    "Các dòng dưới đây bớt thông số cho gọn; cửa sổ thật có đủ thông số.\n"
+    "Các dòng bớt thông số cho gọn; cửa sổ thật có đủ thông số.\n"
     "\n"
-    "Ví dụ 1 - hội thoại liền mạch, có đệm lời và một lần ngắt lời; mỗi người có từ 3 lượt thật trở lên; thời lượng tính từ mốc thời gian:\n"
-    "[1] 0:00-0:09 (d=9.0s) A {gap=0.0s ov=0.00s flags=-}: dạo này bạn chạy bộ buổi sáng hay buổi tối\n"
-    "[2] 0:10-0:24 (d=14.0s) B {gap=1.0s ov=0.00s flags=-}: mình chạy sáng, năm rưỡi dậy, ban đầu khổ lắm\n"
-    "[3] 0:22-0:23 (d=0.8s) A {gap=-2.0s ov=0.80s flags=-}: ừ\n"
-    "[4] 0:25-0:34 (d=9.0s) A {gap=2.0s ov=0.00s flags=-}: vậy mất bao lâu thì bạn quen\n"
-    "[5] 0:35-0:50 (d=15.0s) B {gap=1.0s ov=0.00s flags=-}: hai tuần là quen, giờ không chạy là thấy thiếu\n"
-    "[6] 0:49-1:05 (d=16.0s) A {gap=-1.0s ov=1.00s flags=-}: còn chuyện đau gối thì sao\n"
-    "[7] 1:06-1:25 (d=19.0s) B {gap=1.0s ov=0.00s flags=-}: mình khởi động kỹ và đổi giày, đỡ hẳn\n"
-    "[8] 1:26-1:34 (d=8.0s) A {gap=1.0s ov=0.00s flags=-}: hay quá, cảm ơn bạn nhé\n"
-    "-> [{\"start_line\": 1, \"end_line\": 8, \"keep\": true, \"self_contained\": 4, \"topic\": \"chuyện chạy bộ mỗi sáng\", "
-    "\"reason\": \"hỏi đáp liền mạch, có đệm lời, hai người, dài 94s\", "
-    "\"category\": \"interrupt\", "
-    "\"assistant\": \"B\", \"role_conf\": 0.9, \"role_why\": \"A hỏi và chuyển hướng, B đáp và giải thích\", "
-    "\"interruptions\": [{\"line\": 6, \"intent\": \"topic_shift\"}], "
-    "\"summary\": \"" + _FINDER_EXAMPLE_SUMMARIES[0] + "\"}]\n"
-    "(94s = 1:34 trừ 0:00, không phải số dòng nhân vài giây. Dòng 6 ngắt lời dòng 5 để đổi sang chuyện khác và B theo sang. "
-    "Dòng 3 chỉ 0.8s và là từ đệm \"ừ\" nên là đệm lời, không phải lượt nói và không ghi vào interruptions. "
-    "A có 4 lượt, B có 3 lượt; vùng mở bằng câu hỏi và kết bằng lời chốt.)\n"
-    "\n"
-    "Ví dụ 2 - một dòng xấu giữa mạch: tách riêng dòng đó, giữ hai phần tốt hai bên (mỗi phần mở bằng câu hỏi, kết bằng câu đáp, mỗi người 3 lượt):\n"
-    "[1] 0:00-0:12 (d=12.0s) A {gap=0.0s ov=0.00s flags=-}: nhiều người ngại đi khám định kỳ, bạn nghĩ sao\n"
-    "[2] 0:13-0:30 (d=17.0s) B {gap=1.0s ov=0.00s flags=-}: mình từng ngại, đến khi ba mình phát hiện bệnh muộn\n"
-    "[3] 0:31-0:40 (d=9.0s) A {gap=1.0s ov=0.00s flags=-}: vậy sau đó bạn thay đổi thế nào\n"
-    "[4] 0:41-0:58 (d=17.0s) B {gap=1.0s ov=0.00s flags=-}: mình đặt lịch khám đều và rủ cả nhà đi cùng\n"
-    "[5] 0:59-1:07 (d=8.0s) A {gap=1.0s ov=0.00s flags=-}: bạn khám mấy tháng một lần\n"
-    "[6] 1:08-1:26 (d=18.0s) B {gap=1.0s ov=0.00s flags=-}: sáu tháng một lần, kèm xét nghiệm máu cơ bản\n"
-    "[7] 1:26-1:31 (d=5.0s) B {gap=0.1s ov=0.00s flags=-}: hãy đăng ký cho kênh để không bỏ lỡ những video hấp dẫn\n"
-    "[8] 1:32-1:44 (d=12.0s) A {gap=1.0s ov=0.00s flags=-}: còn chi phí khám thì có đắt không\n"
-    "[9] 1:45-2:02 (d=17.0s) B {gap=1.0s ov=0.00s flags=-}: gói cơ bản không đắt, có bảo hiểm thì rẻ hơn nhiều\n"
-    "[10] 2:03-2:11 (d=8.0s) A {gap=1.0s ov=0.00s flags=-}: bạn có khuyên người ngại nên bắt đầu từ đâu không\n"
-    "[11] 2:12-2:30 (d=18.0s) B {gap=1.0s ov=0.00s flags=-}: bắt đầu bằng một lần khám tổng quát, rồi giữ nhịp đều\n"
-    "[12] 2:31-2:39 (d=8.0s) A {gap=1.0s ov=0.00s flags=-}: nghe có vẻ đơn giản hơn mình tưởng\n"
-    "[13] 2:40-2:58 (d=18.0s) B {gap=1.0s ov=0.00s flags=-}: đúng, quan trọng là đi đều\n"
-    "-> [{\"start_line\": 1, \"end_line\": 6, \"keep\": true, \"self_contained\": 4, \"topic\": \"khám sức khỏe định kỳ\", "
-    "\"reason\": \"hỏi đáp mạch lạc, hai người, kết bằng câu đáp\", "
-    "\"category\": \"turn_by_turn\", "
-    "\"assistant\": \"B\", \"role_conf\": 0.85, \"role_why\": \"A hỏi dẫn dắt, B kể và đáp\", "
-    "\"interruptions\": [], \"summary\": \"" + _FINDER_EXAMPLE_SUMMARIES[1] + "\"}, "
-    "{\"start_line\": 7, \"end_line\": 7, \"keep\": false, \"self_contained\": 1, \"topic\": \"lời kêu gọi đăng ký kênh\", "
-    "\"reason\": \"câu quảng cáo chen giữa mạch, có thể là ảo giác ASR\"}, "
-    "{\"start_line\": 8, \"end_line\": 13, \"keep\": true, \"self_contained\": 4, \"topic\": \"khám sức khỏe định kỳ\", "
-    "\"reason\": \"mở bằng câu hỏi mới, hai người, mỗi người 3 lượt\", "
-    "\"category\": \"turn_by_turn\", "
-    "\"assistant\": \"B\", \"role_conf\": 0.8, \"role_why\": \"B đáp câu hỏi, A phản hồi\", "
-    "\"interruptions\": [], \"summary\": \"" + _FINDER_EXAMPLE_SUMMARIES[2] + "\"}]\n"
-    "(Vùng chỉ có MỘT dòng được phép; mỗi vùng còn lại phải đủ dài và đủ lượt để dùng: 86s, 3 lượt mỗi người.)\n"
-    "\n"
-    "Ví dụ 3 - một người nói gần hết thời lượng thì keep=false:\n"
-    "[1] 0:00-0:07 (d=7.0s) A {gap=0.0s ov=0.00s flags=-}: mời anh chia sẻ về hành trình của mình\n"
-    "[2] 0:08-1:21 (d=73.0s) B {gap=0.7s ov=0.00s flags=-}: hồi đó tôi bỏ việc, đi vay vốn, rồi thất bại ba lần liền...\n"
-    "[3] 1:22-1:23 (d=0.9s) A {gap=0.7s ov=0.00s flags=-}: dạ vâng\n"
-    "-> [{\"start_line\": 1, \"end_line\": 3, \"keep\": false, \"self_contained\": 3, \"topic\": \"kể chuyện khởi nghiệp một chiều\", "
-    "\"reason\": \"B nói 73s trên 83s, gần như độc thoại\"}]\n"
+    + _FINDER_EXAMPLES +
     "\n"
     "## ĐẦU RA\n"
     "Chỉ trả MỘT JSON ARRAY, không markdown, không giải thích ngoài JSON. Mọi vùng có 6 khóa:\n"

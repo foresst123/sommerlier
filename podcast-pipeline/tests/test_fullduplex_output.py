@@ -257,13 +257,13 @@ def test_the_prompt_asks_for_the_new_fields_and_fills_the_new_placeholder():
 def test_every_example_answer_in_the_prompt_carries_the_role_fields_for_kept_regions():
     prompt = _prompt()
     answers = [l[3:] for l in prompt.splitlines() if l.startswith("-> ")]
-    assert len(answers) == 3
+    assert len(answers) == 4
     for answer in answers:
         for region in parse_finder_reply(answer):
             if region["keep"]:
                 assert region["assistant"] in ("A", "B") and region["role_conf"]
                 assert region["summary"] is None, "the example summaries are refused on parse"
-    assert re.search(r'"interruptions": \[\{"line": 6, "intent": "topic_shift"\}\]', prompt)
+    assert re.search(r'"interruptions": \[\{"line": 3, "intent": "topic_shift"\}\]', prompt)
 
 
 # --- validator gates ---------------------------------------------------------------
@@ -715,7 +715,7 @@ def test_kept_example_regions_obey_the_prompts_own_rules_for_the_a100_values():
                 last = who
             assert len(turns) == 2 and min(turns.values()) >= 3, turns
             checked += 1
-    assert checked == 3
+    assert checked == 4
 
 
 # --- review fixes: manifests, skipped reruns, the gate record -----------------------------

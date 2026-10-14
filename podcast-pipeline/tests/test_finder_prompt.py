@@ -46,10 +46,10 @@ def test_the_prompt_says_to_take_durations_from_the_timestamps():
     assert not re.search(r"\{[a-z_]+\}", prompt), "an unfilled {placeholder} is left in the prompt"
 
 
-def test_the_prompt_carries_three_worked_examples():
+def test_the_prompt_carries_four_worked_examples():
     examples = _examples(_prompt())
-    assert len(examples) == 3
-    assert [len(lines) for lines, _ in examples] == [8, 13, 3]
+    assert len(examples) == 4
+    assert [len(lines) for lines, _ in examples] == [6, 7, 13, 3]
 
 
 def test_each_example_answer_covers_its_lines_exactly_and_is_valid_json_of_the_right_shape():
@@ -71,11 +71,14 @@ def test_the_durations_in_the_examples_match_their_timestamps():
             assert abs(float(d) - span) <= 1.0, line
 
 
-def test_the_second_example_isolates_a_single_line_and_the_third_rejects_a_monologue():
-    (_, one), (_, two), (_, three) = _examples(_prompt())
-    assert [(r["start_line"], r["end_line"], r["keep"]) for r in two] == [
+def test_the_examples_show_each_category_a_failed_separation_seam_and_a_monologue():
+    (one, two, three, four) = [regions for _, regions in _examples(_prompt())]
+    assert [r["category"] for r in one] == ["interrupt"]
+    assert [r["category"] for r in two] == ["backchannel"]
+    assert [(r["start_line"], r["end_line"], r["keep"]) for r in three] == [
         (1, 6, True), (7, 7, False), (8, 13, True)]
-    assert [r["keep"] for r in one] == [True] and [r["keep"] for r in three] == [False]
+    assert [r["category"] for r in three if r["keep"]] == ["turn_by_turn", "turn_by_turn"]
+    assert [r["keep"] for r in four] == [False]
 
 
 def _reply_for(topic):
@@ -87,7 +90,7 @@ def _reply_for(topic):
 
 
 def test_a_region_copied_from_an_example_is_refused(tmp_path):
-    _, result, _ = base._run(tmp_path, base.FakeLLM(_reply_for("khám sức khỏe định kỳ")),
+    _, result, _ = base._run(tmp_path, base.FakeLLM(_reply_for("nuôi mèo và chi phí")),
                              max_candidates=1)
     (row,) = result.report["replies"]
     assert row["proposal_results"][0]["validator"] == "copied_example"
