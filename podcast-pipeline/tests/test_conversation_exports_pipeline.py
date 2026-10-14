@@ -112,7 +112,7 @@ def test_a_finished_file_is_cut_into_the_output_folder(tmp_path):
                                  str(tmp_path), "/data/episode 7.mp3")
     assert result.exports
     root = tmp_path / "conversation_exports"
-    assert (root / "half_duplex").is_dir(), "conversations are filed by category"
+    assert (root / "turn_by_turn").is_dir(), "conversations are filed by category"
     assert (root / "manifest.jsonl").is_file()
     first = root / result.exports[0]["folder"]
     assert (first / "conversation.json").is_file() and (first / "mixture.wav").is_file()

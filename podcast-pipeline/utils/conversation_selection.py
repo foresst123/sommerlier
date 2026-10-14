@@ -165,8 +165,7 @@ class ConversationSelectionConfig:
     music_patched_max: float = 0.15      # share of the item whose music bed was replaced
 
     # -- where an excerpt is filed (used by the service)
-    # Filing is by category (full_duplex/interruption, full_duplex/backchannel,
-    # half_duplex), not by score; see utils/conversation_events.py. The two
+    # Filing is by category (interrupt, backchannel, turn_by_turn), not by score; see utils/conversation_events.py. The two
     # `overlap_good_*` knobs are the separation gate of the full-duplex categories:
     # wherever the voices overlap the tracks must be separated that well, else the
     # excerpt goes to quarantine/ (or is not exported when `keep_quarantine` is off).
@@ -180,7 +179,7 @@ class ConversationSelectionConfig:
     # thresholds marked heuristic in the design have no published precedent.
     role_min_conf: float = 0.7           # below this the assistant/user roles are "symmetric"
     keep_symmetric: bool = True          # false drops excerpts whose roles are not locked
-    keep_quarantine: bool = True         # false drops, instead of quarantining, a failed separation gate
+    keep_quarantine: bool = False        # false drops, instead of quarantining, a failed separation gate
     assistant_channel: str = "left"      # which ear holds the assistant in stereo_2ch.wav
     ipu_gap: float = 0.2                 # silence that ends an inter-pausal unit
     overlap_min: float = 0.2             # both speaking at least this long is an overlap
@@ -188,8 +187,11 @@ class ConversationSelectionConfig:
     backchannel_max_words: int = 2
     backchannel_context: float = 1.0     # the other speaker talks this close before and after
     yield_within_seconds: float = 1.5    # heuristic: stopping this soon after the cut-in is a yield
-    min_backchannels: int = 2            # backchannels needed for full_duplex/backchannel
-    half_duplex_max_overlap: float = 0.2 # half duplex has no overlap this long
+    cutter_min_seconds: float = 2.0      # a cut-in shorter than this is a comment, not an interrupt
+    interrupt_min_overlap: float = 0.5   # the holder was still talking this long over the cutter
+    resume_gap_seconds: float = 0.5      # holder back this soon after the cutter ends: not a yield
+    min_backchannels: int = 1            # listener words / floor-keeping cut-ins needed for backchannel
+    half_duplex_max_overlap: float = 0.2 # turn_by_turn has no overlap this long
     context_turns_around_interruption: int = 2   # turns the finder keeps on each side of one
 
     # -- writing the audio (used by the service)
@@ -407,6 +409,94 @@ def pick_non_overlapping(candidates: List[Candidate]) -> List[Candidate]:
 # The finder
 # ---------------------------------------------------------------------------
 
+PASSTHROUGH_SIM = -2.0           # separation_service marks a same-speaker passthrough span with it
+COVERAGE_SLACK_SECONDS = 0.35    # uncovered overlap below this is bound mismatch, not a miss
+
+
+class _SpanIndex:
+    """Intervals with a fast "which ones touch [lo, hi)" query."""
+
+    def __init__(self, spans):
+        self.spans = sorted(spans)
+        self.starts = [row[0] for row in self.spans]
+        self.longest = max((row[1] - row[0] for row in self.spans), default=0.0)
+
+    def touching(self, lo: float, hi: float):
+        k = bisect.bisect_left(self.starts, lo - self.longest)
+        while k < len(self.spans) and self.starts[k] < hi:
+            row = self.spans[k]
+            if row[1] > lo:
+                yield row
+            k += 1
+
+
+def bad_separation_positions(segs, speech_segments, min_similarity: float,
+                             min_coverage: float, overlap_min: float) -> set:
+    """Positions of transcript segments whose voice separation cannot be trusted.
+
+    A segment is bad when the separator failed inside it (a failure other than
+    "same speaker"), when a span it separated matched its speaker below
+    `min_similarity`, or when it overlaps another speaker for `overlap_min` or
+    more and less than `min_coverage` of that overlap was separated at all. Such a
+    segment is treated like a seam: no conversation is built across it. Without
+    separation output there is nothing to judge, so nothing is marked.
+    """
+    if not speech_segments:
+        return set()
+    sep_by, fail_by, every = {}, {}, []
+    for sp in speech_segments:
+        who = str(sp.speaker)
+        for row in getattr(sp, "bss_spans", None) or ():
+            a, b, sim = float(row[0]), float(row[1]), float(row[2])
+            if sim <= PASSTHROUGH_SIM + 0.5:
+                continue            # same-speaker passthrough marker: nothing was separated
+            every.append((a, b))
+            if sim >= 0.0:          # a negative sim means "no score", not a poor one
+                sep_by.setdefault(who, []).append((a, b, sim))
+        for row in getattr(sp, "bss_failed_spans", None) or ():
+            if row[2] != "same_speaker":
+                fail_by.setdefault(who, []).append((float(row[0]), float(row[1])))
+    sep_index = {who: _SpanIndex(rows) for who, rows in sep_by.items()}
+    fail_index = {who: _SpanIndex(rows) for who, rows in fail_by.items()}
+    union = _SpanIndex(_merge_spans(every))
+
+    bad = set()
+    for pos, seg in enumerate(segs):
+        who, lo, hi = str(seg.speaker), float(seg.start), float(seg.end)
+        if who in fail_index and next(fail_index[who].touching(lo, hi), None):
+            bad.add(pos)
+        elif who in sep_index and any(
+                row[2] < min_similarity for row in sep_index[who].touching(lo, hi)):
+            bad.add(pos)
+    for i, first in enumerate(segs):
+        for j in range(i + 1, len(segs)):
+            second = segs[j]
+            if float(second.start) >= float(first.end):
+                break
+            if str(second.speaker) == str(first.speaker):
+                continue
+            lo = max(float(first.start), float(second.start))
+            hi = min(float(first.end), float(second.end))
+            if hi - lo < overlap_min:
+                continue
+            covered = sum(min(hi, row[1]) - max(lo, row[0]) for row in union.touching(lo, hi))
+            # ASR segment bounds are word based and differ a little from the overlap the
+            # separator saw, so a sliver left uncovered is not a missed overlap.
+            if covered / (hi - lo) < min_coverage and (hi - lo) - covered > COVERAGE_SLACK_SECONDS:
+                bad.update((i, j))
+    return bad
+
+
+def _merge_spans(spans):
+    merged = []
+    for lo, hi in sorted(spans):
+        if merged and lo <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+        else:
+            merged.append((lo, hi))
+    return merged
+
+
 class ConversationSelectionFinder:
     """Blocks, candidates and their scores for one recording.
 
@@ -416,7 +506,8 @@ class ConversationSelectionFinder:
     cut timeline (or None if music was not analysed).
     """
 
-    def __init__(self, segments, timeline, noise, music_map, config: ConversationSelectionConfig):
+    def __init__(self, segments, timeline, noise, music_map, config: ConversationSelectionConfig,
+                 bad_separation=None):
         self.cfg = config
         self.timeline = timeline or TimelineMap()   # nothing cut: an empty map
         self.noise = noise
@@ -439,6 +530,9 @@ class ConversationSelectionFinder:
         # overlapping transcript windows may show the same segment several times.
         # Cache one deterministic technical summary per segment.
         self._segment_quality_cache: Dict[int, dict] = {}
+        # Segments whose voice separation failed: a seam, nothing is built across them.
+        self.bad_separation: set = set(bad_separation or ())
+        self.stats["bad_separation"] = len(self.bad_separation)
 
         self.state, self.reason = [], []
         for seg in self.segs:
@@ -465,11 +559,18 @@ class ConversationSelectionFinder:
                 return True
         return False
 
+    def set_bad_separation(self, positions) -> None:
+        self.bad_separation = set(positions)
+        self._segment_quality_cache.clear()
+        self.stats["bad_separation"] = len(self.bad_separation)
+
     # -- blocks ---------------------------------------------------------------
     def _ineligible(self, i) -> Optional[str]:
         seg = self.segs[i]
         if self.state[i] == INVALID:
             return f"invalid_{self.reason[i]}"
+        if i in self.bad_separation:
+            return "bad_separation"
         if self.cfg.review_hard_reject:
             kind = hard_review_kind(seg)
             if kind:
@@ -689,6 +790,8 @@ class ConversationSelectionFinder:
         hard_flags = []
         if self.state[pos] == INVALID:
             hard_flags.append(f"invalid_{self.reason[pos]}")
+        if pos in self.bad_separation:
+            hard_flags.append("bad_separation")
         if seam_before:
             hard_flags.append("seam_before")
         if seam_inside:

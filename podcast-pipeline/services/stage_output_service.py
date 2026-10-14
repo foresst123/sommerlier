@@ -556,7 +556,7 @@ class StageOutputService:
 
         The audio and per-item JSON live in `conversation_exports/` beside the final
         export, one folder per conversation filed by category
-        (`full_duplex/interruption/<name>/`, `half_duplex/<name>/`, `quarantine/<name>/`)
+        (`interrupt/<name>/`, `backchannel/<name>/`, `turn_by_turn/<name>/`, `_quarantine/<name>/`)
         with a `manifest.jsonl`; this directory holds the accounting:
         `exports.json` is one row per item written, `report.json` carries the finder's counts (how many blocks
         each rule ended, how many windows each noise or music gate refused, how

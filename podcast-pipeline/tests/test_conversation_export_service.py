@@ -880,11 +880,13 @@ def test_where_the_separator_worked_and_where_it_failed_is_written_into_the_meta
     seg = SimpleNamespace(
         speaker=A, start=0.0, end=400.0, audio=None,
         bss_spans=[(150.0, 152.0, 0.81)],
-        bss_failed_spans=[(160.0, 161.0, "low_similarity", "sim 0.1")])
+        bss_failed_spans=[(160.0, 161.0, "same_speaker", "both heard one voice")])
+    # A real failure marks its segment as a seam before any conversation is chosen, so
+    # only the harmless "same_speaker" kind can reach an exported excerpt's metadata.
     _, meta, _, _, _ = _tracks(tmp_path, speech_segments=[seg])
     assert [row["similarity"] for row in meta["separated_spans"]] == [0.81]
-    assert meta["failed_separation_spans"][0]["reason"] == "low_similarity"
-    assert meta["failed_separation_spans"][0]["zeroed_in_strict_track"] is True
+    assert meta["failed_separation_spans"][0]["reason"] == "same_speaker"
+    assert meta["failed_separation_spans"][0]["zeroed_in_strict_track"] is False
 
 
 def test_with_the_real_track_builder_an_overlap_is_heard_one_voice_to_an_ear(tmp_path):
@@ -949,8 +951,8 @@ from services.conversation_export_service import (
 
 
 def test_the_folder_order_is_the_categories_then_quarantine():
-    assert FOLDER_ORDER == ("full_duplex/interruption", "full_duplex/backchannel",
-                            "half_duplex", "quarantine")
+    assert FOLDER_ORDER == ("interrupt", "backchannel",
+                            "turn_by_turn", "_quarantine")
     assert CATEGORIES == FOLDER_ORDER[:3] and QUARANTINE == FOLDER_ORDER[3]
 
 

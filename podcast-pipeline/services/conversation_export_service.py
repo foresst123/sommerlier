@@ -30,11 +30,11 @@ one another. The roles are fixed per excerpt: the finder names the assistant (th
 one who follows and answers) and the other is the user; code checks that against
 how each behaves when interrupted (utils/conversation_events.py).
 
-  full_duplex/interruption/  at least one interruption (listener cuts in, overlap >= 0.2 s).
-  full_duplex/backchannel/   at least two backchannels, no interruption.
-  half_duplex/               no overlap and no backchannel.
-  quarantine/                a full-duplex excerpt whose overlap the separator did not
-                             pull apart cleanly (conversation.json says why).
+  interrupt/                 the listener cuts in and the holder stops or changes course.
+  backchannel/               a short cut-in or listener word while the holder keeps talking.
+  turn_by_turn/              speakers alternate; no overlap event and no listener word.
+  _quarantine/               an excerpt with overlap the separator did not pull apart
+                             cleanly (conversation.json says why); not a dataset folder.
   manifest.jsonl             one line per trainable excerpt written for this recording;
   manifest_quarantine.jsonl  the quarantined ones, so a trainer reading the first never sees them.
     <name>/                  <recording>_<start second>s
@@ -75,17 +75,19 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from utils.conversation_events import (
-    INTERRUPTION_INTENTS, EventParams, analyze, categorize, decide_roles, event_counts,
-    label_events, tags_of)
+    CATEGORY_NAMES, INTERRUPTION_INTENTS, TURN_BY_TURN, EventParams, analyze, categorize,
+    category_is_plausible,
+    decide_roles, event_counts, label_events, tags_of)
 from utils.conversation_selection import (
     Candidate, ConversationSelectionConfig, ConversationSelectionFinder,
+    PASSTHROUGH_SIM, bad_separation_positions,
     has_complete_word_alignment, pick_non_overlapping, review_flags_of, shortlist)
 from utils.llm_batches import ask_in_batches, reply_budget
 from utils.llm_json import clean_reply, is_cut_in_thought, is_readable, objects_in
 from utils.transcript_windows import line_number
 
 # Bump when the prompt or the acceptance rules change.
-CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v10-foreign-review"
+CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v11-three-categories"
 CONVERSATION_SELECTION_CHECKPOINT_VERSION = 1
 
 _TEMPLATE_SLACK_TOKENS = 64
@@ -131,6 +133,9 @@ CONVERSATION_FINDER_SYSTEM_PROMPT = (
     "Bạn là bộ PHÂN VÙNG + TÌM ĐOẠN hội thoại tiếng Việt để tạo dữ liệu huấn luyện full-duplex: "
     "một trợ lý (assistant) trò chuyện với một người dùng (user) và có thể nói chen, ngắt lời, đệm lời. "
     "Bạn nhận một cửa sổ dài của transcript sau diarization/ASR. Cửa sổ có thể có nhiều người nói.\n"
+    "Mục đích: huấn luyện mô hình full-duplex cần các đoạn HỘI THOẠI HOÀN CHỈNH giữa HAI người thật sự trao đổi qua lại, "
+    "liền mạch từ đầu đến cuối vùng. Mỗi vùng bạn giữ sẽ được xếp vào một trong 3 thư mục (interrupt / backchannel / turn_by_turn, xem mục LOẠI HỘI THOẠI), "
+    "nên bạn là người quyết định loại. Không cần mở đầu hay kết thúc thật trọn vẹn; cần là một cuộc trò chuyện hai người liền mạch.\n"
     "\n"
     "## NHIỆM VỤ BẮT BUỘC: PHỦ TOÀN BỘ CỬA SỔ\n"
     "Hãy chia TOÀN BỘ các dòng 1..N thành các vùng liên tiếp theo mạch hội thoại, rồi quyết định keep=true/false cho từng vùng.\n"
@@ -161,6 +166,9 @@ CONVERSATION_FINDER_SYSTEM_PROMPT = (
     "(cả dòng thuộc người kia, hoặc ASR bịa/vô nghĩa); speaker_phrase:\"...\" là cờ MỀM (cụm từ trong dòng có thể là backchannel của người kia); "
     "review=not_vietnamese là dòng không phải tiếng Việt, hãy tránh đưa dòng đó vào vùng keep=true.\n"
     "Dòng có cờ CỨNG phải nằm NGOÀI mọi vùng keep=true: đặt biên vùng quanh chúng (tách vùng tại dòng đó). "
+    "flags=bad_separation cũng là cờ CỨNG: dòng đó bị lỗi tách giọng ở chỗ hai người nói chồng, KHÔNG dùng được và sẽ bị bỏ. "
+    "Hãy coi nó như một seam: đừng đưa nó vào vùng keep=true, và đừng nối hai bên của nó thành một hội thoại; "
+    "mỗi bên là một hội thoại riêng, chỉ dựng từ các dòng sạch liền nhau.\n"
     "Dòng có cờ MỀM vẫn được phép nằm trong vùng keep=true nhưng làm vùng kém chất lượng hơn, nên tránh nếu có cách đặt biên tốt hơn.\n"
     "\n"
     "## CÁCH SUY NGHĨ (vừa đủ, ngắn gọn)\n"
@@ -220,11 +228,20 @@ CONVERSATION_FINDER_SYSTEM_PROMPT = (
     "- assistant là nhãn người nói ('A', 'B', ...) đúng như trong cửa sổ này. role_conf từ 0 đến 1. "
     "role_why tối đa 20 từ.\n"
     "\n"
-    "## NGẮT LỜI (chỉ cho vùng keep=true)\n"
-    "interruptions là các dòng mà một người nói chen vào ngắt lời người kia (không tính đệm lời ngắn như ừ/dạ). "
+    "## LOẠI HỘI THOẠI (category, chỉ cho vùng keep=true)\n"
+    "Mỗi vùng keep=true thuộc ĐÚNG MỘT loại:\n"
+    "- interrupt: có ít nhất một lần người này nói chen làm người kia DỪNG LẠI giữa nhịp nói của họ (bị cắt ngang, chưa nói hết ý), "
+    "HOẶC chen vào để ĐỔI HƯỚNG câu chuyện và người kia theo sang hướng mới. Chỉ nói chồng lên nhau chưa đủ.\n"
+    "- backchannel: MỌI chỗ hai người nói chồng tiếng mà KHÔNG phải interrupt: đệm lời (ừ, dạ, vâng, ờ, đúng rồi...), câu chen ngắn, "
+    "hay hai người nói đè lên nhau trong lúc người kia vẫn giữ lượt và nói tiếp. Không ai bị cắt ngang và không ai đổi hướng.\n"
+    "- turn_by_turn: CHỈ các lượt nối tiếp nhau, người này nói xong người kia mới nói, KHÔNG chồng tiếng chỗ nào và không có đệm lời. "
+    "Vùng có bất kỳ chồng tiếng hay đệm lời nào thì KHÔNG phải turn_by_turn.\n"
+    "Nếu vùng có CẢ interrupt lẫn backchannel thì chọn interrupt. Một câu chen mà người kia nói tiếp bình thường là backchannel, KHÔNG phải interrupt.\n"
+    "Đừng nhầm: \"à\", \"thế à\", \"vậy hả\" là câu hỏi lại; nếu người kia dừng để trả lời thì đó là interrupt, nếu người kia nói tiếp thì là backchannel.\n"
+    "interruptions là các dòng ngắt lời (chỉ khi category=interrupt). "
     "Mỗi phần tử {\"line\": số dòng của câu ngắt lời, \"intent\": ...} với intent là một trong "
     "topic_shift (chuyển chủ đề), clarify (hỏi lại/làm rõ), disagree (phản đối), complete (nói tiếp/hoàn thành ý người kia). "
-    "Thời điểm và việc người kia có nhường lời hay không do code đo, bạn KHÔNG ghi. Không có thì để [].\n"
+    "Thời điểm đo chính xác do code kiểm tra lại, bạn KHÔNG ghi. Không có thì để [].\n"
     "\n"
     "## summary (chỉ cho vùng keep=true)\n"
     "1-3 câu tiếng Việt, tối đa khoảng 50 từ: hai người nói về gì, diễn biến ra sao (ai ngắt lời, rẽ ở đâu), kết thúc thế nào. "
@@ -244,6 +261,7 @@ CONVERSATION_FINDER_SYSTEM_PROMPT = (
     "[8] 1:26-1:34 (d=8.0s) A {gap=1.0s ov=0.00s flags=-}: hay quá, cảm ơn bạn nhé\n"
     "-> [{\"start_line\": 1, \"end_line\": 8, \"keep\": true, \"self_contained\": 4, \"topic\": \"chuyện chạy bộ mỗi sáng\", "
     "\"reason\": \"hỏi đáp liền mạch, có đệm lời, hai người, dài 94s\", "
+    "\"category\": \"interrupt\", "
     "\"assistant\": \"B\", \"role_conf\": 0.9, \"role_why\": \"A hỏi và chuyển hướng, B đáp và giải thích\", "
     "\"interruptions\": [{\"line\": 6, \"intent\": \"topic_shift\"}], "
     "\"summary\": \"" + _FINDER_EXAMPLE_SUMMARIES[0] + "\"}]\n"
@@ -267,12 +285,14 @@ CONVERSATION_FINDER_SYSTEM_PROMPT = (
     "[13] 2:40-2:58 (d=18.0s) B {gap=1.0s ov=0.00s flags=-}: đúng, quan trọng là đi đều\n"
     "-> [{\"start_line\": 1, \"end_line\": 6, \"keep\": true, \"self_contained\": 4, \"topic\": \"khám sức khỏe định kỳ\", "
     "\"reason\": \"hỏi đáp mạch lạc, hai người, kết bằng câu đáp\", "
+    "\"category\": \"turn_by_turn\", "
     "\"assistant\": \"B\", \"role_conf\": 0.85, \"role_why\": \"A hỏi dẫn dắt, B kể và đáp\", "
     "\"interruptions\": [], \"summary\": \"" + _FINDER_EXAMPLE_SUMMARIES[1] + "\"}, "
     "{\"start_line\": 7, \"end_line\": 7, \"keep\": false, \"self_contained\": 1, \"topic\": \"lời kêu gọi đăng ký kênh\", "
     "\"reason\": \"câu quảng cáo chen giữa mạch, có thể là ảo giác ASR\"}, "
     "{\"start_line\": 8, \"end_line\": 13, \"keep\": true, \"self_contained\": 4, \"topic\": \"khám sức khỏe định kỳ\", "
     "\"reason\": \"mở bằng câu hỏi mới, hai người, mỗi người 3 lượt\", "
+    "\"category\": \"turn_by_turn\", "
     "\"assistant\": \"B\", \"role_conf\": 0.8, \"role_why\": \"B đáp câu hỏi, A phản hồi\", "
     "\"interruptions\": [], \"summary\": \"" + _FINDER_EXAMPLE_SUMMARIES[2] + "\"}]\n"
     "(Vùng chỉ có MỘT dòng được phép; mỗi vùng còn lại phải đủ dài và đủ lượt để dùng: 86s, 3 lượt mỗi người.)\n"
@@ -287,12 +307,13 @@ CONVERSATION_FINDER_SYSTEM_PROMPT = (
     "## ĐẦU RA\n"
     "Chỉ trả MỘT JSON ARRAY, không markdown, không giải thích ngoài JSON. Mọi vùng có 6 khóa:\n"
     "start_line, end_line, keep, self_contained, topic, reason.\n"
-    "Vùng keep=true thêm 5 khóa: assistant, role_conf, role_why, interruptions, summary.\n"
+    "Vùng keep=true thêm 6 khóa: category, assistant, role_conf, role_why, interruptions, summary.\n"
     "- start_line/end_line: số dòng trong cửa sổ hiện tại.\n"
     "- keep: boolean JSON true/false, không dùng chuỗi.\n"
     "- self_contained: số nguyên 1..5.\n"
     "- topic: tối đa 10 từ.\n"
     "- reason: tối đa 20 từ, nêu lý do GIỮ hoặc LOẠI.\n"
+    "- category: \"interrupt\" | \"backchannel\" | \"turn_by_turn\" (xem LOẠI HỘI THOẠI).\n"
     "- assistant: \"A\"/\"B\"/... (nhãn người nói trong cửa sổ); role_conf: số 0..1; role_why: tối đa 20 từ.\n"
     "- interruptions: mảng {\"line\": int, \"intent\": \"topic_shift|clarify|disagree|complete\"}, dòng nằm trong vùng.\n"
     "- summary: 1-3 câu tiếng Việt, tối đa khoảng 50 từ.\n"
@@ -499,6 +520,7 @@ def parse_finder_reply(raw: Optional[str]) -> List[dict]:
             "role_why": str(obj.get("role_why") or "").strip()[:240],
             "interruptions": interruptions,
             "interruptions_dropped": dropped,
+            "category": _clean_category(obj.get("category")),
             "summary": _clean_summary(obj.get("summary")),
         })
     return out
@@ -532,6 +554,15 @@ def _clean_role_conf(value) -> Optional[float]:
     if 1.0 < conf <= 100.0:
         conf /= 100.0                    # "85" means 85 %
     return round(conf, 3) if 0.0 <= conf <= 1.0 else None
+
+
+FINDER_CATEGORIES = ("interrupt", "backchannel", "turn_by_turn")
+
+
+def _clean_category(value) -> Optional[str]:
+    """The finder's folder for a region, or None when it named none or an unknown one."""
+    text = re.sub(r"[\s\-]+", "_", str(value or "").strip().lower())
+    return text if text in FINDER_CATEGORIES else None
 
 
 def _clean_interruptions(value, start: int, end: int) -> Tuple[List[dict], Dict[str, int]]:
@@ -620,11 +651,11 @@ MANIFEST_FILE = "manifest.jsonl"
 QUARANTINE_MANIFEST_FILE = "manifest_quarantine.jsonl"   # kept apart: never train on these
 
 # Filed by what happens in the conversation, not by score.
-CATEGORIES = ("full_duplex/interruption", "full_duplex/backchannel", "half_duplex")
-QUARANTINE = "quarantine"
+CATEGORIES = CATEGORY_NAMES            # interrupt / backchannel / turn_by_turn
+QUARANTINE = "_quarantine"             # review pile, not a dataset folder
 FOLDER_ORDER = CATEGORIES + (QUARANTINE,)
 # Folders `_clear_previous` removes: ours, and the score tiers older runs wrote.
-_OWN_ROOTS = ("full_duplex", "half_duplex", QUARANTINE)
+_OWN_ROOTS = CATEGORIES + ("full_duplex", "half_duplex", "quarantine", QUARANTINE)
 
 
 def _merge(spans):
@@ -885,6 +916,7 @@ class _Judged:
     role_why: str = ""
     interruptions: Dict[str, str] = field(default_factory=dict)   # segment index -> intent
     summary: Optional[str] = None
+    category: Optional[str] = None            # interrupt / backchannel / turn_by_turn, as the finder named it
 
 
 @dataclass
@@ -1070,6 +1102,7 @@ class ConversationExportService:
             "role_why": judged.role_why,
             "interruptions": _json_safe(judged.interruptions),
             "summary": judged.summary,
+            "category": judged.category,
         }
 
     @classmethod
@@ -1095,6 +1128,7 @@ class ConversationExportService:
                 role_why=str(payload.get("role_why") or ""),
                 interruptions={str(k): str(v) for k, v in interruptions.items()},
                 summary=payload.get("summary"),
+                category=_clean_category(payload.get("category")),
             )
         except (KeyError, TypeError) as exc:
             raise ValueError("malformed judged row in selection checkpoint") from exc
@@ -1113,7 +1147,7 @@ class ConversationExportService:
             return False
         if report.get("skipped") == "llm_unavailable":
             return False
-        for key in ("unanswered", "coverage_retry_unanswered", "unreadable", "cut_in_thought"):
+        for key in ("unanswered", "unreadable", "cut_in_thought"):
             if int(report.get(key) or 0) > 0:
                 return False
         windows = int(report.get("windows") or 0)
@@ -1423,6 +1457,9 @@ class ConversationExportService:
                 else:
                     retry_meta[idx]["after_coverage"] = old_cov["coverage_fraction"]
 
+        # A window the retry did answer is no longer missing; only a still-empty one is.
+        report["unanswered_first_pass"] = unanswered
+        report["unanswered"] = sum(1 for r in replies if r is None)
         report["coverage_retries"] = len(bad_indexes)
         report["coverage_retry_improved"] = sum(1 for x in retry_meta.values() if x["improved"])
 
@@ -1570,7 +1607,8 @@ class ConversationExportService:
                     interruptions={
                         str(finder.segs[start + k["line"] - 1].index): k["intent"]
                         for k in region.get("interruptions", [])},
-                    summary=region.get("summary"))
+                    summary=region.get("summary"),
+                    category=region.get("category"))
                 key = (i, j)
                 old = accepted_by_range.get(key)
                 if old is None or (item.semantic or 0) > (old.semantic or 0):
@@ -1815,7 +1853,19 @@ class ConversationExportService:
         analysis = analyze(finder.segs[cand.first:cand.last + 1], self.events, item.interruptions)
         roles = decide_roles(analysis.events, cand.speakers, item.assistant, item.role_conf,
                              self.events, analysis.units)
-        category, why = categorize(analysis.events, analysis.max_overlap, self.events)
+        if item.category:
+            # The model filed it; the measurements only veto a label with nothing behind it.
+            if category_is_plausible(item.category, analysis.events, analysis.max_overlap,
+                                     self.events, analysis.units):
+                category, why = item.category, None
+            else:
+                # The numbers contradict the label (e.g. "interrupt" with no cut-in at all):
+                # file it by what was measured instead of losing the conversation.
+                category, why = categorize(analysis.events, analysis.max_overlap, self.events,
+                                           analysis.units)
+        else:
+            category, why = categorize(analysis.events, analysis.max_overlap, self.events,
+                                       analysis.units)
         plan = _Plan(cand, item, None, list(analysis.gate_spans),
                      sum(b - a for a, b in analysis.overlaps), category, category,
                      analysis=analysis, roles=roles)
@@ -1833,10 +1883,10 @@ class ConversationExportService:
         plan.method = render.method
         if self._keep_render(render):
             plan.render = render
-        # Where the voices overlap, each ear must hold one voice; half duplex has no overlap.
-        if category.startswith("full_duplex") and not plan.overlaps:
+        # Where the voices overlap, each ear must hold one voice; turn by turn has no overlap.
+        if category != TURN_BY_TURN and not plan.overlaps:
             plan.gate = "no_overlap"           # in-turn backchannels only: nothing to separate
-        if category.startswith("full_duplex") and plan.overlaps:
+        if category != TURN_BY_TURN and plan.overlaps:
             plan.gate = "applied"
             self._judge_overlap(plan, speech_segments)
             if plan.overlap_quality == "bad":
@@ -1887,13 +1937,16 @@ class ConversationExportService:
                 if seg.speaker not in cand.speakers:
                     continue
                 for a, b, sim in getattr(seg, "bss_spans", ()):
+                    if float(sim) <= PASSTHROUGH_SIM + 0.5:
+                        continue               # same-speaker passthrough marker, nothing separated
                     if _shared_seconds([(float(a), float(b))], plan.overlaps) > 0:
                         spans.append((float(a), float(b)))
-                        sims.append(float(sim))
+                        if float(sim) >= 0.0:  # a negative sim is "not scored", not a poor one
+                            sims.append(float(sim))
             total = sum(b - a for a, b in plan.overlaps)
             plan.separated_share = round(_shared_seconds(spans, plan.overlaps) / total, 4) if total else 1.0
             plan.min_similarity = round(min(sims), 4) if sims else None
-            if self._zeroed_spans(speech_segments, cand):
+            if self._zeroed_spans(speech_segments, cand, plan.overlaps):
                 reasons.append("separation_failed")
             if sims and min(sims) < cfg.overlap_good_min_similarity:
                 reasons.append("low_similarity")
@@ -1903,13 +1956,22 @@ class ConversationExportService:
         plan.overlap_quality = "bad" if reasons else "good"
 
     @staticmethod
-    def _zeroed_spans(speech_segments, cand: Candidate) -> bool:
-        """Whether the separator failed somewhere in the excerpt, leaving silence in both ears."""
+    def _zeroed_spans(speech_segments, cand: Candidate, spans=None) -> bool:
+        """Whether the separator failed where it matters, leaving silence in both ears.
+
+        `spans` are the overlap spans (pipeline clock). A failure elsewhere in the
+        excerpt, in speech nobody talks over, does not touch the overlap, so it does
+        not count; without `spans` any failure in the excerpt does.
+        """
         from services.clean_two_channel_dataset_service import (
             CleanTwoChannelDatasetService as _Tracks)
         try:
-            return any(row["zeroed_in_strict_track"]
-                       for row in _Tracks._failure_rows(speech_segments, cand))
+            return any(
+                row["zeroed_in_strict_track"]
+                and (spans is None or _shared_seconds(
+                    [(row["start"] + cand.pad_start, row["end"] + cand.pad_start)],
+                    spans) > 0)
+                for row in _Tracks._failure_rows(speech_segments, cand))
         except Exception:                              # pragma: no cover - defensive
             return True                                # cannot tell, so it is not "clean"
 
@@ -2210,7 +2272,14 @@ class ConversationExportService:
                speech_segments=None) -> "ConversationSelection":
         """Find, judge and validate excerpts of one recording; writes no files."""
         cfg = self.cfg
-        finder = ConversationSelectionFinder(transcripts, timeline, noise, music_map, cfg)
+        # Segments whose voices were not pulled apart cleanly are dropped before any
+        # conversation is chosen: they act as a seam, so the model builds from clean parts.
+        sorted_segs = sorted(transcripts, key=lambda x: (float(x.start), float(x.end)))
+        bad = bad_separation_positions(
+            sorted_segs, speech_segments, cfg.overlap_good_min_similarity,
+            cfg.overlap_good_min_coverage, self.events.overlap_min)
+        finder = ConversationSelectionFinder(transcripts, timeline, noise, music_map, cfg,
+                                             bad_separation=bad)
         report = {"prompt_version": CONVERSATION_EXPORT_PROMPT_VERSION,
                   "thinking": cfg.thinking, "mode": "llm_finder_then_validator",
                   "skipped": None, "windows": 0,

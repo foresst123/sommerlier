@@ -168,7 +168,7 @@ def test_the_llm_marked_line_gives_the_intent_and_adapt_when_the_reply_follows()
 
 def test_without_the_mark_a_yield_stays_a_yield_even_if_the_holder_speaks_again():
     holder, cutter = cut_in(holder_words=12, cut_at=3.0, cutter_words=8)
-    reply = seg(3, A, 5.8, long_text(8))
+    reply = seg(3, A, 6.2, long_text(8))
     ev = of_type(events_of([holder, cutter, reply]), "interruption")[0]
     assert ev["response"] == "yield"
 
@@ -218,19 +218,19 @@ def an(segments, marked=None):
 
 def test_no_overlap_and_no_backchannel_is_half_duplex():
     a = an([seg(1, A, 0.0, long_text(10)), seg(2, B, 3.5, long_text(8))])
-    assert categorize(a.events, a.max_overlap, P) == ("half_duplex", None)
+    assert categorize(a.events, a.max_overlap, P) == ("turn_by_turn", None)
 
 
 def test_an_interruption_wins_over_backchannels_and_keeps_both_tags():
-    holder = seg(1, A, 0.0, long_text(30))                # to 9.0
+    holder = seg(1, A, 0.0, long_text(26))                # to 7.8: stops soon after the cut-in
     b1 = seg(2, B, 2.0, "ừ")
     b2 = seg(3, B, 5.0, "dạ")
-    cutter = seg(4, B, 7.0, long_text(4))
+    cutter = seg(4, B, 7.0, long_text(8))
     follow = seg(5, A, 10.0, long_text(5))
     a = an([holder, b1, b2, cutter, follow])
     counts = event_counts(a.events)
     assert counts["backchannel"] == 2 and counts["interruption"] == 1
-    assert categorize(a.events, a.max_overlap, P) == ("full_duplex/interruption", None)
+    assert categorize(a.events, a.max_overlap, P) == ("interrupt", None)
     assert tags_of(a.events) == ["interruption", "backchannel"]
 
 
@@ -238,24 +238,40 @@ def test_two_backchannels_without_interruption_is_the_backchannel_category():
     main = seg(1, A, 0.0, long_text(30))
     segs = [main, seg(2, B, 2.0, "ừ"), seg(3, B, 5.0, "dạ"), seg(4, A, 9.1, long_text(5))]
     a = an(segs)
-    assert categorize(a.events, a.max_overlap, P) == ("full_duplex/backchannel", None)
+    assert categorize(a.events, a.max_overlap, P) == ("backchannel", None)
 
 
-def test_one_backchannel_alone_is_no_category():
+def test_one_backchannel_alone_is_the_backchannel_category():
     a = an(talk_with())
-    assert categorize(a.events, a.max_overlap, P) == (None, "no_category")
+    assert categorize(a.events, a.max_overlap, P) == ("backchannel", None)
 
 
-def test_a_competitive_overlap_alone_is_no_category():
+def test_a_competitive_overlap_is_a_backchannel_not_turn_by_turn():
     holder, cutter = cut_in(holder_words=30, cut_at=3.0, cutter_words=12)
     a = an([holder, cutter])
-    assert categorize(a.events, a.max_overlap, P) == (None, "no_category")
+    assert categorize(a.events, a.max_overlap, P) == ("backchannel", None)
 
 
-def test_min_backchannels_is_configurable():
-    a = an(talk_with())
-    loose = EventParams(min_backchannels=1)
-    assert categorize(a.events, a.max_overlap, loose)[0] == "full_duplex/backchannel"
+def test_a_cut_in_the_holder_talks_through_is_a_backchannel_not_an_interrupt():
+    holder, cutter = cut_in(holder_words=30, cut_at=3.0, cutter_words=3)
+    a = an([holder, cutter])
+    (e,) = of_type(a.events, "interruption")
+    assert e["response"] == "continue"
+    assert categorize(a.events, a.max_overlap, P) == ("backchannel", None)
+
+
+def test_a_question_like_reply_is_not_a_backchannel_on_its_text_alone():
+    holder = seg(1, A, 0.0, long_text(30))
+    reply = seg(2, B, 4.0, "thế à")
+    a = an([holder, reply, seg(3, A, 9.1, long_text(5))])
+    assert not of_type(a.events, "backchannel")
+
+
+def test_any_overlap_that_is_not_an_interrupt_is_never_turn_by_turn():
+    holder, cutter = cut_in(holder_words=30, cut_at=3.0, cutter_words=3)
+    a = an([holder, cutter])
+    strict = EventParams(min_backchannels=2)
+    assert categorize(a.events, a.max_overlap, strict) == ("backchannel", None)
 
 
 def test_gate_spans_cover_overlaps_and_overlapping_backchannels():
@@ -414,7 +430,7 @@ def test_a_backchannel_with_no_overlap_far_from_a_turn_does_not_count_for_the_ca
     a = an([a1, bc1, a2, bc2, a3])
     assert event_counts(a.events)["backchannel"] == 2
     assert not any(e["in_turn"] for e in a.events if e["type"] == "backchannel")
-    assert categorize(a.events, a.max_overlap, P) == (None, "no_category")
+    assert categorize(a.events, a.max_overlap, P) == ("backchannel", None)
     assert a.gate_spans == []
 
 
@@ -432,3 +448,41 @@ def test_words_outside_the_segment_are_ignored_or_clamped_when_building_ipus():
     s.words[0]["start"] = 1.5                            # starts before the segment
     (unit,) = analyze([s], P).units
     assert (unit.start, unit.end) == (pytest.approx(2.0), pytest.approx(3.5))
+
+
+# --- what counts as the other speaker really stopping -----------------------------------
+
+def test_an_ordinary_hand_over_with_a_sliver_of_overlap_is_not_an_interrupt():
+    holder = seg(1, A, 0.0, long_text(32))                  # to 9.6
+    nxt = seg(2, B, 9.3, long_text(14))                     # B starts 0.3 s before A ends
+    a = an([holder, nxt])
+    assert categorize(a.events, a.max_overlap, P)[0] == "backchannel"
+    assert not [e for e in a.events if e["type"] == "interruption" and e["response"] != "continue"]
+
+
+def test_a_short_comment_is_not_an_interrupt_even_if_the_holder_pauses():
+    holder = seg(1, A, 0.0, long_text(12))                  # to 3.6
+    comment = seg(2, B, 3.0, long_text(4))                  # 1.2 s, under cutter_min_seconds
+    a = an([holder, comment])
+    assert categorize(a.events, a.max_overlap, P)[0] == "backchannel"
+
+
+def test_the_holder_taking_the_floor_straight_back_is_not_a_yield():
+    holder = seg(1, A, 0.0, long_text(12))                  # to 3.6
+    cutter = seg(2, B, 3.0, long_text(8))                   # to 5.4
+    back = seg(3, A, 5.6, long_text(8))                     # 0.2 s after the cutter ends
+    a = an([holder, cutter, back])
+    assert categorize(a.events, a.max_overlap, P)[0] == "backchannel"
+
+
+def test_a_long_cut_in_that_stops_the_holder_is_an_interrupt():
+    holder, cutter = cut_in(holder_words=12, cut_at=3.0, cutter_words=8)   # overlap 0.6, cutter 2.4 s
+    a = an([holder, cutter])
+    assert categorize(a.events, a.max_overlap, P)[0] == "interrupt"
+
+
+def test_the_models_mark_makes_a_short_cut_in_count():
+    holder = seg(1, A, 0.0, long_text(12))
+    comment = seg(2, B, 3.0, long_text(4))
+    a = an([holder, comment], marked={comment.index: "clarify"})
+    assert categorize(a.events, a.max_overlap, P)[0] == "interrupt"

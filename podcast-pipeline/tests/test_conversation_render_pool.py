@@ -29,7 +29,7 @@ def _drive(svc, tmp_path, count=6, fail=()):
     lock = threading.Lock()
 
     def plan(finder, cand, item, *a, **k):
-        p = _Plan(cand, item, None, [], 0.0, "half_duplex")
+        p = _Plan(cand, item, None, [], 0.0, "turn_by_turn")
         p.render = _Render(0, 8, np.zeros(8, np.float32))
         svc._keep_render(p.render)
         return p
@@ -80,7 +80,7 @@ def test_cut_cache_is_bounded_and_released(tmp_path):
     svc.RENDER_CACHE_BYTES = 40           # room for one 8-sample cut (32 bytes)
     first, second = _Render(0, 8, np.zeros(8, np.float32)), _Render(0, 8, np.zeros(8, np.float32))
     assert svc._keep_render(first) and not svc._keep_render(second)
-    svc._release_render(_Plan(None, None, None, [], 0.0, "half_duplex", render=first))
+    svc._release_render(_Plan(None, None, None, [], 0.0, "turn_by_turn", render=first))
     assert svc._render_bytes == 0 and svc._keep_render(second)
 
 

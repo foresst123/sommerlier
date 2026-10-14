@@ -73,7 +73,7 @@ def test_round_trip_keeps_null_zero_and_empty_distinct():
                    particles=[Particle("nhé", 6.23)], address_terms=[AddressTerm("anh", 0)],
                    llm_candidate_forms=[], description=None)
     profile = PersonaProfile(
-        schema_version=1, params_version="pp-2026.10.2", source_type="real",
+        schema_version=1, params_version="pp-2026.10.3", source_type="real",
         recording_id="ep", usable_ratio=None,
         speakers={A: _speaker(style, Rate(0.0, 0, 22.1)),
                   B: _speaker(_style(), Rate(None, 1, 1.1))})
@@ -111,7 +111,7 @@ def test_params_version_guard():
     Update this snapshot AND PARAMS_VERSION together; a snapshot edit without a
     version bump is exactly the mistake this test exists to make visible.
     """
-    assert svc_mod.PARAMS_VERSION == "pp-2026.10.2"
+    assert svc_mod.PARAMS_VERSION == "pp-2026.10.3"
     assert svc_mod.params_snapshot() == {
         "MIN_DIST_N": 20, "MIN_RATIO_N": 8, "MIN_EXPOSURE_MIN": 5.0,
         "MIN_EXPOSURE_INTERRUPTION_MIN": 20.0, "MIN_LEXICON_N": 5,
@@ -126,7 +126,8 @@ def test_params_version_guard():
         "EVENT_PARAMS": {
             "ipu_gap": 0.2, "overlap_min": 0.2, "backchannel_max_seconds": 1.0,
             "backchannel_max_words": 2, "backchannel_context": 1.0,
-            "yield_within_seconds": 1.5, "min_backchannels": 2,
+            "yield_within_seconds": 1.5, "cutter_min_seconds": 2.0,
+            "interrupt_min_overlap": 0.5, "resume_gap_seconds": 0.5, "min_backchannels": 1,
             "half_duplex_max_overlap": 0.2, "role_min_conf": 0.7},
     }
     assert svc_mod.PROFILE_PROMPT_VERSION == "persona-v1"

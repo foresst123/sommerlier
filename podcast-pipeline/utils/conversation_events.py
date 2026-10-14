@@ -24,6 +24,10 @@ INTERRUPTION_INTENTS = ("topic_shift", "clarify", "disagree", "complete")
 # The event types that make an excerpt worth filing as full duplex.
 TAG_TYPES = ("interruption", "backchannel", "merged_backchannel", "competitive_overlap")
 
+# Short replies that are really questions: they ask the holder something, so they
+# are never filed as a backchannel on text alone; what the holder does decides.
+QUESTION_BACKCHANNELS = frozenset({"à", "thế à", "vậy à", "vậy hả", "thế ạ"})
+
 # Only used to guess the assistant when the finder gave none and nobody was interrupted.
 _QUESTION_WORDS = frozenset({"không", "chưa", "nhỉ", "hả", "gì", "sao", "nào", "đâu", "ai"})
 
@@ -36,7 +40,10 @@ class EventParams:
     backchannel_max_words: int = 2
     backchannel_context: float = 1.0
     yield_within_seconds: float = 1.5
-    min_backchannels: int = 2
+    cutter_min_seconds: float = 2.0      # a cut-in shorter than this is a comment, not taking the floor
+    interrupt_min_overlap: float = 0.5   # the holder must still be talking this long over the cutter
+    resume_gap_seconds: float = 0.5      # the holder coming back this soon after the cutter ends: no yield
+    min_backchannels: int = 1
     half_duplex_max_overlap: float = 0.2
     role_min_conf: float = 0.7
 
@@ -144,7 +151,8 @@ def _mark_backchannels(units: List[Unit], params: EventParams) -> None:
     for unit in units:
         if (unit.duration > params.backchannel_max_seconds
                 or unit.n_words > params.backchannel_max_words
-                or _fold(unit.text) not in BACKCHANNELS):
+                or _fold(unit.text) not in BACKCHANNELS
+                or _fold(unit.text) in QUESTION_BACKCHANNELS):
             continue
         others = [u for u in units if u.speaker != unit.speaker and not u.backchannel]
         before = any(o.start < unit.start and o.end > unit.start - params.backchannel_context
@@ -261,7 +269,13 @@ def analyze(segments, params: EventParams,
             continue
         intent = next((marked[k] for e in episode for k in e.keys if k in marked), None)
         response = "continue"
-        if holder_stop <= stays:
+        # The holder stops for real only if the cutter held the floor for a while, the
+        # holder was still talking over them, and does not simply take the turn back.
+        back_soon = any(h.speaker == holder.speaker and end <= h.start <= end + params.resume_gap_seconds
+                        for h in talk)
+        held = (end - start >= params.cutter_min_seconds
+                and overlap >= params.interrupt_min_overlap and not back_soon)
+        if holder_stop <= stays and (held or intent is not None):
             response = "yield"
             next_turn = next((h for h in talk if h.speaker == holder.speaker
                               and h.start >= end - 0.05), None)
@@ -336,18 +350,64 @@ def tags_of(events: Sequence[dict]) -> List[str]:
     return [kind for kind in TAG_TYPES if kind in present]
 
 
-def categorize(events: Sequence[dict], max_overlap: float,
-               params: EventParams) -> Tuple[Optional[str], Optional[str]]:
-    """(category, reason): interruption > backchannel > half duplex, else no category."""
+INTERRUPT, BACKCHANNEL, TURN_BY_TURN = "interrupt", "backchannel", "turn_by_turn"
+CATEGORY_NAMES = (INTERRUPT, BACKCHANNEL, TURN_BY_TURN)
+
+
+def _is_stray_backchannel(unit: Unit) -> bool:
+    """A listener word ("ừ", "dạ") that stands alone and was not marked as a backchannel."""
+    return (not unit.backchannel and unit.n_words <= 2
+            and _fold(unit.text) in BACKCHANNELS)
+
+
+def categorize(events: Sequence[dict], max_overlap: float, params: EventParams,
+               units: Optional[Sequence[Unit]] = None) -> Tuple[Optional[str], Optional[str]]:
+    """(category, reason) for one excerpt.
+
+    interrupt     the listener cuts in and the holder stops or changes course.
+    backchannel   a short cut-in or listener word while the holder keeps the floor.
+    turn_by_turn  speakers alternate; no overlap event and no listener word.
+    Every excerpt gets a folder: overlap that is not an interruption is a backchannel.
+    """
+    if any(e["type"] == "interruption" and e.get("response") in ("yield", "adapt")
+           for e in events):
+        return INTERRUPT, None
+    keeps_floor = sum(
+        1 for e in events
+        if (e["type"] == "interruption" and e.get("response") == "continue")
+        or (e["type"] == "backchannel" and e.get("in_turn", True)))
+    merged = sum(1 for e in events if e["type"] == "merged_backchannel")
+    if keeps_floor + merged >= params.min_backchannels:
+        return BACKCHANNEL, None
+    # Any overlap that is not an interruption, and any listener word, is a backchannel;
+    # turn_by_turn is strictly one voice at a time.
+    if (any(e["type"] in ("backchannel", "competitive_overlap") for e in events)
+            or max_overlap >= params.half_duplex_max_overlap
+            or (units is not None and any(_is_stray_backchannel(u) for u in units))):
+        return BACKCHANNEL, None
+    return TURN_BY_TURN, None
+
+
+def category_is_plausible(category: str, events: Sequence[dict], max_overlap: float,
+                          params: EventParams,
+                          units: Optional[Sequence[Unit]] = None) -> bool:
+    """Whether the measurements leave room for the folder the model named.
+
+    Only a guard against a label the numbers contradict: interrupt needs a measured
+    cut-in (an overlap that is only a listener word is not one), backchannel needs
+    some overlap or listener word, turn_by_turn needs none of either.
+    """
     counts = event_counts(events)
-    if counts.get("interruption"):
-        return "full_duplex/interruption", None
-    in_turn = sum(1 for e in events if e["type"] == "backchannel" and e.get("in_turn", True))
-    if in_turn >= params.min_backchannels:
-        return "full_duplex/backchannel", None
-    if not counts.get("backchannel") and max_overlap < params.half_duplex_max_overlap:
-        return "half_duplex", None
-    return None, "no_category"
+    if category == INTERRUPT:
+        return bool(counts.get("interruption"))
+    if category == BACKCHANNEL:
+        return (any(counts.get(k) for k in ("backchannel", "interruption", "merged_backchannel",
+                                            "competitive_overlap"))
+                or max_overlap > 0
+                or (units is not None and any(_is_stray_backchannel(u) for u in units)))
+    if category == TURN_BY_TURN:
+        return categorize(events, max_overlap, params, units)[0] == TURN_BY_TURN
+    return False
 
 
 # ---------------------------------------------------------------------------

@@ -28,7 +28,7 @@ from utils.provenance import annotate
 SCHEMA_VERSION = 1
 # Hand-written. Change it whenever a constant, dictionary, EventParams default or
 # formula below changes a number (tests/test_persona_profile.py guards this).
-PARAMS_VERSION = "pp-2026.10.2"
+PARAMS_VERSION = "pp-2026.10.3"
 PROFILE_PROMPT_VERSION = "persona-v1"
 
 MIN_DIST_N = 20                     # distribution needs this many samples
