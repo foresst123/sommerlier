@@ -86,8 +86,15 @@ class ModelLoader:
             return
         if self.args.dia3:
             if self.logger: self.logger.info(f"Loading Pyannote Diarization on {self.device_1}")
+            token = self.config.get("huggingface_token", "")
+            if not token:
+                # Prompting is switched off for now: use HF_TOKEN / huggingface-cli login if
+                # set. Drop required=False to ask here again (the gated pipeline needs one).
+                from utils import env_bootstrap
+                token = env_bootstrap.ensure_hf_token(
+                    self.config, self.logger, required=False) or ""
             self.models["diarizer"] = PyannoteDiarizer(
-                token=self.config.get("huggingface_token", ""),
+                token=token,
                 device=self.device_1,
                 use_community=True
             )

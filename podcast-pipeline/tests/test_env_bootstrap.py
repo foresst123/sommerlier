@@ -70,6 +70,22 @@ def test_missing_token_prompts_and_exports(monkeypatch):
     assert os.environ["HF_TOKEN"] == "hf_typed"
 
 
+def test_optional_token_is_never_prompted_for(monkeypatch):
+    _clear_token_env(monkeypatch)
+    cfg = {}
+    token = env_bootstrap.ensure_hf_token(
+        cfg, LOG, prompt=lambda _: pytest.fail("must not prompt"), interactive=True,
+        required=False)
+    assert token is None and "huggingface_token" not in cfg
+
+
+def test_optional_token_is_still_used_when_present(monkeypatch):
+    _clear_token_env(monkeypatch)
+    monkeypatch.setenv("HF_TOKEN", "hf_env")
+    token = env_bootstrap.ensure_hf_token({}, LOG, required=False)
+    assert token == "hf_env"
+
+
 def test_missing_token_without_terminal_raises(monkeypatch):
     _clear_token_env(monkeypatch)
     with pytest.raises(RuntimeError, match="No HuggingFace token"):

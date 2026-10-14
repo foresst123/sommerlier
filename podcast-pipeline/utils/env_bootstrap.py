@@ -296,16 +296,23 @@ def _cached_hf_token():
         return None
 
 
-def ensure_hf_token(config, logger, prompt=getpass.getpass, interactive=None):
+def ensure_hf_token(config, logger, prompt=getpass.getpass, interactive=None, required=True):
     """Return a HuggingFace token, asking for one when none is configured.
 
     Order: config value, HUGGINGFACE_TOKEN / HF_TOKEN, a token saved by ``huggingface-cli
     login``, then a hidden prompt. The token is exported to the environment for this process
     and its workers only; it is never written to config.json.
+
+    With ``required=False`` nothing is asked: a token found is exported, otherwise None is
+    returned and whatever really needs one (the gated pyannote pipeline) asks when it loads.
     """
     token = (config.get("huggingface_token")
              or os.environ.get("HUGGINGFACE_TOKEN") or os.environ.get("HF_TOKEN")
              or _cached_hf_token())
+    if not token and not required:
+        logger.info("[bootstrap] no HuggingFace token set; it will only be asked for if a "
+                    "gated model (--dia3) is loaded")
+        return None
     if not token:
         if interactive is None:
             interactive = sys.stdin.isatty()

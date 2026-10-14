@@ -435,7 +435,8 @@ def main():
     preflight.run(logger, kill_orphans=args.kill_orphans)
     if not args.skip_bootstrap:
         from utils import env_bootstrap
-        env_bootstrap.ensure_hf_token(config, logger)
+        # Only the gated pyannote diarizer (--dia3) needs one; it asks when it loads.
+        env_bootstrap.ensure_hf_token(config, logger, required=False)
         qwen_backend = str(env_profile.get("models", {}).get("qwen3", {})
                            .get("backend", "transformers")).lower()
         env_bootstrap.ensure_worker_envs(
