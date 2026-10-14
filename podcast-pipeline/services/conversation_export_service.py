@@ -87,7 +87,7 @@ from utils.llm_json import clean_reply, is_cut_in_thought, is_readable, objects_
 from utils.transcript_windows import line_number
 
 # Bump when the prompt or the acceptance rules change.
-CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v11-three-categories"
+CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v12-emotion"
 CONVERSATION_SELECTION_CHECKPOINT_VERSION = 1
 
 _TEMPLATE_SLACK_TOKENS = 64
@@ -325,6 +325,11 @@ CONVERSATION_FINDER_SYSTEM_PROMPT = (
     "topic_shift (chuyển chủ đề), clarify (hỏi lại/làm rõ), disagree (phản đối), complete (nói tiếp/hoàn thành ý người kia). "
     "Thời điểm đo chính xác do code kiểm tra lại, bạn KHÔNG ghi. Không có thì để [].\n"
     "\n"
+    "## emotions (chỉ cho vùng keep=true)\n"
+    "Với MỖI dòng trong vùng, ghi cảm xúc chính của người nói ở dòng đó, chỉ dựa vào nội dung chữ (bạn không nghe được audio). "
+    "Mỗi phần tử {\"line\": số dòng, \"emotion\": nhãn, \"conf\": số 0..1}. Nhãn là MỘT trong: {emotion_labels} (tiếng Anh, chữ thường). "
+    "Không rõ thì ghi neutral hoặc bỏ dòng đó; conf thấp khi chỉ đoán.\n"
+    "\n"
     "## summary (chỉ cho vùng keep=true)\n"
     "1-3 câu tiếng Việt, tối đa khoảng 50 từ: hai người nói về gì, diễn biến ra sao (ai ngắt lời, rẽ ở đâu), kết thúc thế nào. "
     "Gọi theo vai (\"người hỏi\"/\"người đáp\"), không đoán tên hay giới tính, không thêm gì ngoài transcript.\n"
@@ -337,7 +342,7 @@ CONVERSATION_FINDER_SYSTEM_PROMPT = (
     "## ĐẦU RA\n"
     "Chỉ trả MỘT JSON ARRAY, không markdown, không giải thích ngoài JSON. Mọi vùng có 6 khóa:\n"
     "start_line, end_line, keep, self_contained, topic, reason.\n"
-    "Vùng keep=true thêm 6 khóa: category, assistant, role_conf, role_why, interruptions, summary.\n"
+    "Vùng keep=true thêm 7 khóa: category, assistant, role_conf, role_why, interruptions, emotions, summary.\n"
     "- start_line/end_line: số dòng trong cửa sổ hiện tại.\n"
     "- keep: boolean JSON true/false, không dùng chuỗi.\n"
     "- self_contained: số nguyên 1..5.\n"
@@ -346,6 +351,7 @@ CONVERSATION_FINDER_SYSTEM_PROMPT = (
     "- category: \"interrupt\" | \"backchannel\" | \"turn_by_turn\" (xem LOẠI HỘI THOẠI).\n"
     "- assistant: \"A\"/\"B\"/... (nhãn người nói trong cửa sổ); role_conf: số 0..1; role_why: tối đa 20 từ.\n"
     "- interruptions: mảng {\"line\": int, \"intent\": \"topic_shift|clarify|disagree|complete\"}, dòng nằm trong vùng.\n"
+    "- emotions: mảng {\"line\": int, \"emotion\": \"<nhãn>\", \"conf\": 0..1}, dòng nằm trong vùng, tối đa mỗi dòng một phần tử.\n"
     "- summary: 1-3 câu tiếng Việt, tối đa khoảng 50 từ.\n"
     "- Các vùng phải phủ đủ 1..N như quy tắc ở trên.\n"
     "- Tối đa {max_proposals} vùng; nếu cần, gộp các vùng keep=false liền nhau có cùng lý do để vẫn phủ đủ cửa sổ."
@@ -550,6 +556,7 @@ def parse_finder_reply(raw: Optional[str]) -> List[dict]:
             "role_why": str(obj.get("role_why") or "").strip()[:240],
             "interruptions": interruptions,
             "interruptions_dropped": dropped,
+            "emotions": _clean_emotions(obj.get("emotions"), start, end),
             "category": _clean_category(obj.get("category")),
             "summary": _clean_summary(obj.get("summary")),
         })
@@ -593,6 +600,37 @@ def _clean_category(value) -> Optional[str]:
     """The finder's folder for a region, or None when it named none or an unknown one."""
     text = re.sub(r"[\s\-]+", "_", str(value or "").strip().lower())
     return text if text in FINDER_CATEGORIES else None
+
+
+# Small closed set the finder picks from; anything else is dropped, not guessed.
+EMOTION_LABELS = ("neutral", "happy", "excited", "amused", "surprised", "thoughtful",
+                  "serious", "sad", "anxious", "angry")
+
+
+def _clean_emotions(value, start: int, end: int) -> List[dict]:
+    """[{"line", "emotion", "conf"}] for lines inside the region; unknown labels, bad lines
+    and unreadable conf are dropped, conf is clamped to 0..1, the first entry per line wins."""
+    kept: List[dict] = []
+    for item in value if isinstance(value, list) else []:
+        if not isinstance(item, dict):
+            continue
+        line = line_number(item.get("line"))
+        label = str(item.get("emotion") or "").strip().lower()
+        conf = item.get("conf")
+        if isinstance(conf, bool):
+            continue
+        try:
+            conf = float(conf)
+        except (TypeError, ValueError):
+            continue
+        if line is None or not start <= line <= end or label not in EMOTION_LABELS:
+            continue
+        if conf != conf:
+            continue
+        if all(k["line"] != line for k in kept):
+            kept.append({"line": line, "emotion": label,
+                         "conf": round(min(1.0, max(0.0, conf)), 3)})
+    return kept
 
 
 def _clean_interruptions(value, start: int, end: int) -> Tuple[List[dict], Dict[str, int]]:
@@ -686,6 +724,18 @@ QUARANTINE = "_quarantine"             # review pile, not a dataset folder
 FOLDER_ORDER = CATEGORIES + (QUARANTINE,)
 # Folders `_clear_previous` removes: ours, and the score tiers older runs wrote.
 _OWN_ROOTS = CATEGORIES + ("full_duplex", "half_duplex", "quarantine", QUARANTINE)
+
+
+def _item_of(item_dir: str, name: str, base_name: str, safe: str) -> bool:
+    """Was this item folder written from recording `base_name`? (metadata, else name)"""
+    try:
+        with open(os.path.join(item_dir, "conversation.json"), encoding="utf-8") as fh:
+            stem = json.load(fh).get("source_stem")
+    except (OSError, ValueError, AttributeError):
+        stem = None
+    if stem is not None:
+        return stem == base_name
+    return re.fullmatch(re.escape(safe) + r"_\d+s(_b)*", name) is not None
 
 
 def _merge(spans):
@@ -930,6 +980,20 @@ def _json_safe(value):
     return str(value)
 
 
+def _emotions_from_checkpoint(value) -> Dict[str, dict]:
+    """Emotions of an older checkpoint (key absent or malformed) read as none."""
+    out: Dict[str, dict] = {}
+    if not isinstance(value, dict):
+        return out
+    for key, item in value.items():
+        if isinstance(item, dict) and isinstance(item.get("label"), str):
+            try:
+                out[str(key)] = {"label": item["label"], "conf": float(item.get("conf"))}
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
 @dataclass
 class _Judged:
     original: Candidate
@@ -947,6 +1011,7 @@ class _Judged:
     interruptions: Dict[str, str] = field(default_factory=dict)   # segment index -> intent
     summary: Optional[str] = None
     category: Optional[str] = None            # interrupt / backchannel / turn_by_turn, as the finder named it
+    emotions: Dict[str, dict] = field(default_factory=dict)       # segment index -> {"label", "conf"}
 
 
 @dataclass
@@ -1133,6 +1198,7 @@ class ConversationExportService:
             "interruptions": _json_safe(judged.interruptions),
             "summary": judged.summary,
             "category": judged.category,
+            "emotions": _json_safe(judged.emotions),
         }
 
     @classmethod
@@ -1159,6 +1225,7 @@ class ConversationExportService:
                 interruptions={str(k): str(v) for k, v in interruptions.items()},
                 summary=payload.get("summary"),
                 category=_clean_category(payload.get("category")),
+                emotions=_emotions_from_checkpoint(payload.get("emotions")),
             )
         except (KeyError, TypeError) as exc:
             raise ValueError("malformed judged row in selection checkpoint") from exc
@@ -1272,7 +1339,8 @@ class ConversationExportService:
                   .replace("{min_turns_each}", str(self.cfg.min_turns_each))
                   .replace("{context_turns}", str(self.cfg.context_turns_around_interruption))
                   .replace("{min_semantic}", str(self.cfg.min_semantic))
-                  .replace("{max_proposals}", str(self.cfg.finder_max_proposals_per_window)))
+                  .replace("{max_proposals}", str(self.cfg.finder_max_proposals_per_window))
+                  .replace("{emotion_labels}", ", ".join(EMOTION_LABELS)))
         for key, value in limits.items():
             prompt = prompt.replace("{" + key + "}", f"{value:g}")
         return prompt
@@ -1562,6 +1630,7 @@ class ConversationExportService:
                     "assistant": region.get("assistant"),
                     "role_conf": region.get("role_conf"),
                     "interruptions": region.get("interruptions", []),
+                    "emotions": region.get("emotions", []),
                     "summary": region.get("summary"),
                 }
 
@@ -1638,7 +1707,11 @@ class ConversationExportService:
                         str(finder.segs[start + k["line"] - 1].index): k["intent"]
                         for k in region.get("interruptions", [])},
                     summary=region.get("summary"),
-                    category=region.get("category"))
+                    category=region.get("category"),
+                    emotions={
+                        str(finder.segs[start + k["line"] - 1].index):
+                            {"label": k["emotion"], "conf": k["conf"]}
+                        for k in region.get("emotions", [])})
                 key = (i, j)
                 old = accepted_by_range.get(key)
                 if old is None or (item.semantic or 0) > (old.semantic or 0):
@@ -2006,15 +2079,26 @@ class ConversationExportService:
             return True                                # cannot tell, so it is not "clean"
 
     @staticmethod
-    def _clear_previous(out_dir: str) -> None:
-        """Remove what an earlier run of this file left (also the old tier folders)."""
+    def _clear_previous(out_dir: str, base_name: Optional[str] = None) -> None:
+        """Remove what an earlier run of this file left (also the old tier folders).
+
+        With `base_name` (shared out_dir) only that recording's item folders go.
+        """
         if not os.path.isdir(out_dir):
             return
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", base_name) if base_name is not None else None
         for name in os.listdir(out_dir):
             path = os.path.join(out_dir, name)
-            if os.path.isdir(path) and (name in _OWN_ROOTS
-                                        or re.fullmatch(r"tier_\d+_[A-Za-z_]+", name)):
+            if not (os.path.isdir(path) and (name in _OWN_ROOTS
+                                             or re.fullmatch(r"tier_\d+_[A-Za-z_]+", name))):
+                continue
+            if base_name is None:
                 shutil.rmtree(path, ignore_errors=True)
+                continue
+            for item in os.listdir(path):
+                item_dir = os.path.join(path, item)
+                if os.path.isdir(item_dir) and _item_of(item_dir, item, base_name, safe):
+                    shutil.rmtree(item_dir, ignore_errors=True)
 
     def _verify(self, directory: str, files: Dict[str, str], sample_rate: int,
                 num_samples: int, assistant_channel: str = "left") -> dict:
@@ -2181,6 +2265,9 @@ class ConversationExportService:
                     row["words"].append(timed)
             if getattr(seg, "speaker_original", None) is not None:
                 row["speaker_original"] = seg.speaker_original
+            emotion = (judged.emotions or {}).get(str(seg.index))
+            if emotion:
+                row["emotion"] = {"label": emotion["label"], "conf": emotion["conf"]}
             flags = review_flags_of(seg)
             if flags:
                 row["review_flags"] = [dict(f) for f in flags]
@@ -2353,8 +2440,11 @@ class ConversationExportService:
 
     def write(self, selection: "ConversationSelection", *, waveform, sample_rate: int,
               out_dir: str, base_name: str, speech_segments=None,
-              separation_service=None) -> ConversationExportRun:
+              separation_service=None, shared_out_dir: bool = False) -> ConversationExportRun:
         """Write the excerpts `select` chose.
+
+        `shared_out_dir`: other recordings write into the same `out_dir`, so only this
+        recording's earlier items are cleared (default: the whole tree is replaced).
 
         `speech_segments` and `separation_service` are what the separation stage
         produced and the object that can lay its speaker tracks out; with both,
@@ -2374,8 +2464,8 @@ class ConversationExportService:
             return result
         if skipped:
             # Nothing found this time: the earlier run's excerpts and manifests are stale.
-            self._clear_previous(out_dir)
-            self._write_manifests(out_dir, [], [])
+            self._clear_previous(out_dir, base_name if shared_out_dir else None)
+            self._write_manifests(out_dir, [], [], base_name)
             return result
         final = list(selection.final)
         if self.cfg.require_word_alignment:
@@ -2387,12 +2477,13 @@ class ConversationExportService:
             final = complete
         self._plan_and_write(selection.finder, final, selection.kept, result, report,
                              waveform, sample_rate, out_dir, base_name,
-                             speech_segments, separation_service)
+                             speech_segments, separation_service, shared_out_dir)
         return result
 
     def run(self, transcripts, *, timeline, noise, music_map, waveform,
             sample_rate: int, out_dir: str, base_name: str,
-            speech_segments=None, separation_service=None) -> ConversationExportRun:
+            speech_segments=None, separation_service=None,
+            shared_out_dir: bool = False) -> ConversationExportRun:
         """Find, judge and write selected conversation excerpts: `write(select(...))`."""
         selection = self.select(
             transcripts, timeline=timeline, noise=noise, music_map=music_map,
@@ -2401,10 +2492,11 @@ class ConversationExportService:
         return self.write(
             selection, waveform=waveform, sample_rate=sample_rate, out_dir=out_dir,
             base_name=base_name, speech_segments=speech_segments,
-            separation_service=separation_service)
+            separation_service=separation_service, shared_out_dir=shared_out_dir)
 
     def _plan_and_write(self, finder, final, kept, result, report, waveform, sample_rate,
-                        out_dir, base_name, speech_segments, separation_service) -> None:
+                        out_dir, base_name, speech_segments, separation_service,
+                        shared_out_dir: bool = False) -> None:
         """Cut, file and write every accepted excerpt on a bounded CPU pool.
 
         Each excerpt is independent CPU/disk work: events, roles and category are
@@ -2439,7 +2531,7 @@ class ConversationExportService:
         # Interruptions first, then the other categories, quarantine last; best score first inside.
         rank = {name: k for k, name in enumerate(FOLDER_ORDER)}
         plans.sort(key=lambda p: (rank.get(p.category, len(rank)), -p.cand.score))
-        self._clear_previous(out_dir)
+        self._clear_previous(out_dir, base_name if shared_out_dir else None)
 
         safe = re.sub(r"[^A-Za-z0-9._-]+", "_", base_name)
         taken: set = set()
@@ -2508,18 +2600,49 @@ class ConversationExportService:
                 "swappable": meta["swappable"], "topic": item.topic, "summary": meta["summary"],
                 "source_stem": base_name, "sample_rate": int(sample_rate)})
         # Rewritten whole on every run of this file, like the folders it lists.
-        self._write_manifests(out_dir, manifest, quarantined)
+        self._write_manifests(out_dir, manifest, quarantined, base_name)
         report["exported"] = len(result.exports)
         self._log(
             f"[conversation-exports] {base_name}: {len(result.exports)} item(s) written to {out_dir}")
 
     @staticmethod
-    def _write_manifests(out_dir: str, manifest: List[dict], quarantined: List[dict]) -> None:
+    def _write_manifests(out_dir: str, manifest: List[dict], quarantined: List[dict],
+                         base_name: Optional[str] = None) -> None:
+        """Write both manifests. With `base_name`, only that recording's rows are replaced.
+
+        Rows of other recordings (and old rows without `source_stem`) are kept, so
+        recordings sharing one out_dir do not overwrite each other. Locked and moved
+        into place atomically because several processes may write at once.
+        """
+        import fcntl
         os.makedirs(out_dir, exist_ok=True)
-        for name, rows in ((MANIFEST_FILE, manifest), (QUARANTINE_MANIFEST_FILE, quarantined)):
-            with open(os.path.join(out_dir, name), "w", encoding="utf-8") as fh:
-                for row in rows:
-                    fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        with open(os.path.join(out_dir, ".manifest.lock"), "a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                for name, rows in ((MANIFEST_FILE, manifest), (QUARANTINE_MANIFEST_FILE, quarantined)):
+                    path = os.path.join(out_dir, name)
+                    kept: List[str] = []
+                    if base_name is not None and os.path.isfile(path):
+                        with open(path, encoding="utf-8") as fh:
+                            for line in fh:
+                                line = line.rstrip("\n")
+                                if not line.strip():
+                                    continue
+                                try:
+                                    stem = json.loads(line).get("source_stem")
+                                except (ValueError, AttributeError):
+                                    stem = None
+                                if stem is None or stem != base_name:
+                                    kept.append(line)
+                    tmp = f"{path}.tmp-{os.getpid()}-{threading.get_ident()}"
+                    with open(tmp, "w", encoding="utf-8") as fh:
+                        for line in kept:
+                            fh.write(line + "\n")
+                        for row in rows:
+                            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+                    os.replace(tmp, path)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def _log(self, message: str):
         if self.logger:

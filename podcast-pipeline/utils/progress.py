@@ -16,6 +16,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 import time
 
 LEDGER_NAME = "_sommelier_progress.json"
@@ -51,6 +52,10 @@ class ProgressLedger:
         self.done = {}       # relative path -> {finished, seconds}
         self.failed = {}     # relative path -> {error, attempts, last_tried}
         self.rejected = {}   # relative path -> {reason, rejected_at}
+        # relative path -> the input-quality (DNSMOS) report, kept here rather than only
+        # in the cache so clearing the cache does not force every file to be scored again.
+        self.quality = {}
+        self._lock = threading.Lock()
         self.directory = directory
         self._load()
 
@@ -64,6 +69,7 @@ class ProgressLedger:
             self.done = data.get("done", {}) or {}
             self.failed = data.get("failed", {}) or {}
             self.rejected = data.get("rejected", {}) or {}
+            self.quality = data.get("quality", {}) or {}
         except Exception as e:
             # A corrupt ledger must not stop the run: the worst case is
             # reprocessing files, which is wasteful but not wrong.
@@ -81,6 +87,7 @@ class ProgressLedger:
             "done": self.done,
             "failed": self.failed,
             "rejected": self.rejected,
+            "quality": self.quality,
         }
         d = os.path.dirname(self.path) or "."
         try:
@@ -105,6 +112,19 @@ class ProgressLedger:
 
     def is_rejected(self, path: str) -> bool:
         return self._key(path) in self.rejected
+
+    def get_quality(self, path: str):
+        return self.quality.get(self._key(path))
+
+    def set_quality(self, path: str, report: dict):
+        """Remember a file's input-quality report and write the ledger now.
+
+        Written at once, not at the end of the file: scoring is the slow part and the
+        run may stop before the file finishes.
+        """
+        with self._lock:
+            self.quality[self._key(path)] = dict(report)
+            self.save()
 
     def attempts(self, path: str) -> int:
         return int(self.failed.get(self._key(path), {}).get("attempts", 0))

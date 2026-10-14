@@ -58,3 +58,4 @@ yt-dlp
 setuptools==75.0.0
 sacrebleu
 git+https://github.com/BUTSpeechFIT/DiariZen.git
+lhotse>=1.14

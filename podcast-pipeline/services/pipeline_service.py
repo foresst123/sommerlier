@@ -8,6 +8,8 @@ import json
 import threading
 from typing import Any
 from utils.checkpoint import CheckpointManager
+from utils.final_output import (conversation_export_dir, final_output_root,
+                                run_lhotse_after_export)
 from utils import llm_trace
 from utils.music_map import MusicMap, build_maps
 from utils.noise_map import NoiseTrack
@@ -68,6 +70,8 @@ class PipelineService:
         self.conversation_export_svc = conversation_export_svc
         self.word_alignment_svc = word_alignment_svc
         self.clean_dataset_svc = clean_dataset_svc
+        # Set by main(): the input directory's ledger, which also keeps DNSMOS scores.
+        self.progress_ledger = None
         self.input_audio_gate = input_audio_gate
         self.logger = logger
         self.model_loader = model_loader
@@ -155,7 +159,17 @@ class PipelineService:
             **self._input_source_identity(audio_path),
         }
         decoded_audio = None
-        if report is None or any(report.get(k) != v for k, v in fingerprint.items()):
+        stale = report is None or any(report.get(k) != v for k, v in fingerprint.items())
+        ledger = getattr(self, "progress_ledger", None)
+        if stale and ledger is not None:
+            # Scored in an earlier run whose cache is gone: reuse it if nothing changed.
+            kept = ledger.get_quality(audio_path)
+            if kept and not kept.get("skipped") and all(
+                    kept.get(k) == v for k, v in fingerprint.items()):
+                report = dict(kept)
+                checkpoint.save("input_audio_quality", report, fmt="json")
+                stale = False
+        if stale:
             if waveform is None or sample_rate is None:
                 decoded_audio = self.audio_svc.load_audio(audio_path, target_sr=24000)
                 waveform = decoded_audio.waveform
@@ -163,6 +177,8 @@ class PipelineService:
             report = gate.check(waveform, sample_rate, source_path=audio_path)
             report.update(fingerprint)
             checkpoint.save("input_audio_quality", report, fmt="json")
+            if ledger is not None and not report.get("skipped"):
+                ledger.set_quality(audio_path, report)
             if self.logger:
                 if report.get("skipped"):
                     self.logger.warning(
@@ -714,7 +730,7 @@ class PipelineService:
 
     def _export_conversation_exports(self, stage_out, transcripts, audio_data, music_map,
                                      output_dir, audio_path, speech_segments=None,
-                                     align=None, stop_before_write=False):
+                                     align=None, stop_before_write=False, export_target=None):
         """Select, align and export two-person conversation excerpts.
 
         Runs after relabel/review, so a stray third label does not end a conversation,
@@ -737,7 +753,7 @@ class PipelineService:
                      if music_map is not None and self.timeline else music_map)
         base_name = os.path.splitext(os.path.basename(audio_path))[0]
         svc = self.conversation_export_svc
-        out_dir = os.path.join(output_dir, "conversation_exports")
+        out_dir, shared = export_target or (os.path.join(output_dir, "conversation_exports"), False)
         if align is None and not stop_before_write:
             # Nothing to do between select and write: run() is exactly that pair.
             result = svc.run(
@@ -747,8 +763,9 @@ class PipelineService:
                 out_dir=out_dir, base_name=base_name,
                 # The two-channel file is laid out from the separated speaker tracks.
                 speech_segments=speech_segments,
-                separation_service=getattr(self, "separation_svc", None))
-            stage_out.write_conversation_exports(result.report, result.exports)
+                separation_service=getattr(self, "separation_svc", None),
+                shared_out_dir=shared)
+            self._finish_conversation_export(stage_out, result, out_dir, shared, base_name)
             return result
         selection = svc.select(
             transcripts, timeline=self.timeline,
@@ -764,9 +781,17 @@ class PipelineService:
             waveform=audio_data.waveform, sample_rate=audio_data.sample_rate,
             out_dir=out_dir, base_name=base_name,
             speech_segments=speech_segments,
-            separation_service=getattr(self, "separation_svc", None))
-        stage_out.write_conversation_exports(result.report, result.exports)
+            separation_service=getattr(self, "separation_svc", None),
+            shared_out_dir=shared)
+        self._finish_conversation_export(stage_out, result, out_dir, shared, base_name)
         return result
+
+    def _finish_conversation_export(self, stage_out, result, out_dir, shared, base_name):
+        """Write the accounting; when the export tree is the final root, add this
+        recording's Lhotse manifest (a failure there is logged and reported, not raised)."""
+        if shared:
+            run_lhotse_after_export(out_dir, base_name, result.report, self.logger)
+        stage_out.write_conversation_exports(result.report, result.exports)
 
     def _export_clean_two_channel_dataset(self, args, config, transcripts,
                                           speech_segments, audio_data,
@@ -781,6 +806,18 @@ class PipelineService:
                    .get(getattr(args, "env", ""), {}))
         root = ((profile.get("outputs") or {})
                 .get("clean_two_channel_dir", ""))
+        if final_output_root(config, args):
+            # clean_two_channel_dir is now the final root of conversation_exports + Lhotse.
+            if self.logger:
+                self.logger.info(
+                    "[clean-2ch] legacy clean two-channel exporter is off: output moved to "
+                    "conversation export + Lhotse under outputs.clean_two_channel_dir")
+                if not (self.conversation_export_svc is not None
+                        and opt_in_step_enabled(args, "conversation_exports")):
+                    self.logger.warning(
+                        "[clean-2ch] conversation_exports is off, so nothing will be written to "
+                        "outputs.clean_two_channel_dir; enable steps.conversation_exports")
+            return None
         if self.clean_dataset_svc is None:
             return None
         root = self.clean_dataset_svc.resolve_root(root)
@@ -1267,7 +1304,8 @@ class PipelineService:
         return selection
 
     def _write_conversation_exports(self, stage_out, selection, audio_data,
-                                    output_dir, audio_path, speech_segments=None):
+                                    output_dir, audio_path, speech_segments=None,
+                                    export_target=None):
         """Write a previously selected/aligned result without invoking the LLM."""
         service = self.conversation_export_svc
         if selection is None:
@@ -1279,14 +1317,15 @@ class PipelineService:
                 "Conversation selection did not complete; no checkpoint was written, "
                 "so conversation_exports cannot safely overwrite previous output.")
         base_name = os.path.splitext(os.path.basename(audio_path))[0]
-        out_dir = os.path.join(output_dir, "conversation_exports")
+        out_dir, shared = export_target or (os.path.join(output_dir, "conversation_exports"), False)
         result = service.write(
             selection,
             waveform=audio_data.waveform, sample_rate=audio_data.sample_rate,
             out_dir=out_dir, base_name=base_name,
             speech_segments=speech_segments,
-            separation_service=getattr(self, "separation_svc", None))
-        stage_out.write_conversation_exports(result.report, result.exports)
+            separation_service=getattr(self, "separation_svc", None),
+            shared_out_dir=shared)
+        self._finish_conversation_export(stage_out, result, out_dir, shared, base_name)
         return result
 
     def _resolve_output_dir(self, args, audio_path: str) -> str:
@@ -2006,14 +2045,16 @@ class PipelineService:
             if getattr(args, "stop_after", None) == "conversation_exports":
                 self._write_conversation_exports(
                     stage_out, selection, audio_data, output_dir, audio_path,
-                    speech_segments=speech_segments)
+                    speech_segments=speech_segments,
+                    export_target=conversation_export_dir(config, args, output_dir))
                 self._release_llm_after(args, "conversation_selection")
             elif not postprocess_only and getattr(args, "stop_after", None) is None:
                 # Single-file runs do not go through utils.batch's stage-major
                 # loop, so finish the same stages inline.
                 self._write_conversation_exports(
                     stage_out, selection, audio_data, output_dir, audio_path,
-                    speech_segments=speech_segments)
+                    speech_segments=speech_segments,
+                    export_target=conversation_export_dir(config, args, output_dir))
 
         if getattr(args, "stop_after", None) == "conversation_exports":
             if self.logger:

@@ -176,3 +176,62 @@ def test_files_scored_at_once_share_one_scorer():
     for t in threads:
         t.join()
     assert len(built) == 1
+
+
+def test_score_survives_a_cleared_cache_through_the_progress_ledger(tmp_path):
+    from utils.progress import ProgressLedger
+
+    source = tmp_path / "input.wav"
+    source.write_bytes(b"audio")
+    ledger = ProgressLedger(str(tmp_path))
+    service = PipelineService.__new__(PipelineService)
+    service.audio_svc = _AudioService()
+    service.logger = None
+    service.progress_ledger = ledger
+    gate = _Gate()
+
+    first, _ = service._check_input_audio_quality(gate, _Checkpoint(), str(source))
+    assert gate.calls == 1
+
+    # The cache is wiped (a fresh checkpoint) and the ledger is read back from disk.
+    service.progress_ledger = ProgressLedger(str(tmp_path))
+    second, decoded = service._check_input_audio_quality(gate, _Checkpoint(), str(source))
+    assert second == first and decoded is None
+    assert gate.calls == 1 and service.audio_svc.calls == 1
+
+
+def test_a_changed_source_or_gate_is_scored_again_despite_the_ledger(tmp_path):
+    from utils.progress import ProgressLedger
+
+    source = tmp_path / "input.wav"
+    source.write_bytes(b"audio")
+    service = PipelineService.__new__(PipelineService)
+    service.audio_svc = _AudioService()
+    service.logger = None
+    service.progress_ledger = ProgressLedger(str(tmp_path))
+    gate = _Gate()
+    service._check_input_audio_quality(gate, _Checkpoint(), str(source))
+
+    source.write_bytes(b"a different recording")
+    service._check_input_audio_quality(gate, _Checkpoint(), str(source))
+    assert gate.calls == 2
+
+
+def test_skipped_scores_are_not_kept_in_the_ledger(tmp_path):
+    from utils.progress import ProgressLedger
+
+    ledger = ProgressLedger(str(tmp_path))
+    source = tmp_path / "input.wav"
+    source.write_bytes(b"audio")
+
+    class SkippingGate(_Gate):
+        def check(self, *args, **kwargs):
+            self.calls += 1
+            return {"skipped": True, "reason": "scorer unavailable"}
+
+    service = PipelineService.__new__(PipelineService)
+    service.audio_svc = _AudioService()
+    service.logger = None
+    service.progress_ledger = ledger
+    service._check_input_audio_quality(SkippingGate(), _Checkpoint(), str(source))
+    assert ledger.get_quality(str(source)) is None

@@ -235,13 +235,11 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
                         logger.info(f"Stage '{label}' is off in the profile; skipping batch pass")
                     continue
         elif stage is None:
-            profile = ((config.get("environments") or {})
-                       .get(getattr(args, "env", ""), {}))
-            clean_data_on = bool(
-                ((profile.get("outputs") or {}).get("clean_two_channel_dir")))
-            if not step_enabled(args, "export") and not clean_data_on:
+            # clean_two_channel_dir no longer drives a pass of its own: the legacy
+            # exporter is off and conversation_exports has its own stage pass.
+            if not step_enabled(args, "export"):
                 if logger:
-                    logger.info("Clean-data and export are off; skipping final batch pass")
+                    logger.info("Export is off; skipping final batch pass")
                 continue
         pending = [p for p in batch if p not in failures]
         if stage == "diarization":

@@ -1021,6 +1021,7 @@ def main():
         else:
             ledger = ProgressLedger(os.path.dirname(os.path.abspath(args.audio)),
                                     logger=logger, persist=False)
+        pipeline.progress_ledger = ledger
         if ledger.done or ledger.failed or ledger.rejected:
             logger.info(f"Resuming: {ledger.summary(len(paths))} "
                         f"(ledger: {os.path.basename(ledger.path)})")
