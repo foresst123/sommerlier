@@ -328,7 +328,7 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
                             if logger:
                                 logger.error(
                                     f"Failed on {path} during {label}: "
-                                    f"{type(e).__name__}: {e}")
+                                    f"{type(e).__name__}: {e}", exc_info=e)
                             failures[path] = (
                                 f"{label}: {type(e).__name__}: {e}")
             else:
@@ -341,7 +341,7 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
                         if logger:
                             logger.error(
                                 f"Failed on {path} during {label}: "
-                                f"{type(e).__name__}: {e}")
+                                f"{type(e).__name__}: {e}", exc_info=e)
                         failures[path] = f"{label}: {type(e).__name__}: {e}"
 
             # Block here until every diarize_postprocess() future this
