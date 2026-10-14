@@ -342,6 +342,20 @@ def test_a_later_entry_loads_the_measurement_instead_of_sweeping_again(tmp_path,
     assert float(again.noise_track.combined.max()) == pytest.approx(0.02, abs=1e-3)
 
 
+def test_a_pass_on_the_cached_post_music_waveform_finds_the_processed_noise(tmp_path, sweeps):
+    """Selection runs on later passes that never strip; it must still be given the noise
+    measured after the strip, which is filed under the namespace the strip used."""
+    pipe, config, ckpt = _pipeline(Halving(), tmp_path)
+    pipe._strip_music(_args(), config, ckpt, _audio(), None, MusicMap())
+    pipe._measure_processed_noise(_args(), ckpt, _audio(value=0.5))
+
+    _, _, later = _pipeline(Halving(), tmp_path)
+    later.namespaces["noise_track_processed"] = pipe._music_namespace(_args(), config)
+    payload = later.load_if_committed("noise_track_processed", fmt="json")
+    assert payload is not None
+    assert float(NoiseTrack.from_json(payload).combined.max()) == pytest.approx(0.02, abs=1e-3)
+
+
 def test_the_measurement_before_stripping_is_kept_where_it_was_saved(tmp_path, sweeps):
     pipe, config, ckpt = _pipeline(Halving(), tmp_path)
     ckpt.save("noise_track", _track(0.30).to_json(), fmt="json")

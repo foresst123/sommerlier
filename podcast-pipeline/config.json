@@ -424,7 +424,7 @@
           "music_patched_max": 0.15,
           "require_word_alignment": true,
           "thinking": true,
-          "max_new_tokens": 4096
+          "max_new_tokens": 16384
         },
         "sidon": {
           "num_steps": 100

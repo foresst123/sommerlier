@@ -833,6 +833,12 @@ class PipelineService:
                 f"pipeline.music_scope must be 'full' or 'spans', got {scope!r}")
         return scope
 
+    @classmethod
+    def _music_namespace(cls, args, config) -> str:
+        """Key the music patches and the noise measured after them are filed under."""
+        stem = os.path.splitext(cls._music_checkpoint_name(args, config))[0]
+        return re.sub(r"[^A-Za-z0-9._-]+", "_", f"{cls._music_scope(args)}-{stem}")
+
     @staticmethod
     def _music_checkpoint_name(args, config) -> str:
         """The separator checkpoint in use, so what it produced is filed under it."""
@@ -884,8 +890,7 @@ class PipelineService:
         if scope == "spans" and music_map.total_of(MUSIC) <= 0:
             return False
 
-        stem = os.path.splitext(self._music_checkpoint_name(args, config))[0]
-        namespace = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{scope}-{stem}")
+        namespace = self._music_namespace(args, config)
         checkpoint.namespaces["music_patches"] = namespace
         checkpoint.namespaces["noise_track_processed"] = namespace
 
@@ -1418,6 +1423,15 @@ class PipelineService:
         if music_payload is not None:
             music_map = MusicMap.from_json(music_payload)
             self.noise_track = NoiseTrack.from_json(noise_payload)
+            if processed_audio_cached and self.step_enabled(args, "music_analysis"):
+                # The waveform in use is the one after music removal, so a conversation is
+                # judged by the noise measured on it, not by the recording as it was made.
+                checkpoint.namespaces["noise_track_processed"] = self._music_namespace(
+                    args, config)
+                processed_noise = checkpoint.load_if_committed(
+                    "noise_track_processed", fmt="json")
+                if processed_noise is not None:
+                    self.noise_track = NoiseTrack.from_json(processed_noise)
         else:
             music_map = MusicMap()
             if self.step_enabled(args, "music_analysis"):
