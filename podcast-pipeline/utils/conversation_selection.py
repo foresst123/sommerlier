@@ -241,8 +241,9 @@ class ConversationSelectionConfig:
                       if key not in RENDER_ONLY_SETTINGS})
 
 
-# Settings of `models.conversation_selection` read by the export renderer instead.
-RENDER_ONLY_SETTINGS = frozenset({"render_workers", "reuse_render"})
+# Settings of `models.conversation_selection` read by the export service instead of the finder:
+# the renderer's knobs, and replay_old_replies (where replies come from, not which are chosen).
+RENDER_ONLY_SETTINGS = frozenset({"render_workers", "reuse_render", "replay_old_replies"})
 
 
 def tier_of(score: float) -> str:

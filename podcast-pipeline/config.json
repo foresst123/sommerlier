@@ -397,16 +397,17 @@
         "conversation_selection": {
           "render_workers": 4,
           "reuse_render": true,
-          "min_seconds": 30,
-          "max_seconds": 120,
+          "replay_old_replies": true,
+          "min_seconds": 20,
+          "max_seconds": 150,
           "finder_window_segments": 150,
           "finder_overlap_segments": 40,
           "max_silence": 3.0,
           "max_monologue": 0,
           "min_turns_each": 1,
-          "min_turns_total": 3,
+          "min_turns_total": 2,
           "count_backchannels_as_turns": true,
-          "min_score": 70,
+          "min_score": 60,
           "weights": {
             "interaction": 25
           },
