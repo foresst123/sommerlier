@@ -4,7 +4,8 @@ Run (from podcast-pipeline/), dry run first:
   python scripts/filter_language.py /home/lamkd2/data/data_input/data_run_2
   python scripts/filter_language.py /home/lamkd2/data/data_input/data_run_2 --apply
 
-Only the audio files directly under the folder are looked at. A file the progress ledger
+By default only the audio files directly under the folder are looked at; --depth 2 also
+goes one subfolder down (each file is judged against the ledger and _final of its own folder). A file the progress ledger
 marks done or rejected is left alone, so nothing finished is ever redone. For every other
 file a small Whisper model guesses the language from a few 30 s windows; when the mean
 probability of Vietnamese is under --min_vi the file is dropped:
@@ -34,11 +35,19 @@ FRACTIONS = (0.10, 0.35, 0.60, 0.85)
 SAMPLE_RATE = 16000
 
 
-def list_audio(folder):
-    """Audio files directly under `folder` (no recursion), sorted."""
-    return sorted(
-        os.path.join(folder, name) for name in os.listdir(folder)
-        if name.lower().endswith(AUDIO_EXT) and os.path.isfile(os.path.join(folder, name)))
+def list_audio(folder, depth=1):
+    """Audio files under `folder`, down to `depth` levels (1 = directly under it), sorted.
+
+    `_final` and hidden folders are never entered.
+    """
+    out = []
+    base_parts = len(os.path.normpath(folder).split(os.sep))
+    for cur, dirs, files in os.walk(folder):
+        level = len(os.path.normpath(cur).split(os.sep)) - base_parts + 1
+        dirs[:] = sorted(d for d in dirs if d != "_final" and not d.startswith(".")) if level < depth else []
+        out += [os.path.join(cur, name) for name in sorted(files)
+                if name.lower().endswith(AUDIO_EXT)]
+    return sorted(out)
 
 
 def read_ledger(folder):
@@ -51,12 +60,21 @@ def read_ledger(folder):
     return set(data.get("done", {}) or {}), set(data.get("rejected", {}) or {})
 
 
-def plan(folder, include_done=False):
+def ledger_state(path, cache):
+    """(done, rejected) of the folder that holds `path` (its own ledger, like the pipeline's --audio_dir)."""
+    container = os.path.dirname(path)
+    if container not in cache:
+        cache[container] = read_ledger(container)
+    return cache[container]
+
+
+def plan(folder, include_done=False, depth=1):
     """(todo, skipped_done, skipped_rejected) as lists of paths."""
-    done, rejected = read_ledger(folder)
+    ledgers = {}
     todo, skipped_done, skipped_rejected = [], [], []
-    for path in list_audio(folder):
+    for path in list_audio(folder, depth):
         name = os.path.basename(path)
+        done, rejected = ledger_state(path, ledgers)
         if name in done and not include_done:
             skipped_done.append(path)
         elif name in rejected:
@@ -255,8 +273,8 @@ class WhisperLanguageId:
 
 def run(args, detector=None):
     folder = os.path.abspath(args.folder)
-    todo, skipped_done, skipped_rejected = plan(folder, include_done=args.include_done)
-    done_names = read_ledger(folder)[0]
+    todo, skipped_done, skipped_rejected = plan(folder, include_done=args.include_done, depth=args.depth)
+    ledgers = {}
     if args.limit:
         todo = todo[:args.limit]
     print(f"{folder}: {len(todo)} file cần kiểm tra | bỏ qua {len(skipped_done)} đã done, "
@@ -280,7 +298,7 @@ def run(args, detector=None):
             action = "keep"
             if flagged:
                 stem = stem_of(path)
-                targets = outputs_of(folder, stem, args.cache_dir, args.job_id)
+                targets = outputs_of(os.path.dirname(path), stem, args.cache_dir, args.job_id)
                 items, ds_files = dataset_targets(args.dataset_root, stem) if args.dataset_root else ([], [])
                 size = (os.path.getsize(path) + sum(dir_size(t) for t in targets)
                         + sum(dir_size(i) for i in items) + sum(os.path.getsize(f) for f in ds_files))
@@ -300,7 +318,7 @@ def run(args, detector=None):
                 flagged_rows.append((path, mean_vi, top, targets))
             shown = "n/a" if mean_vi is None else f"{mean_vi:.2f}"
             note = ""
-            if flagged and os.path.basename(path) in done_names:
+            if flagged and os.path.basename(path) in ledger_state(path, ledgers)[0]:
                 note = f" [done; {len(items)} conversation trong dataset"
                 note += "]" if args.dataset_root else ", thêm --dataset_root để xóa]"
             elif flagged and args.dataset_root and items:
@@ -319,6 +337,8 @@ def build_parser():
     ap.add_argument("folder", help="input folder; only the audio files directly under it are checked")
     ap.add_argument("--apply", action="store_true", help="delete for real (default is a dry run)")
     ap.add_argument("--trash", default=None, help="move the audio here instead of deleting it")
+    ap.add_argument("--depth", type=int, default=1,
+                    help="folder levels to scan: 1 = files directly under FOLDER, 2 = also one subfolder down")
     ap.add_argument("--include_done", action="store_true",
                     help="also check files the ledger marks done (default: skip them)")
     ap.add_argument("--dataset_root", default=None,

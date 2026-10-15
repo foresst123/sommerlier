@@ -146,3 +146,27 @@ def test_a_done_file_is_left_alone_without_include_done(tmp_path):
     detector = lambda p: [{"vi": 0.0, "en": 1.0}]
     fl.run(_args(folder, cache, apply=True), detector=detector)
     assert (folder / "[Vlog] english.wav").exists()
+
+
+def test_depth_two_reaches_subfolders_and_uses_their_own_ledger_and_final(tmp_path):
+    root = tmp_path / "root"
+    sub = root / "batch1"
+    sub.mkdir(parents=True)
+    (root / "top.wav").write_bytes(b"x")
+    (sub / "deep english.wav").write_bytes(b"x")
+    (sub / "deep done.wav").write_bytes(b"x")
+    (sub / fl.LEDGER_NAME).write_text(json.dumps({"done": {"deep done.wav": {}}, "rejected": {}}))
+    out = sub / "_final" / "params" / "deep english" / "01_music"
+    out.mkdir(parents=True)
+    (out / "m.json").write_text("{}")
+    assert [os.path.basename(p) for p in fl.list_audio(root, 1)] == ["top.wav"]
+    todo, done, _ = fl.plan(root, depth=2)
+    assert sorted(os.path.basename(p) for p in todo) == ["deep english.wav", "top.wav"]
+    assert [os.path.basename(p) for p in done] == ["deep done.wav"]
+    detector = lambda p: [{"vi": 0.0, "en": 1.0}] if "english" in p else [{"vi": 0.9}]
+    args = fl.build_parser().parse_args([str(root), "--depth", "2", "--apply",
+                                         "--cache_dir", str(tmp_path / "cache"), "--log", str(tmp_path / "l.tsv")])
+    fl.run(args, detector=detector)
+    assert not (sub / "deep english.wav").exists()
+    assert not (sub / "_final" / "params" / "deep english").exists()
+    assert (root / "top.wav").exists() and (sub / "deep done.wav").exists()
