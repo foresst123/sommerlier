@@ -242,7 +242,7 @@ def _prompt(**settings):
 
 
 def test_the_prompt_version_is_bumped():
-    assert CONVERSATION_EXPORT_PROMPT_VERSION == "conversation-export-v12-emotion"
+    assert CONVERSATION_EXPORT_PROMPT_VERSION == "conversation-export-v13-semantic-clean"
 
 
 def test_the_prompt_asks_for_the_new_fields_and_fills_the_new_placeholder():
@@ -257,7 +257,7 @@ def test_the_prompt_asks_for_the_new_fields_and_fills_the_new_placeholder():
 def test_every_example_answer_in_the_prompt_carries_the_role_fields_for_kept_regions():
     prompt = _prompt()
     answers = [l[3:] for l in prompt.splitlines() if l.startswith("-> ")]
-    assert len(answers) == 4
+    assert len(answers) == 5
     for answer in answers:
         for region in parse_finder_reply(answer):
             if region["keep"]:

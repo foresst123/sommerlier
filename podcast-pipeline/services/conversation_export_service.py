@@ -87,7 +87,7 @@ from utils.llm_json import clean_reply, is_cut_in_thought, is_readable, objects_
 from utils.transcript_windows import line_number
 
 # Bump when the prompt or the acceptance rules change.
-CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v12-emotion"
+CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v13-semantic-clean"
 CONVERSATION_SELECTION_CHECKPOINT_VERSION = 1
 
 _TEMPLATE_SLACK_TOKENS = 64
@@ -209,6 +209,18 @@ _FINDER_EXAMPLES = (
     + "-> [" + _example_region(
         start_line=1, end_line=3, keep=False, self_contained=3,
         topic="kể chuyện khởi nghiệp một chiều", reason="B nói 73s trên 83s, gần như độc thoại") + "]\n"
+    "\n"
+    "Ví dụ 5 - nhãn người nói nghi sai ở nhiều dòng thì keep=false (không cứu được bằng cách đổi biên):\n"
+    + _example_lines([
+        ("0:00-0:08", 8.0, "A", 0.0, "-", "anh làm nghề này bao lâu rồi"),
+        ("0:09-0:15", 6.0, "A", 0.0, "-", "dạ em làm được năm năm rồi anh"),
+        ("0:16-0:30", 14.0, "B", 0.0, "-", "vậy em thấy khó nhất là gì"),
+        ("0:31-0:40", 9.0, "B", 0.0, "-", "khó nhất là giữ khách cũ chị ạ"),
+        ("0:41-0:52", 11.0, "A", 0.0, "-", "ừ chị hiểu rồi, cảm ơn em"),
+    ])
+    + "-> [" + _example_region(
+        start_line=1, end_line=5, keep=False, self_contained=2,
+        topic="hỏi đáp về nghề", reason="nhãn nghi sai dòng 2, 3, 4: câu đáp mang nhãn người hỏi") + "]\n"
 )
 
 CONVERSATION_FINDER_SYSTEM_PROMPT = (
@@ -256,13 +268,15 @@ CONVERSATION_FINDER_SYSTEM_PROMPT = (
     "## CÁCH SUY NGHĨ (vừa đủ, ngắn gọn)\n"
     "Suy nghĩ ngắn theo đúng 3 bước, rồi trả JSON. KHÔNG chép lại hay đọc lại từng dòng của cửa sổ.\n"
     "1. Tìm ĐIỂM NGẮT, chỉ ghi số dòng: seam_before=1, người thứ ba xuất hiện, cờ CỨNG, intro/outro/quảng cáo, "
-    "đoạn độc thoại dài, chỗ mạch hội thoại đứt (không ai đáp lại, hai đoạn không liên quan bị ghép).\n"
+    "đoạn độc thoại dài, chỗ mạch hội thoại đứt (không ai đáp lại, hai đoạn không liên quan bị ghép), "
+    "và dòng NGHI NGỜ về nhãn người nói hoặc nội dung (xem KIỂM TRA NGỮ NGHĨA).\n"
     "2. Với mỗi vùng giữa hai điểm ngắt, tính thời lượng = end của dòng cuối trừ start của dòng đầu, "
     "và đếm số người nói. Chỉ kiểm tra kỹ những vùng có vẻ giữ được; vùng rõ ràng bỏ thì ghi một dòng lý do.\n"
     "3. Quyết định keep, self_contained, vai (assistant), các dòng ngắt lời MỘT lần cho mỗi vùng, rồi viết JSON. "
     "Không quay lại xét lại vùng đã chốt.\n"
-    "Khi vùng ở gần ngưỡng hoặc phân vân: nghiêng về keep=true nếu đúng hai người và đủ dài, vì validator sẽ kiểm tra lại. "
-    "Đừng tốn suy nghĩ vào transcript sai vài từ, nhãn A/B/C hay số thông số nhỏ lệch.\n"
+    "Khi vùng ở gần ngưỡng về số người hoặc độ dài: nghiêng về keep=true, vì validator sẽ kiểm tra lại. "
+    "Nhưng về nhãn người nói và nội dung thì ngược lại: phân vân thì LOẠI, dữ liệu sạch quan trọng hơn số lượng. "
+    "Đừng tốn suy nghĩ vào transcript sai một hai từ hay số thông số nhỏ lệch.\n"
     "\n"
     "## TÍNH THỜI LƯỢNG\n"
     "- Thời lượng một vùng = thời điểm KẾT THÚC của dòng cuối trừ thời điểm BẮT ĐẦU của dòng đầu, lấy từ mốc thời gian. "
@@ -277,8 +291,27 @@ CONVERSATION_FINDER_SYSTEM_PROMPT = (
     "- có DÒNG CHẢY hội thoại liên tục: mỗi lượt đáp lại lượt trước, người kia theo mạch chứ không nói chuyện riêng;\n"
     "- nghe độc lập vẫn hiểu: không bắt đầu giữa một ý đang dở, kết thúc bằng một ý trọn hoặc một cặp hỏi-đáp trọn;\n"
     "- có nội dung thật (kiến thức, câu chuyện, trao đổi), không phải chào hỏi, quảng cáo, đọc kịch bản, intro/outro;\n"
-    "- dài khoảng {min_seconds}-{max_seconds} giây, tính từ mốc thời gian.\n"
+    "- dài khoảng {min_seconds}-{max_seconds} giây, tính từ mốc thời gian;\n"
+    "- sạch về ngữ nghĩa: nhãn người nói khớp với nội dung ở mọi lượt và chữ đọc lên là lời nói có nghĩa (xem KIỂM TRA NGỮ NGHĨA bên dưới).\n"
     "Ưu tiên vùng có tương tác full-duplex (ngắt lời, đệm lời ừ/dạ, nói chồng tự nhiên) nhưng không bắt buộc.\n"
+    "\n"
+    "## KIỂM TRA NGỮ NGHĨA (nhãn người nói và chữ do ASR)\n"
+    "Nhãn người nói và văn bản đều do máy tạo và đôi khi sai. Bạn không nghe được audio, nên hãy đọc nội dung như người đọc hiểu "
+    "hội thoại để phát hiện dòng NGHI NGỜ:\n"
+    "- NHÃN SAI: một lượt mà nội dung chỉ hợp với người kia, ví dụ tự hỏi rồi tự đáp; câu hỏi và câu trả lời mang cùng nhãn; "
+    "người này đáp một câu không ai hỏi trong khi câu đó là câu trả lời cho câu hỏi của chính họ; xưng hô đảo hẳn so với các lượt khác "
+    "của cùng nhãn (đang gọi người kia là anh lại tự xưng anh); nhãn đổi giữa chừng một ý đang nói dở; "
+    "lời đệm (ừ, dạ, đúng rồi) nằm lẫn trong lượt dài của chính người đang nói.\n"
+    "- CHỮ SAI NẶNG: câu vô nghĩa hoặc từ rời rạc không thành câu; câu trôi chảy nhưng lạc hẳn chủ đề so với các dòng quanh nó; "
+    "văn mẫu kiểu lời chào kênh, đăng ký, cảm ơn người xem chen vào; cả dòng là ngoại ngữ.\n"
+    "- KHÔNG tính là nghi ngờ: sai một hai từ, sai chính tả, thiếu dấu, nghe nhầm từ đồng âm mà câu vẫn hiểu được, ngập ngừng, lặp từ, "
+    "tiếng cười, tên riêng viết sai. Các lỗi nhỏ này được bỏ qua.\n"
+    "Cách xử lý, theo thứ tự:\n"
+    "1. Dòng nghi ngờ rõ ràng: đặt nó ngoài mọi vùng keep=true, tách vùng tại đó như một seam; mỗi bên chỉ được giữ nếu tự nó vẫn đủ tốt.\n"
+    "2. Trong cùng một vùng có từ hai dòng nghi ngờ trở lên (hoặc nhãn sai kéo dài nhiều lượt liên tiếp): không giữ vùng đó; "
+    "chỉ giữ các đoạn liền nhau sạch nếu còn đủ dài, còn lại keep=false.\n"
+    "3. Phân vân không biết dòng đó đúng hay sai: coi như nghi ngờ, theo bước 1.\n"
+    "Khi keep=false vì lý do này, reason ghi rõ \"nhãn nghi sai\" hoặc \"chữ vô nghĩa\" kèm số dòng.\n"
     "\n"
     "## ĐỔI CHỦ ĐỀ VÀ NGẮT LỜI\n"
     "- Đổi chủ đề ĐƯỢC PHÉP khi một người chủ động đổi (ngắt lời, hỏi chuyện khác, phản đối) VÀ người kia theo sang chủ đề mới.\n"
@@ -293,6 +326,7 @@ CONVERSATION_FINDER_SYSTEM_PROMPT = (
     "## KHI NÀO keep=false\n"
     "Đặt keep=false khi vùng chỉ là cầu nối/intro/outro/quảng cáo, quá ngắn, quá dài không thể chia hợp lý, một người nói gần như độc thoại, "
     "mạch hội thoại đứt hoặc cụt, có hơn hai người không thể tránh bằng đổi biên, "
+    "nhãn người nói nghi sai hoặc chữ ASR vô nghĩa ở từ hai dòng trở lên không thể tách ra được, "
     "hoặc chất lượng kỹ thuật rõ ràng quá xấu. "
     "reason phải nói NGẮN GỌN nguyên nhân chính để người vận hành debug được.\n"
     "\n"
