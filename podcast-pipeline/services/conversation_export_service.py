@@ -87,7 +87,7 @@ from utils.llm_json import clean_reply, is_cut_in_thought, is_readable, objects_
 from utils.transcript_windows import line_number
 
 # Bump when the prompt or the acceptance rules change.
-CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v13-semantic-clean"
+CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v14-concise"
 CONVERSATION_SELECTION_CHECKPOINT_VERSION = 1
 
 _TEMPLATE_SLACK_TOKENS = 64
@@ -210,185 +210,95 @@ _FINDER_EXAMPLES = (
         start_line=1, end_line=3, keep=False, self_contained=3,
         topic="kể chuyện khởi nghiệp một chiều", reason="B nói 73s trên 83s, gần như độc thoại") + "]\n"
     "\n"
-    "Ví dụ 5 - nhãn người nói nghi sai ở nhiều dòng thì keep=false (không cứu được bằng cách đổi biên):\n"
+    "Ví dụ 5 - nhãn nhảy giữa câu ở nhiều dòng mà không nói chồng, không ai xác nhận thì keep=false:\n"
     + _example_lines([
-        ("0:00-0:08", 8.0, "A", 0.0, "-", "anh làm nghề này bao lâu rồi"),
-        ("0:09-0:15", 6.0, "A", 0.0, "-", "dạ em làm được năm năm rồi anh"),
-        ("0:16-0:30", 14.0, "B", 0.0, "-", "vậy em thấy khó nhất là gì"),
-        ("0:31-0:40", 9.0, "B", 0.0, "-", "khó nhất là giữ khách cũ chị ạ"),
-        ("0:41-0:52", 11.0, "A", 0.0, "-", "ừ chị hiểu rồi, cảm ơn em"),
+        ("0:00-0:13", 13.0, "A", 0.0, "-", "Mình vừa nói đến vốn, rồi mô hình kinh doanh. Vậy bài toán tài chính thì sao?"),
+        ("0:14-0:21", 7.0, "B", 0.0, "-", "Lưu ý là khi các bạn làm thì phải tính bài toán cho kỹ."),
+        ("0:22-0:25", 3.0, "A", 0.0, "-", "Nếu nó phải nằm trong khoảng thu hồi vốn dưới một năm"),
+        ("0:26-0:27", 1.2, "B", 0.0, "-", "thì nó sẽ là an toàn"),
+        ("0:28-0:28", 0.4, "A", 0.0, "-", "hình."),
+        ("0:29-0:30", 1.5, "B", 0.0, "-", "trong ngành này này."),
     ])
     + "-> [" + _example_region(
-        start_line=1, end_line=5, keep=False, self_contained=2,
-        topic="hỏi đáp về nghề", reason="nhãn nghi sai dòng 2, 3, 4: câu đáp mang nhãn người hỏi") + "]\n"
+        start_line=1, end_line=6, keep=False, self_contained=2,
+        topic="bàn về bài toán tài chính", reason="nhảy nhãn giữa câu ở dòng 3-6: không nói chồng (ov=0), không ai xác nhận") + "]\n"
 )
 
 CONVERSATION_FINDER_SYSTEM_PROMPT = (
-    "Bạn là bộ PHÂN VÙNG + TÌM ĐOẠN hội thoại tiếng Việt để tạo dữ liệu huấn luyện full-duplex: "
-    "một trợ lý (assistant) trò chuyện với một người dùng (user) và có thể nói chen, ngắt lời, đệm lời. "
-    "Bạn nhận một cửa sổ dài của transcript sau diarization/ASR. Cửa sổ có thể có nhiều người nói.\n"
-    "Mục đích: huấn luyện mô hình full-duplex cần các đoạn HỘI THOẠI HOÀN CHỈNH giữa HAI người thật sự trao đổi qua lại, "
-    "liền mạch từ đầu đến cuối vùng. Mỗi vùng bạn giữ sẽ được xếp vào một trong 3 thư mục (interrupt / backchannel / turn_by_turn, xem mục LOẠI HỘI THOẠI), "
-    "nên bạn là người quyết định loại. Không cần mở đầu hay kết thúc thật trọn vẹn; cần là một cuộc trò chuyện hai người liền mạch.\n"
-    "\n"
-    "## NHIỆM VỤ BẮT BUỘC: PHỦ TOÀN BỘ CỬA SỔ\n"
-    "Hãy chia TOÀN BỘ các dòng 1..N thành các vùng liên tiếp theo mạch hội thoại, rồi quyết định keep=true/false cho từng vùng.\n"
-    "- Mọi dòng từ 1 đến N phải xuất hiện trong đúng MỘT vùng.\n"
-    "- Các vùng phải theo thứ tự, không chồng nhau, không để hở: vùng đầu start_line=1; vùng sau bắt đầu ngay sau vùng trước; "
-    "vùng cuối end_line=N.\n"
-    "- KHÔNG được trả [] khi cửa sổ có dòng. Nếu không có đoạn nào đáng giữ, vẫn phải chia vùng và đặt keep=false kèm lý do.\n"
-    "- Không chia vụn từng segment. Hãy chia theo mạch hội thoại và cố gắng tạo vùng có kích thước hữu ích.\n"
-    "- Nếu một vùng dài hơn {max_seconds}s hoặc mạch hội thoại đứt, hãy tách thành nhiều vùng. Nếu các ý liền nhau và cùng mạch, "
-    "có thể gộp để đạt khoảng {min_seconds}-{max_seconds}s.\n"
-    "\n"
-    "## DỮ LIỆU MỖI DÒNG\n"
-    "Mỗi dòng có dạng: [số dòng] start-end (d=thời lượng) NGƯỜI {THÔNG_SỐ}: nội dung. "
-    "start-end là mốc phút:giây; d là độ dài của CHÍNH dòng đó tính bằng giây (một dòng có thể dài hàng chục giây). "
-    "NGƯỜI là nhãn A/B/C/... chỉ để phân biệt người nói.\n"
-    "THÔNG_SỐ là đo trực tiếp từ pipeline:\n"
-    "- gap: khoảng cách với segment trước; số âm nghĩa là overlap thời gian.\n"
-    "- ov: số giây segment này overlap với người nói khác.\n"
-    "- noise: combined p90; ns/ne/nr là noise_speech/noise_env/noise_room; thấp hơn sạch hơn.\n"
-    "- noisy: tỷ lệ frame vượt ngưỡng; run: chuỗi noise liên tục dài nhất.\n"
-    "- music: tỷ lệ segment bị music-patch; 0 là không patch, càng thấp càng tốt.\n"
-    "- bss=1: segment có dùng separation; unsep: tỷ lệ chưa tách được.\n"
-    "- seam_before/seam_inside và flags: cảnh báo kỹ thuật.\n"
-    "Validator sau bạn tự đo lại các chỉ số này (noise <= {noise_max}, ns <= {noise_speech_max}, ne <= {noise_env_max}, "
-    "nr <= {noise_room_max}, music <= {music_patched_max}, noisy < {noisy_share_max}, run < {noisy_run_seconds}s). "
-    "Bạn KHÔNG tính lại từng dòng: chỉ tránh những dòng có chỉ số rõ ràng vượt xa ngưỡng.\n"
-    "- review: cờ từ bước rà soát transcript. Dòng không có review= là sạch. speaker_turn / speaker_phrase / asr_hallucination / asr_garbage là cờ CỨNG "
-    "(cả dòng hoặc một cụm trong dòng thuộc người kia, hoặc ASR bịa/vô nghĩa); "
-    "review=not_vietnamese là dòng không phải tiếng Việt, hãy tránh đưa dòng đó vào vùng keep=true.\n"
-    "Dòng có cờ CỨNG phải nằm NGOÀI mọi vùng keep=true: đặt biên vùng quanh chúng (tách vùng tại dòng đó). "
-    "flags=bad_separation cũng là cờ CỨNG: dòng đó bị lỗi tách giọng ở chỗ hai người nói chồng, KHÔNG dùng được và sẽ bị bỏ. "
-    "Hãy coi nó như một seam: đừng đưa nó vào vùng keep=true, và đừng nối hai bên của nó thành một hội thoại; "
-    "mỗi bên là một hội thoại riêng, chỉ dựng từ các dòng sạch liền nhau.\n"
-    "Dòng có cờ MỀM vẫn được phép nằm trong vùng keep=true nhưng làm vùng kém chất lượng hơn, nên tránh nếu có cách đặt biên tốt hơn.\n"
-    "\n"
-    "## CÁCH SUY NGHĨ (vừa đủ, ngắn gọn)\n"
-    "Suy nghĩ ngắn theo đúng 3 bước, rồi trả JSON. KHÔNG chép lại hay đọc lại từng dòng của cửa sổ.\n"
-    "1. Tìm ĐIỂM NGẮT, chỉ ghi số dòng: seam_before=1, người thứ ba xuất hiện, cờ CỨNG, intro/outro/quảng cáo, "
-    "đoạn độc thoại dài, chỗ mạch hội thoại đứt (không ai đáp lại, hai đoạn không liên quan bị ghép), "
-    "và dòng NGHI NGỜ về nhãn người nói hoặc nội dung (xem KIỂM TRA NGỮ NGHĨA).\n"
-    "2. Với mỗi vùng giữa hai điểm ngắt, tính thời lượng = end của dòng cuối trừ start của dòng đầu, "
-    "và đếm số người nói. Chỉ kiểm tra kỹ những vùng có vẻ giữ được; vùng rõ ràng bỏ thì ghi một dòng lý do.\n"
-    "3. Quyết định keep, self_contained, vai (assistant), các dòng ngắt lời MỘT lần cho mỗi vùng, rồi viết JSON. "
-    "Không quay lại xét lại vùng đã chốt.\n"
-    "Khi vùng ở gần ngưỡng về số người hoặc độ dài: nghiêng về keep=true, vì validator sẽ kiểm tra lại. "
-    "Nhưng về nhãn người nói và nội dung thì ngược lại: phân vân thì LOẠI, dữ liệu sạch quan trọng hơn số lượng. "
-    "Đừng tốn suy nghĩ vào transcript sai một hai từ hay số thông số nhỏ lệch.\n"
-    "\n"
-    "## TÍNH THỜI LƯỢNG\n"
-    "- Thời lượng một vùng = thời điểm KẾT THÚC của dòng cuối trừ thời điểm BẮT ĐẦU của dòng đầu, lấy từ mốc thời gian. "
-    "TUYỆT ĐỐI không ước lượng theo số dòng: dòng ngắn và dòng dài khác nhau rất nhiều.\n"
-    "- Thời lượng nói của mỗi người = tổng d các dòng của người đó. Nếu một người chiếm gần hết thời lượng của vùng thì đó là độc thoại.\n"
-    "\n"
-    "## KHI NÀO keep=true\n"
-    "Đặt keep=true khi vùng có TIỀM NĂNG làm một mẫu hội thoại tốt. Validator phía sau sẽ kiểm tra lại bằng số liệu, "
-    "vì vậy đừng quá bảo thủ chỉ vì noise/music hơi xấu hoặc một chỉ số gần ngưỡng.\n"
-    "Một vùng keep=true phải:\n"
-    "- có đúng HAI người nói từ start_line đến end_line, mỗi người ít nhất {min_turns_each} lượt nói thật;\n"
-    "- có DÒNG CHẢY hội thoại liên tục: mỗi lượt đáp lại lượt trước, người kia theo mạch chứ không nói chuyện riêng;\n"
-    "- nghe độc lập vẫn hiểu: không bắt đầu giữa một ý đang dở, kết thúc bằng một ý trọn hoặc một cặp hỏi-đáp trọn;\n"
-    "- có nội dung thật (kiến thức, câu chuyện, trao đổi), không phải chào hỏi, quảng cáo, đọc kịch bản, intro/outro;\n"
-    "- dài khoảng {min_seconds}-{max_seconds} giây, tính từ mốc thời gian;\n"
-    "- sạch về ngữ nghĩa: nhãn người nói khớp với nội dung ở mọi lượt và chữ đọc lên là lời nói có nghĩa (xem KIỂM TRA NGỮ NGHĨA bên dưới).\n"
-    "Ưu tiên vùng có tương tác full-duplex (ngắt lời, đệm lời ừ/dạ, nói chồng tự nhiên) nhưng không bắt buộc.\n"
-    "\n"
-    "## KIỂM TRA NGỮ NGHĨA (nhãn người nói và chữ do ASR)\n"
-    "Nhãn người nói và văn bản đều do máy tạo và đôi khi sai. Bạn không nghe được audio, nên hãy đọc nội dung như người đọc hiểu "
-    "hội thoại để phát hiện dòng NGHI NGỜ:\n"
-    "- NHÃN SAI: một lượt mà nội dung chỉ hợp với người kia, ví dụ tự hỏi rồi tự đáp; câu hỏi và câu trả lời mang cùng nhãn; "
-    "người này đáp một câu không ai hỏi trong khi câu đó là câu trả lời cho câu hỏi của chính họ; xưng hô đảo hẳn so với các lượt khác "
-    "của cùng nhãn (đang gọi người kia là anh lại tự xưng anh); nhãn đổi giữa chừng một ý đang nói dở; "
-    "lời đệm (ừ, dạ, đúng rồi) nằm lẫn trong lượt dài của chính người đang nói.\n"
-    "- CHỮ SAI NẶNG: câu vô nghĩa hoặc từ rời rạc không thành câu; câu trôi chảy nhưng lạc hẳn chủ đề so với các dòng quanh nó; "
-    "văn mẫu kiểu lời chào kênh, đăng ký, cảm ơn người xem chen vào; cả dòng là ngoại ngữ.\n"
-    "- KHÔNG tính là nghi ngờ: sai một hai từ, sai chính tả, thiếu dấu, nghe nhầm từ đồng âm mà câu vẫn hiểu được, ngập ngừng, lặp từ, "
-    "tiếng cười, tên riêng viết sai. Các lỗi nhỏ này được bỏ qua.\n"
-    "Cách xử lý, theo thứ tự:\n"
-    "1. Dòng nghi ngờ rõ ràng: đặt nó ngoài mọi vùng keep=true, tách vùng tại đó như một seam; mỗi bên chỉ được giữ nếu tự nó vẫn đủ tốt.\n"
-    "2. Trong cùng một vùng có từ hai dòng nghi ngờ trở lên (hoặc nhãn sai kéo dài nhiều lượt liên tiếp): không giữ vùng đó; "
-    "chỉ giữ các đoạn liền nhau sạch nếu còn đủ dài, còn lại keep=false.\n"
-    "3. Phân vân không biết dòng đó đúng hay sai: coi như nghi ngờ, theo bước 1.\n"
-    "Khi keep=false vì lý do này, reason ghi rõ \"nhãn nghi sai\" hoặc \"chữ vô nghĩa\" kèm số dòng.\n"
-    "\n"
-    "## ĐỔI CHỦ ĐỀ VÀ NGẮT LỜI\n"
-    "- Đổi chủ đề ĐƯỢC PHÉP khi một người chủ động đổi (ngắt lời, hỏi chuyện khác, phản đối) VÀ người kia theo sang chủ đề mới.\n"
-    "- Phải tách vùng hoặc bỏ khi đổi chủ đề do seam, music, hai đoạn không liên quan bị ghép lại, hoặc không ai phản ứng.\n"
-    "- KHÔNG đặt biên vùng ngay tại chỗ ngắt lời: giữ ít nhất {context_turns} lượt trước và {context_turns} lượt sau chỗ ngắt lời trong cùng vùng.\n"
-    "- Bắt buộc tách vùng tại: seam_before=1 / seam_inside=1 (seam_inside không được nằm trong vùng keep=true), "
-    "người thứ ba (tách tại đó hoặc co biên để cứu phần hai người), dòng có cờ CỨNG (dòng đó nằm ngoài vùng giữ), "
-    "quảng cáo/intro/outro, đoạn độc thoại dài không ai đáp.\n"
-    "- Vài dòng noise/music xấu nằm giữa: tách quanh chúng khi vẫn giữ được mạch; nếu không thì keep=false vùng đó. "
-    "Khoảng im lặng vài giây không tự làm hỏng hội thoại nếu nội dung vẫn cùng mạch. Transcript sai vài từ thì không loại.\n"
-    "\n"
-    "## KHI NÀO keep=false\n"
-    "Đặt keep=false khi vùng chỉ là cầu nối/intro/outro/quảng cáo, quá ngắn, quá dài không thể chia hợp lý, một người nói gần như độc thoại, "
-    "mạch hội thoại đứt hoặc cụt, có hơn hai người không thể tránh bằng đổi biên, "
-    "nhãn người nói nghi sai hoặc chữ ASR vô nghĩa ở từ hai dòng trở lên không thể tách ra được, "
-    "hoặc chất lượng kỹ thuật rõ ràng quá xấu. "
-    "reason phải nói NGẮN GỌN nguyên nhân chính để người vận hành debug được.\n"
-    "\n"
-    "## self_contained (chấm dòng chảy hội thoại, KHÔNG phải 'chỉ một chủ đề')\n"
-    "5 = mở và kết rất tự nhiên, dòng chảy rõ, nội dung thật. Chỉ dùng 5 khi thực sự nổi bật.\n"
-    "4 = tốt, dùng được, có thể hơi thừa/thiếu nhẹ ở biên. Đây thường là mức của một đoạn tốt.\n"
-    "3 = theo dõi được nhưng còn cụt/mơ hồ hoặc biên chưa đẹp.\n"
-    "1-2 = không dùng được riêng.\n"
-    "keep=true chỉ khi self_contained >= {min_semantic}. keep=false vẫn phải chấm self_contained để debug.\n"
-    "\n"
-    "## VAI (chỉ cho vùng keep=true)\n"
-    "- user = người DẪN: mở chủ đề, hỏi, yêu cầu, chuyển hướng.\n"
-    "- assistant = người THEO và ĐÁP: trả lời, giải thích, xác nhận, đệm lời khi nghe, nhường lời khi bị ngắt.\n"
-    "- KHÔNG xét theo thời gian nói: assistant có thể nói ít hơn. Nếu hai người hỏi và đáp ngang nhau thì role_conf thấp.\n"
-    "- assistant là nhãn người nói ('A', 'B', ...) đúng như trong cửa sổ này. role_conf từ 0 đến 1. "
-    "role_why tối đa 20 từ.\n"
-    "\n"
-    "## LOẠI HỘI THOẠI (category, chỉ cho vùng keep=true)\n"
-    "Mỗi vùng keep=true thuộc ĐÚNG MỘT loại:\n"
-    "- interrupt: có ít nhất một lần người này nói chen làm người kia DỪNG LẠI giữa nhịp nói của họ (bị cắt ngang, chưa nói hết ý), "
-    "HOẶC chen vào để ĐỔI HƯỚNG câu chuyện và người kia theo sang hướng mới. Chỉ nói chồng lên nhau chưa đủ.\n"
-    "- backchannel: MỌI chỗ hai người nói chồng tiếng mà KHÔNG phải interrupt: đệm lời (ừ, dạ, vâng, ờ, đúng rồi...), câu chen ngắn, "
-    "hay hai người nói đè lên nhau trong lúc người kia vẫn giữ lượt và nói tiếp. Không ai bị cắt ngang và không ai đổi hướng.\n"
-    "- turn_by_turn: CHỈ các lượt nối tiếp nhau, người này nói xong người kia mới nói, KHÔNG chồng tiếng chỗ nào và không có đệm lời. "
-    "Vùng có bất kỳ chồng tiếng hay đệm lời nào thì KHÔNG phải turn_by_turn.\n"
-    "Nếu vùng có CẢ interrupt lẫn backchannel thì chọn interrupt. Một câu chen mà người kia nói tiếp bình thường là backchannel, KHÔNG phải interrupt.\n"
-    "Đừng nhầm: \"à\", \"thế à\", \"vậy hả\" là câu hỏi lại; nếu người kia dừng để trả lời thì đó là interrupt, nếu người kia nói tiếp thì là backchannel.\n"
-    "interruptions là các dòng ngắt lời (chỉ khi category=interrupt). "
-    "Mỗi phần tử {\"line\": số dòng của câu ngắt lời, \"intent\": ...} với intent là một trong "
-    "topic_shift (chuyển chủ đề), clarify (hỏi lại/làm rõ), disagree (phản đối), complete (nói tiếp/hoàn thành ý người kia). "
-    "Thời điểm đo chính xác do code kiểm tra lại, bạn KHÔNG ghi. Không có thì để [].\n"
-    "\n"
-    "## emotions (chỉ cho vùng keep=true)\n"
-    "Với MỖI dòng trong vùng, ghi cảm xúc chính của người nói ở dòng đó, chỉ dựa vào nội dung chữ (bạn không nghe được audio). "
-    "Mỗi phần tử {\"line\": số dòng, \"emotion\": nhãn, \"conf\": số 0..1}. Nhãn là MỘT trong: {emotion_labels} (tiếng Anh, chữ thường). "
-    "Không rõ thì ghi neutral hoặc bỏ dòng đó; conf thấp khi chỉ đoán.\n"
-    "\n"
-    "## summary (chỉ cho vùng keep=true)\n"
-    "1-3 câu tiếng Việt, tối đa khoảng 50 từ: hai người nói về gì, diễn biến ra sao (ai ngắt lời, rẽ ở đâu), kết thúc thế nào. "
-    "Gọi theo vai (\"người hỏi\"/\"người đáp\"), không đoán tên hay giới tính, không thêm gì ngoài transcript.\n"
-    "\n"
-    "## VÍ DỤ (chỉ minh họa cách quyết định; KHÔNG sao chép nội dung hay chủ đề vào câu trả lời)\n"
-    "Các dòng bớt thông số cho gọn; cửa sổ thật có đủ thông số.\n"
-    "\n"
+    """Bạn là bộ PHÂN VÙNG + CHỌN đoạn hội thoại tiếng Việt để tạo dữ liệu huấn luyện full-duplex: một trợ lý (assistant) trò chuyện với một người dùng (user), có thể nói chen, ngắt lời, đệm lời. Bạn nhận một cửa sổ transcript dài (sau diarization + ASR), có thể có nhiều người nói, và chọn các đoạn HAI NGƯỜI trao đổi qua lại liền mạch, SẠCH về nhãn người nói và nội dung. Dữ liệu sạch quan trọng hơn số lượng.
+
+## NHIỆM VỤ
+Chia TOÀN BỘ dòng 1..N thành các vùng liên tiếp theo mạch hội thoại, mỗi vùng keep=true hoặc keep=false.
+- Mỗi dòng thuộc đúng MỘT vùng; vùng đầu start_line=1, mỗi vùng sau bắt đầu ngay sau vùng trước, vùng cuối end_line=N; không chồng, không hở.
+- Không bao giờ trả []. Không có đoạn đáng giữ thì vẫn phân vùng với keep=false kèm lý do.
+- Chia theo mạch, không chia vụn từng dòng. Tách khi mạch đứt hoặc vùng dài hơn {max_seconds}s; gộp ý liền mạch để đạt {min_seconds}-{max_seconds}s.
+- Tối đa {max_proposals} vùng; nếu cần, gộp các vùng keep=false liền nhau.
+
+## DỮ LIỆU MỖI DÒNG
+[số dòng] start-end (d=giây của chính dòng đó) NGƯỜI {thông số}: nội dung
+NGƯỜI là nhãn A/B/C... chỉ để phân biệt người nói. Thông số đo từ pipeline:
+- gap (âm = overlap thời gian), ov (giây overlap với người khác).
+- noise (p90 gộp), ns/ne/nr (noise_speech/env/room), noisy (tỷ lệ frame vượt ngưỡng), run (chuỗi noise liên tục dài nhất), music (tỷ lệ bị music-patch): thấp là sạch.
+- bss=1: có dùng separation; unsep: tỷ lệ chưa tách được.
+- seam_before, seam_inside, flags: cảnh báo kỹ thuật. review: cờ rà soát transcript; không có review= là sạch.
+Validator đo lại chính xác (noise <= {noise_max}, ns <= {noise_speech_max}, ne <= {noise_env_max}, nr <= {noise_room_max}, music <= {music_patched_max}, noisy < {noisy_share_max}, run < {noisy_run_seconds}s). Bạn không tính lại từng dòng, chỉ tránh dòng vượt xa ngưỡng.
+
+## CHỖ PHẢI NGẮT (đặt ngoài mọi vùng keep=true, tách vùng tại đó)
+- Cờ CỨNG: flags có bad_separation (lỗi tách giọng, không dùng được) hoặc review_flag_*; review=speaker_turn / speaker_phrase / asr_hallucination / asr_garbage. Dòng cờ cứng là seam: hai bên của nó là hai hội thoại riêng, không nối lại.
+- seam_before=1; seam_inside=1 (không được nằm trong vùng keep=true).
+- review=not_vietnamese; người thứ ba (tách tại đó hoặc co biên để cứu phần hai người); quảng cáo, intro, outro; độc thoại dài không ai đáp; mạch đứt hoặc hai đoạn không liên quan bị ghép.
+- Noise/music xấu nằm giữa: tách quanh chúng nếu còn giữ được mạch, không thì keep=false. Im lặng vài giây không làm hỏng hội thoại nếu cùng mạch.
+- Đổi chủ đề được phép khi một người chủ động đổi và người kia theo sang; không được khi do seam, music hoặc ghép hai đoạn không liên quan.
+- Không đặt biên ngay tại chỗ ngắt lời: giữ ít nhất {context_turns} lượt trước và {context_turns} lượt sau chỗ ngắt lời trong cùng vùng.
+
+## KIỂM TRA NGỮ NGHĨA (nhãn và chữ do máy tạo, đôi khi sai)
+Bạn không nghe được audio; hãy đọc như người hiểu hội thoại để tìm dòng NGHI NGỜ:
+- Nhãn sai: nội dung chỉ hợp với người kia (tự hỏi tự đáp; câu hỏi và câu đáp cùng nhãn; xưng hô đảo so với các lượt khác của cùng nhãn; lời đệm lẫn trong lượt dài của chính người đang nói).
+- Nhãn nhảy giữa câu: người kia nối tiếp câu dở của người trước là BÌNH THƯỜNG nếu hai dòng nói chồng nhau (ov>0 hoặc gap âm), hoặc người trước phản hồi sau đó (vâng, ừ, đúng rồi, cười, nói tiếp ý mình). Chỉ NGHI NGỜ khi các mảnh rất ngắn ("hình.", "rất là nhiều.") đảo nhãn liên tục trên cùng một câu, ov=0 và không ai phản hồi.
+- Chữ sai nặng: câu vô nghĩa, từ rời rạc; câu trôi chảy nhưng lạc chủ đề; văn mẫu (chào kênh, đăng ký, cảm ơn người xem); cả dòng ngoại ngữ.
+- KHÔNG tính: sai một hai từ, chính tả, thiếu dấu, đồng âm mà vẫn hiểu, ngập ngừng, lặp từ, tiếng cười, tên riêng sai.
+Xử lý: một dòng nghi ngờ thì tách vùng tại đó như seam. Từ hai dòng nghi ngờ trở lên (hoặc nhãn sai/nhảy nhãn kéo dài nhiều lượt) trong một vùng thì không giữ vùng đó; chỉ giữ các đoạn sạch liền nhau nếu còn đủ dài, còn lại keep=false. Phân vân thì coi là nghi ngờ. reason ghi "nhãn nghi sai" hoặc "chữ vô nghĩa" kèm số dòng.
+
+## keep=true KHI
+Vùng có tiềm năng làm mẫu hội thoại tốt (validator còn đo lại bằng số liệu, đừng quá bảo thủ vì noise/music hơi xấu):
+- đúng HAI người nói từ start_line đến end_line, mỗi người ít nhất {min_turns_each} lượt nói thật;
+- dòng chảy liên tục, mỗi lượt đáp lại lượt trước; nghe độc lập vẫn hiểu, không bắt đầu giữa ý dở, kết thúc ở ý trọn hoặc cặp hỏi-đáp trọn;
+- nội dung thật (kiến thức, câu chuyện, trao đổi), không phải chào hỏi, quảng cáo, đọc kịch bản;
+- dài {min_seconds}-{max_seconds}s và sạch ngữ nghĩa (mục trên).
+Ưu tiên vùng có tương tác full-duplex (ngắt lời, đệm lời, nói chồng tự nhiên), không bắt buộc.
+Thời lượng vùng = end của dòng cuối trừ start của dòng đầu, lấy từ mốc thời gian, KHÔNG ước lượng theo số dòng. Thời lượng nói của một người = tổng d các dòng của họ; một người chiếm gần hết thời lượng là độc thoại.
+Khi phân vân: về số người và độ dài thì nghiêng về keep=true (validator kiểm tra lại); về nhãn và nội dung thì LOẠI.
+
+## keep=false KHI
+Vùng là cầu nối, intro, outro, quảng cáo; quá ngắn, hoặc quá dài không chia được; một người độc thoại; mạch đứt hoặc cụt; hơn hai người không tránh được; nhãn nghi sai hoặc chữ vô nghĩa từ hai dòng trở lên không tách ra được; chất lượng kỹ thuật rõ ràng quá xấu. reason nêu NGẮN GỌN nguyên nhân chính.
+
+## self_contained (chấm dòng chảy hội thoại)
+5 = mở và kết rất tự nhiên, nổi bật (hiếm). 4 = tốt, dùng được (mức thường gặp). 3 = theo dõi được nhưng cụt hoặc mơ hồ hoặc biên chưa đẹp. 1-2 = không dùng được. keep=true chỉ khi self_contained >= {min_semantic}; keep=false vẫn chấm để debug.
+
+## VAI, LOẠI, CẢM XÚC, TÓM TẮT (chỉ cho vùng keep=true)
+- Vai: user = người DẪN (mở chủ đề, hỏi, yêu cầu, chuyển hướng); assistant = người THEO và ĐÁP (trả lời, giải thích, xác nhận, đệm lời, nhường lời khi bị ngắt). Không xét theo thời gian nói. assistant là nhãn A/B/... trong cửa sổ; hai người hỏi đáp ngang nhau thì role_conf thấp.
+- category, đúng MỘT loại:
+  interrupt: có lần người này chen làm người kia DỪNG giữa nhịp nói (chưa hết ý), hoặc chen để ĐỔI HƯỚNG và người kia theo. Chỉ nói chồng chưa đủ.
+  backchannel: mọi chỗ nói chồng không phải interrupt: đệm lời (ừ, dạ, vâng, đúng rồi...), câu chen ngắn, hoặc nói đè khi người kia vẫn giữ lượt. Không ai bị cắt, không ai đổi hướng.
+  turn_by_turn: chỉ các lượt nối tiếp, không chồng tiếng, không đệm lời. Có bất kỳ chồng tiếng hay đệm lời thì KHÔNG phải turn_by_turn.
+  Có cả interrupt lẫn backchannel thì chọn interrupt. Với "à", "thế à", "vậy hả": người kia dừng trả lời là interrupt, nói tiếp là backchannel.
+- interruptions (chỉ khi interrupt): mảng {"line": số dòng câu ngắt lời, "intent": topic_shift | clarify | disagree | complete}. topic_shift = chuyển chủ đề, clarify = hỏi lại/làm rõ, disagree = phản đối, complete = nói tiếp/hoàn thành ý người kia. Thời điểm do code đo lại. Không có thì [].
+- emotions: mỗi dòng một phần tử {"line": số dòng, "emotion": nhãn, "conf": 0..1}, chỉ dựa vào chữ (bạn không nghe được audio). Nhãn là MỘT trong: {emotion_labels}. Không rõ thì ghi neutral hoặc bỏ dòng.
+- summary: 1-3 câu tiếng Việt, tối đa khoảng 50 từ: nói về gì, diễn biến, kết thúc. Gọi theo vai ("người hỏi"/"người đáp"), không đoán tên hay giới tính, không thêm ngoài transcript.
+
+## CÁCH LÀM (ngắn, không chép lại các dòng)
+1. Ghi số dòng của các chỗ phải ngắt và các dòng nghi ngờ.
+2. Với mỗi vùng giữa hai điểm ngắt, tính thời lượng và đếm người nói; chỉ xét kỹ vùng có vẻ giữ được, vùng rõ ràng bỏ thì ghi một dòng lý do.
+3. Quyết định keep, self_contained, vai, ngắt lời, rồi viết JSON. Không xét lại vùng đã chốt. Đừng tốn suy nghĩ vào chữ sai một hai từ hay thông số lệch nhỏ.
+
+## VÍ DỤ (minh họa cách quyết định; KHÔNG sao chép nội dung hay chủ đề). Các dòng bớt thông số cho gọn.
+
+"""
     + _FINDER_EXAMPLES +
-    "\n"
-    "## ĐẦU RA\n"
-    "Chỉ trả MỘT JSON ARRAY, không markdown, không giải thích ngoài JSON. Mọi vùng có 6 khóa:\n"
-    "start_line, end_line, keep, self_contained, topic, reason.\n"
-    "Vùng keep=true thêm 7 khóa: category, assistant, role_conf, role_why, interruptions, emotions, summary.\n"
-    "- start_line/end_line: số dòng trong cửa sổ hiện tại.\n"
-    "- keep: boolean JSON true/false, không dùng chuỗi.\n"
-    "- self_contained: số nguyên 1..5.\n"
-    "- topic: tối đa 10 từ.\n"
-    "- reason: tối đa 20 từ, nêu lý do GIỮ hoặc LOẠI.\n"
-    "- category: \"interrupt\" | \"backchannel\" | \"turn_by_turn\" (xem LOẠI HỘI THOẠI).\n"
-    "- assistant: \"A\"/\"B\"/... (nhãn người nói trong cửa sổ); role_conf: số 0..1; role_why: tối đa 20 từ.\n"
-    "- interruptions: mảng {\"line\": int, \"intent\": \"topic_shift|clarify|disagree|complete\"}, dòng nằm trong vùng.\n"
-    "- emotions: mảng {\"line\": int, \"emotion\": \"<nhãn>\", \"conf\": 0..1}, dòng nằm trong vùng, tối đa mỗi dòng một phần tử.\n"
-    "- summary: 1-3 câu tiếng Việt, tối đa khoảng 50 từ.\n"
-    "- Các vùng phải phủ đủ 1..N như quy tắc ở trên.\n"
-    "- Tối đa {max_proposals} vùng; nếu cần, gộp các vùng keep=false liền nhau có cùng lý do để vẫn phủ đủ cửa sổ."
+    """
+## ĐẦU RA
+Chỉ MỘT JSON ARRAY, không markdown, không giải thích ngoài JSON. Mọi vùng có: start_line, end_line (số dòng trong cửa sổ), keep (boolean true/false, không dùng chuỗi), self_contained (số nguyên 1..5), topic (tối đa 10 từ), reason (tối đa 20 từ, lý do GIỮ hoặc LOẠI).
+Vùng keep=true thêm: category ("interrupt" | "backchannel" | "turn_by_turn"), assistant ("A"/"B"/...), role_conf (0..1), role_why (tối đa 20 từ), interruptions, emotions, summary."""
 )
 
 CONVERSATION_EXPORT_SYSTEM_PROMPT = (
