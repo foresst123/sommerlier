@@ -140,3 +140,123 @@ def test_a_failed_file_is_offered_again_next_pass(tmp_path):
 
     fresh = ProgressLedger(str(tmp_path))
     assert files[0] in fresh.pending(files), "a failure must not count as done"
+
+
+def test_a_memory_only_ledger_neither_reads_nor_writes(tmp_path):
+    # `--audio` runs one file with no input folder of its own: its ledger must not
+    # leave a record, or the next run of the same file would be skipped as done.
+    audio = tmp_path / "a.wav"
+    audio.write_bytes(b"x")
+    first = ProgressLedger(str(tmp_path), persist=False)
+    first.mark_done(str(audio), seconds=3)
+    first.save()
+    assert not (tmp_path / "_sommelier_progress.json").exists()
+    assert first.pending([str(audio)]) == []
+
+    again = ProgressLedger(str(tmp_path), persist=False)
+    assert again.pending([str(audio)]) == [str(audio)]
+
+
+def test_a_memory_only_ledger_ignores_an_existing_file(tmp_path):
+    real = ProgressLedger(str(tmp_path))
+    real.mark_done(str(tmp_path / "a.wav"))
+    real.save()
+    assert ProgressLedger(str(tmp_path), persist=False).pending([str(tmp_path / "a.wav")])
+
+
+def test_main_gives_a_single_audio_file_a_memory_only_ledger():
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "main.py"), encoding="utf-8").read()
+    assert "persist=False" in src and "ProgressLedger(args.audio_dir" in src
+
+
+# --- input-quality rejection is final -------------------------------------------
+
+def test_a_rejected_file_is_never_offered_again(tmp_path):
+    files = _files(tmp_path, 2)
+    led = ProgressLedger(str(tmp_path))
+    led.mark_rejected(files[0], "DNSMOS rejected")
+    led.save()
+
+    assert led.attempts(files[0]) == 0, "a rejection is not a counted failure"
+    assert ProgressLedger(str(tmp_path)).pending(files) == files[1:]
+    assert ProgressLedger(str(tmp_path)).pending(files, max_attempts=0) == files[1:]
+
+
+def test_a_rejection_replaces_an_earlier_failure_and_done_replaces_a_rejection(tmp_path):
+    files = _files(tmp_path, 1)
+    led = ProgressLedger(str(tmp_path))
+    led.mark_failed(files[0], "OOM")
+    led.mark_rejected(files[0], "too noisy")
+    assert led.failed == {} and led.is_rejected(files[0])
+
+    led.mark_done(files[0])
+    assert led.rejected == {} and led.is_done(files[0])
+
+
+def test_record_failure_tells_a_rejection_from_a_retryable_failure(tmp_path):
+    files = _files(tmp_path, 3)
+    led = ProgressLedger(str(tmp_path))
+
+    batch_style = ("music: AudioQualityRejected: DNSMOS rejected a.wav: "
+                   "normalized_quality=0.412 < threshold=0.500 (OVRL=2.648)")
+    file_style = "AudioQualityRejected: DNSMOS rejected a.wav: normalized_quality=0.1"
+    assert led.record_failure(files[0], batch_style) == "rejected"
+    assert led.record_failure(files[1], file_style) == "rejected"
+
+    # A scorer that could not run says nothing about the audio: that one is retried.
+    scorer = "music: AudioQualityGateError: DNSMOS input check failed for a.wav: OSError"
+    assert led.record_failure(files[2], scorer) == "failed"
+    assert led.pending(files) == [files[2]]
+
+
+def test_rejections_show_in_the_summary_and_not_as_remaining(tmp_path):
+    files = _files(tmp_path, 4)
+    led = ProgressLedger(str(tmp_path))
+    led.mark_done(files[0])
+    led.mark_rejected(files[1], "x")
+    led.mark_failed(files[2], "OOM")
+
+    assert led.summary(len(files)) == "1 done, 1 failed, 1 rejected, 1 remaining"
+
+
+def test_the_rejection_marker_is_the_real_exception_name():
+    from services.dnsmos_gate import AudioQualityRejected
+    from utils.progress import REJECTION_TYPE, is_input_rejection
+
+    assert REJECTION_TYPE == AudioQualityRejected.__name__
+    exc = AudioQualityRejected("a.wav", {"normalized_quality": 0.1, "threshold": 0.5,
+                                         "OVRL": 1.4})
+    assert is_input_rejection(f"{type(exc).__name__}: {exc}")
+    assert not is_input_rejection("RuntimeError: Failed to start vLLM refinement workers")
+    assert not is_input_rejection(None)
+
+
+def test_main_records_every_failure_through_the_ledger_classifier():
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "main.py"), encoding="utf-8").read()
+    calls = src.count("_record_failure(ledger") - 1          # minus its own def
+    assert calls == 2, "both run modes must classify"
+    assert "ledger.mark_failed(" not in src, "a bare mark_failed would retry a rejection"
+
+
+# --- an early-stopped run must not mark files done --------------------------------
+
+def test_pending_can_skip_files_this_invocation_already_visited(tmp_path):
+    files = _files(tmp_path, 3)
+    led = ProgressLedger(str(tmp_path))
+    # Nothing is marked done by an early-stopped run, so only `exclude` keeps the
+    # same group from being offered again and again.
+    assert led.pending(files) == files
+    assert led.pending(files, exclude={files[0], files[1]}) == files[2:]
+    assert led.pending(files, exclude=set(files)) == []
+
+
+def test_main_does_not_mark_files_done_after_stop_after():
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "main.py"), encoding="utf-8").read()
+    assert 'partial_run = getattr(args, "stop_after", None) is not None' in src
+    assert "ledger.pending(run_snapshot, exclude=attempted)" in src
+    assert "attempted.update(group)" in src
+    assert src.count("ledger.mark_done(") == 2
+    assert src.count("not partial_run") == 2, "both run modes must honour it"

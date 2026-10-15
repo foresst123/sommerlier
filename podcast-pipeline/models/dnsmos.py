@@ -43,13 +43,20 @@ class ComputeScore:
         Raises:
             RuntimeError: If the device is not supported.
         """
+        from utils.cpu_plan import onnx_session_options
+        sess_options = onnx_session_options()
         if device == "cuda":
             self.onnx_sess = ort.InferenceSession(
-                primary_model_path, providers=["CUDAExecutionProvider"]
+                primary_model_path,
+                sess_options=sess_options,
+                # CPU listed second so a machine without CUDA still scores.
+                providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
             )
             print("Using CUDA:", self.onnx_sess.get_providers())
         else:
-            self.onnx_sess = ort.InferenceSession(primary_model_path)
+            self.onnx_sess = ort.InferenceSession(
+                primary_model_path, sess_options=sess_options
+            )
 
     def audio_melspec(
         self, audio, n_mels=120, frame_size=320, hop_length=160, sr=16000, to_db=True

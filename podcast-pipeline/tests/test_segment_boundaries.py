@@ -13,6 +13,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from utils.acoustic_boundary import AcousticBoundaryFinder
 from utils.segment_utils import _quietest_cut, split_long_segments
 
 SR = 24000
@@ -84,3 +85,22 @@ def test_quietest_cut_finds_the_pause_and_degrades_safely():
     assert _quietest_cut(None, SR, 0.0, 5.0) is None
     assert _quietest_cut(w, SR, 5.0, 5.0) is None      # empty band
     assert _quietest_cut(w, SR, 0.0, 0.001) is None    # shorter than a frame
+
+
+def test_boundary_finder_can_strictly_exclude_overlap_ranges():
+    finder = AcousticBoundaryFinder(np.zeros(10 * SR, dtype=np.float32), SR)
+    candidates = finder.find_candidates(
+        5 * SR,
+        search_min=4 * SR,
+        search_max=6 * SR,
+        hard_bounds=(4 * SR, 6 * SR),
+        forbidden_ranges=[(4 * SR, 6 * SR)],
+    )
+    assert candidates == []
+    assert finder.find_cut(
+        5 * SR,
+        search_min=4 * SR,
+        search_max=6 * SR,
+        hard_bounds=(4 * SR, 6 * SR),
+        forbidden_ranges=[(4 * SR, 6 * SR)],
+    ) is None

@@ -1,0 +1,39 @@
+model:
+  name_or_path: openbmb/MiniCPM-o-4_5
+  revision: 1f761131fa83f5ed3cd6f2f22b225c4501d154fa
+  trust_remote_code: true
+  max_length: 4096
+  lora_rank: 64
+  lora_alpha: 128
+  lora_dropout: 0.05
+  train_audio_projector: true
+  # Chỉ mở 1-6 lớp trên cùng sau khi projector + LoRA đã được đánh giá.
+  train_audio_encoder_top_layers: 0
+
+data:
+  train_manifest: data/minicpmo45/train.jsonl
+  eval_manifest: data/minicpmo45/dev.jsonl
+  num_workers: 4
+  sample_rate: 16000
+  max_audio_seconds: 30.0
+  # Nếu chưa có text replay, sampler tự chuẩn hóa trên các task đang hiện diện.
+  task_weights:
+    asr: 0.25
+    dialogue: 0.50
+    text: 0.25
+
+train:
+  output_dir: runs/minicpmo45_vi_lora
+  seed: 42
+  per_device_batch_size: 1
+  gradient_accumulation_steps: 16
+  max_steps: 1000
+  learning_rate_lora: 0.00002
+  learning_rate_projector: 0.0001
+  weight_decay: 0.01
+  warmup_ratio: 0.03
+  max_grad_norm: 1.0
+  logging_steps: 5
+  eval_steps: 100
+  save_steps: 100
+  gradient_checkpointing: true
