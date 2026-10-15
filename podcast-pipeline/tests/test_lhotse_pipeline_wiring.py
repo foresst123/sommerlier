@@ -163,3 +163,45 @@ def test_run_lhotse_after_export_reports_success(tmp_path):
     report = {}
     run_lhotse_after_export(str(tmp_path), "a", report)
     assert report["lhotse"]["written"] == 1
+
+
+def test_lhotse_params_come_from_the_profile_and_default_to_none():
+    from utils.final_output import lhotse_params
+    assert lhotse_params(_cfg("/x"), Args()) is None
+    cfg = {"environments": {"e": {"outputs": {"lhotse": {"coverage_max_uncovered": 1.5,
+                                                          "coverage_rms_threshold": 0.02}}}}}
+    params = lhotse_params(cfg, Args())
+    assert params.coverage_max_uncovered == 1.5 and params.coverage_rms_threshold == 0.02
+    assert params.coverage_min_speech_frames == 3             # untouched keys keep the converter's default
+
+
+def test_a_typo_in_outputs_lhotse_is_an_error():
+    from utils.final_output import lhotse_params
+    with pytest.raises(ValueError):
+        lhotse_params({"environments": {"e": {"outputs": {"lhotse": {"coverage_max": 1}}}}}, Args())
+
+
+def test_run_lhotse_after_export_hands_the_params_to_the_converter(tmp_path, monkeypatch):
+    import services.lhotse_manifest_service as m
+    seen = {}
+
+    def fake(root, stem, params=None):
+        seen["params"] = params
+        return type("R", (), {"written": 0, "skipped": [], "output_path": "x"})()
+    monkeypatch.setattr(m, "build_recording_manifest", fake)
+    marker = LhotseManifestParams(coverage_max_uncovered=1.5)
+    run_lhotse_after_export(str(tmp_path), "a", {}, params=marker)
+    assert seen["params"] is marker
+
+
+def test_a_loose_tolerance_keeps_an_item_the_default_drops(tmp_path):
+    import numpy as np
+    import soundfile as sf
+    from tests.test_lhotse_manifest import SR, _base_rows
+    item = _make_item(tmp_path / "item", _base_rows())
+    data, _ = sf.read(os.path.join(item, "stereo_2ch.wav"))
+    data[int(7.2 * SR):int(8.0 * SR), 1] = 0.3 * np.sin(2 * np.pi * 220 * np.arange(int(0.8 * SR)) / SR)
+    sf.write(os.path.join(item, "stereo_2ch.wav"), data, SR, subtype="PCM_16")   # 0.8 s unannotated voice
+    assert convert_item(item, "b", "t", LhotseManifestParams(), index=0).cut is None
+    loose = convert_item(item, "b", "t", LhotseManifestParams(coverage_max_uncovered=1.5), index=0)
+    assert loose.cut is not None

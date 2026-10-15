@@ -9,7 +9,7 @@ import threading
 from typing import Any
 from utils.checkpoint import CheckpointManager
 from utils.final_output import (conversation_export_dir, final_output_root,
-                                run_lhotse_after_export)
+                                lhotse_params, run_lhotse_after_export)
 from utils import llm_trace
 from utils.music_map import MusicMap, build_maps
 from utils.noise_map import NoiseTrack
@@ -790,7 +790,8 @@ class PipelineService:
         """Write the accounting; when the export tree is the final root, add this
         recording's Lhotse manifest (a failure there is logged and reported, not raised)."""
         if shared:
-            run_lhotse_after_export(out_dir, base_name, result.report, self.logger)
+            run_lhotse_after_export(out_dir, base_name, result.report, self.logger,
+                                    params=getattr(self, "lhotse_params", None))
         stage_out.write_conversation_exports(result.report, result.exports)
 
     def _export_clean_two_channel_dataset(self, args, config, transcripts,
@@ -1366,6 +1367,8 @@ class PipelineService:
         return os.path.join(root, audio_name)
 
     def run(self, args: Any, config: dict, audio_path: str):
+        # outputs.lhotse of the profile (coverage tolerance); None keeps the converter's defaults.
+        self.lhotse_params = lhotse_params(config, args)
         # Checkpoint phải gắn với từng file; dùng chung job_id có thể khiến file
         # sau đọc diarization của file trước. Tính đường dẫn một lần để dữ liệu
         # đối chiếu separation và đầu ra cuối luôn cùng thư mục.

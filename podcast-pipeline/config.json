@@ -235,7 +235,10 @@
       "gpu_1": 0,
       "gpu_2": 1,
       "outputs": {
-        "clean_two_channel_dir": "/home/lamkd2/data/data_output/data_output_v2"
+        "clean_two_channel_dir": "/home/lamkd2/data/data_output/data_output_v2",
+        "lhotse": {
+          "coverage_max_uncovered": 1.5
+        }
       },
       "steps": {
         "music_analysis": true,
