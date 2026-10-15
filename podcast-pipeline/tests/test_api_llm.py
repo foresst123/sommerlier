@@ -197,3 +197,12 @@ def test_in_flight_requests_never_exceed_the_configured_concurrency():
     with ThreadPoolExecutor(max_workers=12) as pool:           # several callers at once, as refinement queues chunks
         results = list(pool.map(lambda i: llm.generate_texts("S", ["a", "b", "c", "d"]), range(6)))
     assert all(ok for ok, _ in results) and state["peak"] <= 3
+
+
+def test_cached_prompt_tokens_are_counted_separately():
+    body = {"choices": [{"message": {"content": "x"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 2000, "completion_tokens": 30,
+                      "prompt_tokens_details": {"cached_tokens": 1536}}}
+    llm = _llm(FakeTransport([(200, json.dumps(body).encode(), {})]))
+    llm.generate_texts("S", ["a", "b"])
+    assert llm.stats["prompt_tokens"] == 4000 and llm.stats["cached_tokens"] == 3072

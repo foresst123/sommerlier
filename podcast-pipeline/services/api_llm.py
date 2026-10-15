@@ -89,7 +89,8 @@ class ApiLLM:
         self.replica_count = self.concurrency
         self._lock = threading.Lock()
         self._slots = threading.BoundedSemaphore(self.concurrency)   # requests in flight, across every caller
-        self.stats = {"calls": 0, "failures": 0, "prompt_tokens": 0, "completion_tokens": 0}
+        self.stats = {"calls": 0, "failures": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                      "cached_tokens": 0}
 
     # -- the surface the passes use ------------------------------------------------
     def ensure_loaded(self) -> bool:
@@ -220,11 +221,14 @@ class ApiLLM:
             if usage:
                 self.stats["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
                 self.stats["completion_tokens"] += int(usage.get("completion_tokens") or 0)
+                details = usage.get("prompt_tokens_details") or {}
+                self.stats["cached_tokens"] += int(details.get("cached_tokens") or 0)
             calls, snapshot = self.stats["calls"], dict(self.stats)
         if self.logger and calls % _LOG_EVERY_CALLS == 0:
             self.logger.info(
                 f"[api-llm] {self.api_model}: {snapshot['calls']} call(s), {snapshot['failures']} failed, "
-                f"{snapshot['prompt_tokens']} prompt + {snapshot['completion_tokens']} completion tokens")
+                f"{snapshot['prompt_tokens']} prompt ({snapshot['cached_tokens']} cached) "
+                f"+ {snapshot['completion_tokens']} completion tokens")
 
 
 def resolve_backend(args, env_profile) -> str:
