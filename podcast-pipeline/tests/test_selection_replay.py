@@ -94,3 +94,21 @@ def test_load_siblings_returns_other_namespaces_newest_first(tmp_path):
         time.sleep(0.05)                                    # distinct modification times
     cp.namespaces["conversation_selection"] = "ns-now"
     assert [p["v"] for p in cp.load_siblings("conversation_selection")] == [2, 1]
+
+
+def test_a_region_over_the_length_limit_is_cut_down_instead_of_dropped():
+    sel = _first_run(max_seconds=100)
+    assert not sel.final                                    # the whole 233 s region is refused
+    replay = Svc.replay_from_payloads([{"report": sel.report}])
+    NoCallLLM.calls = 0
+    cut = Svc(NoCallLLM(), max_seconds=100, replay_old_replies=True, rescue_subspans=True)
+    out = cut.select(_talk(), replay=replay, **_kw())
+    assert NoCallLLM.calls == 0
+    assert out.final, out.report
+    assert out.report["rescued_regions"] >= 1 and out.report["rescued_spans"] >= 1
+    assert all(c.duration <= 100 for c in out.final)
+
+
+def test_rescue_is_off_by_default():
+    sel = _first_run(max_seconds=100)
+    assert sel.report["rescued_regions"] == 0 and not sel.final

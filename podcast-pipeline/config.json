@@ -237,7 +237,8 @@
       "outputs": {
         "clean_two_channel_dir": "/home/lamkd2/data/data_output/data_output_v2",
         "lhotse": {
-          "coverage_max_uncovered": 1.5
+          "coverage_max_uncovered": 3.0,
+          "coverage_min_speech_frames": 5
         }
       },
       "steps": {
@@ -398,8 +399,9 @@
           "render_workers": 4,
           "reuse_render": true,
           "replay_old_replies": true,
-          "min_seconds": 20,
-          "max_seconds": 150,
+          "min_seconds": 10,
+          "max_seconds": 600,
+          "rescue_subspans": true,
           "finder_window_segments": 150,
           "finder_overlap_segments": 40,
           "max_silence": 3.0,

@@ -550,3 +550,31 @@ def test_the_report_says_why_a_recording_gave_few_clips():
     report = finder.report()
     assert report["segments"] == 6 and report["blocks"] == 1
     assert report["blocks_short"] == 1 and report["noise_measured"] is True
+
+
+# --- rescue: clean spans inside a region the validator rejected whole ----------
+
+def test_rescue_returns_the_clean_stretches_around_a_third_speaker():
+    segs = _talk(30, seg=7.0, gap=1.0)
+    segs[15] = _seg(15, C, segs[15].start, segs[15].end)
+    finder = _finder(segs, min_seconds=20, max_seconds=120, min_score=0)
+    cand, why = finder.evaluate(0, 29)
+    assert cand is None
+    spans = finder.rescue(0, 29)
+    assert spans and all(not _covers(c, 15) for c in spans)
+    assert all(finder.evaluate(c.first, c.last)[0] is not None for c in spans)
+    assert all(a.last < b.first for a, b in zip(spans, spans[1:]))
+
+
+def test_rescue_finds_nothing_when_no_clean_span_is_long_enough():
+    segs = _talk(6, seg=3.0, gap=0.5)
+    finder = _finder(segs, min_seconds=60, max_seconds=120, min_score=0)
+    assert finder.rescue(0, 5) == []
+
+
+def test_rescue_respects_its_evaluation_budget():
+    segs = _talk(60, seg=7.0, gap=1.0)
+    finder = _finder(segs, min_seconds=20, max_seconds=60, min_score=0, rescue_max_evaluations=2)
+    before = finder.stats["candidates_generated"]
+    finder.rescue(0, 59)
+    assert finder.stats["candidates_generated"] - before <= 2

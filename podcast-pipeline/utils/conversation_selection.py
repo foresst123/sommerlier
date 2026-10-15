@@ -114,6 +114,10 @@ class ConversationSelectionConfig:
     min_turns_total: int = 0             # 0 keeps legacy per-speaker-only policy
     count_backchannels_as_turns: bool = False
     ends_per_start: int = 3
+    # When the validator rejects a whole region the model kept, look inside it for
+    # shorter spans that pass the very same checks, instead of dropping all of it.
+    rescue_subspans: bool = False
+    rescue_max_evaluations: int = 300    # cap on validator calls spent on one region
     pad_seconds: float = 0.2
 
     # -- what to keep
@@ -1028,38 +1032,77 @@ class ConversationSelectionFinder:
             return []
         ideal = (cfg.plateau_min + cfg.plateau_max) / 2.0
         found: List[Candidate] = []
-        rejected = self.stats["candidates_rejected"]
         for first, last in self.blocks:
             if len({self.segs[p].speaker for p in range(first, last + 1)}) != 2:
                 continue
-            for i in range(first, last + 1):
-                if not self._is_start(i, first):
-                    continue
-                valid, edge = [], float(self.segs[i].start)
-                for j in range(i, last + 1):
-                    edge = max(edge, float(self.segs[j].end))
-                    span = edge - float(self.segs[i].start)
-                    if span > cfg.max_seconds:
-                        break
-                    if span >= cfg.min_seconds and self._is_stop(j, last):
-                        valid.append((j, span))
-                if not valid:
-                    continue
-                # The end nearest the ideal length first, then the extremes, so a
-                # small `ends_per_start` keeps the most useful ones.
-                picks: List[int] = []
-                for item in (min(valid, key=lambda it: abs(it[1] - ideal)),
-                             valid[-1], valid[0]):
-                    if item[0] not in picks:
-                        picks.append(item[0])
-                for j in picks[:max(1, cfg.ends_per_start)]:
-                    self.stats["candidates_generated"] += 1
-                    cand, why = self.evaluate(i, j)
-                    if cand is None:
-                        rejected[why] += 1
-                    else:
-                        found.append(cand)
+            self._scan_block(first, last, ideal, found)
         return found
+
+    def _scan_block(self, first, last, ideal, found, budget=None) -> int:
+        """Evaluate the start/end pairs of one run of segments; returns the validator calls made."""
+        cfg = self.cfg
+        rejected = self.stats["candidates_rejected"]
+        calls = 0
+        for i in range(first, last + 1):
+            if not self._is_start(i, first):
+                continue
+            valid, edge = [], float(self.segs[i].start)
+            for j in range(i, last + 1):
+                edge = max(edge, float(self.segs[j].end))
+                span = edge - float(self.segs[i].start)
+                if span > cfg.max_seconds:
+                    break
+                if span >= cfg.min_seconds and self._is_stop(j, last):
+                    valid.append((j, span))
+            if not valid:
+                continue
+            # The end nearest the ideal length first, then the extremes, so a
+            # small `ends_per_start` keeps the most useful ones.
+            picks: List[int] = []
+            for item in (min(valid, key=lambda it: abs(it[1] - ideal)),
+                         valid[-1], valid[0]):
+                if item[0] not in picks:
+                    picks.append(item[0])
+            for j in picks[:max(1, cfg.ends_per_start)]:
+                if budget is not None and calls >= budget:
+                    return calls
+                calls += 1
+                self.stats["candidates_generated"] += 1
+                cand, why = self.evaluate(i, j)
+                if cand is None:
+                    rejected[why] += 1
+                else:
+                    found.append(cand)
+        return calls
+
+    def rescue(self, i, j) -> List[Candidate]:
+        """Spans inside [i, j] that pass `evaluate`, best first, none overlapping.
+
+        For a region the model kept but the validator rejected as a whole: one bad
+        segment, a third speaker, or a length over the maximum should not cost the
+        clean stretches around it. Nothing is relaxed: every span returned went
+        through the same `evaluate` as any other candidate.
+        """
+        cfg = self.cfg
+        if not (0 <= i <= j < len(self.segs)) or (cfg.require_noise and not self.noise_measured):
+            return []
+        ideal = (cfg.plateau_min + cfg.plateau_max) / 2.0
+        found: List[Candidate] = []
+        budget = max(1, int(cfg.rescue_max_evaluations))
+        for first, last in self.blocks:
+            lo, hi = max(first, i), min(last, j)
+            if lo > hi or len({self.segs[p].speaker for p in range(lo, hi + 1)}) != 2:
+                continue
+            budget -= self._scan_block(lo, hi, ideal, found, budget=budget)
+            if budget <= 0:
+                break
+        found.sort(key=lambda c: (-c.score, -c.duration))
+        chosen: List[Candidate] = []
+        for cand in found:
+            if all(cand.last < c.first or cand.first > c.last for c in chosen):
+                chosen.append(cand)
+        chosen.sort(key=lambda c: c.first)
+        return chosen
 
     def report(self) -> dict:
         """The counts that say why a recording produced few items, or none."""

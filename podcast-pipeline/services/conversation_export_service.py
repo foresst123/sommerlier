@@ -540,6 +540,10 @@ def _clean_role_conf(value) -> Optional[float]:
 FINDER_CATEGORIES = ("interrupt", "backchannel", "turn_by_turn")
 
 
+# Not about the span's own content: a smaller span cannot fix these.
+_NOT_RESCUABLE = {"out_of_range", "noise_not_measured"}
+
+
 def _clean_category(value) -> Optional[str]:
     """The finder's folder for a region, or None when it named none or an unknown one."""
     text = re.sub(r"[\s\-]+", "_", str(value or "").strip().lower())
@@ -1547,6 +1551,7 @@ class ConversationExportService:
         regions_total = 0
         model_kept_total = 0
         model_rejected_total = 0
+        rescued_regions = rescued_spans = 0
         accepted_by_range: Dict[Tuple[int, int], _Judged] = {}
         coverage_values: List[float] = []
 
@@ -1655,48 +1660,70 @@ class ConversationExportService:
                     continue
 
                 cand, why = finder.evaluate(i, j)
+                rescued = []
                 if cand is None:
                     detail["validator"] = why or "validation_failed"
+                    if (self.cfg.rescue_subspans
+                            and why not in _NOT_RESCUABLE):
+                        rescued = finder.rescue(i, j)
+                    if rescued:
+                        detail["rescued_spans"] = [
+                            {"first_index": str(finder.segs[c.first].index),
+                             "last_index": str(finder.segs[c.last].index),
+                             "duration": c.duration, "score": c.score}
+                            for c in rescued]
+                        rescued_regions += 1
+                        rescued_spans += len(rescued)
+                    else:
+                        row["proposal_results"].append(detail)
+                        reject(why or "validation_failed")
+                        continue
+                else:
+                    detail.update({
+                        "validator": "accepted",
+                        "duration": cand.duration,
+                        "score": cand.score,
+                        "tier": cand.tier,
+                        "noise": cand.noise,
+                        "music_patched_share": cand.music_patched_share,
+                        "metrics": cand.metrics,
+                    })
+                if rescued:
                     row["proposal_results"].append(detail)
-                    reject(why or "validation_failed")
-                    continue
 
-                detail.update({
-                    "validator": "accepted",
-                    "duration": cand.duration,
-                    "score": cand.score,
-                    "tier": cand.tier,
-                    "noise": cand.noise,
-                    "music_patched_share": cand.music_patched_share,
-                    "metrics": cand.metrics,
-                })
-                row["proposal_results"].append(detail)
-                # The letter is only meaningful for this window; back to a speaker id now.
-                assistant = letter_to_id.get(region.get("assistant") or "")
-                if assistant not in cand.speakers:
-                    assistant = None
-                item = _Judged(
-                    original=cand,
-                    candidate=cand,
-                    semantic=score,
-                    topic=region.get("topic", ""),
-                    why=region.get("reason", ""),
-                    assistant=assistant,
-                    role_conf=region.get("role_conf") if assistant else None,
-                    role_why=region.get("role_why", ""),
-                    interruptions={
-                        str(finder.segs[start + k["line"] - 1].index): k["intent"]
-                        for k in region.get("interruptions", [])},
-                    summary=region.get("summary"),
-                    category=region.get("category"),
-                    emotions={
-                        str(finder.segs[start + k["line"] - 1].index):
-                            {"label": k["emotion"], "conf": k["conf"]}
-                        for k in region.get("emotions", [])})
-                key = (i, j)
-                old = accepted_by_range.get(key)
-                if old is None or (item.semantic or 0) > (old.semantic or 0):
-                    accepted_by_range[key] = item
+                for cand in (rescued or [cand]):
+                    # The letter is only meaningful for this window; back to a speaker id now.
+                    assistant = letter_to_id.get(region.get("assistant") or "")
+                    if assistant not in cand.speakers:
+                        assistant = None
+
+                    def inside(k, lo=cand.first, hi=cand.last):
+                        return lo <= start + k["line"] - 1 <= hi
+
+                    item = _Judged(
+                        original=cand,
+                        candidate=cand,
+                        semantic=score,
+                        topic=region.get("topic", ""),
+                        why=region.get("reason", ""),
+                        assistant=assistant,
+                        role_conf=region.get("role_conf") if assistant else None,
+                        role_why=region.get("role_why", ""),
+                        interruptions={
+                            str(finder.segs[start + k["line"] - 1].index): k["intent"]
+                            for k in region.get("interruptions", []) if inside(k)},
+                        summary=region.get("summary"),
+                        category=region.get("category"),
+                        emotions={
+                            str(finder.segs[start + k["line"] - 1].index):
+                                {"label": k["emotion"], "conf": k["conf"]}
+                            for k in region.get("emotions", []) if inside(k)})
+                    key = (cand.first, cand.last)
+                    old = accepted_by_range.get(key)
+                    if old is None or (item.semantic or 0) > (old.semantic or 0):
+                        accepted_by_range[key] = item
+                if not rescued:
+                    row["proposal_results"].append(detail)
 
         # Every keep=true model region reaches the same deterministic validator.
         # Exact duplicates from overlapping transcript windows are merged here.
@@ -1713,6 +1740,8 @@ class ConversationExportService:
         report["shortlisted"] = len(judged)
         report["validated"] = len(judged)
         report["judged_rejected"] = rejected
+        report["rescued_regions"] = rescued_regions
+        report["rescued_spans"] = rescued_spans
         report["replies"] = rows
         report["coverage"] = {
             "mean_fraction": round(sum(coverage_values) / len(coverage_values), 4)

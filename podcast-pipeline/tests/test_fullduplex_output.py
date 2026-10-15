@@ -330,7 +330,7 @@ def test_every_shipped_profile_still_builds_and_a100_has_the_designed_values():
         profiles["a100"]["models"]["conversation_selection"])
     # Loosened a little to release more conversations: 20-150 s, two turns, score 60.
     assert (a100.min_seconds, a100.max_seconds, a100.min_turns_each, a100.min_turns_total,
-            a100.count_backchannels_as_turns, a100.min_score) == (20, 150, 1, 2, True, 60)
+            a100.count_backchannels_as_turns, a100.min_score) == (10, 600, 1, 2, True, 60)
 
 
 # --- selection: letters back to ids, lines to segments -------------------------------------
