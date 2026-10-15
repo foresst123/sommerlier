@@ -106,6 +106,7 @@ class StageOutputService:
         "relabel": "07_relabel",
         "transcript_review": "07b_transcript_review",
         "persona_profile": "07c_persona_profile",
+        "conversation_selection": "07d_conversation_selection",
         "word_alignment": "08_word_alignment",
         "conversation_exports": "09_conversation_exports",
     }
@@ -531,6 +532,43 @@ class StageOutputService:
             "transcript_review", "flags.json", [report.get("flagged", {})], stats,
             extra={"report.json": report})
 
+    def write_conversation_selection(self, report: dict):
+        """What the model proposed for every window, and what became of each region.
+
+        `replies.json` is the model's whole answer per window as it came back,
+        reasoning included when thinking is on, so a wrong or missing region can be
+        traced to what the model wrote. `selection.json` has one row per region it
+        proposed, with the verdict of the numeric validator; `report.json` the counts.
+        """
+        replies = report.get("replies") or []
+        regions = [dict(region, window=reply.get("window"))
+                   for reply in replies for region in reply.get("proposal_results") or []]
+        stats = {k: report.get(k) for k in (
+            "windows", "regions", "model_kept", "model_rejected", "accepted",
+            "coverage_retries", "coverage_retry_improved", "unanswered",
+            "unreadable", "cut_in_thought", "judged_rejected", "skipped", "thinking")}
+        warnings = []
+        if report.get("unanswered"):
+            warnings.append(f"{report['unanswered']} window(s) got no answer")
+        if report.get("cut_in_thought"):
+            warnings.append(
+                f"{report['cut_in_thought']} window(s) ran out of tokens while the model "
+                "was still thinking; raise models.conversation_selection.max_new_tokens")
+        if report.get("unreadable"):
+            warnings.append(
+                f"{report['unreadable']} window(s) were answered without any JSON; "
+                "read replies.json to see what the model wrote instead")
+        uncovered = sum(1 for r in replies if r.get("coverage_error"))
+        if uncovered:
+            warnings.append(f"{uncovered} window(s) were not covered line by line "
+                            "(coverage_error in replies.json)")
+        if warnings:
+            stats["warnings"] = warnings
+        return self._finish(
+            "conversation_selection", "selection.json", regions, stats,
+            extra={"replies.json": replies,
+                   "report.json": {k: v for k, v in report.items() if k != "replies"}})
+
     def write_word_alignment(self, transcripts, report: dict):
         """Final refined text with Wav2Vec2 timestamps for every aligned word."""
         stats = {key: report.get(key) for key in (
@@ -723,8 +761,11 @@ class StageOutputService:
         if extra:
             payload.update(extra)
 
+        # Word alignment never drops rows: with conversation exports on it times
+        # only the selected segments, so a smaller count there is not a loss.
         drops = [(a, b) for a, b in zip(flow, flow[1:])
-                 if a["n"] and b["n"] and b["n"] < a["n"]]
+                 if a["n"] and b["n"] and b["n"] < a["n"]
+                 and b["stage"] != "word_alignment"]
         if drops:
             payload["warnings"] = [
                 f"segment count fell from {a['n']} to {b['n']} between "

@@ -345,3 +345,15 @@ def test_a_manifest_is_written_for_a_file_with_no_output_folder_yet(tmp_path):
     path = StageOutputService(str(out)).write_manifest(
         {"audio_file": "a.wav", "stopped_after": "input_quality"})
     assert path and json.load(open(path))["metadata"]["stopped_after"] == "input_quality"
+
+
+def test_word_alignment_on_selected_segments_is_not_a_segment_loss(tmp_path):
+    # With conversation exports on, alignment only times the selected segments.
+    so = StageOutputService(str(tmp_path))
+    so.write_refinement([_Seg(index=str(i), text="x") for i in range(10)])
+    so.write_word_alignment([_Seg(index="0", text="x")], {"segments": 1})
+    so.write_manifest({"audio_file": "a.mp3"})
+
+    m = json.loads((tmp_path / "manifest.json").read_text())
+    assert [f["stage"] for f in m["flow"]] == ["refinement", "word_alignment"]
+    assert "warnings" not in m
