@@ -326,3 +326,26 @@ def test_build_manifest_plain_jsonl_keeps_unicode(tmp_path):
     assert build_manifest(str(root), str(out)).written == 1
     text = out.read_text(encoding="utf-8")
     assert "Chào" in text and len(text.strip().splitlines()) == 1
+
+
+def _item_with_quiet_noise(tmp_path, amplitude):
+    rows = _base_rows()
+    item = _make_item(tmp_path / "item", rows)
+    data, _ = sf.read(os.path.join(item, "stereo_2ch.wav"))
+    noise = amplitude * np.sin(2 * np.pi * 180 * np.arange(SR) / SR)
+    data[int(7.2 * SR):int(7.7 * SR), 1] = noise[: int(0.5 * SR)]       # half a second where nobody is annotated
+    sf.write(os.path.join(item, "stereo_2ch.wav"), data, SR, subtype="PCM_16")
+    return item
+
+
+def test_quiet_noise_sinks_the_item_by_default_but_not_with_a_higher_speech_threshold(tmp_path):
+    item = _item_with_quiet_noise(tmp_path, amplitude=0.02)              # RMS about 0.014: above the default floor
+    assert _convert(item).cut is None
+    res = _convert(item, coverage_rms_threshold=0.05)
+    assert res.cut is not None, res.reasons
+
+
+def test_real_speech_level_is_still_caught_with_the_higher_threshold(tmp_path):
+    item = _item_with_quiet_noise(tmp_path, amplitude=0.3)               # loud, a real voice
+    res = _convert(item, coverage_rms_threshold=0.05)
+    assert res.cut is None and res.reasons[0].startswith("coverage")

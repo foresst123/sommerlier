@@ -51,6 +51,11 @@ class LhotseManifestParams:
     emotion_min_conf: float = 0.6
     coverage_check: bool = True
     coverage_max_uncovered: float = 0.30
+    # What counts as "speech" on a channel for that check: raw energy over this RMS for at least
+    # this many 20 ms frames. Breaths, laughs, noise and separation bleed pass that test too, so
+    # a stricter pair keeps real speech and stops them from sinking a whole conversation.
+    coverage_rms_threshold: float = 0.005
+    coverage_min_speech_frames: int = 3
     sampling_rate_check: bool = True
     # Same-speaker pieces further apart than this stay separate turns; a longer
     # silence inside one turn would read as that person talking over the other.
@@ -484,7 +489,10 @@ def _convert(item_dir, batch_id, topic_id, params, index, reasons, uuid_factory)
 
     if params.coverage_check:
         cov = dx.check_item_coverage(
-            wav, spans, dx.CoverageParams(max_uncovered_seconds=params.coverage_max_uncovered))
+            wav, spans, dx.CoverageParams(
+                max_uncovered_seconds=params.coverage_max_uncovered,
+                rms_threshold=params.coverage_rms_threshold,
+                min_speech_frames=params.coverage_min_speech_frames))
         if cov:
             raise _Reject("coverage:" + ";".join(
                 f"ch{v['channel']} {v['start']:.2f}-{v['end']:.2f}" for v in cov))

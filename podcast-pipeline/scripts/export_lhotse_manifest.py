@@ -20,6 +20,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--emotion-min-conf", type=float, default=0.6)
     ap.add_argument("--coverage-max-uncovered", type=float, default=0.30,
                     help="seconds of unannotated speech tolerated per channel")
+    ap.add_argument("--coverage-rms", type=float, default=0.005,
+                    help="channel energy (RMS) above which a stretch counts as speech in the "
+                         "coverage check; raise it to ignore breaths, noise and bleed")
+    ap.add_argument("--coverage-min-frames", type=int, default=3,
+                    help="shortest burst, in 20 ms frames, that counts as speech in the coverage check")
     ap.add_argument("--no-coverage-check", action="store_true")
     ap.add_argument("--validate", action="store_true", help="check the written manifest against spec section 9")
     return ap
@@ -33,7 +38,9 @@ def main(argv=None) -> int:
         language=args.language,
         emotion_min_conf=args.emotion_min_conf,
         coverage_check=not args.no_coverage_check,
-        coverage_max_uncovered=args.coverage_max_uncovered)
+        coverage_max_uncovered=args.coverage_max_uncovered,
+        coverage_rms_threshold=args.coverage_rms,
+        coverage_min_speech_frames=args.coverage_min_frames)
     report = build_manifest(args.root, args.out, params)
     print(f"wrote {report.written} cut(s) to {report.output_path}; skipped {len(report.skipped)} item(s)")
     reasons = Counter(r for row in report.skipped for r in row.get("reasons", []))
