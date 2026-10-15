@@ -199,7 +199,7 @@ def test_main_builds_the_persona_service_only_when_the_step_is_on():
     src = _main_src()
     gate = src.index('opt_in_step_enabled(args, "persona_profile")')
     assert "PersonaProfileService(" in src[gate:gate + 700]
-    assert "refinement_svc, logger=logger" in src[gate:gate + 700]
+    assert "pass_llm, logger=logger" in src[gate:gate + 700]       # the LLM passes share `pass_llm` (local or API)
     assert "persona_svc = None" in src[gate - 200:gate]
     assert "persona_svc=persona_svc" in src
     assert src.index("persona_svc = None") > src.index("review_svc = TranscriptReviewService(")

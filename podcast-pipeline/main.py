@@ -105,6 +105,15 @@ def _build_parser():
                         help="At start-up, kill this user's leftover vLLM engines and "
                              "pipeline workers from an earlier run (parent gone, still "
                              "holding GPU memory). Without it they are only reported.")
+    parser.add_argument("--llm_backend", choices=["local", "api"], default=None,
+                        help="Where the LLM passes (relabel, review, persona, conversation "
+                             "selection) run: the resident local model (default) or an "
+                             "OpenAI-compatible API (models.api_llm in the profile). Finished "
+                             "work is reused from checkpoints; refinement stays local.")
+    parser.add_argument("--api_model", default=None,
+                        help="API model id for --llm_backend api (overrides models.api_llm.model). "
+                             "The key is read from the environment variable named by "
+                             "models.api_llm.api_key_env (default OPENAI_API_KEY).")
     parser.add_argument("--keep_models", action="store_true",
                         help="Keep models in VRAM between stages instead of unloading them. "
                              "Saves reload time when processing many files, at the cost of a "
@@ -907,8 +916,12 @@ def main():
         # switches nothing on: `steps.speaker_relabel` decides whether it runs.
         # An unknown key in `models.relabel` raises here, so a typo is an error
         # rather than a setting that quietly did not apply.
+        # The passes below talk to `pass_llm`: the same local model as refinement unless
+        # --llm_backend api swaps in the API, with the same surface and checkpoint names.
+        from services.api_llm import build_pass_llm
+        pass_llm = build_pass_llm(args, env_profile, refinement_svc, logger=logger)
         relabel_svc = SpeakerRelabelService(
-            refinement_svc, logger=logger,
+            pass_llm, logger=logger,
             **dict(env_profile.get("models", {}).get("relabel", {})))
         # Review only flags; same resident LLM. Built only when the step is on, so
         # a profile without it never imports or validates its settings. Settings
@@ -925,7 +938,7 @@ def main():
                 if key not in review_cfg and key in relabel_cfg:
                     review_cfg[key] = relabel_cfg[key]
             review_svc = TranscriptReviewService(
-                refinement_svc, logger=logger, **review_cfg)
+                pass_llm, logger=logger, **review_cfg)
         # Persona profile: per-speaker habits; same resident LLM. Built only when the
         # step is on. Its three settings come from models.persona_profile alone, and an
         # unknown key raises like relabel's.
@@ -933,9 +946,9 @@ def main():
         if opt_in_step_enabled(args, "persona_profile"):
             from services.persona_profile_service import PersonaProfileService
             persona_cfg = dict(env_profile.get("models", {}).get("persona_profile", {}))
-            persona_svc = PersonaProfileService(refinement_svc, logger=logger, **persona_cfg)
+            persona_svc = PersonaProfileService(pass_llm, logger=logger, **persona_cfg)
         conversation_export_svc = ConversationExportService(
-            refinement_svc, logger=logger,
+            pass_llm, logger=logger,
             **dict(env_profile.get("models", {}).get("conversation_selection", {})))
         alignment_cfg = dict(
             env_profile.get("models", {}).get("word_alignment", {}))
