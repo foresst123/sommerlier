@@ -30,6 +30,14 @@ class _DigestWriter:
 def _json_bytes(data: Any) -> bytes:
     return json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
 
+def _verify_digest_on_load() -> bool:
+    """Full sha256 of every checkpoint on every load is off: a stage-major batch
+    re-enters run() once per stage per file, so it re-read and re-hashed each
+    checkpoint many times. Size + mtime still catch a truncated or edited file, and
+    writes are atomic. Set CHECKPOINT_VERIFY_DIGEST=1 to hash on load again."""
+    return os.environ.get("CHECKPOINT_VERIFY_DIGEST", "") == "1"
+
+
 class CheckpointManager:
     def __init__(self, cache_dir: str, job_id: str):
         self.job_dir = os.path.join(cache_dir, job_id)
@@ -73,7 +81,7 @@ class CheckpointManager:
     def load(self, stage: str, fmt: str = "pkl") -> Optional[Any]:
         """Đọc kết quả trung gian nếu đã lưu."""
         path = self._get_stage_path(stage, fmt)
-        if not self._is_committed(path):
+        if not self._is_committed(path, verify_digest=_verify_digest_on_load()):
             return None
             
         if fmt == "pkl":
