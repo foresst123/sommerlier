@@ -429,7 +429,7 @@
           "noise_max": 0.15,
           "music_patched_max": 0.15,
           "require_word_alignment": true,
-          "thinking": true,
+          "thinking": false,
           "max_new_tokens": 16384
         },
         "sidon": {
