@@ -77,21 +77,88 @@ class ProgressLedger:
                 self.logger.warning(
                     f"Could not read {self.path} ({e}); starting a fresh ledger")
 
-    def save(self):
-        """Write atomically: a run killed mid-write must not lose the ledger."""
+    @staticmethod
+    def _read_disk(path):
+        """The ledger on disk as four dicts, or None when missing or unreadable."""
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        return tuple((data.get(k) or {}) for k in
+                     ("done", "failed", "rejected", "quality"))
+
+    def _merge(self, disk):
+        """Fold another process's view (`disk`) into memory. Memory wins on equal keys.
+
+        done wins over failed/rejected: a file one process finished is finished,
+        whatever another process saw before. Attempt counts only grow.
+        """
+        d_done, d_failed, d_rejected, d_quality = disk
+        done = {**d_done, **self.done}
+        failed = {**d_failed, **self.failed}
+        for key, entry in d_failed.items():
+            mine = self.failed.get(key)
+            if mine is not None:
+                try:
+                    top = max(int(entry.get("attempts", 0)),
+                              int(mine.get("attempts", 0)))
+                    failed[key] = {**mine, "attempts": top}
+                except (TypeError, ValueError, AttributeError):
+                    pass
+        rejected = {**d_rejected, **self.rejected}
+        for key in done:
+            failed.pop(key, None)
+            rejected.pop(key, None)
+        self.done, self.failed, self.rejected = done, failed, rejected
+        self.quality = {**d_quality, **self.quality}
+
+    def refresh(self):
+        """Merge the on-disk ledger into memory without writing.
+
+        Lets `pending()` see what other pipelines sharing this directory finished.
+        """
         if not self.persist:
             return
-        payload = {
-            "directory": self.directory,
-            "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "done": self.done,
-            "failed": self.failed,
-            "rejected": self.rejected,
-            "quality": self.quality,
-        }
+        with self._lock:
+            disk = self._read_disk(self.path)
+            if disk is not None:
+                self._merge(disk)
+
+    def save(self):
+        """Merge with the disk, then write atomically.
+
+        Several pipelines may share one input directory, so overwriting the file
+        from memory would drop what the others recorded. The read-merge-write runs
+        under an flock on a sibling lock file. A run killed mid-write must not lose
+        the ledger, hence the atomic replace.
+        """
+        if not self.persist:
+            return
         d = os.path.dirname(self.path) or "."
+        lock_fd = None
         try:
             os.makedirs(d, exist_ok=True)
+            try:
+                import fcntl
+                lock_fd = os.open(os.path.join(d, ".progress.lock"),
+                                  os.O_CREAT | os.O_RDWR, 0o644)
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            except (ImportError, OSError):
+                lock_fd = None  # no flock (Windows): best-effort merge
+            disk = self._read_disk(self.path)
+            if disk is not None:
+                self._merge(disk)
+            payload = {
+                "directory": self.directory,
+                "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "done": self.done,
+                "failed": self.failed,
+                "rejected": self.rejected,
+                "quality": self.quality,
+            }
             fd, tmp = tempfile.mkstemp(dir=d, prefix=".progress-", suffix=".json")
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -99,6 +166,12 @@ class ProgressLedger:
         except Exception as e:
             if self.logger:
                 self.logger.warning(f"Could not write progress ledger: {e}")
+        finally:
+            if lock_fd is not None:
+                try:
+                    os.close(lock_fd)  # closing releases the flock
+                except OSError:
+                    pass
 
     # -- queries -------------------------------------------------------
     def _key(self, path: str) -> str:

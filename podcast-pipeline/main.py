@@ -128,6 +128,10 @@ def _build_parser():
                              "pipelined refinement, split diarization placement, telemetry). "
                              "Forces it on for a profile whose performance.enabled "
                              "is false; a profile that already enables it ignores the flag.")
+    parser.add_argument("--no_claims", action="store_true",
+                        help="Do not mark files being processed in the audio directory. "
+                             "By default several pipelines can share one --audio_dir "
+                             "without picking the same file.")
     parser.add_argument("--no_stage_output", action="store_true",
                         help="Skip the per-stage artifact directories (01_diarization/, "
                              "02_separation/, ...). They are written by default so a run "
@@ -310,6 +314,7 @@ install_torch_load_shim()
 
 from utils.batch import audio_duration, find_audio_files, find_name_collisions, plan_batches, run_batch_by_stage
 from utils.progress import ProgressLedger
+from utils.file_claims import FileClaims, claim_group
 from utils.steps import will_run, opt_in_step_enabled
 from utils.worker_env import resolve_worker_python
 # Separation thresholds live in the profile, but separation_service and bss_model read
@@ -390,6 +395,13 @@ def _discard_partial(ledger, args, audio_path, logger, pipeline=None):
     input) may be in an undefined state and still holding VRAM. The next pass
     will restart it cleanly via _rebind_worker.
     """
+    claims = getattr(ledger, "claims", None)
+    if claims is not None and claims.enabled and audio_path not in claims.held():
+        # Another pipeline may own this file's checkpoint; never delete it.
+        if logger:
+            logger.warning(f"Not clearing partial output of {os.path.basename(audio_path)}: "
+                           "this pipeline does not hold its claim")
+        return
     base_job = getattr(args, "job_id", "default_job")
     stem = os.path.splitext(os.path.basename(audio_path))[0]
     cache_dir = getattr(args, "cache_dir", "cache")
@@ -420,6 +432,12 @@ def _discard_partial(ledger, args, audio_path, logger, pipeline=None):
             except Exception as exc:
                 if logger:
                     logger.warning(f"Could not release {worker_name} worker after failure: {exc}")
+
+
+def _first_group_planner(todo, max_hours, logger=None):
+    """Duration-bounded first group of `todo`, in the shape claim_group expects."""
+    group = plan_batches(todo, max_hours, logger=logger)[0]
+    return [group]
 
 
 def _record_failure(ledger, args, path, err, logger, pipeline, failures, rejections):
@@ -777,6 +795,7 @@ def main():
                 except Exception:
                     pass
 
+    claims = None
     try:
         # 2. Build the loader, but load nothing yet.
         #
@@ -1044,6 +1063,26 @@ def main():
             ledger = ProgressLedger(os.path.dirname(os.path.abspath(args.audio)),
                                     logger=logger, persist=False)
         pipeline.progress_ledger = ledger
+        # Claims only make sense with a persistent ledger, i.e. a shared directory.
+        claims = FileClaims(args.audio_dir, logger=logger,
+                            enabled=not args.no_claims,
+                            job_id=getattr(args, "job_id", None)) \
+            if args.audio_dir else FileClaims(".", enabled=False)
+        ledger.claims = claims
+        if claims.enabled:
+            claims.start()
+            import signal
+            _prev_term = signal.getsignal(signal.SIGTERM)
+            if _prev_term in (signal.SIG_DFL, None):
+                def _on_term(signum, frame):
+                    claims.release_all()
+                    signal.signal(signum, signal.SIG_DFL)
+                    os.kill(os.getpid(), signum)
+                signal.signal(signal.SIGTERM, _on_term)
+            _held_by_others = len(claims.claimed_by_others(
+                ledger.pending(paths)))
+            logger.info(f"{_held_by_others} file(s) are being processed by "
+                        "another pipeline")
         if ledger.done or ledger.failed or ledger.rejected:
             logger.info(f"Resuming: {ledger.summary(len(paths))} "
                         f"(ledger: {os.path.basename(ledger.path)})")
@@ -1080,12 +1119,22 @@ def main():
             todo = ledger.pending(run_snapshot, exclude=attempted)
             if not todo:
                 break
+            group, others_hold = claim_group(
+                ledger, claims, run_snapshot, attempted, max_hours, logger=logger,
+                planner=_first_group_planner)
+            if not group:
+                if others_hold:
+                    logger.info(f"{others_hold} file(s) are being processed by "
+                                "another pipeline; nothing left to claim "
+                                "(run again to pick up what is left if that "
+                                "pipeline stops)")
+                break
+            todo = ledger.pending(run_snapshot, exclude=attempted)
 
             # The max-hours contract applies to every full-pipeline pass. In
             # stage-major mode this group completes ASR before its refinement
             # model is loaded, then finishes every remaining stage before the
             # next duration-bounded group starts.
-            group = plan_batches(todo, max_hours, logger=logger)[0]
             group_hours = sum(audio_duration(p) for p in group) / 3600.0
             logger.info(
                 f"--- Pass {pass_no}: {len(group)} file(s), {group_hours:.2f}h "
@@ -1112,6 +1161,8 @@ def main():
                         pipeline.run(args, config, path)
                         if not partial_run:
                             ledger.mark_done(path, time.time() - file_started)
+                            if claims.enabled:
+                                ledger.save()  # visible to others before an abort
                     except Exception as e:
                         # One bad file must not cost the rest of the pass.
                         err = f"{type(e).__name__}: {e}"
@@ -1123,6 +1174,8 @@ def main():
             # Written after every pass, so a run killed between passes resumes
             # from the last completed group rather than the beginning.
             ledger.save()
+            for path in group:
+                claims.release(path)
             logger.info(f"Pass {pass_no} finished in {(time.time() - started) / 60:.1f} min "
                         f"({ledger.summary()})")
 
@@ -1158,6 +1211,11 @@ def main():
             logger.info(f"All {len(paths)} file(s) completed")
 
     finally:
+        if claims is not None:
+            if claims.enabled:
+                ledger.save()  # finished work must be recorded before claims go
+            claims.release_all()
+            claims.stop()
         # Final safety net.  Normal stage boundaries release these earlier,
         # but startup OOMs happen before a stage can register its deferred
         # release.  In particular Whisper-vLLM and refinement used to be absent
