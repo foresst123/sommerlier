@@ -3,7 +3,8 @@ import types
 
 import pytest
 
-from services.api_llm import ApiError, ApiLLM, build_pass_llm, resolve_backend
+from services.api_llm import (ApiError, ApiLLM, STAGES, build_pass_llm, resolve_backend,
+                              resolve_stages, stage_llm)
 from services.transcript_review_service import TranscriptReviewService
 from utils.llm_batches import ask_in_batches
 
@@ -206,3 +207,23 @@ def test_cached_prompt_tokens_are_counted_separately():
     llm = _llm(FakeTransport([(200, json.dumps(body).encode(), {})]))
     llm.generate_texts("S", ["a", "b"])
     assert llm.stats["prompt_tokens"] == 4000 and llm.stats["cached_tokens"] == 3072
+
+
+def test_every_stage_calls_the_api_unless_narrowed():
+    assert resolve_stages(_args(), {}) == frozenset(STAGES)
+    assert resolve_stages(_args(api_stages="review, selection"), {}) == {"review", "selection"}
+    assert resolve_stages(_args(), {"stages": ["review"]}) == {"review"}
+    assert resolve_stages(_args(api_stages="selection"), {"stages": ["review"]}) == {"selection"}   # flag wins
+    with pytest.raises(ValueError):
+        resolve_stages(_args(api_stages="review,summary"), {})
+
+
+def test_only_the_chosen_stages_get_the_api_and_the_rest_keep_the_local_model():
+    local = types.SimpleNamespace(model_name=LOCAL_NAME)
+    profile = {"models": {"api_llm": {"model": "gpt-x"}}}
+    llm = build_pass_llm(_args(llm_backend="api", api_stages="review,selection"), profile, local)
+    assert stage_llm(llm, local, "review") is llm and stage_llm(llm, local, "selection") is llm
+    assert stage_llm(llm, local, "refinement") is local and stage_llm(llm, local, "relabel") is local
+    everything = build_pass_llm(_args(llm_backend="api"), profile, local)
+    assert all(stage_llm(everything, local, name) is everything for name in STAGES)
+    assert stage_llm(local, local, "review") is local             # local backend: nothing changes

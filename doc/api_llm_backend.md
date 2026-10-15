@@ -2,6 +2,16 @@
 
 Các bước LLM dùng chung một mô hình cục bộ (Qwen): **refinement, relabel, transcript_review, persona_profile, conversation_selection**. Có thể cho tất cả gọi một API tương thích OpenAI thay cho Qwen. Khi chọn API thì **không còn nạp Qwen/vLLM cục bộ** (không worker, không trọng số), nên GPU rảnh cho các bước khác.
 
+## Chi phí: nên chọn bước nào gọi API
+
+Refinement gửi **một yêu cầu cho mỗi đoạn** (mỗi yêu cầu lặp lại prompt hệ thống khoảng 1.500 token), nên chiếm gần hết token: khoảng 575 nghìn token vào cho một file 283 đoạn. Review và chọn conversation chỉ gửi vài cửa sổ mỗi file. Để giảm chi phí mà không đổi chất lượng refinement, để refinement chạy Qwen cục bộ và chỉ cho các bước sau gọi API:
+
+```bash
+python main.py ... --llm_backend api --api_model <id model> --api_stages review,selection
+```
+
+`--api_stages` nhận danh sách trong `refinement, relabel, review, persona, selection` (mặc định: tất cả). Cũng đặt được trong cấu hình bằng `"stages": ["review", "selection"]` trong `models.api_llm`. Bước nào không nằm trong danh sách vẫn dùng Qwen cục bộ; nếu refinement không dùng API thì Qwen vẫn cần nạp cho riêng bước đó.
+
 ## Dùng thế nào
 
 ```bash
@@ -23,7 +33,8 @@ Hoặc đặt cố định trong profile của `config.json`:
     "timeout_seconds": 120,
     "max_retries": 3,
     "reasoning_effort": "low",
-    "completion_floor": 1024
+    "completion_floor": 1024,
+    "stages": ["review", "selection"]
   }
 }
 ```

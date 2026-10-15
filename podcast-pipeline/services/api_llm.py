@@ -34,9 +34,12 @@ from utils import llm_trace
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 BACKENDS = ("local", "api")
+# The LLM stages that can run on the API. Refinement sends one request per segment, so it
+# dominates the token bill; running it locally and only the rest on the API cuts most of it.
+STAGES = ("refinement", "relabel", "review", "persona", "selection")
 _CONFIG_KEYS = frozenset({
     "model", "checkpoint_model_name", "base_url", "api_key_env", "concurrency",
-    "timeout_seconds", "max_retries", "reasoning_effort", "completion_floor"})
+    "timeout_seconds", "max_retries", "reasoning_effort", "completion_floor", "stages"})
 _RETRY_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 _LOG_EVERY_CALLS = 25
 
@@ -68,6 +71,7 @@ class ApiLLM:
         if not checkpoint_model_name:
             raise ValueError("api_llm needs the local model name its checkpoints were made with")
         self.api_model = str(model)
+        self.stages = frozenset(STAGES)          # build_pass_llm narrows this to what was asked for
         self.model_name = str(checkpoint_model_name)      # checkpoint identity, see module docstring
         self.base_url = str(base_url).rstrip("/")
         self.api_key_env = str(api_key_env)
@@ -240,6 +244,25 @@ def resolve_backend(args, env_profile) -> str:
     return backend
 
 
+def resolve_stages(args, config) -> frozenset:
+    """`--api_stages` (comma list), then `models.api_llm.stages`, then every stage."""
+    raw = getattr(args, "api_stages", None) or config.get("stages")
+    if not raw:
+        return frozenset(STAGES)
+    names = [n.strip() for n in (raw.split(",") if isinstance(raw, str) else raw) if str(n).strip()]
+    bad = sorted(set(names) - set(STAGES))
+    if bad:
+        raise ValueError(f"unknown api stage(s): {', '.join(bad)}; choose from {', '.join(STAGES)}")
+    return frozenset(names)
+
+
+def stage_llm(pass_llm, local_llm, stage: str):
+    """The LLM object `stage` should use: the API one only when that stage was asked for."""
+    if pass_llm is local_llm:
+        return local_llm
+    return pass_llm if stage in pass_llm.stages else local_llm
+
+
 def build_pass_llm(args, env_profile, local_llm, logger=None):
     """The object the LLM passes talk to: `local_llm` itself unless the API backend is chosen.
 
@@ -252,16 +275,22 @@ def build_pass_llm(args, env_profile, local_llm, logger=None):
     unknown = sorted(set(config) - _CONFIG_KEYS)
     if unknown:
         raise ValueError(f"unknown key(s) in models.api_llm: {', '.join(unknown)}")
+    stages = resolve_stages(args, config)
+    config.pop("stages", None)
     model = getattr(args, "api_model", None) or config.pop("model", None)
     config.pop("model", None)
     checkpoint_name = config.pop("checkpoint_model_name", None) or getattr(local_llm, "model_name", None)
     llm = ApiLLM(model, checkpoint_model_name=checkpoint_name, logger=logger, **config)
+    llm.stages = stages
     if not llm.ensure_loaded():
         raise RuntimeError(
             f"llm_backend is 'api' but the environment variable {llm.api_key_env} is not set")
     if logger:
+        local = [n for n in STAGES if n not in stages]
         logger.info(
-            f"LLM stages (refinement, relabel, review, persona, conversation selection) call the API model "
-            f"{llm.api_model} at {llm.base_url}; checkpoints stay under the name {llm.model_name}, "
+            f"LLM stages {', '.join(n for n in STAGES if n in stages)} call the API model "
+            f"{llm.api_model} at {llm.base_url}"
+            + (f"; {', '.join(local)} stay on the local model" if local else "")
+            + f". Checkpoints stay under the name {llm.model_name}, "
             f"so work already done is reused and only unfinished files are sent")
     return llm
