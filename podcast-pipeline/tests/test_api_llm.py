@@ -61,16 +61,17 @@ def test_generate_texts_keeps_order_and_sends_the_expected_request():
     assert ok and texts == ["a", "b", "c"]
     url, body, headers = transport.calls[0]
     assert url == "https://api.openai.com/v1/chat/completions"
-    assert body["model"] == "gpt-x" and body["max_completion_tokens"] == 300
-    assert body["reasoning_effort"] == "low"
+    assert body["model"] == "gpt-x" and body["reasoning_effort"] == "low"
+    assert body["max_completion_tokens"] == 1024        # reasoning on: room for the thinking and the answer
     assert body["messages"] == [{"role": "system", "content": "SYS"}, {"role": "user", "content": "m1"}]
     assert headers["Authorization"] == "Bearer sk-test-secret"
 
 
 def test_reasoning_effort_is_only_sent_when_configured():
     transport = FakeTransport([_ok()])
-    _llm(transport).generate_texts("S", ["m"])
+    _llm(transport).generate_texts("S", ["m"], max_new_tokens=300)
     assert "reasoning_effort" not in transport.calls[0][1]
+    assert transport.calls[0][1]["max_completion_tokens"] == 300      # no floor without reasoning
 
 
 def test_concurrent_calls_return_in_message_order():
@@ -175,3 +176,24 @@ def test_conversation_selection_checkpoint_name_is_the_same_for_api_and_local():
     local = types.SimpleNamespace(model_name=LOCAL_NAME, batch_size=4, max_batch_tokens=0)
     assert (ConversationExportService(api).checkpoint_namespace
             == ConversationExportService(local).checkpoint_namespace)
+
+
+def test_in_flight_requests_never_exceed_the_configured_concurrency():
+    import threading
+    import time
+    lock, state = threading.Lock(), {"now": 0, "peak": 0}
+
+    def transport(url, body, headers, timeout):
+        with lock:
+            state["now"] += 1
+            state["peak"] = max(state["peak"], state["now"])
+        time.sleep(0.02)
+        with lock:
+            state["now"] -= 1
+        return _ok("x")
+
+    llm = _llm(transport, concurrency=3)
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=12) as pool:           # several callers at once, as refinement queues chunks
+        results = list(pool.map(lambda i: llm.generate_texts("S", ["a", "b", "c", "d"]), range(6)))
+    assert all(ok for ok, _ in results) and state["peak"] <= 3

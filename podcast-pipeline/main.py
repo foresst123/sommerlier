@@ -916,10 +916,12 @@ def main():
         # switches nothing on: `steps.speaker_relabel` decides whether it runs.
         # An unknown key in `models.relabel` raises here, so a typo is an error
         # rather than a setting that quietly did not apply.
-        # The passes below talk to `pass_llm`: the same local model as refinement unless
+        # Refinement and the passes below run on `pass_llm`: the local model unless
         # --llm_backend api swaps in the API, with the same surface and checkpoint names.
         from services.api_llm import build_pass_llm
         pass_llm = build_pass_llm(args, env_profile, refinement_svc, logger=logger)
+        if pass_llm is not refinement_svc:
+            refinement_svc.use_remote(pass_llm)
         relabel_svc = SpeakerRelabelService(
             pass_llm, logger=logger,
             **dict(env_profile.get("models", {}).get("relabel", {})))

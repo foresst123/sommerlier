@@ -1,6 +1,6 @@
 # Gọi API thay cho Qwen ở các bước LLM
 
-Các bước sau dùng chung một mô hình LLM cục bộ (Qwen): **relabel, transcript_review, persona_profile, conversation_selection**. Có thể cho chúng gọi một API tương thích OpenAI thay cho Qwen. **Refinement vẫn dùng Qwen cục bộ** (nó có luồng riêng, không đổi).
+Các bước LLM dùng chung một mô hình cục bộ (Qwen): **refinement, relabel, transcript_review, persona_profile, conversation_selection**. Có thể cho tất cả gọi một API tương thích OpenAI thay cho Qwen. Khi chọn API thì **không còn nạp Qwen/vLLM cục bộ** (không worker, không trọng số), nên GPU rảnh cho các bước khác.
 
 ## Dùng thế nào
 
@@ -22,17 +22,19 @@ Hoặc đặt cố định trong profile của `config.json`:
     "concurrency": 8,
     "timeout_seconds": 120,
     "max_retries": 3,
-    "reasoning_effort": "low"
+    "reasoning_effort": "low",
+    "completion_floor": 1024
   }
 }
 ```
 
-Chỉ `model` là bắt buộc. `reasoning_effort` chỉ gửi đi khi được đặt (bỏ nếu model không hỗ trợ). `base_url` đổi được sang cổng tương thích OpenAI khác. Cờ dòng lệnh thắng cấu hình; mặc định là `local`, nên không có gì đổi nếu không bật.
+Chỉ `model` là bắt buộc. `reasoning_effort` chỉ gửi đi khi được đặt (bỏ nếu model không hỗ trợ). `completion_floor` là số token trả lời tối thiểu được xin: model suy luận tiêu một phần `max_completion_tokens` để suy nghĩ nên một giới hạn nhỏ có thể không còn chỗ cho câu trả lời; mặc định là 1024 khi có `reasoning_effort`, 0 nếu không. `base_url` đổi được sang cổng tương thích OpenAI khác. Cờ dòng lệnh thắng cấu hình; mặc định là `local`, nên không có gì đổi nếu không bật.
 
 ## Không làm lại việc đã xong
 
+- Refinement không đặt tên checkpoint theo model, nên file đã có checkpoint `refinement` được nạp lại như cũ, không gọi API. Các bước sau thì:
 - Mỗi bước tính tên checkpoint từ `llm.model_name`. `ApiLLM.model_name` được đặt **bằng tên model cục bộ** (`models.api_llm.checkpoint_model_name`, mặc định là tên model của refinement) nên checkpoint cũ của review, persona, relabel và selection vẫn được nhận. File đã có kết quả thì nạp từ checkpoint, **không gọi API**; chỉ file còn dở mới được gửi đi.
-- Prompt, cách chia cửa sổ, cách đọc kết quả, định dạng checkpoint và thư mục xuất đều giữ nguyên.
+- Prompt, cách chia cửa sổ, cách đọc kết quả, định dạng checkpoint và thư mục xuất đều giữ nguyên. Refinement giữ nguyên cách tách đoạn, kiểm tra trung thực (`_accept`) và điều kiện báo lỗi cả file khi quá nhiều đoạn thất bại; chỉ phần sinh chữ chuyển sang API, và bộ nhớ đệm tiền tố cục bộ (`use_prefix`) không dùng.
 - Model thật được gọi nằm trong từng dòng của `llm_trace/` (`"backend": "api"`).
 - Hệ quả cần biết: kết quả do API tạo sẽ nằm chung tên checkpoint với kết quả do Qwen tạo. Muốn tách riêng thì đặt `checkpoint_model_name` khác (khi đó các file đã làm sẽ bị tính lại).
 - Bước chọn conversation đã đổi version prompt (`v14-concise`) nên vẫn tính lại một lần cho file chưa xuất, độc lập với việc đổi backend.
@@ -41,6 +43,7 @@ Chỉ `model` là bắt buộc. `reasoning_effort` chỉ gửi đi khi được 
 
 - Khóa đọc từ biến môi trường, không ghi log, và được che khỏi thông báo lỗi.
 - Thiếu khóa, thiếu `model` hay sai tên cấu hình thì **báo lỗi ngay lúc khởi động**, không để từng file bị bỏ qua lặng lẽ.
+- Tổng số yêu cầu đang bay cùng lúc không vượt `concurrency`, kể cả khi refinement xếp nhiều đoạn một lúc.
 - Mỗi yêu cầu thử lại khi gặp 429/5xx/timeout (theo `Retry-After` nếu có). Yêu cầu không trả lời được thì bước đó coi như "không đổi gì" như khi Qwen không trả lời.
 - Chi phí: số token mỗi lần chạy được cộng dồn và ghi log mỗi 25 lần gọi (`[api-llm] ... call(s) ... prompt + completion tokens`).
 

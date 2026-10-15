@@ -1,12 +1,12 @@
 """A chat-completions API standing in for the resident local LLM in the LLM passes.
 
-Speaker relabel, transcript review, persona profile and conversation selection all
-talk to one object (`DiarizationRefinementService`) through a small surface:
+Refinement, speaker relabel, transcript review, persona profile and conversation selection
+all run on one object (`DiarizationRefinementService`); the passes after refinement talk to it
+through a small surface:
 `ensure_loaded`, `count_tokens`, `generate_texts`, `batch_size`, `max_batch_tokens`,
 `model_name`, `parallel_windows`, `replica_count`. `ApiLLM` offers the same surface
 over any OpenAI-compatible endpoint, so those passes run unchanged: same prompts, same
-windows, same parsing, same checkpoints and output layout. Refinement itself keeps
-the local model.
+windows, same parsing, same checkpoints and output layout.
 
 Finished work is never redone. Each pass keys its checkpoint on `llm.model_name`, so
 `model_name` here is the NAME OF THE LOCAL MODEL the checkpoints were made with, not the
@@ -15,6 +15,9 @@ files still to do reach the API. The model actually called is `api_model` and is
 in every llm_trace line (`backend: "api"`).
 
 The key is read from the environment (`api_key_env`) and is never logged or stored.
+
+Refinement uses it too: `DiarizationRefinementService.use_remote(api_llm)` makes the
+refinement service hand its requests to this object instead of starting the local worker.
 """
 
 import json
@@ -33,7 +36,7 @@ DEFAULT_BASE_URL = "https://api.openai.com/v1"
 BACKENDS = ("local", "api")
 _CONFIG_KEYS = frozenset({
     "model", "checkpoint_model_name", "base_url", "api_key_env", "concurrency",
-    "timeout_seconds", "max_retries", "reasoning_effort"})
+    "timeout_seconds", "max_retries", "reasoning_effort", "completion_floor"})
 _RETRY_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 _LOG_EVERY_CALLS = 25
 
@@ -57,7 +60,8 @@ class ApiLLM:
     def __init__(self, model: str, *, checkpoint_model_name: str,
                  base_url: str = DEFAULT_BASE_URL, api_key_env: str = "OPENAI_API_KEY",
                  concurrency: int = 8, timeout_seconds: float = 120.0, max_retries: int = 3,
-                 reasoning_effort: Optional[str] = None, logger=None,
+                 reasoning_effort: Optional[str] = None, completion_floor: Optional[int] = None,
+                 logger=None,
                  transport: Optional[Callable] = None, sleep: Callable = time.sleep):
         if not model:
             raise ValueError("api_llm.model is required (the id of the API model to call)")
@@ -71,6 +75,10 @@ class ApiLLM:
         self.timeout_seconds = float(timeout_seconds)
         self.max_retries = max(0, int(max_retries))
         self.reasoning_effort = reasoning_effort or None
+        # A reasoning model spends part of max_completion_tokens thinking; a small cap can leave
+        # no room for the answer. With reasoning on, never ask for less than this.
+        self.completion_floor = (int(completion_floor) if completion_floor is not None
+                                 else (1024 if self.reasoning_effort else 0))
         self.logger = logger
         self._transport = transport or _default_transport
         self._sleep = sleep
@@ -80,12 +88,19 @@ class ApiLLM:
         self.parallel_windows = True
         self.replica_count = self.concurrency
         self._lock = threading.Lock()
+        self._slots = threading.BoundedSemaphore(self.concurrency)   # requests in flight, across every caller
         self.stats = {"calls": 0, "failures": 0, "prompt_tokens": 0, "completion_tokens": 0}
 
     # -- the surface the passes use ------------------------------------------------
     def ensure_loaded(self) -> bool:
         """Nothing to load; usable when the key is set."""
         return bool(os.environ.get(self.api_key_env))
+
+    def token_usage(self) -> dict:
+        """Tokens billed so far, in the shape the refinement progress line reads."""
+        with self._lock:
+            return {"prompt_tokens": self.stats["prompt_tokens"],
+                    "completion_tokens": self.stats["completion_tokens"]}
 
     def count_tokens(self, text: str) -> int:
         """Same estimate the local service uses when its tokenizer is in another process."""
@@ -130,7 +145,7 @@ class ApiLLM:
         body = {"model": self.api_model,
                 "messages": [{"role": "system", "content": system_prompt},
                              {"role": "user", "content": user_message}],
-                "max_completion_tokens": int(max_new_tokens)}
+                "max_completion_tokens": max(int(max_new_tokens), self.completion_floor)}
         if self.reasoning_effort:
             body["reasoning_effort"] = self.reasoning_effort
         return json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -145,7 +160,8 @@ class ApiLLM:
         last = "no attempt made"
         for attempt in range(self.max_retries + 1):
             try:
-                status, raw, response_headers = self._transport(url, body, headers, self.timeout_seconds)
+                with self._slots:
+                    status, raw, response_headers = self._transport(url, body, headers, self.timeout_seconds)
             except Exception as exc:                      # network error, timeout
                 status, raw, response_headers = None, b"", {}
                 last = f"{type(exc).__name__}"
@@ -241,7 +257,7 @@ def build_pass_llm(args, env_profile, local_llm, logger=None):
             f"llm_backend is 'api' but the environment variable {llm.api_key_env} is not set")
     if logger:
         logger.info(
-            f"LLM passes (relabel, review, persona, conversation selection) call the API model "
+            f"LLM stages (refinement, relabel, review, persona, conversation selection) call the API model "
             f"{llm.api_model} at {llm.base_url}; checkpoints stay under the name {llm.model_name}, "
             f"so work already done is reused and only unfinished files are sent")
     return llm

@@ -287,6 +287,18 @@ class DiarizationRefinementService:
                     "falling back to direct load")
             self._worker_python = None
 
+    def use_remote(self, llm) -> None:
+        """Send this service's requests to `llm` (an API backend) instead of the local model.
+
+        Nothing is loaded locally afterwards: no vLLM worker, no weights. Fusion, its
+        acceptance checks and its checkpoints are unchanged; only where the text is
+        generated differs. `use_prefix` (a local KV-cache trick) is not used remotely.
+        """
+        self._remote_llm = llm
+
+    def _remote(self):
+        return getattr(self, "_remote_llm", None)
+
     def _ensure_worker_started(self):
         """Spawn worker subprocess lần đầu cần dùng (lazy start).
 
@@ -743,7 +755,7 @@ class DiarizationRefinementService:
     def refine(self, segments: List[TranscriptSegment], prompt: str = None) -> List[TranscriptSegment]:
         if not self.ensure_loaded():
             raise RuntimeError(
-                f"Failed to initialize refinement LLM {self.model_name}"
+                f"Failed to initialize refinement LLM {self._remote().api_model if self._remote() else self.model_name}"
             )
 
         self.last_failure = None
@@ -791,7 +803,7 @@ class DiarizationRefinementService:
         tokenizer = None
         original_padding_side = None
 
-        if self._worker is None:
+        if self._worker is None and self._remote() is None:
             tokenizer = self.tokenizer
 
             if tokenizer.pad_token_id is None:
@@ -1150,11 +1162,17 @@ class DiarizationRefinementService:
     @property
     def replica_count(self) -> int:
         """Engines a request can go to right now (1 until the workers are up)."""
+        remote = self._remote()
+        if remote is not None:
+            return remote.replica_count
         services = getattr(self._worker, "services", None)
         return max(1, len(services)) if services else 1
 
     def token_usage(self) -> dict:
         """Tokens the engines processed so far, from their own counts (empty if unknown)."""
+        remote = self._remote()
+        if remote is not None:
+            return remote.token_usage()
         return dict(getattr(self._worker, "usage", None) or {})
 
     def submit_texts(self, system_prompt, user_messages, max_new_tokens=512,
@@ -1164,6 +1182,15 @@ class DiarizationRefinementService:
         A replica pool takes it into the shared queue. Anything else runs it on one
         background thread, so the caller can work while a single engine generates.
         """
+        remote = self._remote()
+        if remote is not None:
+            if getattr(self, "_remote_executor", None) is None:
+                from concurrent.futures import ThreadPoolExecutor
+                self._remote_executor = ThreadPoolExecutor(
+                    max_workers=max(1, remote.replica_count), thread_name_prefix="refinement-api")
+            return self._remote_executor.submit(
+                profiling.bind(self.generate_texts), system_prompt, user_messages,
+                max_new_tokens, use_prefix, labels, thinking)
         worker = self._worker if self._ensure_worker_started() else None
         if worker is not None and hasattr(worker, "submit"):
             return worker.submit(system_prompt, user_messages,
@@ -1184,6 +1211,9 @@ class DiarizationRefinementService:
         judging) that run on the same model: `refine()` loads it itself, but
         those passes must work with refinement switched off too.
         """
+        remote = self._remote()
+        if remote is not None:
+            return remote.ensure_loaded()
         if self._ensure_worker_started():
             return self._worker.ping()
         self._load_model()
@@ -1211,6 +1241,10 @@ class DiarizationRefinementService:
         then starts with a `<think>` block, so `max_new_tokens` has to cover the
         reasoning as well as the answer. A model with no thinking mode ignores it.
         """
+        remote = self._remote()
+        if remote is not None:
+            return remote.generate_texts(
+                system_prompt, user_messages, max_new_tokens, False, labels, thinking)
         if self._ensure_worker_started():
             return self._worker.generate_texts(
                 system_prompt, user_messages,
