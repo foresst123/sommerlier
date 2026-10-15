@@ -6,7 +6,7 @@ proposing a new label it only *flags* what it cannot believe, so the conversatio
 finder can keep its ranges away from it:
 
   * `speaker_phrase`   words inside a turn that belong to the other speaker
-                       (a backchannel merged into a long turn). Soft.
+                       (a backchannel merged into a long turn). Hard.
   * `speaker_turn`     the whole turn belongs to the other speaker. Hard.
   * `asr_hallucination` boilerplate or invented text the speaker did not say,
                        unrelated to the talk around it, that
@@ -50,9 +50,9 @@ REVIEW_PROMPT_VERSION = "review-v3"
 
 FLAG_KINDS = ("speaker_phrase", "speaker_turn", "asr_hallucination", "asr_garbage",
               "not_vietnamese")
-# Soft: speaker_phrase is a score penalty downstream; not_vietnamese is checked by
-# duration share downstream. The remaining kinds reject a range.
-HARD_FLAG_KINDS = ("speaker_turn", "asr_hallucination", "asr_garbage")
+# not_vietnamese is soft: checked by duration share downstream. The remaining kinds,
+# wrong-speaker ones included, reject a range.
+HARD_FLAG_KINDS = ("speaker_phrase", "speaker_turn", "asr_hallucination", "asr_garbage")
 
 _TEMPLATE_SLACK_TOKENS = 64
 

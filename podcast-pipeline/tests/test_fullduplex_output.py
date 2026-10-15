@@ -278,21 +278,11 @@ def _soft(segs, *numbers):
         segs[n].review_flags = [{"kind": "speaker_phrase", "phrase": "x", "conf": 0.9, "why": "t"}]
 
 
-def test_more_than_max_soft_flags_rejects_the_range():
+def test_a_single_speaker_phrase_flag_rejects_the_range():
     segs = _talk()
-    _soft(segs, 2, 3, 4)
+    _soft(segs, 2)
     cand, why = _finder(segs).evaluate(0, 14)
-    assert cand is None and why == "too_many_soft_flags"
-    cand, why = _finder(segs, max_soft_flags=3).evaluate(0, 14)
-    assert cand is not None, why
-
-
-def test_two_soft_flags_still_pass_and_cost_five_points_each():
-    clean = _finder(_talk()).evaluate(0, 14)[0]
-    segs = _talk()
-    _soft(segs, 2, 3)
-    soft = _finder(segs).evaluate(0, 14)[0]
-    assert soft is not None and soft.score == pytest.approx(clean.score - 10.0, abs=0.11)
+    assert cand is None and why == "review_flag_speaker_phrase"
 
 
 def test_the_score_is_a_gate_only():

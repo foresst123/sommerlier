@@ -63,8 +63,8 @@ DEFAULT_WEIGHTS = {
 }
 
 # Mirror transcript_review_service.HARD_FLAG_KINDS (not imported on purpose).
-HARD_REVIEW_KINDS = frozenset({"speaker_turn", "asr_hallucination", "asr_garbage"})
-SOFT_REVIEW_KINDS = frozenset({"speaker_phrase"})
+HARD_REVIEW_KINDS = frozenset({"speaker_phrase", "speaker_turn", "asr_hallucination", "asr_garbage"})
+SOFT_REVIEW_KINDS: frozenset = frozenset()     # no soft kind now: every wrong-speaker flag rejects
 # Judged by share of the excerpt, not by presence: one short "OK"/"yeah" line must not
 # sink a Vietnamese conversation, a stretch of English must.
 RATIO_REVIEW_KINDS = frozenset({"not_vietnamese"})

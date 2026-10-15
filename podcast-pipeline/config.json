@@ -38,7 +38,7 @@
         "asr": true,
         "captioning": false,
         "refinement": true,
-        "speaker_relabel": true,
+        "speaker_relabel": false,
         "word_alignment": true,
         "conversation_exports": true,
         "export": true
@@ -246,7 +246,7 @@
         "asr": true,
         "captioning": false,
         "refinement": true,
-        "speaker_relabel": true,
+        "speaker_relabel": false,
         "word_alignment": true,
         "conversation_exports": true,
         "export": true,

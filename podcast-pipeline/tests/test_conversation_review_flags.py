@@ -75,16 +75,11 @@ def test_hard_reject_can_be_turned_off():
     assert cand is not None
 
 
-def test_soft_flags_lower_the_score_and_are_counted():
-    clean = _finder(_talk()).evaluate(0, 14)[0]
+def test_a_speaker_phrase_flag_rejects_the_range():
     segs = _talk()
     segs[3].review_flags = [flag("speaker_phrase", "đúng rồi")]
-    segs[6].review_flags = [flag("speaker_phrase", "ừ")]
-    soft = _finder(segs).evaluate(0, 14)[0]
-    assert soft is not None
-    assert soft.metrics["review_soft_flags"] == 2
-    assert clean.metrics["review_soft_flags"] == 0
-    assert soft.score == pytest.approx(clean.score - 10.0, abs=0.11)
+    cand, why = _finder(segs).evaluate(0, 14)
+    assert cand is None and why == "review_flag_speaker_phrase"
 
 
 def test_none_and_empty_flags_are_clean():
@@ -220,7 +215,7 @@ def test_run_equals_write_of_select(tmp_path):
 
 def test_conversation_json_rows_carry_nonempty_review_flags(tmp_path):
     segs = _talk()
-    segs[5].review_flags = [flag("speaker_phrase", "đúng rồi")]
+    segs[5].review_flags = [flag("not_vietnamese")]
     segs[6].review_flags = []
     svc = _service()
     run = svc.run(segs, out_dir=str(tmp_path), **_kw())
@@ -229,7 +224,7 @@ def test_conversation_json_rows_carry_nonempty_review_flags(tmp_path):
         open(p, encoding="utf-8").read() for p in _files(tmp_path)
         if p.endswith("conversation.json")))
     rows = {r["index"]: r for r in doc["conversation"]}
-    assert rows["00005"]["review_flags"][0]["kind"] == "speaker_phrase"
+    assert rows["00005"]["review_flags"][0]["kind"] == "not_vietnamese"
     assert "review_flags" not in rows["00006"]
     assert "review_flags" not in rows["00004"]
 
