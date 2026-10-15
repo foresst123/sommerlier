@@ -1,0 +1,18 @@
+# Separate environment for nemotron_worker.py (Nemotron-3-Diarization).
+# NeMo pins numba==0.61.0, which conflicts with the main env (librosa/whisperx
+# want 0.61.2), so never add it to requirements.txt.
+#
+# Create it next to the repository (resolve_worker_python finds
+# <repo>/../nemotron_env/bin/python, or set NEMOTRON_PYTHON, or
+# worker_envs.nemotron in the config profile):
+#
+#   python -m venv nemotron_env
+#   nemotron_env/bin/pip install torch==2.8.0 torchaudio==2.8.0   # CUDA build for the DGX
+#   nemotron_env/bin/pip install -r podcast-pipeline/requirements-nemotron.txt
+#
+# UNVERIFIED: no version below has been installed or run. After the first
+# successful run on the DGX, pin the exact versions with `pip freeze`.
+# Needs Linux and an Ampere-or-newer NVIDIA GPU (assumed from the model card).
+
+nemo-toolkit[asr]
+soundfile
