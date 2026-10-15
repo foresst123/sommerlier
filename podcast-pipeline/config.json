@@ -501,10 +501,10 @@
             "ordered_postprocess": true
           },
           "music": {
-            "tagger_workers": 4,
+            "tagger_workers": 2,
             "tagger_isolate_process": true,
-            "max_separator_workers": 2,
-            "workers_per_gpu": 2,
+            "max_separator_workers": 1,
+            "workers_per_gpu": 1,
             "cross_file_overlap": false,
             "ordered_postprocess": true,
             "postprocess_workers": 2,
