@@ -1266,11 +1266,20 @@ class PipelineService:
         music_cut = (music_map.remap(self.timeline)
                      if music_map is not None and self.timeline else music_map)
         base_name = os.path.splitext(os.path.basename(audio_path))[0]
+        replay = None
+        if getattr(service, "replay_old_replies", False):
+            # Re-judge the model's earlier answers (older namespaces of this file's checkpoint)
+            # under the current settings instead of asking the model again.
+            replay = service.replay_from_payloads(
+                checkpoint.load_siblings("conversation_selection"))
+            if self.logger and replay:
+                self.logger.info(f"[selection] replaying {len(replay)} earlier window "
+                                 f"answer(s) for {base_name}")
         selection = service.select(
             transcripts, timeline=self.timeline,
             noise=getattr(self, "noise_track", None), music_map=music_cut,
             waveform=audio_data.waveform, sample_rate=audio_data.sample_rate,
-            base_name=base_name, speech_segments=speech_segments)
+            base_name=base_name, speech_segments=speech_segments, replay=replay)
         report = getattr(selection, "report", {}) or {}
         # Only complete answers may be persisted.  The service marks transient
         # failures explicitly; keeping this guard in the orchestrator prevents

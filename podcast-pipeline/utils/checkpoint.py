@@ -92,6 +92,29 @@ class CheckpointManager:
                 return json.load(f)
         return None
 
+    def load_siblings(self, stage: str, fmt: str = "pkl") -> list:
+        """Committed payloads of `stage` kept under every OTHER namespace folder, newest first.
+
+        A changed setting or prompt version gets a folder of its own, so the answers made
+        before the change are still on disk; this reads them (for replaying model replies).
+        """
+        base = os.path.join(self.job_dir, stage)
+        current = self.namespaces.get(stage)
+        found = []
+        if os.path.isdir(base):
+            for name in os.listdir(base):
+                path = os.path.join(base, name, f"result.{fmt}")
+                if name != current and os.path.isfile(path) and self._is_committed(path, verify_digest=False):
+                    found.append((os.path.getmtime(path), path))
+        out = []
+        for _, path in sorted(found, reverse=True):
+            try:
+                with open(path, "rb") as handle:
+                    out.append(pickle.load(handle) if fmt == "pkl" else json.load(handle))
+            except Exception:
+                continue
+        return out
+
     def load_if_committed(self, stage: str, fmt: str = "pkl") -> Optional[Any]:
         """Load one checkpoint after one validation pass.
 

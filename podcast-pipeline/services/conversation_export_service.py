@@ -1003,9 +1003,14 @@ class ConversationExportService:
     RENDER_CACHE_BYTES = 512 * 1024 * 1024
 
     def __init__(self, llm, logger=None, render_workers: int = 1,
-                 reuse_render: bool = False, **settings):
+                 reuse_render: bool = False, replay_old_replies: bool = False, **settings):
         self.llm = llm
         self.logger = logger
+        # Reuse the model's earlier replies for windows it already answered (from older
+        # checkpoints, see replay_from_payloads), so loosening a validator setting re-judges
+        # the same answers without asking the model again. Not part of the settings digest
+        # on purpose: it changes where replies come from, not what a checkpoint means.
+        self.replay_old_replies = bool(replay_old_replies)
         # CPU threads that cut and write excerpts (numpy and soundfile release the
         # GIL). 1 keeps the sequential order; results are always reported in the
         # same order whatever the width.
@@ -1020,6 +1025,23 @@ class ConversationExportService:
         # A finder reply can contain many candidates, so never use the tiny budget
         # that was sufficient for the old one-candidate semantic judge.
         self.max_new_tokens = reply_budget(max(1536, self.cfg.max_new_tokens), self.cfg.thinking)
+
+    @staticmethod
+    def replay_from_payloads(payloads) -> Dict[Tuple[str, str], str]:
+        """(first_index, last_index) of a window -> the model's final reply for it.
+
+        `payloads` are older selection checkpoints, newest first; the first readable reply
+        for a window wins. Replies cut off while thinking or unreadable are never replayed.
+        """
+        out: Dict[Tuple[str, str], str] = {}
+        for payload in payloads or []:
+            report = (payload or {}).get("report") or {}
+            for row in report.get("replies") or []:
+                raw = row.get("raw")
+                key = (str(row.get("first_index")), str(row.get("last_index")))
+                if raw and row.get("readable") and not row.get("cut_in_thought") and key not in out:
+                    out[key] = raw
+        return out
 
     @property
     def checkpoint_namespace(self) -> str:
@@ -1423,13 +1445,10 @@ class ConversationExportService:
             batch = min(batch, max(1, limit // max(1, longest)))
         return batch
 
-    def _find_with_llm(self, finder: ConversationSelectionFinder, report: dict) -> List[_Judged]:
+    def _find_with_llm(self, finder: ConversationSelectionFinder, report: dict,
+                       replay: Optional[Dict[Tuple[str, str], str]] = None) -> List[_Judged]:
         """Ask Qwen to partition every window, then validate only keep=true regions."""
         if not finder.segs:
-            return []
-        if not self.llm.ensure_loaded():
-            report["llm_available"] = False
-            self._log("[conversation-exports] LLM not available for candidate finding")
             return []
 
         names = self._speaker_labels(finder)
@@ -1437,11 +1456,29 @@ class ConversationExportService:
         interruptions_dropped: Dict[str, int] = {}
         windows = self._finder_windows(finder, names)
         messages = [self._finder_message(finder, w, names) for w in windows]
-        replies, unanswered = ask_in_batches(
-            self.llm, self._finder_system_prompt(), messages,
-            per_call=self._finder_per_call(messages), max_new_tokens=self.max_new_tokens,
-            label="conversation coverage finder window", logger=self.logger,
-            thinking=self.cfg.thinking)
+        # Windows the model already answered in an older checkpoint are not asked again.
+        replay = replay if (self.replay_old_replies and replay) else {}
+        keys = [(str(finder.segs[a].index), str(finder.segs[b - 1].index)) for a, b in windows]
+        reused = {i for i, k in enumerate(keys) if k in replay}
+        todo = [i for i in range(len(windows)) if i not in reused]
+        if todo and not self.llm.ensure_loaded():
+            report["llm_available"] = False
+            self._log("[conversation-exports] LLM not available for candidate finding")
+            return []
+        replies = [None] * len(windows)
+        for i in reused:
+            replies[i] = replay[keys[i]]
+        unanswered = 0
+        if todo:
+            todo_messages = [messages[i] for i in todo]
+            asked, unanswered = ask_in_batches(
+                self.llm, self._finder_system_prompt(), todo_messages,
+                per_call=self._finder_per_call(todo_messages), max_new_tokens=self.max_new_tokens,
+                label="conversation coverage finder window", logger=self.logger,
+                thinking=self.cfg.thinking)
+            for i, reply in zip(todo, asked):
+                replies[i] = reply
+        report["windows_replayed"] = len(reused)
         report["windows"] = len(windows)
         report["unanswered"] = unanswered
         first_replies = list(replies)      # a retry may replace a reply; keep the first
@@ -1465,7 +1502,7 @@ class ConversationExportService:
         bad_indexes = []
         for idx, ((start, stop), raw) in enumerate(zip(windows, replies)):
             quality, _regions, cov = partition_quality(raw, stop - start)
-            if quality[0] == 0:
+            if quality[0] == 0 and idx not in reused:           # a replayed reply was already retried
                 bad_indexes.append(idx)
                 retry_meta[idx] = {"attempted": True, "improved": False,
                                    "before_coverage": cov["coverage_fraction"]}
@@ -2330,8 +2367,12 @@ class ConversationExportService:
     # -- the pass ---------------------------------------------------------------------
     def select(self, transcripts, *, timeline, noise, music_map, waveform,
                sample_rate: int, base_name: str,
-               speech_segments=None) -> "ConversationSelection":
-        """Find, judge and validate excerpts of one recording; writes no files."""
+               speech_segments=None, replay=None) -> "ConversationSelection":
+        """Find, judge and validate excerpts of one recording; writes no files.
+
+        `replay` maps a window's (first_index, last_index) to the model's earlier reply; with
+        `replay_old_replies` on, those windows are re-judged instead of asked again.
+        """
         cfg = self.cfg
         # Segments whose voices were not pulled apart cleanly are dropped before any
         # conversation is chosen: they act as a seam, so the model builds from clean parts.
@@ -2360,7 +2401,7 @@ class ConversationExportService:
             report["skipped"] = "noise_not_measured"
             self._log(f"[conversation-exports] {base_name}: no noise labels, nothing selected")
             return selection
-        judged = self._find_with_llm(finder, report)
+        judged = self._find_with_llm(finder, report, replay)
         if report.get("llm_available") is False:
             report["skipped"] = "llm_unavailable"
             return selection
