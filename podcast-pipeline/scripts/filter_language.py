@@ -11,11 +11,18 @@ probability of Vietnamese is under --min_vi the file is dropped:
   * the audio file is deleted (or moved with --trash DIR),
   * <folder>/_final/<params>/<stem>/ (the per-file outputs) is deleted,
   * <cache_dir>/<job_id>_<stem>/ (its checkpoints) is deleted.
-The pipeline code, the progress ledger and the final dataset root are not touched.
+The pipeline code and the progress ledger are not touched.
+
+--include_done also checks files the ledger marks done (their audio, outputs and cache are
+removed the same way). Those files usually have conversations in the final dataset: give
+--dataset_root to remove them too (their item folders, their rows in manifest.jsonl, their
+lhotse/<stem>.jsonl.gz and the swapped WAVs). Stop the pipeline first.
 """
 import argparse
+import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -44,13 +51,13 @@ def read_ledger(folder):
     return set(data.get("done", {}) or {}), set(data.get("rejected", {}) or {})
 
 
-def plan(folder):
+def plan(folder, include_done=False):
     """(todo, skipped_done, skipped_rejected) as lists of paths."""
     done, rejected = read_ledger(folder)
     todo, skipped_done, skipped_rejected = [], [], []
     for path in list_audio(folder):
         name = os.path.basename(path)
-        if name in done:
+        if name in done and not include_done:
             skipped_done.append(path)
         elif name in rejected:
             skipped_rejected.append(path)
@@ -76,6 +83,101 @@ def outputs_of(folder, stem, cache_dir, job_id):
     if os.path.isdir(cache):
         found.append(cache)
     return found
+
+
+DATASET_FOLDERS = ("interrupt", "backchannel", "turn_by_turn", "_quarantine",
+                   "full_duplex", "half_duplex", "quarantine")
+DATASET_MANIFESTS = ("manifest.jsonl", "manifest_quarantine.jsonl")
+
+
+def safe_name(stem):
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", stem)
+
+
+def _item_belongs(item_dir, name, stem):
+    """Was this export item written from recording `stem`? (conversation.json metadata, else its name)"""
+    try:
+        with open(os.path.join(item_dir, "conversation.json"), encoding="utf-8") as handle:
+            meta_stem = json.load(handle).get("source_stem")
+    except (OSError, ValueError, AttributeError):
+        meta_stem = None
+    if meta_stem is not None:
+        return meta_stem == stem
+    return re.fullmatch(re.escape(safe_name(stem)) + r"_\d+s(_b)*", name) is not None
+
+
+def dataset_targets(root, stem):
+    """(item folders, extra files) the final dataset holds for recording `stem`."""
+    items, files = [], []
+    for folder in DATASET_FOLDERS:
+        base = os.path.join(root, folder)
+        if not os.path.isdir(base):
+            continue
+        for name in sorted(os.listdir(base)):
+            item_dir = os.path.join(base, name)
+            if os.path.isdir(item_dir) and _item_belongs(item_dir, name, stem):
+                items.append(item_dir)
+                tag = hashlib.sha1(os.path.abspath(item_dir).encode("utf-8")).hexdigest()[:8]
+                swapped = os.path.join(root, "lhotse", "audio", f"{name}_{tag}.wav")
+                if os.path.isfile(swapped):
+                    files.append(swapped)
+    manifest = os.path.join(root, "lhotse", f"{safe_name(stem)}.jsonl.gz")
+    if os.path.isfile(manifest):
+        files.append(manifest)
+    return items, files
+
+
+def _drop_manifest_rows(root, stem):
+    """Remove this recording's rows from manifest.jsonl / manifest_quarantine.jsonl; returns how many."""
+    dropped = 0
+    lock_path = os.path.join(root, ".manifest.lock")
+    try:
+        import fcntl
+        lock = open(lock_path, "a+", encoding="utf-8")
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    except (OSError, ImportError):
+        lock = None
+    try:
+        for name in DATASET_MANIFESTS:
+            path = os.path.join(root, name)
+            if not os.path.isfile(path):
+                continue
+            kept = []
+            with open(path, encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.rstrip("\n")
+                    if not line.strip():
+                        continue
+                    try:
+                        row_stem = json.loads(line).get("source_stem")
+                    except (ValueError, AttributeError):
+                        row_stem = None
+                    if row_stem == stem:
+                        dropped += 1
+                    else:
+                        kept.append(line)
+            tmp = f"{path}.tmp-{os.getpid()}"
+            with open(tmp, "w", encoding="utf-8") as handle:
+                for line in kept:
+                    handle.write(line + "\n")
+            os.replace(tmp, path)
+    finally:
+        if lock is not None:
+            lock.close()
+    return dropped
+
+
+def purge_dataset(root, stem):
+    """Delete recording `stem`'s items, swapped WAVs, lhotse manifest and manifest rows."""
+    items, files = dataset_targets(root, stem)
+    for item in items:
+        shutil.rmtree(item, ignore_errors=True)
+    for path in files:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    return len(items), _drop_manifest_rows(root, stem)
 
 
 def dir_size(path):
@@ -153,7 +255,8 @@ class WhisperLanguageId:
 
 def run(args, detector=None):
     folder = os.path.abspath(args.folder)
-    todo, skipped_done, skipped_rejected = plan(folder)
+    todo, skipped_done, skipped_rejected = plan(folder, include_done=args.include_done)
+    done_names = read_ledger(folder)[0]
     if args.limit:
         todo = todo[:args.limit]
     print(f"{folder}: {len(todo)} file cần kiểm tra | bỏ qua {len(skipped_done)} đã done, "
@@ -176,12 +279,17 @@ def run(args, detector=None):
                 continue
             action = "keep"
             if flagged:
-                targets = outputs_of(folder, stem_of(path), args.cache_dir, args.job_id)
-                size = os.path.getsize(path) + sum(dir_size(t) for t in targets)
+                stem = stem_of(path)
+                targets = outputs_of(folder, stem, args.cache_dir, args.job_id)
+                items, ds_files = dataset_targets(args.dataset_root, stem) if args.dataset_root else ([], [])
+                size = (os.path.getsize(path) + sum(dir_size(t) for t in targets)
+                        + sum(dir_size(i) for i in items) + sum(os.path.getsize(f) for f in ds_files))
                 action = "dry-run" if not args.apply else "deleted"
                 if args.apply:
                     for target in targets:
                         shutil.rmtree(target, ignore_errors=True)
+                    if args.dataset_root:
+                        purge_dataset(args.dataset_root, stem)
                     if args.trash:
                         os.makedirs(args.trash, exist_ok=True)
                         shutil.move(path, os.path.join(args.trash, os.path.basename(path)))
@@ -191,7 +299,13 @@ def run(args, detector=None):
                     freed += size
                 flagged_rows.append((path, mean_vi, top, targets))
             shown = "n/a" if mean_vi is None else f"{mean_vi:.2f}"
-            print(f"[{i}/{len(todo)}] P(vi)={shown} top={top} -> {action}: {os.path.basename(path)}")
+            note = ""
+            if flagged and os.path.basename(path) in done_names:
+                note = f" [done; {len(items)} conversation trong dataset"
+                note += "]" if args.dataset_root else ", thêm --dataset_root để xóa]"
+            elif flagged and args.dataset_root and items:
+                note = f" [{len(items)} conversation trong dataset]"
+            print(f"[{i}/{len(todo)}] P(vi)={shown} top={top} -> {action}: {os.path.basename(path)}{note}")
             log.write(f"{os.path.basename(path)}\t{shown}\t{top}\t{int(flagged)}\t{action}\n")
 
     print(f"\n{len(flagged_rows)} file không phải tiếng Việt "
@@ -205,6 +319,11 @@ def build_parser():
     ap.add_argument("folder", help="input folder; only the audio files directly under it are checked")
     ap.add_argument("--apply", action="store_true", help="delete for real (default is a dry run)")
     ap.add_argument("--trash", default=None, help="move the audio here instead of deleting it")
+    ap.add_argument("--include_done", action="store_true",
+                    help="also check files the ledger marks done (default: skip them)")
+    ap.add_argument("--dataset_root", default=None,
+                    help="final dataset root (holds interrupt/, backchannel/, turn_by_turn/, lhotse/): "
+                         "also delete the dropped recording's conversations there")
     ap.add_argument("--min_vi", type=float, default=0.5, help="drop when mean P(vi) is below this")
     ap.add_argument("--cache_dir", default="/home/lamkd2/sommerlier/podcast-pipeline/cache")
     ap.add_argument("--job_id", default="default", help="checkpoint folders are <job_id>_<file stem>")

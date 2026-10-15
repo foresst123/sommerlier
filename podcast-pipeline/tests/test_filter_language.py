@@ -85,3 +85,64 @@ def test_a_detector_error_never_drops_the_file(tmp_path):
 
     fl.run(_args(folder, cache, apply=True), detector=broken)
     assert (folder / "[Vlog] english.wav").exists() and (folder / "viet.wav").exists()
+
+
+def test_include_done_checks_finished_files_too(tmp_path):
+    folder, _ = _setup(tmp_path)
+    todo, done, _ = fl.plan(folder, include_done=True)
+    assert "done.wav" in [os.path.basename(p) for p in todo] and done == []
+
+
+def _dataset(tmp_path, stem="[Vlog] english"):
+    root = tmp_path / "dataset"
+    safe = fl.safe_name(stem)
+    keep_stem = "viet"
+    for category, name, source in (("turn_by_turn", f"{safe}_300s", stem),
+                                   ("backchannel", f"{safe}_900s", stem),
+                                   ("turn_by_turn", f"{keep_stem}_100s", keep_stem)):
+        item = root / category / name
+        item.mkdir(parents=True)
+        (item / "conversation.json").write_text(json.dumps({"source_stem": source}))
+        (item / "stereo_2ch.wav").write_bytes(b"w" * 8)
+    (root / "lhotse" / "audio").mkdir(parents=True)
+    (root / "lhotse" / f"{safe}.jsonl.gz").write_bytes(b"m")
+    (root / "lhotse" / f"{keep_stem}.jsonl.gz").write_bytes(b"m")
+    rows = [{"source_stem": stem, "path": "a"}, {"source_stem": keep_stem, "path": "b"},
+            {"source_stem": stem, "path": "c"}]
+    (root / "manifest.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    return root
+
+
+def test_purge_dataset_removes_only_that_recordings_items_manifest_and_rows(tmp_path):
+    root = _dataset(tmp_path)
+    items, files = fl.dataset_targets(str(root), "[Vlog] english")
+    assert len(items) == 2 and len(files) == 1
+    assert fl.purge_dataset(str(root), "[Vlog] english") == (2, 2)
+    assert not (root / "turn_by_turn" / "_Vlog_english_300s").exists()
+    assert (root / "turn_by_turn" / "viet_100s").exists()
+    assert not (root / "lhotse" / "_Vlog_english.jsonl.gz").exists()
+    assert (root / "lhotse" / "viet.jsonl.gz").exists()
+    left = [json.loads(l) for l in (root / "manifest.jsonl").read_text().splitlines()]
+    assert [r["source_stem"] for r in left] == ["viet"]
+
+
+def test_apply_with_include_done_and_dataset_root_cleans_the_dataset(tmp_path):
+    folder, cache = _setup(tmp_path)
+    (folder / fl.LEDGER_NAME).write_text(json.dumps(
+        {"done": {"[Vlog] english.wav": {}}, "rejected": {}, "failed": {}}))
+    root = _dataset(tmp_path)
+    detector = lambda p: [{"vi": 0.0, "en": 1.0}] if "english" in p else [{"vi": 0.95}]
+    fl.run(_args(folder, cache, apply=True, include_done=True, dataset_root=str(root)), detector=detector)
+    assert not (folder / "[Vlog] english.wav").exists()
+    assert not any(p.name.startswith("_Vlog_english") for c in ("turn_by_turn", "backchannel")
+                   for p in (root / c).iterdir())
+    assert (root / "turn_by_turn" / "viet_100s").exists()
+
+
+def test_a_done_file_is_left_alone_without_include_done(tmp_path):
+    folder, cache = _setup(tmp_path)
+    (folder / fl.LEDGER_NAME).write_text(json.dumps(
+        {"done": {"[Vlog] english.wav": {}}, "rejected": {}, "failed": {}}))
+    detector = lambda p: [{"vi": 0.0, "en": 1.0}]
+    fl.run(_args(folder, cache, apply=True), detector=detector)
+    assert (folder / "[Vlog] english.wav").exists()
