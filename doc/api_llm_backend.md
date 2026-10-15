@@ -12,6 +12,18 @@ python main.py ... --llm_backend api --api_model <id model> --api_stages review,
 
 `--api_stages` nhận danh sách trong `refinement, relabel, review, persona, selection` (mặc định: tất cả). Cũng đặt được trong cấu hình bằng `"stages": ["review", "selection"]` trong `models.api_llm`. Bước nào không nằm trong danh sách vẫn dùng Qwen cục bộ; nếu refinement không dùng API thì Qwen vẫn cần nạp cho riêng bước đó.
 
+## Lưu đệm prompt (prompt caching)
+
+Mỗi yêu cầu đặt prompt hệ thống dài ở đầu, phần thay đổi (nội dung đoạn hay cửa sổ) ở cuối, đúng kiểu mà nhà cung cấp lưu đệm theo tiền tố giống hệt (từ khoảng 1.024 token trở lên, theo từng khối 128 token). Với OpenAI, token vào được lưu đệm tính giá thấp hơn nhiều (theo các trang giá, khoảng 1/10).
+
+Backend làm thêm hai việc để tăng số lần trúng:
+- Gửi `prompt_cache_key` ổn định theo prompt hệ thống để các yêu cầu cùng tiền tố đi vào cùng một bộ nhớ đệm. Hướng dẫn của OpenAI khuyên mỗi cặp tiền tố + khóa dưới khoảng 15 yêu cầu mỗi phút, nên một prompt bận (như refinement, hàng trăm yêu cầu mỗi phút) được chia ra vài khóa (tối đa `cache_max_shards`, mặc định 32), còn prompt thưa giữ một khóa.
+- Chỉ gửi các trường này tới `api.openai.com` (cổng khác có thể từ chối trường lạ; bật bằng `prompt_cache: true`). Nếu máy chủ trả `400` nói về `prompt_cache`, backend bỏ các trường đó và gửi lại, không lỗi.
+
+Tùy chọn: `"prompt_cache_retention": "24h"` để giữ bộ nhớ đệm lâu hơn (mặc định chỉ vài phút không dùng; không phải model nào cũng hỗ trợ). Số token lưu đệm và tỷ lệ trúng được ghi trong dòng log `[api-llm] ... prompt (X cached, Y%)`.
+
+Những gì nên biết: lưu đệm không làm yêu cầu đầu tiên rẻ hơn (chỉ các yêu cầu sau trúng tiền tố), chỉ áp dụng khi tiền tố dài ít nhất khoảng 1.024 token (prompt của refinement khoảng 1.500 token, của review và chọn conversation khoảng 3.000–4.000 token, đều đủ), và trên các model mới hơn OpenAI có thể tính phí ghi bộ nhớ đệm. Mức tiết kiệm thật chỉ biết qua số `cached` trong log.
+
 ## Dùng thế nào
 
 ```bash
@@ -34,7 +46,8 @@ Hoặc đặt cố định trong profile của `config.json`:
     "max_retries": 3,
     "reasoning_effort": "low",
     "completion_floor": 1024,
-    "stages": ["review", "selection"]
+    "stages": ["review", "selection"],
+    "prompt_cache_retention": "24h"
   }
 }
 ```

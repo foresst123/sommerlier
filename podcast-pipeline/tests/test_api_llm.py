@@ -227,3 +227,68 @@ def test_only_the_chosen_stages_get_the_api_and_the_rest_keep_the_local_model():
     everything = build_pass_llm(_args(llm_backend="api"), profile, local)
     assert all(stage_llm(everything, local, name) is everything for name in STAGES)
     assert stage_llm(local, local, "review") is local             # local backend: nothing changes
+
+
+def _cache_key_of(call):
+    return json.loads(json.dumps(call[1])).get("prompt_cache_key")
+
+
+def test_the_same_system_prompt_gets_the_same_cache_key_and_another_prompt_another():
+    transport = FakeTransport([_ok()])
+    llm = _llm(transport)
+    llm.generate_texts("PROMPT A", ["m1"])
+    llm.generate_texts("PROMPT A", ["m2"])
+    llm.generate_texts("PROMPT B", ["m3"])
+    keys = [_cache_key_of(c) for c in transport.calls]
+    assert keys[0] == keys[1] and keys[0] != keys[2] and keys[0].startswith("sommelier-")
+
+
+def test_a_busy_prefix_is_spread_over_more_keys_to_stay_under_the_request_rate():
+    transport = FakeTransport([_ok()])
+    now = {"t": 0.0}
+    llm = _llm(transport, clock=lambda: now["t"], concurrency=1)
+    for i in range(60):                                       # 60 requests inside one minute
+        now["t"] = i * 0.5
+        llm.generate_texts("SAME", ["m"])
+    keys = {_cache_key_of(c) for c in transport.calls}
+    assert 3 <= len(keys) <= 32                               # about rpm / 12, never one key for all
+    quiet = _llm(FakeTransport([_ok()]), clock=lambda: 0.0, concurrency=1)
+    quiet.generate_texts("SAME", ["m"])
+
+
+def test_a_slow_prefix_keeps_one_key_so_its_cache_is_reused():
+    transport = FakeTransport([_ok()])
+    now = {"t": 0.0}
+    llm = _llm(transport, clock=lambda: now["t"])
+    for i in range(5):
+        now["t"] = i * 30.0                                   # one request every half minute
+        llm.generate_texts("SAME", ["m"])
+    assert len({_cache_key_of(c) for c in transport.calls}) <= 2
+
+
+def test_caching_fields_are_not_sent_to_another_endpoint_unless_asked():
+    transport = FakeTransport([_ok()])
+    other = _llm(transport, base_url="https://gateway.example/v1")
+    other.generate_texts("S", ["m"])
+    assert "prompt_cache_key" not in transport.calls[0][1]
+    forced = _llm(FakeTransport([_ok()]), base_url="https://gateway.example/v1", prompt_cache=True)
+    forced.generate_texts("S", ["m"])
+    assert forced._transport.calls[0][1]["prompt_cache_key"].startswith("sommelier-")
+
+
+def test_retention_is_sent_only_when_configured():
+    plain = FakeTransport([_ok()])
+    _llm(plain).generate_texts("S", ["m"])
+    assert "prompt_cache_retention" not in plain.calls[0][1]
+    kept = FakeTransport([_ok()])
+    _llm(kept, prompt_cache_retention="24h").generate_texts("S", ["m"])
+    assert kept.calls[0][1]["prompt_cache_retention"] == "24h"
+
+
+def test_a_server_that_rejects_the_caching_fields_gets_the_request_again_without_them():
+    transport = FakeTransport([(400, b'{"error": {"message": "Unknown parameter: prompt_cache_key"}}', {}), _ok("fine")])
+    llm = _llm(transport, max_retries=0)
+    assert llm.generate_texts("S", ["m"]) == (True, ["fine"])
+    assert "prompt_cache_key" in transport.calls[0][1] and "prompt_cache_key" not in transport.calls[1][1]
+    llm.generate_texts("S", ["again"])
+    assert "prompt_cache_key" not in transport.calls[2][1]    # and it does not try them again

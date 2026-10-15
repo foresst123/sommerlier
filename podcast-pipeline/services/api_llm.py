@@ -20,13 +20,16 @@ Refinement uses it too: `DiarizationRefinementService.use_remote(api_llm)` makes
 refinement service hand its requests to this object instead of starting the local worker.
 """
 
+import hashlib
 import json
+import math
 import os
 import random
 import threading
 import time
 import urllib.error
 import urllib.request
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, List, Optional, Tuple
 
@@ -39,9 +42,14 @@ BACKENDS = ("local", "api")
 STAGES = ("refinement", "relabel", "review", "persona", "selection")
 _CONFIG_KEYS = frozenset({
     "model", "checkpoint_model_name", "base_url", "api_key_env", "concurrency",
-    "timeout_seconds", "max_retries", "reasoning_effort", "completion_floor", "stages"})
+    "timeout_seconds", "max_retries", "reasoning_effort", "completion_floor", "stages",
+    "prompt_cache", "prompt_cache_retention", "cache_max_shards"})
 _RETRY_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 _LOG_EVERY_CALLS = 25
+# OpenAI routes a request to a cache by its prefix and `prompt_cache_key`; a prefix+key pair
+# should stay under about 15 requests a minute or the overflow lands on cold machines.
+_CACHE_RPM_PER_KEY = 12
+_CACHE_WINDOW_SECONDS = 60.0
 
 
 class ApiError(RuntimeError):
@@ -64,8 +72,10 @@ class ApiLLM:
                  base_url: str = DEFAULT_BASE_URL, api_key_env: str = "OPENAI_API_KEY",
                  concurrency: int = 8, timeout_seconds: float = 120.0, max_retries: int = 3,
                  reasoning_effort: Optional[str] = None, completion_floor: Optional[int] = None,
-                 logger=None,
-                 transport: Optional[Callable] = None, sleep: Callable = time.sleep):
+                 prompt_cache: Optional[bool] = None, prompt_cache_retention: Optional[str] = None,
+                 cache_max_shards: int = 32, logger=None,
+                 transport: Optional[Callable] = None, sleep: Callable = time.sleep,
+                 clock: Callable = time.monotonic):
         if not model:
             raise ValueError("api_llm.model is required (the id of the API model to call)")
         if not checkpoint_model_name:
@@ -91,6 +101,17 @@ class ApiLLM:
         self.max_batch_tokens = 0
         self.parallel_windows = True
         self.replica_count = self.concurrency
+        # Prompt caching: the long system prompt comes first in every request, so a repeated
+        # prefix is cached by the provider at a fraction of the input price. `prompt_cache_key`
+        # steers requests that share a prefix to the same cache; it is sent only to the OpenAI
+        # endpoint (another gateway may reject an unknown field) and dropped if the server says no.
+        self.prompt_cache = ((self.base_url == DEFAULT_BASE_URL) if prompt_cache is None
+                             else bool(prompt_cache))
+        self.prompt_cache_retention = prompt_cache_retention or None
+        self.cache_max_shards = max(1, int(cache_max_shards))
+        self._clock = clock
+        self._cache_seen = {}            # prefix hash -> request times in the last minute
+        self._cache_turn = {}            # prefix hash -> requests so far, to spread them over keys
         self._lock = threading.Lock()
         self._slots = threading.BoundedSemaphore(self.concurrency)   # requests in flight, across every caller
         self.stats = {"calls": 0, "failures": 0, "prompt_tokens": 0, "completion_tokens": 0,
@@ -146,6 +167,20 @@ class ApiLLM:
         return (True, texts) if ok else (False, [])
 
     # -- one request ---------------------------------------------------------------
+    def _cache_key(self, system_prompt: str) -> str:
+        """Same prefix, same key; a busy prefix is spread over a few keys to stay under the rate."""
+        sha = hashlib.sha1((system_prompt or "").encode("utf-8", "surrogatepass")).hexdigest()[:10]
+        now = self._clock()
+        with self._lock:
+            seen = self._cache_seen.setdefault(sha, deque())
+            while seen and now - seen[0] > _CACHE_WINDOW_SECONDS:
+                seen.popleft()
+            seen.append(now)
+            shards = min(self.cache_max_shards, max(1, math.ceil(len(seen) / _CACHE_RPM_PER_KEY)))
+            turn = self._cache_turn.get(sha, 0)
+            self._cache_turn[sha] = turn + 1
+        return f"sommelier-{sha}-{turn % shards}"
+
     def _body(self, system_prompt, user_message, max_new_tokens) -> bytes:
         body = {"model": self.api_model,
                 "messages": [{"role": "system", "content": system_prompt},
@@ -153,6 +188,10 @@ class ApiLLM:
                 "max_completion_tokens": max(int(max_new_tokens), self.completion_floor)}
         if self.reasoning_effort:
             body["reasoning_effort"] = self.reasoning_effort
+        if self.prompt_cache:
+            body["prompt_cache_key"] = self._cache_key(system_prompt)
+            if self.prompt_cache_retention:
+                body["prompt_cache_retention"] = self.prompt_cache_retention
         return json.dumps(body, ensure_ascii=False).encode("utf-8")
 
     def _chat(self, system_prompt, user_message, max_new_tokens, thinking) -> Tuple[str, dict]:
@@ -174,6 +213,12 @@ class ApiLLM:
                 if status == 200:
                     return self._parse(raw)
                 last = f"HTTP {status}: {self._message(raw)}".replace(key, "***")
+                if status == 400 and self.prompt_cache and "prompt_cache" in last:
+                    # This endpoint or model does not take the caching fields: stop sending them.
+                    self.prompt_cache = False
+                    if self.logger:
+                        self.logger.warning("[api-llm] prompt caching fields rejected; sending without them")
+                    return self._chat(system_prompt, user_message, max_new_tokens, thinking)
                 if status not in _RETRY_STATUS:
                     self._count(failed=True)
                     raise ApiError(last)
@@ -231,7 +276,8 @@ class ApiLLM:
         if self.logger and calls % _LOG_EVERY_CALLS == 0:
             self.logger.info(
                 f"[api-llm] {self.api_model}: {snapshot['calls']} call(s), {snapshot['failures']} failed, "
-                f"{snapshot['prompt_tokens']} prompt ({snapshot['cached_tokens']} cached) "
+                f"{snapshot['prompt_tokens']} prompt ({snapshot['cached_tokens']} cached, "
+                f"{100 * snapshot['cached_tokens'] // max(1, snapshot['prompt_tokens'])}%) "
                 f"+ {snapshot['completion_tokens']} completion tokens")
 
 
