@@ -181,8 +181,11 @@ class DiarizationRefinementService:
                  backend: str = "transformers", workers: int = 1,
                  max_model_len: int = 0, config=None, env_profile=None,
                  shared_queue: bool = False, chunk_size: int = 0,
-                 parallel_windows: bool = False, progress_interval: float = 15.0):
+                 parallel_windows: bool = False, progress_interval: float = 15.0,
+                 thinking_budget: int = 0):
         self.logger = logger
+        # vLLM only: tokens a thinking request may think before it is told to answer (0 = no limit).
+        self.thinking_budget = max(0, int(thinking_budget))
         self.model = None
         self.tokenizer = None
         self.device = device
@@ -353,6 +356,7 @@ class DiarizationRefinementService:
                     max_model_len=self.max_model_len,
                     enable_prefix_caching=(self.prefix_cache
                                            or self.backend == "vllm"),
+                    thinking_budget=self.thinking_budget if self.backend == "vllm" else 0,
                     logger=self.logger,
                 ) for index in range(replica_count)]
                 worker = (RefinementWorkerPoolService(services, self.logger)

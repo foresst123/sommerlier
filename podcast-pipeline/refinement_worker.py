@@ -45,7 +45,8 @@ import argparse
 import warnings
 
 import worker_vllm_env  # noqa: F401  (sets VLLM_* defaults before vllm loads)
-from utils.llm_sampling import hf_generate_kwargs, vllm_sampling_kwargs
+from utils.llm_sampling import (THINKING_CLOSE, hf_generate_kwargs, thinking_continuation,
+                                vllm_sampling_kwargs)
 
 warnings.filterwarnings("ignore")
 
@@ -188,6 +189,64 @@ def load_model(model_name: str, dtype_str: str, device_map: str,
     return model, tokenizer
 
 
+# Tokens a thinking request may spend thinking before it is told to answer (0 = no limit).
+# Set once from --thinking-budget; only the vLLM path uses it.
+_THINKING_BUDGET = 0
+_MIN_ANSWER_TOKENS = 512
+
+
+def set_thinking_budget(tokens: int) -> None:
+    global _THINKING_BUDGET
+    _THINKING_BUDGET = max(0, int(tokens))
+
+
+def _vllm_params(SamplingParams, thinking, max_tokens):
+    kwargs = vllm_sampling_kwargs(thinking, max_tokens)
+    detection = kwargs.pop("repetition_detection", None)
+    if detection:
+        try:
+            from vllm.sampling_params import RepetitionDetectionParams
+            kwargs["repetition_detection"] = RepetitionDetectionParams(**detection)
+        except ImportError:
+            pass   # an older vLLM: the token limit is the only stop
+    return SamplingParams(**kwargs)
+
+
+def _vllm_generate(model, SamplingParams, texts, thinking, max_new_tokens):
+    """(texts, completion_tokens, finish_reasons, prompt_tokens) with the thinking budget applied.
+
+    First pass stops at the budget. A reply cut there is continued once: a thought still open is
+    closed by hand, then the model answers with what is left of `max_new_tokens`. Replies that
+    ended on their own are not touched, so with no budget this is one plain call.
+    """
+    budget = _THINKING_BUDGET if thinking else 0
+    first = budget if 0 < budget < max_new_tokens else max_new_tokens
+    outputs = model.generate(texts, sampling_params=_vllm_params(SamplingParams, thinking, first),
+                             use_tqdm=False)
+    replies = [o.outputs[0].text for o in outputs]
+    tokens = [len(o.outputs[0].token_ids or ()) for o in outputs]
+    reasons = [getattr(o.outputs[0], "finish_reason", None) for o in outputs]
+    prompt_tokens = [len(o.prompt_token_ids or ()) for o in outputs]
+    if first >= max_new_tokens:
+        return replies, tokens, reasons, prompt_tokens
+    more = {}
+    for i, (reply, reason) in enumerate(zip(replies, reasons)):
+        tail = thinking_continuation(reply, reason)
+        if tail is not None:
+            more[i] = tail
+    if more:
+        order = list(more)
+        follow = [texts[i] + replies[i] + more[i] for i in order]
+        room = max(_MIN_ANSWER_TOKENS, max_new_tokens - first)
+        second = model.generate(follow, sampling_params=_vllm_params(SamplingParams, thinking, room),
+                                use_tqdm=False)
+        for i, o in zip(order, second):
+            replies[i] = replies[i] + more[i] + o.outputs[0].text
+            tokens[i] += len(o.outputs[0].token_ids or ())
+            reasons[i] = getattr(o.outputs[0], "finish_reason", None)
+    return replies, tokens, reasons, prompt_tokens
+
+
 def _entry_device(model):
     try:
         return model.get_input_embeddings().weight.device
@@ -260,28 +319,16 @@ def generate_with_details(model, tokenizer, system_prompt: str, user_messages: l
 
     if backend == "vllm":
         from vllm import SamplingParams
-        kwargs = vllm_sampling_kwargs(thinking, max_new_tokens)
-        detection = kwargs.pop("repetition_detection", None)
-        if detection:
-            try:
-                from vllm.sampling_params import RepetitionDetectionParams
-                kwargs["repetition_detection"] = RepetitionDetectionParams(**detection)
-            except ImportError:
-                pass   # an older vLLM: the token limit is the only stop
-        outputs = model.generate(
-            texts, sampling_params=SamplingParams(**kwargs), use_tqdm=False)
+        replies, tokens, reasons, prompts = _vllm_generate(
+            model, SamplingParams, texts, thinking, max_new_tokens)
         usage = {
-            "prompt_tokens": sum(len(o.prompt_token_ids or ()) for o in outputs),
-            "completion_tokens": sum(len(o.outputs[0].token_ids or ()) for o in outputs),
-            "repetition_stops": sum(
-                1 for o in outputs
-                if getattr(o.outputs[0], "finish_reason", None) == "repetition"),
+            "prompt_tokens": sum(prompts),
+            "completion_tokens": sum(tokens),
+            "repetition_stops": sum(1 for r in reasons if r == "repetition"),
         }
-        details = [{
-            "finish_reason": getattr(o.outputs[0], "finish_reason", None),
-            "prompt_tokens": len(o.prompt_token_ids or ()),
-            "completion_tokens": len(o.outputs[0].token_ids or ())} for o in outputs]
-        return [output.outputs[0].text for output in outputs], usage, details
+        details = [{"finish_reason": r, "prompt_tokens": p, "completion_tokens": t}
+                   for r, p, t in zip(reasons, prompts, tokens)]
+        return replies, usage, details
 
     inputs = tokenizer(texts, return_tensors="pt", padding=True)
     inputs = inputs.to(_entry_device(model))
@@ -324,7 +371,11 @@ def main():
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--max-model-len", type=int, default=0)
     parser.add_argument("--disable-prefix-caching", action="store_true")
+    parser.add_argument("--thinking-budget", type=int, default=0,
+                        help="Tokens a thinking request may spend thinking before it is told to "
+                             "answer; 0 = no limit.")
     args = parser.parse_args()
+    set_thinking_budget(args.thinking_budget)
 
     gpu_ids = [int(x) for x in args.gpu_ids.split(",") if x.strip()]
 

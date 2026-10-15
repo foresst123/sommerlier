@@ -35,7 +35,7 @@ class RefinementWorkerService(WorkerProcessService):
                  gpu_memory_fraction: float = 0.90,
                  backend: str = "transformers", device_id=None,
                  tensor_parallel_size: int = 1, max_model_len: int = 0,
-                 enable_prefix_caching: bool = True,
+                 enable_prefix_caching: bool = True, thinking_budget: int = 0,
                  logger=None):
         worker_args = [
             "--model", model_name,
@@ -49,6 +49,8 @@ class RefinementWorkerService(WorkerProcessService):
         ]
         if not enable_prefix_caching:
             worker_args.append("--disable-prefix-caching")
+        if int(thinking_budget) > 0:
+            worker_args += ["--thinking-budget", str(int(thinking_budget))]
         super().__init__(
             name="refinement",
             python_bin=python_env_path,

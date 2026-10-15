@@ -29,6 +29,24 @@ THINKING_SAMPLING = {
 REPETITION_DETECTION = {"max_pattern_size": 256, "min_pattern_size": 16, "min_count": 3}
 
 
+# Qwen3's own way to cap thinking: when the budget runs out, close the thought by hand and let
+# the model answer from what it has. The text is the one its model card gives for this.
+THINKING_CLOSE = ("\n\nConsidering the limited time by the user, I have to give the solution "
+                  "based on the thinking directly now.\n</think>\n\n")
+
+
+def thinking_continuation(text: str, finish_reason) -> str:
+    """What to append to a reply that stopped at the thinking budget, or None when it is done.
+
+    A reply that ended on its own (or by repetition) is final. One cut by the token limit is
+    continued: if it was still thinking the thought is closed first, if it was already
+    answering it simply goes on.
+    """
+    if finish_reason != "length":
+        return None
+    return "" if "</think>" in (text or "") else THINKING_CLOSE
+
+
 def vllm_sampling_kwargs(thinking: bool, max_tokens: int) -> dict:
     """Arguments for vllm.SamplingParams (repetition_detection is plain data here)."""
     if thinking:
