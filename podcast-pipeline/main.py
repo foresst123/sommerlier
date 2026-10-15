@@ -64,6 +64,8 @@ def _build_parser():
     parser.add_argument("--lang", default="vi", help="Language code")
     parser.add_argument("--ASRMoE", action="store_true", help="Enable MoE ASR")
     parser.add_argument("--dia3", action="store_true", help="Use Pyannote community model (default is DiariZen if false)")
+    parser.add_argument("--diarization_backend", choices=["diarizen", "nemotron"], default=None,
+                        help="Diarization model (default: models.diarization_backend in the profile, else diarizen)")
     parser.add_argument("--bss", "--tse", dest="bss", action="store_true",
                         help="Enable blind source separation of overlapped speech")
     parser.add_argument("--separator", choices=["sidon"], default=None,
@@ -378,6 +380,8 @@ from models.phowhisper_client import PhoWhisperClient
 from models.qwen3_asr import Qwen3ASRClient
 from models.whisper_vllm import WhisperVLLMClient
 from services.diarizen_worker_service import DiarizenWorkerService
+from services.nemotron_worker_service import NemotronWorkerService
+from utils.diarization_backend import resolve_diarization_backend
 from services.sidon_worker_service import SidonWorkerService
 from services.assignment_worker_service import AssignmentWorkerService
 from services.worker_pool_service import WorkerPoolService
@@ -642,8 +646,17 @@ def main():
     # DiariZen, dying there instead of producing the music output it was asked
     # for.
     diarizen_service = None
+    # Resolved even when diarization is skipped so a typo fails at startup.
+    args.diarization_backend = resolve_diarization_backend(args, env_profile)
     if not args.dia3 and will_run(args, "diarization"):
-        diarizen_worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diarizen_worker.py")
+        # Nemotron runs under the same "diarizen" pipeline slot; only the
+        # script, service class and interpreter differ.
+        use_nemotron = args.diarization_backend == "nemotron"
+        diarizen_worker_script = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "nemotron_worker.py" if use_nemotron else "diarizen_worker.py")
+        diar_worker_name = "nemotron" if use_nemotron else "diarizen"
+        DiarWorker = NemotronWorkerService if use_nemotron else DiarizenWorkerService
         diar_perf = perf_cfg["stages"]["diarization"]
         configured_devices = list(dict.fromkeys((args.gpu_1, args.gpu_2)))
         if torch.cuda.is_available():
@@ -672,9 +685,9 @@ def main():
                 f"using {worker_count}")
 
         if worker_count > 1:
-            diarizen_workers = [DiarizenWorkerService(
+            diarizen_workers = [DiarWorker(
                 lambda: resolve_worker_python(
-                    "diarizen", config=config, env_profile=env_profile,
+                    diar_worker_name, config=config, env_profile=env_profile,
                     logger=logger),
                 diarizen_worker_script, device_id=device_id, logger=logger,
                 env_name=args.env, config_path=args.config)
@@ -686,13 +699,13 @@ def main():
                 + ", ".join(f"GPU {d}" for d in available_devices[:worker_count]))
         else:
             diar_devices = args.gpu_1
-            if (perf_cfg["enabled"]
+            if (not use_nemotron and perf_cfg["enabled"]
                     and diar_perf["placement"] == "split_components"
                     and args.gpu_1 != args.gpu_2):
                 diar_devices = [args.gpu_1, args.gpu_2]
-            diarizen_service = DiarizenWorkerService(
+            diarizen_service = DiarWorker(
                 lambda: resolve_worker_python(
-                    "diarizen", config=config, env_profile=env_profile,
+                    diar_worker_name, config=config, env_profile=env_profile,
                     logger=logger),
                 diarizen_worker_script, device_id=diar_devices, logger=logger,
                 env_name=args.env, config_path=args.config)
