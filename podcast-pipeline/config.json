@@ -411,7 +411,7 @@
           "weights": {
             "interaction": 25
           },
-          "min_semantic": 4,
+          "min_semantic": 3,
           "max_candidates": 24,
           "pad_seconds": 0.2,
           "fade_ms": 50,
