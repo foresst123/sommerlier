@@ -46,6 +46,9 @@ def load_model(config_path=None, env_name="kaggle"):
     print(json.dumps({"status": "loading", "model": MODEL_ID}), flush=True)
     # CUDA_VISIBLE_DEVICES remaps the assigned GPU to cuda:0.
     model = SortformerEncLabelModel.from_pretrained(MODEL_ID)
+    import torch
+    if torch.cuda.is_available():
+        model = model.to("cuda")
     model.eval()
 
     cfg = _load_nemotron_config(config_path, env_name)
@@ -66,11 +69,11 @@ def diarize(model, audio_path, cfg):
     import importlib.util
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "utils", "nemotron_segments.py")
-    spec = importlib.util.spec_from_file_location("nemotron_segments", path)
-    convert = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(convert)
 
     try:
+        spec = importlib.util.spec_from_file_location("nemotron_segments", path)
+        convert = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(convert)
         predicted = model.diarize(audio=[audio_path], batch_size=1)
         return convert.to_pipeline_segments(
             predicted[0],

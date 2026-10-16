@@ -105,3 +105,19 @@ def test_nemotron_gets_its_own_folder():
     out = _dir(diarization_backend="nemotron")
     assert "-diaModel-nemotron-" in out
     assert out != _dir()
+
+
+# --- worker hardening ------------------------------------------------------
+
+def test_the_ready_line_must_be_json_because_nemo_logs_to_stdout():
+    from services.nemotron_worker_service import NemotronWorkerService
+    assert NemotronWorkerService.ready_requires_json is True
+
+
+def test_a_broken_conversion_module_is_reported_not_raised(tmp_path, monkeypatch):
+    import nemotron_worker
+    monkeypatch.setattr(nemotron_worker.importlib.util if hasattr(nemotron_worker, "importlib") else
+                        __import__("importlib.util").util, "spec_from_file_location",
+                        lambda *a, **k: (_ for _ in ()).throw(ImportError("boom")))
+    out = nemotron_worker.diarize(types.SimpleNamespace(diarize=lambda **k: []), "x.wav", {})
+    assert isinstance(out, str) and out.startswith("[ERROR]")
