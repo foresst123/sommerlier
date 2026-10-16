@@ -94,3 +94,17 @@ arrival, offline and streaming modes, OpenMDW 1.1 license.
    GPU; `split_components` placement is not applied to this backend.
 8. The `-preview` gated repo has an evaluation-only license; this uses the
    main repo.
+
+## Known failure: `self_attention_model='rope' is not supported`
+
+The released `nemo-toolkit` (3.0.0) cannot build this model (rotary position
+embeddings). `requirements-nemotron.txt` now installs NeMo from its main branch.
+In an env that already has the release:
+
+```bash
+nemotron_env/bin/pip install --upgrade "nemo-toolkit[asr] @ git+https://github.com/NVIDIA/NeMo.git"
+```
+
+Reported working elsewhere with NeMo 3.1.0 from main (commit cf724ac). A
+HuggingFace token is needed for `from_pretrained`. Pin the working commit with
+`pip freeze` after the first good run.

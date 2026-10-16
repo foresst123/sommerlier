@@ -14,5 +14,9 @@
 # successful run on the DGX, pin the exact versions with `pip freeze`.
 # Needs Linux and an Ampere-or-newer NVIDIA GPU (assumed from the model card).
 
-nemo-toolkit[asr]
+# The released nemo-toolkit (3.0.0) fails to load the model with
+#   ValueError: self_attention_model='rope' is not supported
+# because the model uses rotary position embeddings, which only NeMo's main
+# branch has. Install from git (needs git and network on the DGX):
+nemo-toolkit[asr] @ git+https://github.com/NVIDIA/NeMo.git
 soundfile
