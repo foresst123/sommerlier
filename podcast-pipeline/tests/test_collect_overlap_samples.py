@@ -54,7 +54,7 @@ def test_build_covers_bins_and_writes_files(tmp_path):
     _recording(tmp_path / "run" / "_final" / "p", "recA", 4)
     _recording(tmp_path / "run" / "_final" / "p", "recB", 4)
     out = tmp_path / "out"
-    idx = cos.build([str(tmp_path / "run")], str(out), n=8, context=60.0)
+    idx = cos.build(cos.stage_recordings([str(tmp_path / "run")]), str(out), n=8, context=60.0)
     assert len(idx) == 8
     assert {s["bin"] for s in idx} == {"short", "medium", "long", "xlong"}
     s = next(s for s in idx if s["bin"] == "medium")
@@ -65,3 +65,30 @@ def test_build_covers_bins_and_writes_files(tmp_path):
     assert set(meta["references"]) == {"A", "B"}
     assert (d / "speakers" / "A" / "reference.wav").exists()
     assert meta["context"]["start"] <= meta["overlap"]["start"] and meta["overlap"]["end"] <= meta["context"]["end"]
+
+
+def test_reads_cache_without_stage_output(tmp_path):
+    import pickle
+    from schemas.segment import SpeechSegment
+    job = tmp_path / "cache" / "default_recX"
+    (job / "separation").mkdir(parents=True)
+    (job / "processed_audio" / "ns").mkdir(parents=True)
+    sr = cos.CACHE_SR
+    np.save(str(job / "processed_audio" / "ns" / "result.npy"),
+            (np.random.randn(sr * 200) * 0.1).astype("float32"))
+    tone = (np.random.randn(sr * 10) * 0.1).astype("float32")
+    rows = [SpeechSegment(index="0", start=0.0, end=40.0, speaker="A"),
+            SpeechSegment(index="1", start=50.0, end=90.0, speaker="B"),
+            SpeechSegment(index="2", start=100.0, end=110.0, speaker="A", audio=tone, bss=True,
+                          bss_spans=[(104.0, 110.0, 0.8)]),
+            SpeechSegment(index="3", start=104.0, end=120.0, speaker="B")]
+    (job / "separation" / "result.pkl").write_bytes(pickle.dumps(rows))
+    recs = cos.cache_recordings(str(tmp_path / "cache"))
+    assert len(recs) == 1
+    idx = cos.build(recs, str(tmp_path / "out"), n=1)
+    assert len(idx) == 1
+    d = tmp_path / "out" / idx[0]["folder"]
+    meta = json.loads((d / "meta.json").read_text())
+    assert meta["sample_rate"] == sr and meta["separation"]["separated_clips"] == ["2_A.wav"]
+    assert sf.info(str(d / "context.wav")).duration == pytest.approx(60.0, abs=0.01)
+    assert (d / "speakers" / "A" / "reference.wav").exists()

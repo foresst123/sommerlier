@@ -21,6 +21,12 @@ Times are in after_music.wav's clock, the clock every stage output shares; use
 01_music/music_map.json "timeline" to get back to the original recording.
 
     python tools/collect_overlap_samples.py --runs /data/data_run_2/_final --out overlap_samples
+
+With only the checkpoint cache (no stage output), read it instead; run from
+podcast-pipeline/ so the pickles can import the segment classes. The audio is
+the cached post-music waveform (24 kHz), which is the same clock:
+
+    python tools/collect_overlap_samples.py --cache cache --out overlap_samples
 """
 
 import argparse
@@ -29,10 +35,14 @@ import json
 import os
 import random
 import shutil
+import sys
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+CACHE_SR = 24000
 BINS = [("short", 0.0, 0.5), ("medium", 0.5, 2.0), ("long", 2.0, 5.0), ("xlong", 5.0, 1e9)]
 
 
@@ -96,24 +106,105 @@ def clean_clips(segs: List[dict], speaker: str, margin: float, min_len: float) -
     return sorted(set(out))
 
 
-def find_recordings(runs: List[str]) -> List[str]:
+def _plain(v):
+    if isinstance(v, (list, tuple)):
+        return [_plain(x) for x in v]
+    if isinstance(v, np.generic):
+        return v.item()
+    return v
+
+
+def stage_recordings(runs: List[str]) -> List[dict]:
+    """Recordings that have 03_separation/segments.json and 01_music/after_music.wav."""
     found = []
     for run in runs:
         for seg in glob.glob(os.path.join(run, "**", "03_separation", "segments.json"), recursive=True):
             rec = os.path.dirname(os.path.dirname(seg))
-            if os.path.exists(os.path.join(rec, "01_music", "after_music.wav")):
+            wav = os.path.join(rec, "01_music", "after_music.wav")
+            if os.path.exists(wav):
                 found.append(rec)
-    return sorted(set(found))
+    return [_stage_recording(r) for r in sorted(set(found))]
 
 
-def events_of(rec: str, merge_gap: float, min_overlap: float) -> Tuple[List[dict], List[dict]]:
-    with open(os.path.join(rec, "03_separation", "segments.json"), encoding="utf-8") as f:
-        segs = [s for s in json.load(f) if "start" in s and "end" in s]
+def _stage_recording(rec: str) -> dict:
+    def segments():
+        with open(os.path.join(rec, "03_separation", "segments.json"), encoding="utf-8") as f:
+            return [s for s in json.load(f) if "start" in s and "end" in s]
+
+    def audio():
+        import soundfile as sf
+        return sf.read(os.path.join(rec, "01_music", "after_music.wav"), always_2d=False)
+
+    def clips(touching, out_dir):
+        names, src = [], os.path.join(rec, "03_separation", "audio", "separated")
+        for s in touching:
+            for p in glob.glob(os.path.join(src, f"{s['index']}_{s['speaker']}_*.wav")):
+                os.makedirs(out_dir, exist_ok=True)
+                shutil.copy(p, os.path.join(out_dir, os.path.basename(p)))
+                names.append(os.path.basename(p))
+        return names
+
+    return {"path": rec, "segments": segments, "audio": audio, "clips": clips}
+
+
+def _newest(pattern: str) -> Optional[str]:
+    hits = glob.glob(pattern, recursive=True)
+    return max(hits, key=os.path.getmtime) if hits else None
+
+
+def cache_recordings(cache: str) -> List[dict]:
+    """Recordings with a separation checkpoint and a cached post-music waveform."""
+    out = []
+    for job in sorted(glob.glob(os.path.join(cache, "*"))):
+        sep = _newest(os.path.join(job, "separation", "**", "result.pkl"))
+        wav = _newest(os.path.join(job, "processed_audio", "**", "result.npy"))
+        if sep and wav:
+            out.append(_cache_recording(job, sep, wav))
+    return out
+
+
+def _cache_recording(job: str, sep: str, wav: str) -> dict:
+    import pickle
+    held: Dict[str, list] = {}
+
+    def segments():
+        with open(sep, "rb") as f:
+            rows = pickle.load(f)
+        out = []
+        for r in rows:
+            d = dict(r.__dict__) if hasattr(r, "__dict__") else dict(r)
+            d["audio"] = d.get("audio")
+            out.append(d)
+        held["rows"] = out
+        return [{k: (_plain(v) if k != "audio" else None) for k, v in d.items()} | {"_i": i}
+                for i, d in enumerate(out)]
+
+    def audio():
+        return np.load(wav, mmap_mode="r", allow_pickle=False), CACHE_SR
+
+    def clips(touching, out_dir):
+        import soundfile as sf
+        names = []
+        for s in touching:
+            a = held["rows"][s["_i"]].get("audio")
+            if a is None or not len(a) or not (s.get("bss_spans") or s.get("bss_failed_spans")):
+                continue
+            os.makedirs(out_dir, exist_ok=True)
+            name = f"{s['index']}_{s['speaker']}.wav"
+            sf.write(os.path.join(out_dir, name), np.asarray(a), CACHE_SR)
+            names.append(name)
+        return names
+
+    return {"path": job, "segments": segments, "audio": audio, "clips": clips}
+
+
+def events_of(rec: dict, merge_gap: float, min_overlap: float) -> Tuple[List[dict], List[dict]]:
+    segs = rec["segments"]()
     spans = [(a, b) for a, b in cross_speaker_overlaps(segs) if b - a >= min_overlap]
     events = []
     for a, b in merge_close(spans, merge_gap):
         inside = [s for s in segs if s["start"] < b and s["end"] > a]
-        events.append({"rec": rec, "start": a, "end": b, "dur": b - a,
+        events.append({"rec": rec["path"], "start": a, "end": b, "dur": b - a,
                        "speakers": sorted({s["speaker"] for s in inside})})
     return events, segs
 
@@ -132,7 +223,7 @@ def select(events: List[dict], n: int, seed: int, context: float) -> List[dict]:
         rng.shuffle(pool)
     taken: List[dict] = []
     used: Dict[str, List[Tuple[float, float]]] = {}
-    quota = {name: n // len(BINS) for name in by_bin}
+    quota = {name: n // len(BINS) + (i < n % len(BINS)) for i, name in enumerate(by_bin)}
 
     def clash(e):
         return any(abs((e["start"] + e["end"]) / 2 - c) < context for c in
@@ -168,11 +259,10 @@ def select(events: List[dict], n: int, seed: int, context: float) -> List[dict]:
     return sorted(taken, key=lambda e: (e["bin"], e["rec"], e["start"]))
 
 
-def write_sample(e: dict, segs: List[dict], out_dir: str, context: float,
+def write_sample(e: dict, rec: dict, segs: List[dict], out_dir: str, context: float,
                  ref_seconds: float, margin: float) -> dict:
     import soundfile as sf
-    rec = e["rec"]
-    audio, sr = sf.read(os.path.join(rec, "01_music", "after_music.wav"), always_2d=False)
+    audio, sr = rec["audio"]()
     total = len(audio) / sr
 
     def cut(a, b):
@@ -202,7 +292,7 @@ def write_sample(e: dict, segs: List[dict], out_dir: str, context: float,
             continue
         d = os.path.join(out_dir, "speakers", spk)
         os.makedirs(os.path.join(d, "clips"), exist_ok=True)
-        gap = np.zeros(int(0.2 * sr), dtype=audio.dtype)
+        gap = np.zeros(int(0.2 * sr), dtype=np.asarray(audio[:1]).dtype)
         parts = []
         for a, b in chosen:
             piece = cut(a, b)
@@ -211,18 +301,10 @@ def write_sample(e: dict, segs: List[dict], out_dir: str, context: float,
         sf.write(os.path.join(d, "reference.wav"), np.concatenate(parts[:-1]), sr)
         refs[spk] = {"seconds": round(acc, 2), "clips": [[round(a, 3), round(b, 3)] for a, b in chosen]}
 
-    copied = []
-    sep_dir = os.path.join(rec, "03_separation", "audio", "separated")
-    for s in segs:
-        if s["start"] < e["end"] and s["end"] > e["start"]:
-            for p in glob.glob(os.path.join(sep_dir, f"{s['index']}_{s['speaker']}_*.wav")):
-                os.makedirs(os.path.join(out_dir, "separated"), exist_ok=True)
-                shutil.copy(p, os.path.join(out_dir, "separated", os.path.basename(p)))
-                copied.append(os.path.basename(p))
-
     touching = [s for s in segs if s["start"] < e["end"] and s["end"] > e["start"]]
+    copied = rec["clips"](touching, os.path.join(out_dir, "separated"))
     meta = {
-        "recording": os.path.relpath(rec),
+        "recording": os.path.relpath(rec["path"]),
         "sample_rate": sr, "clock": "after_music.wav",
         "bin": e["bin"], "speakers": e["speakers"],
         "overlap": {"start": round(e["start"], 3), "end": round(e["end"], 3),
@@ -234,7 +316,7 @@ def write_sample(e: dict, segs: List[dict], out_dir: str, context: float,
         "separation": {
             "bss_spans": [[round(float(x), 3) for x in sp] for s in touching
                           for sp in s.get("bss_spans") or []],
-            "bss_failed_spans": [list(sp) for s in touching for sp in s.get("bss_failed_spans") or []],
+            "bss_failed_spans": [_plain(sp) for s in touching for sp in s.get("bss_failed_spans") or []],
             "separated_clips": copied},
         "references": refs,
     }
@@ -243,20 +325,21 @@ def write_sample(e: dict, segs: List[dict], out_dir: str, context: float,
     return meta
 
 
-def build(runs: List[str], out: str, n: int = 100, context: float = 60.0, seed: int = 0,
+def build(recs: List[dict], out: str, n: int = 100, context: float = 60.0, seed: int = 0,
           merge_gap: float = 1.0, min_overlap: float = 0.1, ref_seconds: float = 30.0,
           margin: float = 0.3) -> List[dict]:
     segs_of, events = {}, []
-    for rec in find_recordings(runs):
+    by_path = {r["path"]: r for r in recs}
+    for rec in recs:
         ev, segs = events_of(rec, merge_gap, min_overlap)
-        segs_of[rec] = segs
+        segs_of[rec["path"]] = segs
         events += ev
     chosen = select(events, n, seed, context)
     os.makedirs(out, exist_ok=True)
     index = []
     for i, e in enumerate(chosen):
-        name = f"{i:03d}_{e['bin']}_{os.path.basename(e['rec'])}_{e['start']:.0f}s"
-        meta = write_sample(e, segs_of[e["rec"]], os.path.join(out, name), context, ref_seconds, margin)
+        name = f"{i:03d}_{e['bin']}_{os.path.basename(e['rec'].rstrip('/'))}_{e['start']:.0f}s"
+        meta = write_sample(e, by_path[e["rec"]], segs_of[e["rec"]], os.path.join(out, name), context, ref_seconds, margin)
         index.append({"folder": name, "bin": e["bin"], "overlap_duration": meta["overlap"]["duration"],
                       "recording": meta["recording"]})
     with open(os.path.join(out, "index.json"), "w", encoding="utf-8") as f:
@@ -267,7 +350,8 @@ def build(runs: List[str], out: str, n: int = 100, context: float = 60.0, seed: 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--runs", nargs="+", required=True, help="run folders (searched recursively)")
+    p.add_argument("--runs", nargs="+", default=[], help="run folders with stage outputs (searched recursively)")
+    p.add_argument("--cache", help="checkpoint cache folder (cache/default_<file>/...), used when there is no stage output")
     p.add_argument("--out", required=True)
     p.add_argument("--n", type=int, default=100)
     p.add_argument("--context", type=float, default=60.0, help="seconds of context per sample")
@@ -276,7 +360,9 @@ def main():
     p.add_argument("--ref-seconds", type=float, default=30.0, help="clean reference length per speaker")
     p.add_argument("--seed", type=int, default=0)
     a = p.parse_args()
-    idx = build(a.runs, a.out, a.n, a.context, a.seed, a.merge_gap, a.min_overlap, a.ref_seconds)
+    recs = stage_recordings(a.runs) + (cache_recordings(a.cache) if a.cache else [])
+    print(f"{len(recs)} recording(s) found")
+    idx = build(recs, a.out, a.n, a.context, a.seed, a.merge_gap, a.min_overlap, a.ref_seconds)
     counts = {}
     for s in idx:
         counts[s["bin"]] = counts.get(s["bin"], 0) + 1
