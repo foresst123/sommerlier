@@ -165,28 +165,28 @@ def cache_recordings(cache: str) -> List[dict]:
 
 def _cache_recording(job: str, sep: str, wav: str) -> dict:
     import pickle
-    held: Dict[str, list] = {}
+
+    def load_rows():
+        with open(sep, "rb") as f:
+            return pickle.load(f)
 
     def segments():
-        with open(sep, "rb") as f:
-            rows = pickle.load(f)
+        # Scanning every recording must not keep its waveforms: drop them at once.
         out = []
-        for r in rows:
+        for i, r in enumerate(load_rows()):
             d = dict(r.__dict__) if hasattr(r, "__dict__") else dict(r)
-            d["audio"] = d.get("audio")
-            out.append(d)
-        held["rows"] = out
-        return [{k: (_plain(v) if k != "audio" else None) for k, v in d.items()} | {"_i": i}
-                for i, d in enumerate(out)]
+            d.pop("audio", None)
+            out.append({k: _plain(v) for k, v in d.items()} | {"_i": i})
+        return out
 
     def audio():
         return np.load(wav, mmap_mode="r", allow_pickle=False), CACHE_SR
 
     def clips(touching, out_dir):
         import soundfile as sf
-        names = []
+        rows, names = load_rows(), []     # only for the few recordings actually sampled
         for s in touching:
-            a = held["rows"][s["_i"]].get("audio")
+            a = getattr(rows[s["_i"]], "audio", None)
             if a is None or not len(a) or not (s.get("bss_spans") or s.get("bss_failed_spans")):
                 continue
             os.makedirs(out_dir, exist_ok=True)
