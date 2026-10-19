@@ -172,3 +172,9 @@ def test_every_documented_key_is_allowed():
                 "spkcache_update_period", "postprocessing", "postprocessing_yaml",
                 "merge_gap", "min_duration"):
         assert key in nemotron_worker.ALLOWED_KEYS
+
+
+def test_an_empty_postprocessing_block_means_the_base_values():
+    from utils.nemotron_segments import POSTPROCESSING_BASE, postprocessing_params
+    assert postprocessing_params({"postprocessing": {}}) == POSTPROCESSING_BASE
+    assert postprocessing_params({"postprocessing": None}) is None

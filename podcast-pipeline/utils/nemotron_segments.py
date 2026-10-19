@@ -79,13 +79,16 @@ POSTPROCESSING_BASE = {"onset": 0.53, "offset": 0.49, "pad_onset": 0.23, "pad_of
 
 
 def postprocessing_params(cfg):
-    """The six thresholds from ``models.nemotron.postprocessing``, or None when it is not set.
+    """The six thresholds from ``models.nemotron.postprocessing``, or None when the key is absent.
+
+    An empty ``{}`` is "set": every threshold then takes its base value.
 
     Raises ValueError on an unknown key so a typo is not a silently ignored setting.
     """
-    section = (cfg or {}).get("postprocessing")
-    if not section:
+    cfg = cfg or {}
+    if cfg.get("postprocessing") is None:
         return None
+    section = cfg["postprocessing"]          # {} means "the base values as they are"
     unknown = sorted(set(section) - set(POSTPROCESSING_KEYS))
     if unknown:
         raise ValueError(f"unknown models.nemotron.postprocessing key(s): {', '.join(unknown)}")
