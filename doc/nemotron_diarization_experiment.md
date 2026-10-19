@@ -108,3 +108,49 @@ nemotron_env/bin/pip install --upgrade "nemo-toolkit[asr] @ git+https://github.c
 Reported working elsewhere with NeMo 3.1.0 from main (commit cf724ac). A
 HuggingFace token is needed for `from_pretrained`. Pin the working commit with
 `pip freeze` after the first good run.
+
+## All tunable parameters (`environments.<env>.models.nemotron`)
+
+None of them is in `config.json` by default; leave a key out to keep the model's own
+behaviour. An unknown key stops the worker at startup. The worker's `ready` line
+prints what it applied (`streaming`, `postprocessing`, `merge_gap`, `min_duration`).
+
+Streaming settings of the model, in 80 ms frames (values from the model card):
+
+| Key | Offline preset | Low-latency preset | Meaning |
+|---|---|---|---|
+| `chunk_len` | 340 | 9 (also 6, 3) | frames in one processing chunk |
+| `chunk_right_context` | 40 | 4 (2, 1) | future frames attached after the chunk |
+| `fifo_len` | 40 | 264 | previous frames attached before the chunk |
+| `spkcache_len` | 264 | 264 | frames in the speaker cache |
+| `spkcache_update_period` | 300 | 222 | frames moved from the FIFO to update the cache |
+
+Post-processing thresholds, passed to NeMo `diarize(postprocessing_yaml=...)`.
+Set them as `"postprocessing": {...}` (keys left out take the values NeMo ships for
+CallHome part 1, which were tuned for other Sortformer models, not for Nemotron-3), or give
+a ready YAML with `"postprocessing_yaml": "/path/file.yaml"` (not both):
+
+| Key | Base value | Meaning (NeMo comments) |
+|---|---|---|
+| `onset` | 0.53 | threshold for the start of a speech segment |
+| `offset` | 0.49 | threshold for the end of a speech segment |
+| `pad_onset` | 0.23 | seconds added before each segment |
+| `pad_offset` | 0.01 | seconds added after each segment |
+| `min_duration_on` | 0.42 | removes speech segments shorter than this |
+| `min_duration_off` | 0.34 | removes silences shorter than this |
+
+NeMo ships other sets in `examples/speaker_tasks/diarization/conf/post_processing/`
+(for example `diar_streaming_sortformer_4spk-v2_dihard3-dev.yaml`: onset 0.56, offset 1.0,
+pad_onset 0.063, pad_offset 0.002, min_duration_on 0.007, min_duration_off 0.151).
+Without `postprocessing`/`postprocessing_yaml` the worker calls `diarize()` as before.
+
+Our own clean-up after the model (not part of NeMo):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `merge_gap` | 0.0 | join same-speaker segments at most this many seconds apart |
+| `min_duration` | 0.0 | drop segments shorter than this many seconds |
+
+Each parameter set needs its own `--audio_dir` and `--cache_dir`: neither the folder name
+nor the diarization checkpoint records these values.
+

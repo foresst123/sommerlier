@@ -121,3 +121,54 @@ def test_a_broken_conversion_module_is_reported_not_raised(tmp_path, monkeypatch
                         lambda *a, **k: (_ for _ in ()).throw(ImportError("boom")))
     out = nemotron_worker.diarize(types.SimpleNamespace(diarize=lambda **k: []), "x.wav", {})
     assert isinstance(out, str) and out.startswith("[ERROR]")
+
+
+# --- thresholds and streaming settings --------------------------------------
+
+def test_postprocessing_is_off_unless_the_profile_sets_it():
+    from utils.nemotron_segments import postprocessing_params
+    assert postprocessing_params({}) is None and postprocessing_params({"chunk_len": 9}) is None
+
+
+def test_postprocessing_overrides_land_on_the_base_values():
+    from utils.nemotron_segments import POSTPROCESSING_BASE, postprocessing_params
+    out = postprocessing_params({"postprocessing": {"onset": 0.7, "min_duration_on": 0.1}})
+    assert out["onset"] == 0.7 and out["min_duration_on"] == 0.1
+    assert out["offset"] == POSTPROCESSING_BASE["offset"] and set(out) == set(POSTPROCESSING_BASE)
+
+
+def test_an_unknown_postprocessing_key_is_an_error():
+    from utils.nemotron_segments import postprocessing_params
+    with pytest.raises(ValueError, match="onsett"):
+        postprocessing_params({"postprocessing": {"onsett": 0.5}})
+
+
+def test_the_yaml_has_the_parameters_block_nemo_reads(tmp_path):
+    from utils.nemotron_segments import postprocessing_params, write_postprocessing_yaml
+    path = write_postprocessing_yaml(postprocessing_params({"postprocessing": {"onset": 0.6}}), str(tmp_path))
+    text = open(path, encoding="utf-8").read().splitlines()
+    assert text[0] == "parameters:" and "  onset: 0.6" in text and len(text) == 7
+
+
+def test_the_worker_passes_the_yaml_to_diarize():
+    import nemotron_worker
+    seen = {}
+
+    class Model:
+        def diarize(self, **kwargs):
+            seen.update(kwargs)
+            return [["0.00 2.00 speaker_0"]]
+
+    out = nemotron_worker.diarize(Model(), "a.wav", {"_postprocessing_path": "/p.yaml"})
+    assert seen["postprocessing_yaml"] == "/p.yaml" and out[0]["speaker"] == "SPEAKER_00"
+    seen.clear()
+    nemotron_worker.diarize(Model(), "a.wav", {})
+    assert "postprocessing_yaml" not in seen
+
+
+def test_every_documented_key_is_allowed():
+    import nemotron_worker
+    for key in ("chunk_len", "chunk_right_context", "fifo_len", "spkcache_len",
+                "spkcache_update_period", "postprocessing", "postprocessing_yaml",
+                "merge_gap", "min_duration"):
+        assert key in nemotron_worker.ALLOWED_KEYS

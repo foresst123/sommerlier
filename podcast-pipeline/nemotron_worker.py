@@ -25,6 +25,11 @@ warnings.filterwarnings("ignore")
 
 MODEL_ID = "nvidia/Nemotron-3-Diarization"
 
+# Everything models.nemotron may hold. Frame counts are 80 ms frames (model card).
+STREAMING_KEYS = ("chunk_len", "chunk_right_context", "fifo_len", "spkcache_len",
+                  "spkcache_update_period")
+ALLOWED_KEYS = STREAMING_KEYS + ("postprocessing", "postprocessing_yaml", "merge_gap", "min_duration")
+
 
 def _load_nemotron_config(config_path, env_name):
     """Read models.nemotron (optional tuning keys) out of the environment profile."""
@@ -51,30 +56,63 @@ def load_model(config_path=None, env_name="kaggle"):
         model = model.to("cuda")
     model.eval()
 
-    cfg = _load_nemotron_config(config_path, env_name)
+    cfg = dict(_load_nemotron_config(config_path, env_name))
+    unknown = sorted(set(cfg) - set(ALLOWED_KEYS))
+    if unknown:
+        raise ValueError(f"unknown models.nemotron key(s): {', '.join(unknown)}; "
+                         f"allowed: {', '.join(ALLOWED_KEYS)}")
+    if cfg.get("postprocessing") and cfg.get("postprocessing_yaml"):
+        raise ValueError("set either models.nemotron.postprocessing or postprocessing_yaml, not both")
+
     # Streaming parameters are in 80 ms frames (model card); only set on request.
-    if "chunk_len" in cfg:
-        model.sortformer_modules.chunk_len = int(cfg["chunk_len"])
+    streaming = {key: int(cfg[key]) for key in STREAMING_KEYS if key in cfg}
+    for key, value in streaming.items():
+        setattr(model.sortformer_modules, key, value)
+    if streaming:
         model._check_streaming_parameters()
 
-    print(json.dumps({"status": "ready", "config_applied": sorted(cfg)}), flush=True)
+    # Post-processing thresholds go to NeMo's diarize() as a YAML file.
+    convert = _load_converter()
+    pp_values, pp_path = None, cfg.get("postprocessing_yaml")
+    if pp_path:
+        if not os.path.isfile(pp_path):
+            raise FileNotFoundError(f"models.nemotron.postprocessing_yaml not found: {pp_path}")
+    else:
+        pp_values = convert.postprocessing_params(cfg)
+        if pp_values:
+            import tempfile
+            pp_path = convert.write_postprocessing_yaml(
+                pp_values, tempfile.mkdtemp(prefix="nemotron_pp_"))
+    cfg["_postprocessing_path"] = pp_path
+
+    print(json.dumps({"status": "ready", "streaming": streaming,
+                      "postprocessing": pp_values or pp_path,
+                      "merge_gap": cfg.get("merge_gap", 0.0),
+                      "min_duration": cfg.get("min_duration", 0.0)}), flush=True)
     return model, cfg
 
 
-def diarize(model, audio_path, cfg):
-    """Run inference on one file and return pipeline segments or an [ERROR] string."""
+def _load_converter():
     # utils/nemotron_segments.py is loaded by path: putting podcast-pipeline on
     # sys.path would shadow NeMo's own 'utils' package (same reason as the
     # DiariZen worker's duplicated torch shim).
     import importlib.util
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "utils", "nemotron_segments.py")
+    spec = importlib.util.spec_from_file_location("nemotron_segments", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
+
+def diarize(model, audio_path, cfg):
+    """Run inference on one file and return pipeline segments or an [ERROR] string."""
     try:
-        spec = importlib.util.spec_from_file_location("nemotron_segments", path)
-        convert = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(convert)
-        predicted = model.diarize(audio=[audio_path], batch_size=1)
+        convert = _load_converter()
+        extra = {}
+        if cfg.get("_postprocessing_path"):
+            extra["postprocessing_yaml"] = cfg["_postprocessing_path"]
+        predicted = model.diarize(audio=[audio_path], batch_size=1, **extra)
         return convert.to_pipeline_segments(
             predicted[0],
             merge_gap=float(cfg.get("merge_gap", 0.0)),
