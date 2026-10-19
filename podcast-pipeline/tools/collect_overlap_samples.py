@@ -391,11 +391,11 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--workers", type=int, default=min(8, os.cpu_count() or 1),
                    help="processes reading recordings in parallel")
-    p.add_argument("--limit", type=int, help="only the first N recordings (quick trial)")
+    p.add_argument("--files", type=int, help="read only N recordings, picked at random (--seed)")
     a = p.parse_args()
     recs = stage_recordings(a.runs) + (cache_recordings(a.cache) if a.cache else [])
-    if a.limit:
-        recs = recs[:a.limit]
+    if a.files and a.files < len(recs):
+        recs = random.Random(a.seed).sample(recs, a.files)
     print(f"{len(recs)} recording(s) found", flush=True)
     idx = build(recs, a.out, a.n, a.context, a.seed, a.merge_gap, a.min_overlap, a.ref_seconds, workers=a.workers)
     counts = {}
