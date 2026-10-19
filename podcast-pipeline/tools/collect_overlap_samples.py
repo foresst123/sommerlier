@@ -209,6 +209,37 @@ def events_of(rec: dict, merge_gap: float, min_overlap: float) -> Tuple[List[dic
     return events, segs
 
 
+_RECS: List[dict] = []
+
+
+def _scan_one(args):
+    i, merge_gap, min_overlap = args
+    return events_of(_RECS[i], merge_gap, min_overlap)
+
+
+def scan_all(recs: List[dict], merge_gap: float, min_overlap: float, workers: int):
+    """events_of for every recording. Reading a cache pickle (it carries the separated
+    audio) dominates the run, so recordings are read in parallel worker processes;
+    only the small segment lists travel back."""
+    global _RECS
+    _RECS = recs
+    jobs = [(i, merge_gap, min_overlap) for i in range(len(recs))]
+    results = []
+    if workers > 1 and len(recs) > 1:
+        import multiprocessing as mp
+        with mp.get_context("fork").Pool(workers) as pool:
+            for k, r in enumerate(pool.imap(_scan_one, jobs), 1):
+                results.append(r)
+                if k % 20 == 0 or k == len(jobs):
+                    print(f"  scanned {k}/{len(jobs)}", flush=True)
+    else:
+        for k, j in enumerate(jobs, 1):
+            results.append(_scan_one(j))
+            if k % 20 == 0 or k == len(jobs):
+                print(f"  scanned {k}/{len(jobs)}", flush=True)
+    return results
+
+
 def select(events: List[dict], n: int, seed: int, context: float) -> List[dict]:
     """Equal share per length bin (what a bin cannot fill goes to the others),
     spread across recordings, never two samples whose context windows overlap."""
@@ -327,11 +358,10 @@ def write_sample(e: dict, rec: dict, segs: List[dict], out_dir: str, context: fl
 
 def build(recs: List[dict], out: str, n: int = 100, context: float = 60.0, seed: int = 0,
           merge_gap: float = 1.0, min_overlap: float = 0.1, ref_seconds: float = 30.0,
-          margin: float = 0.3) -> List[dict]:
+          margin: float = 0.3, workers: int = 1) -> List[dict]:
     segs_of, events = {}, []
     by_path = {r["path"]: r for r in recs}
-    for rec in recs:
-        ev, segs = events_of(rec, merge_gap, min_overlap)
+    for rec, (ev, segs) in zip(recs, scan_all(recs, merge_gap, min_overlap, workers)):
         segs_of[rec["path"]] = segs
         events += ev
     chosen = select(events, n, seed, context)
@@ -359,10 +389,15 @@ def main():
     p.add_argument("--min-overlap", type=float, default=0.1)
     p.add_argument("--ref-seconds", type=float, default=30.0, help="clean reference length per speaker")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--workers", type=int, default=min(8, os.cpu_count() or 1),
+                   help="processes reading recordings in parallel")
+    p.add_argument("--limit", type=int, help="only the first N recordings (quick trial)")
     a = p.parse_args()
     recs = stage_recordings(a.runs) + (cache_recordings(a.cache) if a.cache else [])
-    print(f"{len(recs)} recording(s) found")
-    idx = build(recs, a.out, a.n, a.context, a.seed, a.merge_gap, a.min_overlap, a.ref_seconds)
+    if a.limit:
+        recs = recs[:a.limit]
+    print(f"{len(recs)} recording(s) found", flush=True)
+    idx = build(recs, a.out, a.n, a.context, a.seed, a.merge_gap, a.min_overlap, a.ref_seconds, workers=a.workers)
     counts = {}
     for s in idx:
         counts[s["bin"]] = counts.get(s["bin"], 0) + 1

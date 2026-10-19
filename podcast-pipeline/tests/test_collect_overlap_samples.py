@@ -92,3 +92,13 @@ def test_reads_cache_without_stage_output(tmp_path):
     assert meta["sample_rate"] == sr and meta["separation"]["separated_clips"] == ["2_A.wav"]
     assert sf.info(str(d / "context.wav")).duration == pytest.approx(60.0, abs=0.01)
     assert (d / "speakers" / "A" / "reference.wav").exists()
+
+
+def test_parallel_scan_matches_serial(tmp_path):
+    _recording(tmp_path / "run" / "_final" / "p", "recA", 4)
+    _recording(tmp_path / "run" / "_final" / "p", "recB", 4)
+    recs = cos.stage_recordings([str(tmp_path / "run")])
+    one = cos.scan_all(recs, 1.0, 0.1, 1)
+    two = cos.scan_all(recs, 1.0, 0.1, 2)
+    assert [len(e) for e, _ in one] == [len(e) for e, _ in two]
+    assert one[0][0][0]["start"] == two[0][0][0]["start"]
