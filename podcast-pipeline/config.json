@@ -246,15 +246,15 @@
         "music_removal": true,
         "cut_music": true,
         "diarization": true,
-        "separation": false,
-        "asr": false,
+        "separation": true,
+        "asr": true,
         "captioning": false,
-        "refinement": false,
-        "speaker_relabel": false,
-        "word_alignment": false,
-        "conversation_exports": false,
-        "export": false,
-        "transcript_review": false,
+        "refinement": true,
+        "speaker_relabel": true,
+        "word_alignment": true,
+        "conversation_exports": true,
+        "export": true,
+        "transcript_review": true,
         "persona_profile": false
       },
       "pipeline": {
@@ -283,9 +283,7 @@
         "min_cluster_size": 11,
         "clust_th": 0.5,
         "asr_models": [
-          "qwen3",
-          "whisper",
-          "phowhisper"
+          "qwen3"
         ]
       },
       "audio_quality": {
