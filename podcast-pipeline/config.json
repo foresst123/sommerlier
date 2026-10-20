@@ -246,7 +246,7 @@
         "music_removal": true,
         "cut_music": true,
         "diarization": true,
-        "separation": true,
+        "separation": false,
         "asr": true,
         "captioning": false,
         "refinement": true,
@@ -288,7 +288,7 @@
         ]
       },
       "audio_quality": {
-        "enabled": true,
+        "enabled": false,
         "min_normalized_quality": 0.5,
         "on_error": "reject",
         "device": "cpu"
