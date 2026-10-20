@@ -235,7 +235,7 @@
       "gpu_1": 0,
       "gpu_2": 1,
       "outputs": {
-        "clean_two_channel_dir": "/home/lamkd2/data/data_output/data_output_v2",
+        "clean_two_channel_dir": "/home/lamkd2/data/data_output/data_output_v6",
         "lhotse": {
           "coverage_max_uncovered": 3.0,
           "coverage_min_speech_frames": 5
