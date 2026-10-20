@@ -247,14 +247,14 @@
         "cut_music": true,
         "diarization": true,
         "separation": false,
-        "asr": true,
+        "asr": false,
         "captioning": false,
-        "refinement": true,
+        "refinement": false,
         "speaker_relabel": false,
-        "word_alignment": true,
-        "conversation_exports": true,
-        "export": true,
-        "transcript_review": true,
+        "word_alignment": false,
+        "conversation_exports": false,
+        "export": false,
+        "transcript_review": false,
         "persona_profile": false
       },
       "pipeline": {
@@ -294,6 +294,17 @@
         "device": "cpu"
       },
       "models": {
+        "diarization_backend": "nemotron",
+        "nemotron": {
+          "postprocessing": {
+            "onset": 0.35,
+            "offset": 0.3,
+            "pad_onset": 0.0,
+            "pad_offset": 0.0,
+            "min_duration_on": 0.0,
+            "min_duration_off": 0.0
+          }
+        },
         "dnsmos": {
           "model": "../offline_weights/dnsmos/sig_bak_ovr.onnx"
         },
