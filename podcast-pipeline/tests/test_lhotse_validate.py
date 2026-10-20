@@ -64,6 +64,23 @@ def test_valid_cut_has_no_violation():
     assert validate_cuts([make_cut()]) == []
 
 
+def prompt(**kw):
+    s = {"id": f"{REC}-prompt", "recording_id": REC, "start": 0.0, "duration": 0.0, "channel": [0, 1],
+         "text": "Bạn là trợ lý.", "language": "vi", "custom": {"role": "system", "event_type": "prompt"}}
+    s.update(kw)
+    return s
+
+
+def fcall(**kw):
+    custom = {"role": "assistant", "event_type": "function_call", "anchor_id": f"{REC}-turn_0_0",
+              "anchor_word_index": 2}
+    custom.update({k: kw.pop(k) for k in list(kw) if k in ("anchor_id", "anchor_word_index")})
+    s = {"id": f"{REC}-fc", "recording_id": REC, "start": 1.0, "duration": 0.0, "channel": [0, 1],
+         "text": '{"name": "f", "arguments": {}}', "language": "vi", "custom": custom}
+    s.update(kw)
+    return s
+
+
 # name -> (invariant, mutation that breaks it)
 BREAKERS = {
     "INV01_type": (1, lambda c: c.update(type="DataCut")),
@@ -101,6 +118,17 @@ BREAKERS = {
     "INV11_no_speaker": (11, lambda c: sup(c, 0).pop("speaker")),
     "INV11_assistance_voice": (11, lambda c: sup(c, 0)["custom"].update(assistance_voice=True)),
     "INV11_gender_null": (11, lambda c: sup(c, 0).update(gender="null")),
+    "EXT12_prompt_start": (12, lambda c: c["supervisions"].append(prompt(start=1.0))),
+    "EXT13_no_anchor": (13, lambda c: c["supervisions"].append(fcall(anchor_id="nope"))),
+    "EXT13_word_index": (13, lambda c: c["supervisions"].append(fcall(anchor_word_index=99))),
+    "EXT13_text": (13, lambda c: c["supervisions"].append(fcall(text="not json"))),
+    "EXT13_keys": (13, lambda c: c["supervisions"].append(fcall(text='{"name": "f"}'))),
+    "EXT14_language": (14, lambda c: sup(c, 0).pop("language")),
+    "EXT15_gap": (15, lambda c: (sup(c, 1).update(id=sup(c, 0)["id"] + "-bc1"),
+                                 sup(c, 0)["custom"].update(backchannel_ids=[sup(c, 0)["id"] + "-bc1"]))),
+    "EXT16_null": (16, lambda c: sup(c, 0).update(gender=None)),
+    "EXT17_backchannel_ids": (17, lambda c: sup(c, 2)["custom"].pop("backchannel_ids")),
+    "EXT17_transition": (17, lambda c: sup(c, 2)["custom"].update(transition={"type": "cut"})),
     "INV11_speaker_backchannel": (11, lambda c: sup(c, 1).update(speaker="Backchannel")),
 }
 
@@ -110,7 +138,74 @@ def test_each_invariant_is_caught(name):
     invariant, mutate = BREAKERS[name]
     cut = make_cut()
     mutate(cut)
-    assert f"INV{invariant:02d}" in codes(cut), name
+    code = f"INV{invariant:02d}" if invariant <= 11 else f"EXT{invariant:02d}"
+    assert code in codes(cut), name
+
+
+def test_valid_prompt_and_function_events_pass():
+    cut = make_cut()
+    cut["supervisions"] += [prompt(), fcall()]
+    assert validate_cut(cut) == []
+
+
+def test_events_may_omit_text_but_turns_may_not():
+    cut = make_cut()
+    ev = prompt()
+    del ev["text"]
+    cut["supervisions"].append(ev)
+    assert "INV10" not in codes(cut)
+    del sup(cut, 0)["text"]
+    assert "INV10" in codes(cut)
+
+
+def test_spec_section_10_example_is_valid():
+    """The full example line of the PDF (section 10), with the '...' placeholders filled in."""
+    rec = "vi_casual_demo_batch_0-DiBienCuoiTuan-DiBienCuoiTuan-KeHoachCuoiTuan-Qk3nAAAAAAAAAAAAAAAAAA"
+    base = "DiBienCuoiTuan-KeHoachCuoiTuan"
+    cut = {"id": rec + "-0", "start": 0, "duration": 12.84, "channel": [0, 1], "type": "MultiCut",
+           "recording": {"id": rec, "sources": [{"type": "file", "channels": [0, 1],
+                                                 "source": "/data/DiBienCuoiTuan-KeHoachCuoiTuan.wav"}],
+                         "sampling_rate": 16000, "num_samples": 205440, "duration": 12.84, "channel_ids": [0, 1]},
+           "supervisions": [
+               {"id": f"{base}-prompt", "recording_id": rec, "start": 0.0, "duration": 0.0, "channel": [0, 1],
+                "text": "Bạn là Vivi, trợ lý bán hàng. Luôn trả lời ngắn gọn, thân thiện.", "language": "vi",
+                "custom": {"role": "system", "event_type": "prompt"}},
+               {"id": f"{base}-turn_0_0", "recording_id": rec, "start": 0.0, "duration": 4.21, "channel": 0,
+                "text": "cuối tuần này mình đi biển không ?", "language": "vi", "speaker": "F_22_N_BacNinh0007",
+                "gender": "female",
+                "alignment": {"word": [["cuối", 0.05, 0.22, None], ["tuần", 0.27, 0.25, None]]},
+                "custom": {"role": "user", "event_type": "turn", "raw_text": "Cuối tuần này mình đi biển không?",
+                           "speaker_name": "F_22_N_BacNinh0007", "age": 22, "dislect": None,
+                           "assistance_voice": False, "turn_channel_position": 0, "emotion": "excited",
+                           "transition": {"type": "gap", "duration": 0.0}, "backchannel_ids": []}},
+               {"id": f"{base}-turn_1_0", "recording_id": rec, "start": 3.89, "duration": 5.02, "channel": 1,
+                "text": "ừ hay đó , mình rủ thêm mấy bạn nữa nhé .", "language": "vi", "speaker": "Vivi",
+                "gender": "female", "alignment": {"word": [["ừ", 3.95, 0.18, None]]},
+                "custom": {"role": "assistant", "event_type": "turn", "raw_text": "Ừ hay đó, mình rủ thêm mấy bạn nữa nhé.",
+                           "speaker_name": "Vivi", "age": 25, "dislect": None, "assistance_voice": True,
+                           "turn_channel_position": 0, "emotion": "happy",
+                           "transition": {"type": "overlap", "duration": 0.32},
+                           "backchannel_ids": [f"{base}-turn_1_0-bc0"]}},
+               {"id": f"{base}-turn_1_0-bc0", "recording_id": rec, "start": 6.10, "duration": 0.34, "channel": 0,
+                "text": "ừ", "language": "vi", "speaker": "F_22_N_BacNinh0007", "gender": "female",
+                "alignment": {"word": [["ừ", 6.10, 0.34, None]]},
+                "custom": {"role": "user", "event_type": "backchannel", "anchor_id": f"{base}-turn_1_0",
+                           "anchor_word_index": 5, "speaker_name": "F_22_N_BacNinh0007", "age": 22,
+                           "dislect": None, "assistance_voice": False}}]}
+    assert validate_cut(cut) == []
+
+
+def test_cli_exit_code_and_summary(tmp_path, capsys):
+    from utils.lhotse_validate import main
+    good, bad = tmp_path / "g.jsonl", tmp_path / "b.jsonl"
+    good.write_text(json.dumps(make_cut()) + "\n", encoding="utf-8")
+    broken = make_cut()
+    broken["supervisions"][2]["text"] = "ừ <x>"
+    bad.write_text(json.dumps(broken) + "\n", encoding="utf-8")
+    assert main([str(good), "--no-lhotse"]) == 0
+    assert main([str(bad), "--no-lhotse"]) == 1
+    out = capsys.readouterr().out
+    assert "INV10: 1" in out and "1 cuts checked, 1 violations in 1 cuts" in out
 
 
 def test_inv02_duplicate_ids_across_the_manifest():
@@ -148,7 +243,8 @@ def test_tolerances():
 def test_event_rules():
     cut = make_cut()
     event = {"id": f"{REC}-ev0", "recording_id": REC, "start": 2.0, "duration": 0.0, "channel": [0, 1],
-             "text": "", "language": "vi", "custom": {"role": "assistant", "event_type": "function_call",
+             "text": '{"name": "f", "arguments": {}}', "language": "vi",
+             "custom": {"role": "assistant", "event_type": "function_call",
                                                       "anchor_id": sup(cut, 0)["id"], "anchor_word_index": 1}}
     cut["supervisions"].append(event)
     assert codes(cut) == set()

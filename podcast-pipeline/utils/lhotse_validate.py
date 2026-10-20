@@ -15,10 +15,24 @@ INV01..INV11, one per invariant of section 9:
  10 text has none of < > [ ]
  11 role / event_type / speaker / assistance_voice / gender rules
 
+Further MUST clauses outside the section 9 table are reported as EXT12..EXT17:
+
+ 12 prompt event starts at 0 (4.5)
+ 13 function_call / function_response: anchor_id, anchor_word_index, JSON text (4.3, 4.5)
+ 14 language present on every supervision (4.2)
+ 15 backchannel ids use k = 0, 1, 2... per anchor turn (4.4)
+ 16 no top-level supervision field is null (2)
+ 17 turn: backchannel_ids is a list, transition is {"type": gap|overlap, "duration": s} (4.3)
+
 Tolerance is 1 ms, 10 ms along alignment chains.
+
+CLI:  python -m utils.lhotse_validate manifest.jsonl[.gz] [--max-print N]    (exit 1 on any violation)
 """
+import argparse
 import gzip
 import json
+import sys
+from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 
@@ -71,7 +85,7 @@ def validate_cut(cut: dict, tol: float = DEFAULT_TOL, ali_tol: float = DEFAULT_A
 
     def bad(inv: int, sup: Optional[dict], message: str) -> None:
         sid = None if sup is None else str(sup.get("id"))
-        out.append(Violation(inv, f"INV{inv:02d}", cut_id, sid, message))
+        out.append(Violation(inv, f"INV{inv:02d}" if inv <= 11 else f"EXT{inv:02d}", cut_id, sid, message))
 
     recording = cut.get("recording") if isinstance(cut.get("recording"), dict) else {}
     sups = [s for s in (cut.get("supervisions") or []) if isinstance(s, dict)]
@@ -121,7 +135,8 @@ def validate_cut(cut: dict, tol: float = DEFAULT_TOL, ali_tol: float = DEFAULT_A
         # 10: text
         text = sup.get("text")
         if not isinstance(text, str):
-            bad(10, sup, "text missing or not a string")
+            if text is not None or _event_type(sup) in ("turn", "backchannel"):
+                bad(10, sup, "text missing or not a string")
         else:
             found = sorted({c for c in text if c in FORBIDDEN_TEXT})
             if found:
@@ -135,6 +150,7 @@ def validate_cut(cut: dict, tol: float = DEFAULT_TOL, ali_tol: float = DEFAULT_A
 
         if _event_type(sup) == "backchannel":
             _check_backchannel(sup, custom, by_id, timed, tol, bad)
+        _check_extra(sup, custom, by_id, timed, tol, bad)
 
     # 8: anchors list their backchannels
     for sup in sups:
@@ -151,6 +167,8 @@ def validate_cut(cut: dict, tol: float = DEFAULT_TOL, ali_tol: float = DEFAULT_A
                 bad(8, sup, f"backchannel_ids names {bid!r}, which is not in the cut")
             elif (child.get("custom") or {}).get("anchor_id") != sup.get("id"):
                 bad(8, sup, f"{bid!r} does not point back to this turn via anchor_id")
+
+    _check_backchannel_numbering(sups, bad)
 
     # 6: same-channel turns do not overlap
     per_channel: Dict[object, List[dict]] = {}
@@ -274,6 +292,65 @@ def _check_backchannel(sup: dict, custom: dict, by_id: dict, timed: bool, tol: f
         bad(8, sup, f"anchor {anchor_id!r} does not list this backchannel in backchannel_ids")
 
 
+def _check_extra(sup: dict, custom: dict, by_id: dict, timed: bool, tol: float, bad) -> None:
+    etype = _event_type(sup)
+    # 14: language
+    if not isinstance(sup.get("language"), str) or not sup["language"]:
+        bad(14, sup, "language missing")
+    # 16: null top-level fields are dropped by the dataclass serializer
+    for key, value in sup.items():
+        if value is None:
+            bad(16, sup, f"top-level field {key!r} is null; omit the key (null is only kept inside custom)")
+    # 12: prompt at the start of the conversation
+    if etype == "prompt" and timed and abs(sup["start"]) > tol:
+        bad(12, sup, f"prompt must start at 0, got {sup['start']}")
+    # 13: function events hang on a word of an anchor turn and carry a JSON payload
+    if etype in ("function_call", "function_response"):
+        anchor = by_id.get(custom.get("anchor_id"))
+        if anchor is None:
+            bad(13, sup, f"anchor_id {custom.get('anchor_id')!r} is not a supervision of this cut")
+        else:
+            index = custom.get("anchor_word_index")
+            words = len(str(anchor.get("text") or "").split())
+            if isinstance(index, bool) or not isinstance(index, int) or not 1 <= index <= words:
+                bad(13, sup, f"anchor_word_index {index!r} is not an integer in [1, {words}]")
+            if timed and _num(anchor.get("start")) and _num(anchor.get("duration")) and not (
+                    anchor["start"] - tol <= sup["start"] <= anchor["start"] + anchor["duration"] + tol):
+                bad(13, sup, f"start {sup['start']} is outside the anchor turn")
+        keys = ("name", "arguments") if etype == "function_call" else ("name", "content")
+        try:
+            payload = json.loads(sup.get("text"))
+        except (TypeError, ValueError):
+            payload = None
+        if not isinstance(payload, dict) or not all(k in payload for k in keys):
+            bad(13, sup, f"text must be a JSON object with keys {keys}")
+    # 17: turn bookkeeping
+    if etype == "turn":
+        if not isinstance(custom.get("backchannel_ids"), list):
+            bad(17, sup, "custom.backchannel_ids must be a list ([] when there is none)")
+        transition = custom.get("transition")
+        if transition is not None and not (
+                isinstance(transition, dict) and transition.get("type") in ("gap", "overlap")
+                and _num(transition.get("duration"))):
+            bad(17, sup, f'custom.transition {transition!r} is not {{"type": "gap"|"overlap", "duration": s}}')
+
+
+def _check_backchannel_numbering(sups: List[dict], bad) -> None:
+    """15: backchannels of one anchor are {anchor_id}-bc0, -bc1, ... without gaps."""
+    ks: Dict[object, List[int]] = {}
+    for sup in sups:
+        custom = sup.get("custom") or {}
+        sid, anchor_id = sup.get("id"), custom.get("anchor_id")
+        if _event_type(sup) != "backchannel" or not isinstance(sid, str) or not isinstance(anchor_id, str):
+            continue
+        head, _, tail = sid.rpartition("-bc")
+        if head == anchor_id and tail.isdigit():
+            ks.setdefault(anchor_id, []).append(int(tail))
+    for anchor_id, found in ks.items():
+        if sorted(found) != list(range(len(found))):
+            bad(15, None, f"backchannel numbers of {anchor_id!r} are {sorted(found)}, expected 0..{len(found) - 1}")
+
+
 def validate_cuts(cuts: Iterable[dict], tol: float = DEFAULT_TOL, ali_tol: float = DEFAULT_ALI_TOL) -> List[Violation]:
     """validate_cut on every cut, plus invariant 2 (supervision ids unique across the manifest)."""
     out: List[Violation] = []
@@ -319,3 +396,35 @@ def validate_with_lhotse(path: str) -> List[Violation]:
     except Exception as exc:
         return [Violation(1, "INV01", "<file>", None, f"lhotse cannot load the manifest: {exc}")]
     return []
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    ap = argparse.ArgumentParser(description="Validate a SpeechWorld full-duplex Lhotse manifest (spec 2.2.0).")
+    ap.add_argument("manifest", help=".jsonl or .jsonl.gz")
+    ap.add_argument("--max-print", type=int, default=50, help="violations to print (default 50, 0 = all)")
+    ap.add_argument("--no-lhotse", action="store_true", help="skip the lhotse CutSet.from_file load check")
+    args = ap.parse_args(argv)
+    cuts = [0]
+
+    def counted():
+        for cut in iter_cuts(args.manifest):
+            cuts[0] += 1
+            yield cut
+
+    violations = validate_cuts(counted())
+    if not args.no_lhotse:
+        violations += validate_with_lhotse(args.manifest)
+    shown = violations if args.max_print == 0 else violations[:args.max_print]
+    for v in shown:
+        print(v)
+    if len(shown) < len(violations):
+        print(f"... {len(violations) - len(shown)} more (use --max-print 0)")
+    bad_cuts = len({v.cut_id for v in violations})
+    print(f"\n{cuts[0]} cuts checked, {len(violations)} violations in {bad_cuts} cuts")
+    for code, n in sorted(Counter(v.code for v in violations).items()):
+        print(f"  {code}: {n}")
+    return 1 if violations else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
