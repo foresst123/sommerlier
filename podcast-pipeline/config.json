@@ -271,6 +271,7 @@
         "prefetch_workers": false,
         "by_stage": true,
         "review_page": true,
+        "rerun": false,
         "review_max_mb": 400,
         "initprompt": true,
         "lang": "vi",

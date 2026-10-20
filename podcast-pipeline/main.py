@@ -158,6 +158,13 @@ def _build_parser():
                         help="Write the HTML review page even if the profile turns it off. "
                              "It lists the transcript when the run exported one, otherwise "
                              "the diarization segments, filled in with what exists.")
+    parser.add_argument("--rerun", dest="rerun", action="store_true", default=None,
+                        help="Start the chosen folder over: before the first pass, delete each "
+                             "file's checkpoint cache and its output folder and drop it from the "
+                             "progress ledger, then run it again (profile: pipeline.rerun). "
+                             "Audio is never touched. Off by default.")
+    parser.add_argument("--no_rerun", dest="rerun", action="store_false", default=None,
+                        help="Do not rerun, even if the profile has pipeline.rerun on.")
     parser.add_argument("--review_max_mb", type=int, default=None,
                         help="Cap on audio embedded in the review page (default 400).")
     parser.add_argument("--steps", type=str, default=None,
@@ -1140,6 +1147,13 @@ def main():
                 ledger.pending(paths)))
             logger.info(f"{_held_by_others} file(s) are being processed by "
                         "another pipeline")
+        from utils.rerun import rerun_enabled, clear_for_rerun
+        if rerun_enabled(args):
+            logger.warning("Rerun is ON (pipeline.rerun / --rerun): clearing cache, output and "
+                           "progress for every file of this run before running them again")
+            clear_for_rerun(paths, args.cache_dir, args.job_id,
+                            lambda p: pipeline._resolve_output_dir(args, p),
+                            ledger, claims=claims, logger=logger)
         if ledger.done or ledger.failed or ledger.rejected:
             logger.info(f"Resuming: {ledger.summary(len(paths))} "
                         f"(ledger: {os.path.basename(ledger.path)})")

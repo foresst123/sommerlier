@@ -127,13 +127,17 @@ class ProgressLedger:
             if disk is not None:
                 self._merge(disk)
 
-    def save(self):
+    def save(self, drop=None, drop_quality: bool = False):
         """Merge with the disk, then write atomically.
 
         Several pipelines may share one input directory, so overwriting the file
         from memory would drop what the others recorded. The read-merge-write runs
         under an flock on a sibling lock file. A run killed mid-write must not lose
         the ledger, hence the atomic replace.
+
+        `drop` is a set of keys to remove after the merge. Merging is what brings a
+        key back from the disk, so deleting one from memory alone is not enough; see
+        forget(). `drop_quality` removes the same keys from the DNSMOS reports too.
         """
         if not self.persist:
             return
@@ -151,6 +155,11 @@ class ProgressLedger:
             disk = self._read_disk(self.path)
             if disk is not None:
                 self._merge(disk)
+            for key in (drop or ()):
+                for table in (self.done, self.failed, self.rejected):
+                    table.pop(key, None)
+                if drop_quality:
+                    self.quality.pop(key, None)
             payload = {
                 "directory": self.directory,
                 "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -198,6 +207,23 @@ class ProgressLedger:
         with self._lock:
             self.quality[self._key(path)] = dict(report)
             self.save()
+
+    def forget(self, paths, keep_quality: bool = True) -> int:
+        """Treat `paths` as never seen: drop them from done, failed and rejected.
+
+        Returns how many entries were removed. The DNSMOS report is kept unless
+        `keep_quality` is False, since scoring is the slow part and the score does not
+        change while the file does not.
+        """
+        keys = {self._key(p) for p in paths}
+        removed = 0
+        with self._lock:
+            for table in (self.done, self.failed, self.rejected):
+                for key in keys:
+                    if table.pop(key, None) is not None:
+                        removed += 1
+            self.save(drop=keys, drop_quality=not keep_quality)
+        return removed
 
     def attempts(self, path: str) -> int:
         return int(self.failed.get(self._key(path), {}).get("attempts", 0))
