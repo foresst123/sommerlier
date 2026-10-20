@@ -97,9 +97,11 @@ recording. Còn thiếu so với yêu cầu của vòng 1: **chưa có nhiễu v
    này `mix ≠ s1 + s2`, nên lưu `mix`, `s1`, `s2` thành file riêng. Đích của biến thể có
    nhiễu là hai stem **không có nhiễu**.
 6. **Cắt đoạn** (sau chia tập, sau resample): cửa sổ 4 giây cho MossFormer2 và
-   SpeechBrain, 3 giây cho TIGER; bước nhảy 50% khi train, không chồng khi val. Giữ đoạn
-   khi **cả hai stem** có ≥ 40% khung 25 ms trên −45 dBFS RMS và RMS mixture > 1e-3.
-   Bỏ mọi đoạn có stem im lặng, không đưa vào loss.
+   SpeechBrain, 3 giây cho TIGER, dựng **quanh một overlap thật** (xem 4.7). Quy tắc hoạt động:
+   mỗi stem phải có ít nhất **0.15 giây** tiếng nói (khung 10 ms trên −45 dBFS). Quy tắc cũ
+   "≥ 40% khung hoạt động cho cả hai stem" **bị bỏ**: overlap thật chủ yếu là người thứ hai
+   chen ngắn trong lượt dài, nên stem thứ hai chỉ chiếm ~10% cửa sổ và quy tắc cũ sẽ loại
+   gần hết mẫu đúng kiểu thật. Vẫn loại stem im lặng toàn phần (loss hằng số, gradient 0).
 7. **Ghi một bảng đoạn duy nhất** (jsonl/parquet) làm nguồn sự thật, rồi sinh manifest
    riêng cho từng mô hình từ đó:
    - MossFormer2: ba cột `mix s1 s2`, đường dẫn không có khoảng trắng; `tr_list`/`cv_list`.
@@ -109,7 +111,7 @@ recording. Còn thiếu so với yêu cầu của vòng 1: **chưa có nhiễu v
    tỷ lệ đoạn bị loại, phân bố độ dài / mức lệch / tỷ lệ overlap, không recording nào
    xuất hiện ở cả train lẫn val lẫn test. Nghe ngẫu nhiên ~20 mẫu.
 
-### 4.4 Tham số đề xuất (cần điều chỉnh bằng thực nghiệm)
+### 4.4 Tham số đề xuất ban đầu (ĐÃ BỊ THAY bằng số đo thật ở 4.7; giữ lại để so)
 
 | Tham số | Giá trị khởi điểm | Ghi chú |
 |---|---|---|
@@ -120,6 +122,59 @@ recording. Còn thiếu so với yêu cầu của vòng 1: **chưa có nhiễu v
 | Cửa sổ | 4 s (3 s cho TIGER) | Theo mặc định của từng trainer |
 | Khối lượng | 10–30 giờ đoạn đã render | Không nguồn nào nêu mức tối thiểu; tham chiếu: EchoSet ~34 h, LRS2-2Mix ~11 h, Echo2Mix 57 h |
 
+### 4.7 Số đo overlap thật và thiết kế dữ liệu theo đó (2026-10-20)
+
+`tools/measure_real_overlap_stats.py` chạy trên 360 recording trong cache (351 giờ, 18.623
+sự kiện overlap, 19.013 cặp; mỗi file tối đa 50 sự kiện khi gộp phân phối). Các khoảng
+tin cậy 95% lấy mẫu lại theo recording.
+
+| Số đo | Kết quả | Giả định ban đầu | Sửa |
+|---|---|---|---|
+| Độ dài sự kiện | trung vị **0.46 s** (CI 0.459–0.48), p10 0.2, p90 2.58 s | mỗi người 2–8 s, chồng dài | Overlap thật ngắn; lấy độ dài từ mẫu thật |
+| Kiểu chồng | contained **61.2%**, partial **37.5%**, full **1.3%** | 25 / 50 / 25 | full gần như không có; đề xuất ~60 / 37 / 3 |
+| Chênh mức (người sau − người trước) | trung vị −0.08 dB; \|chênh\| trung vị 1.75 dB; p90 \|chênh\| 4.8–5.6 dB | ±10 dB đều | Lấy mẫu từ phân phối đo; đuôi ±6–12 dB chỉ là ca khó |
+| Speech-to-noise mỗi recording | trung vị **34 dB** (p10 27, p90 42) | 5–25 dB | Dữ liệu thật rất sạch; nhiễu chỉ nhẹ |
+| Nhiễu nền | trung vị −57 dBFS (p10 −65, p90 −49) | | |
+| Mật độ | 0.885 sự kiện/phút; overlap = 1.54% audio | | Hiếm |
+| Overlap lân cận (±30 s) | trung vị 1, p90 4 | | Một cửa sổ 4 s thường chỉ có **một** overlap |
+
+Phát hiện chính: overlap thật là **người thứ hai chen một tiếng ngắn vào lượt dài của người
+thứ nhất**. Nhiễu là việc phụ; khó khăn thật là phát hiện và tách một giọng ngắn, thường cùng
+mức, nằm trong giọng dài.
+
+Hệ quả cho `tools/render_mix_dataset.py` (đã viết, đã test trên dữ liệu giả, **chưa chạy
+trên cache thật**):
+- Mỗi mẫu bắt đầu từ một **mẫu overlap thật** trong `pairs.csv`: độ dài lượt người đầu, độ
+  dài lượt người sau, độ dài overlap, kiểu chồng, chênh mức. Mẫu được hiện thực hóa bằng
+  đoạn sạch của cùng recording, đặt trên một trục thời gian, cắt thành cửa sổ chứa overlap.
+- Nguồn mẫu: 70% từ chính recording đó, 20% từ cả split nhưng chia đều theo nhóm độ dài
+  (để overlap dài 2–5 s và >5 s không bị bỏ đói), 10% ca khó (overlap ≥ 1 s, chênh mức gần
+  0 hoặc rất rộng). Chỉnh bằng `--mix`.
+- Nhiễu: nền của chính recording (các đoạn không có segment) cộng vào **mixture**, xác suất
+  `--noise-prob` (mặc định 0.5), SNR phần lớn 25–45 dB, 20% thấp hơn (10–25 dB). Bản có
+  nhiễu có `mix ≠ s1 + s2`.
+- Không thêm vang tổng hợp (stem đã mang vang của recording).
+- Đoạn sạch cho người chen ngắn lấy từ chính các đoạn ngắn thật không bị chồng (ngưỡng tối
+  thiểu 0.25 s), cắt ở chỗ năng lượng thấp để không cắt giữa từ.
+- Chia tập theo recording; tập ~100 clip thật bị loại bằng `--exclude-index`.
+- Manifest cho ba mô hình vòng 1 sinh từ cùng một bảng `chunks.jsonl`. Định dạng lấy từ hồ
+  sơ khảo sát, **chưa kiểm bằng cách chạy từng trainer**.
+- Chạy hai lần: `--window 4` (MossFormer2, SpeechBrain) và `--window 3` (TIGER).
+
+`tools/validate_mix_dataset.py` kiểm các bất biến (file, sample rate, độ dài, NaN/clip,
+`mix = s1 + s2` cho chunk không nhiễu, stem có tiếng, không recording nào ở cả hai split,
+không dùng recording test) và in phân phối đã render cạnh phân phối thật.
+
+**Giới hạn của số đo**
+- Chênh mức là số gần đúng: lấy từ mức mỗi người khi nói một mình gần nhất, không phải mức
+  tức thời trong overlap; tiếng chen vào thường nhỏ hơn nên chênh thật có thể lớn hơn.
+- Overlap chỉ lấy từ ranh giới segment của DiariZen. Overlap chiếm 1.54% audio, dưới ngưỡng
+  3% mà `stage_output_service.py` dùng để cảnh báo "diarizer có thể bỏ sót backchannel", nên
+  đây có thể là cận dưới của overlap thật.
+- Nhiễu nền đo trên waveform đã cắt nhạc, ở các đoạn không có segment; có thể lẫn tiếng
+  cười hoặc nhạc sót, và thấp hơn thực tế nếu pipeline có khử nhiễu ở bước trước.
+- 360 trong 364 recording được đo.
+
 ### 4.5 Việc suy luận không thuộc dữ liệu train nhưng ảnh hưởng thiết kế
 
 Pipeline chỉ cần tách **đoạn overlap**, nên đầu vào lúc suy luận hầu như luôn có hai
@@ -129,10 +184,11 @@ bước 75%), nên cần viết bộ căn hoán vị theo tương quan ở vùng
 
 ### 4.6 Script cần viết (chưa có)
 
-- `tools/audit_clean_pool.py`: kiểm kê kho đoạn sạch (bước 1).
-- `tools/render_mix_dataset.py`: các bước 3–7 (trộn, resample, nhiễu, cắt đoạn, chia tập,
-  bảng đoạn, manifest từng mô hình).
-- `tools/validate_mix_dataset.py`: bước 8.
+- `tools/measure_real_overlap_stats.py`: **đã chạy** (mục 4.7).
+- `tools/render_mix_dataset.py`: các bước 3–7. **Đã viết, chưa chạy trên cache thật.**
+- `tools/validate_mix_dataset.py`: bước 8. **Đã viết, chưa chạy trên cache thật.**
+- `tools/audit_clean_pool.py` (kiểm kê kho đoạn sạch, bước 1): chưa viết; `render_mix_dataset.py`
+  hiện tự dựng kho đoạn sạch từng recording.
 
 ## 5. Các quyết định còn mở (cần bạn chốt)
 
