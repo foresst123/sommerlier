@@ -119,6 +119,26 @@ def test_typed_answers_override_config():
     assert cfg["environments"]["a100"]["outputs"]["clean_two_channel_dir"] == "/dest"
 
 
+def test_default_is_prefilled_for_editing(monkeypatch):
+    seen = []
+    monkeypatch.setattr(env_bootstrap, "_input_prefilled",
+                        lambda text, default: seen.append((text, default)) or default + "2")
+    monkeypatch.setattr("builtins.input", lambda *_: pytest.fail("fell back to plain input"))
+    cfg = _cfg("/out")
+    args = env_bootstrap.ask_paths(_args(), cfg, prompt=input, interactive=True)
+    assert seen[0] == ("Input audio folder: ", "/in")
+    assert args.audio_dir == "/in2"
+    assert cfg["environments"]["a100"]["outputs"]["clean_two_channel_dir"] == "/out2"
+
+
+def test_prefill_unavailable_falls_back_to_bracket_prompt(monkeypatch):
+    monkeypatch.setattr(env_bootstrap, "_input_prefilled", lambda *_: None)
+    asked = []
+    monkeypatch.setattr("builtins.input", lambda q: asked.append(q) or "")
+    args = env_bootstrap.ask_paths(_args(), _cfg("/out"), prompt=input, interactive=True)
+    assert args.audio_dir == "/in" and "[/in]" in asked[0]
+
+
 def test_input_flag_skips_input_question():
     asked = []
     args = _args(audio_dir="/cli")

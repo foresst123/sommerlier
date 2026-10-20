@@ -17,7 +17,7 @@
     ]
   },
   "entrypoint": {
-    "input_folder_path": "audio_pipeline/test",
+    "input_folder_path": "/home/lamkd2/data/data_input",
     "SAMPLE_RATE": 16000
   },
   "huggingface_token": "",

@@ -332,8 +332,34 @@ def ensure_hf_token(config, logger, prompt=getpass.getpass, interactive=None, re
 
 # ---------------------------------------------------------------- input / output paths
 
+def _input_prefilled(text, default):
+    """input() with `default` already typed on the line, so it can be edited in place.
+
+    None when the terminal cannot do it (no readline, or a build without the pre-input hook,
+    such as macOS libedit); the caller then falls back to a plain prompt.
+    """
+    try:
+        import readline
+        hook = readline.set_pre_input_hook
+    except (ImportError, AttributeError):
+        return None
+
+    def prefill():
+        readline.insert_text(default)
+        readline.redisplay()
+
+    hook(prefill)
+    try:
+        return input(text)
+    finally:
+        hook()
+
+
 def ask_paths(args, config, prompt=input, interactive=None):
     """Ask for the input folder and the clean-data output folder, defaulting to config.json.
+
+    On a terminal the default is typed onto the line for the user to edit; clearing the line
+    leaves the answer empty (output export off).
 
     Defaults: ``entrypoint.input_folder_path`` and the active profile's
     ``outputs.clean_two_channel_dir`` (empty there means the export is off, so Enter keeps it
@@ -347,6 +373,10 @@ def ask_paths(args, config, prompt=input, interactive=None):
     def ask(label, default):
         if not interactive:
             return default
+        if prompt is input:
+            typed = _input_prefilled(f"{label}: ", default)
+            if typed is not None:       # the default was editable text; what is left is the answer
+                return typed.strip()
         shown = f" [{default}]" if default else " [off]"
         return prompt(f"{label}{shown}: ").strip() or default
 
