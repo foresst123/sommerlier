@@ -26,11 +26,12 @@ Further MUST clauses outside the section 9 table are reported as EXT12..EXT17:
 
 Tolerance is 1 ms, 10 ms along alignment chains.
 
-CLI:  python -m utils.lhotse_validate manifest.jsonl[.gz] [--max-print N]    (exit 1 on any violation)
+CLI:  python -m utils.lhotse_validate manifest.jsonl[.gz] | dir ... [--max-print N]    (exit 1 on any violation)
 """
 import argparse
 import gzip
 import json
+import os
 import sys
 from collections import Counter
 from dataclasses import dataclass
@@ -400,27 +401,36 @@ def validate_with_lhotse(path: str) -> List[Violation]:
 
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Validate a SpeechWorld full-duplex Lhotse manifest (spec 2.2.0).")
-    ap.add_argument("manifest", help=".jsonl or .jsonl.gz")
+    ap.add_argument("manifest", nargs="+", help=".jsonl / .jsonl.gz files or directories of them "
+                                                "(all cuts are checked together, so INV02 spans files)")
     ap.add_argument("--max-print", type=int, default=50, help="violations to print (default 50, 0 = all)")
     ap.add_argument("--no-lhotse", action="store_true", help="skip the lhotse CutSet.from_file load check")
     args = ap.parse_args(argv)
+    paths: List[str] = []
+    for item in args.manifest:
+        if os.path.isdir(item):
+            paths += sorted(os.path.join(item, n) for n in os.listdir(item) if n.endswith((".jsonl", ".jsonl.gz")))
+        else:
+            paths.append(item)
     cuts = [0]
 
     def counted():
-        for cut in iter_cuts(args.manifest):
-            cuts[0] += 1
-            yield cut
+        for path in paths:
+            for cut in iter_cuts(path):
+                cuts[0] += 1
+                yield cut
 
     violations = validate_cuts(counted())
     if not args.no_lhotse:
-        violations += validate_with_lhotse(args.manifest)
+        for path in paths:
+            violations += validate_with_lhotse(path)
     shown = violations if args.max_print == 0 else violations[:args.max_print]
     for v in shown:
         print(v)
     if len(shown) < len(violations):
         print(f"... {len(violations) - len(shown)} more (use --max-print 0)")
     bad_cuts = len({v.cut_id for v in violations})
-    print(f"\n{cuts[0]} cuts checked, {len(violations)} violations in {bad_cuts} cuts")
+    print(f"\n{len(paths)} files, {cuts[0]} cuts checked, {len(violations)} violations in {bad_cuts} cuts")
     for code, n in sorted(Counter(v.code for v in violations).items()):
         print(f"  {code}: {n}")
     return 1 if violations else 0

@@ -205,7 +205,9 @@ def test_cli_exit_code_and_summary(tmp_path, capsys):
     assert main([str(good), "--no-lhotse"]) == 0
     assert main([str(bad), "--no-lhotse"]) == 1
     out = capsys.readouterr().out
-    assert "INV10: 1" in out and "1 cuts checked, 1 violations in 1 cuts" in out
+    assert main([str(tmp_path), "--no-lhotse"]) == 1          # a directory: both files, together
+    assert "2 files, 2 cuts" in capsys.readouterr().out
+    assert "INV10: 1" in out and "1 files, 1 cuts checked, 1 violations in 1 cuts" in out
 
 
 def test_inv02_duplicate_ids_across_the_manifest():
