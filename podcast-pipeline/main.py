@@ -150,9 +150,14 @@ def _build_parser():
                         help="Override pipeline.max_segment_length from the profile")
     parser.add_argument("--no_review_page", dest="review_page", action="store_false",
                         default=None,
-                        help="Skip the HTML review page. It is built by default at "
-                             "the end of each file and embeds every clip, so it is "
-                             "worth turning off when only the transcripts matter.")
+                        help="Skip the HTML review page (profile: pipeline.review_page). "
+                             "It is the last step of each pass and embeds every clip, so it "
+                             "is worth turning off when only the transcripts matter.")
+    parser.add_argument("--review_page", dest="review_page", action="store_true",
+                        default=None,
+                        help="Write the HTML review page even if the profile turns it off. "
+                             "It lists the transcript when the run exported one, otherwise "
+                             "the diarization segments, filled in with what exists.")
     parser.add_argument("--review_max_mb", type=int, default=None,
                         help="Cap on audio embedded in the review page (default 400).")
     parser.add_argument("--steps", type=str, default=None,
@@ -317,7 +322,7 @@ install_torch_load_shim()
 from utils.batch import audio_duration, find_audio_files, find_name_collisions, plan_batches, run_batch_by_stage
 from utils.progress import ProgressLedger
 from utils.file_claims import FileClaims, claim_group
-from utils.steps import will_run, opt_in_step_enabled
+from utils.steps import will_run, opt_in_step_enabled, review_page_enabled, step_enabled
 from utils.worker_env import resolve_worker_python
 # Separation thresholds live in the profile, but separation_service and bss_model read
 # them at import time. Publish them as environment variables here -- before those
@@ -461,6 +466,41 @@ def _record_failure(ledger, args, path, err, logger, pipeline, failures, rejecti
         rejections.append((path, err))
     else:
         failures.append((path, err))
+
+
+def _write_review_pages(pipeline, args, paths, logger):
+    """The last step of a pass: one HTML page per file that got through every stage.
+
+    The switch is `pipeline.review_page` in the profile (on by default), or
+    --review_page / --no_review_page. The page is the one tools/make_review_page.py
+    has always written. It lists the transcript when this run exported one and
+    otherwise the diarization segments, filled in with whatever exists (a run that
+    stops after diarization has no ASR text and no processed audio to show).
+    """
+    if not review_page_enabled(args):
+        return
+    from utils.batch import _drain_pending_diarization
+    pending_failures = {}
+    _drain_pending_diarization(pipeline, pending_failures)   # background CPU tails
+    from tools.make_review_page import build_review_page, record_in_manifest
+    # A transcript left in the folder by an earlier run is not this run's.
+    reaches_export = step_enabled(args, "export") and getattr(args, "stop_after", None) is None
+    source = "transcript" if reaches_export else "diarization"
+    for path in paths:
+        name = os.path.basename(path)
+        if path in pending_failures:
+            logger.warning(f"No review page for {name}: {pending_failures[path]}")
+            continue
+        try:
+            out_dir = pipeline._resolve_output_dir(args, path)
+            info = {}
+            page = build_review_page(out_dir, max_mb=getattr(args, "review_max_mb", None),
+                                     logger=logger, source=source, info=info)
+            record_in_manifest(out_dir, page, info.get("kind", source))
+        except SystemExit as exc:          # nothing on disk to list for this file
+            logger.warning(f"No review page for {name}: {exc}")
+        except Exception as exc:
+            logger.warning(f"Could not build the review page for {name}: {exc}")
 
 
 def main():
@@ -1191,6 +1231,10 @@ def main():
             # Written after every pass, so a run killed between passes resumes
             # from the last completed group rather than the beginning.
             ledger.save()
+            # Last step of the pass, after every stage; switched by review_page.
+            _unfinished = {p for p, _ in failures} | {p for p, _ in rejections}
+            _write_review_pages(pipeline, args,
+                                [p for p in group if p not in _unfinished], logger)
             for path in group:
                 claims.release(path)
             logger.info(f"Pass {pass_no} finished in {(time.time() - started) / 60:.1f} min "

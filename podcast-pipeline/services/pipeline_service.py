@@ -2185,21 +2185,10 @@ class PipelineService:
         except Exception as e:
             if self.logger: self.logger.error(f"Failed to export intermediate results: {e}")
         
-        review_page = None
-        if getattr(args, "review_page", True):
-            try:
-                from tools.make_review_page import build_review_page
-                review_page = build_review_page(
-                    save_path,
-                    max_mb=getattr(args, "review_max_mb", None),
-                    logger=self.logger)
-            except Exception as e:
-                if self.logger:
-                    self.logger.warning(f"Could not build the review page: {e}")
-
+        # The HTML page is no longer built here: main.py writes it as the last step
+        # of each pass, after every stage (this one included) has finished, and adds
+        # it to the manifest's `final` block then. See tools/make_diarization_page.py.
         final = {"json": f"{base_name}.json", "srt": f"{base_name}.srt"}
-        if review_page:
-            final["review"] = os.path.basename(review_page)
         manifest_extra = {"final": final}
         if clean_dataset_result:
             manifest_extra["clean_two_channel_dataset"] = clean_dataset_result

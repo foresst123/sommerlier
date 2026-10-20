@@ -44,17 +44,59 @@ def _load_transcript(out_dir: str):
     return name, segments, path
 
 
-def _audio_index(out_dir: str, name: str):
+STAGE_DIARIZATION = "02_diarization"
+
+
+def _load_source(out_dir: str, source: str = "auto"):
+    """What the page lists: (name, segments, path, kind).
+
+    kind is "transcript" when the run exported one, "diarization" when only the
+    diarization stage's segments exist. The page is the same either way; the
+    fields a stage has not filled in yet (the ASR texts, the processed audio)
+    stay empty, so a run that stops early still ends with a page to look at.
+
+    `source` "transcript" or "diarization" forces one; "auto" takes the
+    transcript when there is one. A caller that knows the run did not export
+    asks for "diarization", because a transcript left in the folder by an earlier
+    run would otherwise be shown for this one.
+    """
+    if source not in ("auto", "transcript", "diarization"):
+        raise ValueError(f"source must be auto, transcript or diarization, not {source!r}")
+    if source in ("auto", "transcript"):
+        try:
+            name, segments, path = _load_transcript(out_dir)
+            return name, segments, path, "transcript"
+        except SystemExit:
+            pass
+    name = os.path.basename(os.path.normpath(out_dir))
+    path = os.path.join(out_dir, STAGE_DIARIZATION, "segments.json")
+    if not os.path.isfile(path):
+        raise SystemExit(f"nothing to show in {out_dir}: no transcript JSON and no "
+                         f"{STAGE_DIARIZATION}/segments.json (is stage output on?)")
+    with open(path, encoding="utf-8") as f:
+        segments = json.load(f)
+    return name, segments, path, "diarization"
+
+
+def _audio_index(out_dir: str, name: str, kind: str = "transcript"):
     """Map segment index -> (original clip, processed clip), by filename prefix.
 
     Both directories name their files "{index}_{speaker}...", so the index is
     the prefix up to the first underscore. Matching on that rather than
     rebuilding the whole filename keeps this working when the speaker label
     changes between runs.
+
+    For a diarization-only page the clips are the diarization stage's own
+    (02_diarization/audio/processed, the original audio cut at each segment); there
+    is no processed audio yet.
     """
     original, processed = {}, {}
-    for src, target in ((os.path.join(out_dir, name), original),
-                        (os.path.join(out_dir, "separation"), processed)):
+    if kind == "diarization":
+        sources = ((os.path.join(out_dir, STAGE_DIARIZATION, "audio", "processed"), original),)
+    else:
+        sources = ((os.path.join(out_dir, name), original),
+                   (os.path.join(out_dir, "separation"), processed))
+    for src, target in sources:
         if not os.path.isdir(src):
             continue
         for fn in os.listdir(src):
@@ -943,24 +985,28 @@ document.getElementById("export").onclick = () => {
 
 
 def build_review_page(output_dir: str, target: str = None, max_mb: int = None,
-                      limit: int = None, logger=None):
+                      limit: int = None, logger=None, source: str = "auto", info: dict = None):
     """Write the review page for one processed recording. Returns its path.
 
     Kept separate from main() so the pipeline can call it at the end of a run
-    without going through argparse.
+    without going through argparse. `source` is passed to _load_source; `info`,
+    when given, is filled with {"kind": "transcript" | "diarization", "source": path}.
     """
     out_dir = os.path.abspath(output_dir)
-    name, segments, _src = _load_transcript(out_dir)
+    name, segments, src, kind = _load_source(out_dir, source)
+    if info is not None:
+        info.update({"kind": kind, "source": src})
     if limit:
         segments = segments[:limit]
 
-    original, processed = _audio_index(out_dir, name)
+    original, processed = _audio_index(out_dir, name, kind)
     cap = (max_mb * 1024 * 1024) if max_mb else MAX_EMBED_BYTES
     budget = [cap]
     rows = _rows(segments, original, processed, budget)
 
+    title = name if kind == "transcript" else f"{name} (diarization only)"
     page = (PAGE
-            .replace("__TITLE__", html.escape(name))
+            .replace("__TITLE__", html.escape(title))
             .replace("__COUNT__", str(len(rows)))
             .replace("__NAME__", json.dumps(name))
             .replace("__DATA__", json.dumps(rows, ensure_ascii=False)))
@@ -974,7 +1020,7 @@ def build_review_page(output_dir: str, target: str = None, max_mb: int = None,
         clips = sum(bool(r["audio_src"]) + bool(r["audio_out"]) for r in rows)
         flagged = sum(1 for r in rows if r["unseparated"])
         music = sum(1 for r in rows if r["music"] and not r["bs_roformer"])
-        msg = (f"Review page: {len(rows)} segment(s), {clips} clip(s), "
+        msg = (f"Review page ({kind}): {len(rows)} segment(s), {clips} clip(s), "
                f"{size_mb:.1f} MB -> {target}")
         if flagged or music:
             msg += (f"  ({flagged} segment(s) with unseparated overlap, "
@@ -983,6 +1029,25 @@ def build_review_page(output_dir: str, target: str = None, max_mb: int = None,
             msg += "  (size cap reached; later clips were left out)"
         logger.info(msg)
     return target
+
+
+def record_in_manifest(output_dir: str, page_path: str, kind: str) -> bool:
+    """Name the page in manifest.json when stage output wrote one. Never raises."""
+    path = os.path.join(os.path.abspath(output_dir), "manifest.json")
+    try:
+        if not os.path.isfile(path):
+            return False
+        with open(path, encoding="utf-8") as f:
+            manifest = json.load(f)
+        manifest.setdefault("final", {})["review"] = os.path.basename(page_path)
+        manifest["review_page"] = {"file": os.path.basename(page_path), "kind": kind}
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+        return True
+    except Exception:
+        return False
 
 
 def main():
@@ -994,14 +1059,17 @@ def main():
                     help="cap on embedded audio (default: %(default)s MB)")
     ap.add_argument("--limit", type=int, default=None,
                     help="only the first N segments")
+    ap.add_argument("--source", choices=["auto", "transcript", "diarization"], default="auto",
+                    help="what to list: the transcript, the diarization segments, or "
+                         "whichever exists (default: %(default)s)")
     args = ap.parse_args()
 
     out_dir = os.path.abspath(args.output_dir)
-    name, segments, src = _load_transcript(out_dir)
+    name, segments, src, kind = _load_source(out_dir, args.source)
     if args.limit:
         segments = segments[:args.limit]
 
-    original, processed = _audio_index(out_dir, name)
+    original, processed = _audio_index(out_dir, name, kind)
     budget = [args.max_mb * 1024 * 1024]
     rows = _rows(segments, original, processed, budget)
 
@@ -1010,7 +1078,8 @@ def main():
     missing = sum(1 for r in rows if not r["audio_src"] or not r["audio_out"])
 
     page = (PAGE
-            .replace("__TITLE__", html.escape(name))
+            .replace("__TITLE__", html.escape(name if kind == "transcript"
+                                              else f"{name} (diarization only)"))
             .replace("__COUNT__", str(len(rows)))
             .replace("__NAME__", json.dumps(name))
             .replace("__DATA__", json.dumps(rows, ensure_ascii=False)))
@@ -1020,7 +1089,7 @@ def main():
         f.write(page)
 
     size_mb = os.path.getsize(target) / (1024 * 1024)
-    print(f"transcript : {src}")
+    print(f"{kind:<11}: {src}")
     print(f"segments   : {len(rows)}")
     print(f"audio      : {embedded} clip(s) embedded"
           + (f", {missing} row(s) missing one" if missing else ""))

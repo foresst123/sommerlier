@@ -23,6 +23,17 @@ LEGACY_FLAG = {
 }
 
 
+def review_page_enabled(args) -> bool:
+    """Whether the closing HTML page is written.
+
+    One switch: `pipeline.review_page` in the profile, or --review_page /
+    --no_review_page on the command line (the command line wins). Not set at all
+    means on, so a profile written before the page was a stage still gets one.
+    """
+    value = getattr(args, "review_page", None)
+    return True if value is None else bool(value)
+
+
 def step_enabled(args, name: str) -> bool:
     """Whether `name` runs. Unlisted steps run, which is the old behaviour."""
     explicit = getattr(args, f"step_{name}", None)
