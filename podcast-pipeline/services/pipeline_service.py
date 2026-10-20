@@ -1347,6 +1347,10 @@ class PipelineService:
 
         if save_path == "./output":
             suffix = "pyannote" if getattr(args, "dia3", False) else "diarizen"
+            # Only a non-default backend changes the folder, so DiariZen runs
+            # keep the names (and checkpoints) they already have.
+            if getattr(args, "diarization_backend", None) == "nemotron":
+                suffix = "nemotron"
             # The performance path changes what is computed -- ASR batching,
             # refinement placement and token ceiling, diarization component
             # placement -- so its results must not land in, or be resumed from,
@@ -2139,7 +2143,8 @@ class PipelineService:
         metadata = {
             "audio_file": os.path.basename(audio_path),
             "audio_name": base_name,
-            "diarization_model": "pyannote" if getattr(args, "dia3", False) else "diarizen",
+            "diarization_model": ("pyannote" if getattr(args, "dia3", False)
+                                  else getattr(args, "diarization_backend", None) or "diarizen"),
             "asr_models": self.asr_svc.active_models(),
             "music_enabled": getattr(args, "music", False),
             "vad_enabled": getattr(args, "vad", False),
