@@ -33,6 +33,7 @@ import gzip
 import json
 import os
 import sys
+import traceback
 from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, Iterable, Iterator, List, Optional, Tuple
@@ -395,7 +396,10 @@ def validate_with_lhotse(path: str) -> List[Violation]:
             for sup in cut.supervisions:
                 _ = (sup.id, sup.start, sup.duration, sup.channel)
     except Exception as exc:
-        return [Violation(1, "INV01", "<file>", None, f"lhotse cannot load the manifest: {exc}")]
+        frame = traceback.extract_tb(exc.__traceback__)[-1]
+        where = f"{os.path.basename(frame.filename)}:{frame.lineno} in {frame.name}"
+        return [Violation(1, "INV01", os.path.basename(str(path)), None,
+                          f"lhotse cannot load the manifest: {type(exc).__name__}: {exc} (at {where})")]
     return []
 
 
