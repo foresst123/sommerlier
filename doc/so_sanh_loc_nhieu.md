@@ -149,10 +149,31 @@ python tools/run_variants.py --audio-dir /data/vi_podcasts_3 --variants tools/va
 
 ### Nhắc nhở
 
-- Mở `01b_denoise/denoise.json` của từng biến thể và đọc `errors`: backend lỗi **rơi về âm thanh chưa lọc**, biến thể vẫn có status `ok` nhưng thực chất là bản chưa lọc.
+- Backend lỗi thì **rơi về âm thanh chưa lọc**; `run_variants.py` giờ tự đọc `01b_denoise/denoise.json` và đánh dấu biến thể `degraded` (xem mục dưới), không còn để status `ok`.
 - Âm thanh xuất ra phải qua các cổng kiểm chứng (giữ danh tính người nói, WER ASR so baseline, không khẳng định xóa giọng đám đông).
 - Biến thể `analysis_only` và `analysis_pipes` không được xuất trước khi nghe thử.
 - Nhóm `pipe_crowd`, `pipe_reverb` chưa kiểm chứng trên tiếng Việt; tên checkpoint và stem lấy từ danh sách mô hình, chưa chạy thật.
+
+## Biến thể lỗi lặng lẽ (`degraded`)
+
+Khi backend không nạp được hoặc chạy lỗi, `DenoiseService` giữ nguyên âm thanh chưa lọc và chỉ ghi lỗi vào `01b_denoise/denoise.json` (khóa `errors`). Sau mỗi biến thể, `run_variants.py` đọc file này cho từng file đầu vào và gán một verdict:
+
+| verdict | ý nghĩa |
+|---|---|
+| `ok` | chuỗi là `none`, hoặc không có lỗi |
+| `fallback` | `errors` khác rỗng: chuỗi bị bỏ, giữ nguyên đầu vào |
+| `missing` | chuỗi khác `none` nhưng không có (hoặc hỏng) `denoise.json`, hoặc không có thư mục đầu ra của file: bước denoise chưa chạy hay đã sập |
+| `suspect_noop` | không có lỗi nhưng `corr_with_input` >= 0.99999 với backend thật (không phải `identity`, không phải `blendNN`): bộ lọc không đổi gì, đáng ngờ |
+
+Status của biến thể là `degraded` (ngoài `ok/failed/skipped/missing`) khi tiến trình thoát 0 nhưng có file `fallback` hoặc `missing`. `suspect_noop` một mình không đổi status, chỉ in cảnh báo và ghi vào manifest.
+
+- `variants_manifest.json` có thêm `denoise_report` (`{stem: {verdict, errors, corr_with_input, lag_samples}}`), `degraded_files`, `suspect_files`, `total_files`.
+- Cuối lần chạy in khối `DEGRADED` liệt kê id biến thể, số file ảnh hưởng và dòng lỗi đầu tiên.
+- Biến thể `degraded` **không** ghi `.done`, nên `--resume` sẽ chạy lại sau khi sửa môi trường. `--accept-degraded` vẫn ghi `.done` (status trong manifest vẫn là `degraded`).
+- `--strict`: thoát với mã 3 nếu có biến thể `degraded` hoặc `failed`. Mặc định mã thoát không đổi (`degraded` không làm mã khác 0).
+- Trang so sánh: huy hiệu đỏ trên chip ("fell back to unfiltered audio in N/M files"), huy hiệu vàng cho `suspect_noop`, banner đầu trang, dòng cảnh báo ở tab Text/Speakers/Metrics, và ghi chú `summary_n` / `summary_excluded_degraded` ở tab Metrics (trung bình vẫn tính cả file `fallback`, không bỏ lặng lẽ).
+
+**Biến thể `degraded` không có nghĩa là "bộ lọc không có tác dụng"**: âm thanh của nó chính là bản chưa lọc, nên mọi chênh lệch (hay không chênh lệch) so với baseline không nói gì về bộ lọc. Sửa lỗi (xem `errors` hoặc `logs/<id>.log`) rồi chạy lại với `--resume` trước khi kết luận.
 
 ## Các tab của trang
 
