@@ -26,12 +26,12 @@ def _repo_dir(cfg: dict) -> str:
     return str(cfg.get("repo_dir") or os.environ.get("MPSENET_DIR") or "")
 
 
-def _ckpt_path(cfg: dict) -> str:
+def _ckpt_path(cfg: dict, default_name: str = "g_best_vb") -> str:
     explicit = cfg.get("checkpoint") or os.environ.get("MPSENET_CKPT")
     if explicit:
         return str(explicit)
-    # best_ckpt/g_best_vb (VoiceBank+DEMAND) or g_best_dns (DNS challenge), both shipped in the repo
-    return os.path.join(_repo_dir(cfg), "best_ckpt", str(cfg.get("ckpt_name", "g_best_vb")))
+    # best_ckpt/g_best_vb (VoiceBank+DEMAND) and best_ckpt/g_best_dns are both shipped in the repo
+    return os.path.join(_repo_dir(cfg), "best_ckpt", str(cfg.get("ckpt_name", default_name)))
 
 
 def _stub(name: str, **attrs) -> types.ModuleType:
@@ -103,12 +103,14 @@ class MPSENetBackend(DenoiseBackend):
     delay is expected; delay_compensation="auto" only verifies that cheaply.
 
     Config: repo_dir (clone of the repo, env MPSENET_DIR), checkpoint (explicit file, env
-    MPSENET_CKPT), ckpt_name (default g_best_vb; or g_best_dns, looked up in <repo_dir>/best_ckpt),
+    MPSENET_CKPT), ckpt_name (default g_best_vb = VoiceBank+DEMAND; `ckpt_name: g_best_dns` picks the
+    second checkpoint the repo ships, same 16 kHz config; or use the backend alias "mpsenet_dns"),
     config_json (default <checkpoint folder>/config.json, as upstream), chunk_s (default 10),
     overlap_s (default 1), device (default auto), seed.
     Weights: see scripts/denoise_weights.md.
     """
     name = "mpsenet"
+    default_ckpt_name = "g_best_vb"
     native_sr = 16000
     default_chunk_s = 10.0
     default_overlap_s = 1.0
@@ -125,7 +127,7 @@ class MPSENetBackend(DenoiseBackend):
             return False, "MPSENET_DIR is not set (clone yxlu-0102/MP-SENet and point MPSENET_DIR at it)"
         if not os.path.isfile(os.path.join(repo, "models", "model.py")):
             return False, f"MPSENET_DIR={repo} does not look like an MP-SENet clone (models/model.py missing)"
-        ckpt = _ckpt_path(cfg)
+        ckpt = _ckpt_path(cfg, cls.default_ckpt_name)
         if not os.path.isfile(ckpt):
             return False, f"checkpoint not found: {ckpt}"
         if not os.path.isfile(str(cfg.get("config_json") or os.path.join(os.path.dirname(ckpt), "config.json"))):
@@ -138,7 +140,7 @@ class MPSENetBackend(DenoiseBackend):
             raise DenoiseError(f"{self.name}: {why}")
         import torch
 
-        ckpt = _ckpt_path(self.cfg)
+        ckpt = _ckpt_path(self.cfg, self.default_ckpt_name)
         with open(str(self.cfg.get("config_json") or os.path.join(os.path.dirname(ckpt), "config.json"))) as f:
             h = AttrDict(json.load(f))
         if int(h.sampling_rate) != self.native_sr:
@@ -203,3 +205,13 @@ class MPSENetBackend(DenoiseBackend):
             return out.squeeze(0).cpu().numpy()[:n]
 
         return self._chunked(run, x)
+
+
+class MPSENetDNSBackend(MPSENetBackend):
+    """MP-SENet with the repo's second shipped checkpoint, best_ckpt/g_best_dns (same 16 kHz config).
+
+    Alias of "mpsenet" with ckpt_name defaulting to g_best_dns; MPSENET_DIR / MPSENET_CKPT apply as usual.
+    The upstream README does not say what g_best_dns was trained on (the name suggests the DNS Challenge).
+    """
+    name = "mpsenet_dns"
+    default_ckpt_name = "g_best_dns"

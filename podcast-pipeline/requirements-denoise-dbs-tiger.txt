@@ -1,0 +1,9 @@
+# Optional: only for the dbs_tiger backend (--denoise dbs_tiger). Add to requirements-denoise.txt deps.
+# Torch comes from requirements.txt. The model code is NOT a pip package: git clone
+# https://github.com/JusperLee/Dynamic-Band-Splitting and set DBS_TIGER_DIR (do not pip install it;
+# upstream's own install is `pip install --no-deps -e .`). Upstream floor (pyproject.toml, as read):
+# torch>=2.2, einops>=0.7, huggingface_hub>=0.23, safetensors>=0.4, rotary-embedding-torch>=0.6.
+einops>=0.7
+safetensors>=0.4
+huggingface_hub>=0.23
+rotary-embedding-torch>=0.6

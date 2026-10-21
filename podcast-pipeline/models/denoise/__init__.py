@@ -12,13 +12,17 @@ from .base import DenoiseBackend, DenoiseError
 from .dfn3 import DeepFilterNet3Backend
 from .identity import FakeHighPassBackend, IdentityBackend
 from .mf2se48 import MossFormer2SE48Backend
-from .mpsenet import MPSENetBackend
+from .mpsenet import MPSENetBackend, MPSENetDNSBackend
+from .dbs_tiger import DBSTigerBackend
+from .mambattention import MambAttentionBackend
+from .bsrnn_urgent import BSRNN26Backend
 
 __all__ = ["DenoiseBackend", "DenoiseError", "get_backend", "parse_chain", "chain_id",
            "available_backends", "BACKENDS"]
 
 BACKENDS = {cls.name: cls for cls in (IdentityBackend, FakeHighPassBackend, DeepFilterNet3Backend,
-                                      MossFormer2SE48Backend, MPSENetBackend)}
+                                      MossFormer2SE48Backend, MPSENetBackend, MPSENetDNSBackend,
+                                      DBSTigerBackend, MambAttentionBackend, BSRNN26Backend)}
 
 _TOKEN = re.compile(r"[a-z0-9_]+")
 

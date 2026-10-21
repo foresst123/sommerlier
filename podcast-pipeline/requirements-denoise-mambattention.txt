@@ -1,0 +1,13 @@
+# Separate environment for the "mambattention" denoise backend (NOT the pipeline env: it needs torch 2.2.2).
+# Build steps and the order matter: see scripts/denoise_mambattention.md. UNTESTED.
+# python 3.10 or 3.11, CUDA toolkit 12.x with nvcc on PATH (A100 = sm_80)
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.2.2
+torchaudio==2.2.2
+numpy<2
+einops
+pyyaml
+packaging
+ninja
+# mamba_ssm 1.2.2 is installed from the clone, after the lines above:
+#   cd $MAMBATTENTION_DIR/mamba_install && pip install --no-build-isolation .

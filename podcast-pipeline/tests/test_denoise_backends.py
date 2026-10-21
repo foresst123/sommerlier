@@ -1,3 +1,4 @@
+import os
 import sys
 import textwrap
 
@@ -70,7 +71,8 @@ def test_get_backend_names_and_cfg_merge():
 
 def test_available_backends_never_raises_and_reports_missing(monkeypatch):
     res = available_backends()
-    assert set(res) == {"identity", "fake_hp", "dfn3", "mf2se48", "mpsenet"}
+    assert set(res) == {"identity", "fake_hp", "dfn3", "mf2se48", "mpsenet", "mpsenet_dns",
+                        "dbs_tiger", "mambattention", "bsrnn26"}
     assert res["identity"] == (True, "") and res["fake_hp"][0] is True
     for ok, reason in res.values():
         assert isinstance(ok, bool) and isinstance(reason, str)
@@ -115,6 +117,41 @@ def test_import_is_light():
     # models.denoise must import without pulling in the heavy model packages
     for name in ("df", "clearvoice"):
         assert name not in sys.modules
+
+
+def test_import_and_listing_pull_in_no_torch_in_a_fresh_interpreter():
+    import subprocess
+    code = ("import sys; import models.denoise as d; d.available_backends(); "
+            "bad=[m for m in ('torch','torchaudio','df','clearvoice','mamba_ssm','espnet2','einops') if m in sys.modules]; "
+            "print('BAD', bad); sys.exit(1 if bad else 0)")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    r = subprocess.run([sys.executable, "-c", code], cwd=root, capture_output=True, text=True, env={**os.environ, "PYTHONPATH": root})
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_every_backend_check_available_returns_bool_reason():
+    for name, cls in denoise.BACKENDS.items():
+        ok, why = cls.check_available({})
+        assert isinstance(ok, bool) and isinstance(why, str), name
+        assert ok or why, name
+
+
+def test_mpsenet_dns_alias_defaults_to_g_best_dns(tmp_path, monkeypatch):
+    import models.denoise.mpsenet as mp
+    monkeypatch.setattr(mp, "missing_modules", lambda *names: [])
+    repo = _make_fake_mpsenet(tmp_path)
+    monkeypatch.setenv("MPSENET_DIR", str(repo))
+    monkeypatch.delenv("MPSENET_CKPT", raising=False)
+    assert available_backends()["mpsenet"] == (True, "")
+    ok, why = available_backends()["mpsenet_dns"]
+    assert not ok and "g_best_dns" in why
+    (repo / "best_ckpt" / "g_best_dns").write_bytes(b"x")
+    assert available_backends()["mpsenet_dns"] == (True, "")
+    assert get_backend("mpsenet_dns").name == "mpsenet_dns"
+    assert get_backend("mpsenet").default_ckpt_name == "g_best_vb"
+    assert mp._ckpt_path({}, "g_best_dns").endswith(os.path.join("best_ckpt", "g_best_dns"))
+    # explicit ckpt_name still wins, and per-backend config is keyed by the alias name
+    assert get_backend("mpsenet_dns", {"mpsenet_dns": {"ckpt_name": "g_best_vb"}}).cfg["ckpt_name"] == "g_best_vb"
 
 
 def test_mf2se48_rejects_long_chunks():

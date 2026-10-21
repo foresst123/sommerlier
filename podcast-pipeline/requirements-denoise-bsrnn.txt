@@ -1,0 +1,10 @@
+# Optional: only for the bsrnn26 backend (--denoise bsrnn26). Torch comes from requirements.txt.
+# The model code is NOT a pip package: git clone https://github.com/urgent-challenge/urgent2026_challenge_track1
+# (checked at b1dc3ad) and set URGENT26_DIR. Do NOT `pip install -e` that repo: its setup.py pins
+# numpy 1.23.5 / torch 2.2.1 / scipy 1.11.1 for training.
+# The backend only imports espnet2.enh encoder/decoder/BSRNN layers, so espnet is installed WITHOUT its deps:
+#   pip install --no-deps espnet==202412
+# (import verified with torch 2.8 / numpy 2.5 via the v.202412 source tree; the pip --no-deps install was
+# only import-tested, no audio run). Upstream's own pin is espnet==202412.
+torch_complex
+typeguard

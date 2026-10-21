@@ -40,12 +40,15 @@ per-model variable below says otherwise.
 ## mpsenet (MP-SENet, 16 kHz)
 
 - Source: https://github.com/yxlu-0102/MP-SENet. Not a pip package; the checkpoints are in the repo
-  (`best_ckpt/g_best_vb`, VoiceBank+DEMAND, and `best_ckpt/g_best_dns`, DNS challenge, about 8.7 MB each,
-  next to `best_ckpt/config.json`).
+  (`best_ckpt/g_best_vb`, VoiceBank+DEMAND, and `best_ckpt/g_best_dns`, about 8.7 MB each, next to the
+  shared `best_ckpt/config.json`, sampling_rate 16000). Verified in the clone: both files exist. The
+  upstream README documents only g_best_vb; it does not say what g_best_dns was trained on (the name
+  suggests the DNS Challenge, unconfirmed).
 - Get it: `git clone --depth 1 https://github.com/yxlu-0102/MP-SENet <somewhere>` then
   `export MPSENET_DIR=<somewhere>`.
 - Optional: `MPSENET_CKPT=<file>` to use another checkpoint (its `config.json` is read from the same
-  folder, as upstream does); config key `ckpt_name: g_best_dns` picks the DNS model from `best_ckpt/`.
+  folder, as upstream does); config key `ckpt_name: g_best_dns` picks that model from `best_ckpt/`, or use the registry alias
+  `mpsenet_dns` (same backend, ckpt_name defaults to g_best_dns).
 
 ## Per-backend config keys
 
