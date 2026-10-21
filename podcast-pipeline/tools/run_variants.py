@@ -67,6 +67,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 AUDIO_EXTS = (".mp3", ".wav", ".m4a", ".flac", ".opus", ".ogg", ".aac")
 OUT_FLAG = "--save_path"
+DEFAULT_MAIN = (ROOT / "main.py").resolve()
 DONE_MARKER = ".done"
 MANIFEST_NAME = "variants_manifest.json"
 NOOP_CORR = 0.99999  # corr_with_input at or above this = the filter changed nothing
@@ -662,7 +663,13 @@ def parse_args(argv=None):
     p.add_argument("--reference-dir")
     p.add_argument("--reference", nargs="*", metavar="STEM=PATH")
     p.add_argument("--cache-dir")
-    p.add_argument("--python", default=sys.executable)
+    p.add_argument("--python", default=sys.executable,
+                   help="interpreter that runs main.py (default: the one running this tool; "
+                        "it must be the pipeline's environment, not another project's)")
+    p.add_argument("--no-preflight", action="store_true",
+                   help="skip the import check of --python before the first variant starts")
+    p.add_argument("--preflight-modules", default="torch,torchaudio",
+                   help="modules the interpreter must import cleanly (comma list)")
     p.add_argument("--timeout", type=float, default=0, help="seconds per variant, 0 = none")
     args = p.parse_args(argv)
     if not args.audio_dir and not args.files:
@@ -671,6 +678,28 @@ def parse_args(argv=None):
     args.cwd = args.cwd or str(args.main.parent)
     args.out_root = str(Path(args.out_root).resolve())
     return args
+
+
+def preflight(python, modules, timeout=240):
+    """Import the heavy modules in the interpreter that will run main.py. -> (ok, message).
+
+    A mismatched environment (e.g. torchaudio built for another CUDA than torch) otherwise only
+    shows up minutes into the first variant, as a traceback in its log.
+    """
+    mods = [m.strip() for m in modules.split(",") if m.strip()]
+    code = ("import sys, importlib\nout = []\n"
+            f"for m in {mods!r}:\n"
+            "    mod = importlib.import_module(m)\n"
+            "    out.append(m + '=' + str(getattr(mod, '__version__', '?')))\n"
+            "print(sys.executable, ' '.join(out))")
+    try:
+        r = subprocess.run([python, "-c", code], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"could not run {python}: {exc}"
+    if r.returncode != 0:
+        tail = "\n".join((r.stderr or r.stdout).strip().splitlines()[-6:])
+        return False, f"{python} cannot import {', '.join(mods)}:\n{tail}"
+    return True, r.stdout.strip()
 
 
 def print_plan(variants, files, skipped, args):
@@ -716,6 +745,15 @@ def main(argv=None):
             print(f"[{v['id']}] CUDA_VISIBLE_DEVICES={gpu} " +
                   shlex.join(build_command(v, files, args)))
         return 0
+    if not args.no_preflight and args.main == DEFAULT_MAIN:
+        ok, msg = preflight(args.python, args.preflight_modules)
+        if not ok:
+            print(f"[preflight] FAILED: {msg}\n"
+                  f"Pass --python <path to the pipeline's environment>/bin/python (the one where "
+                  f"`python -c 'import torch, torchaudio'` works), or --no-preflight to skip this check.",
+                  file=sys.stderr, flush=True)
+            return 2
+        print(f"[preflight] ok: {msg}", flush=True)
     runner = Runner(args, variants, files, skipped)
     status = runner.run()
     print(json.dumps(status))

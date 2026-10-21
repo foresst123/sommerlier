@@ -467,3 +467,40 @@ def test_strict_exit_code(env):
     assert rv.main(argv(env)) == 1 and rv.main(argv(env, "--strict")) == 3
     _set_chains(env, "noop")                           # suspect_noop alone is not a failure
     assert rv.main(argv(env, "--strict")) == 0
+
+
+# ---------------------------------------------------------------- preflight of --python
+def test_preflight_reports_the_interpreter_and_module_versions():
+    import sys
+    ok, msg = rv.preflight(sys.executable, "sys,json")
+    assert ok and sys.executable in msg and "json=" in msg
+
+
+def test_preflight_names_the_module_that_cannot_be_imported():
+    import sys
+    ok, msg = rv.preflight(sys.executable, "json,no_such_module_for_preflight")
+    assert not ok
+    assert "no_such_module_for_preflight" in msg and sys.executable in msg
+
+
+def test_preflight_survives_a_missing_interpreter():
+    ok, msg = rv.preflight("/nonexistent/python", "json")
+    assert not ok and "/nonexistent/python" in msg
+
+
+def test_main_stops_before_any_variant_when_preflight_fails(env, monkeypatch, capsys):
+    tmp, main, _, _ = env
+    monkeypatch.setattr(rv, "DEFAULT_MAIN", Path(main).resolve())     # pretend the stub is the real main.py
+    code = rv.main(argv(env, "--preflight-modules", "json,no_such_module_for_preflight"))
+    err = capsys.readouterr().err
+    assert code == 2 and "[preflight] FAILED" in err and "--python" in err
+    assert not (tmp / "out" / "none" / "calls.txt").exists()
+
+
+def test_main_runs_when_preflight_passes_and_can_be_skipped(env, monkeypatch, capsys):
+    tmp, main, _, _ = env
+    monkeypatch.setattr(rv, "DEFAULT_MAIN", Path(main).resolve())
+    assert rv.main(argv(env, "--preflight-modules", "json", "--only-ids", "none")) == 0
+    assert "[preflight] ok:" in capsys.readouterr().out
+    assert rv.main(argv(env, "--preflight-modules", "no_such_module_for_preflight",
+                        "--no-preflight", "--only-ids", "none")) == 0
