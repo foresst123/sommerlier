@@ -77,6 +77,13 @@ def _build_parser():
                              "PANNs finds music, as an audio-separator model "
                              "filename (e.g. model_bs_roformer_ep_368_sdr_12.9628.ckpt). "
                              "Defaults to models.bs_roformer.model in the profile.")
+    parser.add_argument("--music_scope", choices=["spans", "full"], default=None,
+                        help="Same as --set pipeline.music_scope=...: separate only the music "
+                             "spans, or the whole recording")
+    parser.add_argument("--set", dest="set_overrides", action="append", default=[], metavar="KEY=VALUE",
+                        help="Override a profile value after it is loaded, repeatable: "
+                             "--set steps.music_removal=false --set models.bs_roformer.model=x.ckpt. "
+                             "VALUE is JSON when it parses, else a plain string.")
     parser.add_argument("--qwen3omni", action="store_true", help="Enable Qwen3-Omni audio captioning")
     parser.add_argument("--llm_refinement", action="store_true", help="Enable LLM label refinement")
     parser.add_argument("--sortformer_pad_onset", default=0.0, type=float, help="Sortformer start padding")
@@ -235,6 +242,19 @@ if hf_token:
 # ------------------------------------------------------------------
 
 env_profile = config.get("environments", {}).get(args.env, {})
+
+# --set KEY=VALUE: applied to the live profile (config shares this dict, so
+# model_loader sees it too) before anything is derived from it.
+_set_items = ([f"pipeline.music_scope={args.music_scope}"] if args.music_scope else []) + list(args.set_overrides)
+if _set_items:
+    from utils.config_override import apply_overrides
+    if args.env not in config.get("environments", {}):
+        raise SystemExit(f"main.py: error: --set needs an existing profile, --env {args.env!r} has none")
+    try:
+        _applied = apply_overrides(env_profile, _set_items)
+    except ValueError as _exc:
+        raise SystemExit(f"main.py: error: {_exc}")
+    print(f"[*] Profile overrides ({args.env}): " + "; ".join(_applied))
 from utils.asr_models import enabled_asr_models
 asr_models = enabled_asr_models(env_profile)
 

@@ -11,6 +11,15 @@ variants.json: {"baseline": "none", "variants": [{"chain": "none"}, {"chain": "d
                 {"chain": "dfn3>mf2se48", "label": "DFN3 then MF2SE", "group": "chains",
                  "note": "free text shown as the chip tooltip"}]}
 
+Per-variant overrides (all optional; a variant that has any is never the baseline, even with chain
+none, so "music stage OFF" is a second control):
+    {"chain": "none", "tag": "music stage OFF", "set": {"steps.music_removal": false},
+     "music_separator": "model.ckpt", "extra_args": ["--bss"], "id": "my-id"}
+`set` becomes repeated `--set KEY=VALUE` (VALUE as JSON), `music_separator` --music_separator,
+`extra_args` raw arguments. Without `id` it is derived: chain id, plus ".<short tag>" when overrides exist.
+Ids must be unique and filename-safe. Pick work with --groups, --only-ids a,b, --max-variants N
+(counts the baseline) with --shuffle-seed S; --list prints the plan and exits.
+
 --only-available skips (never silently) every variant whose chain names a backend that
 models.denoise.available_backends() reports unusable here: status "skipped" plus the reason in
 variants_manifest.json and in the console summary. --groups a,b runs only variants whose
@@ -89,8 +98,71 @@ def _denoise_helpers():
             sys.path.pop(0)
 
 
+ID_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._+-]*$")
+PSEUDO_RE = re.compile(r"^blend\d{1,3}$")
+
+
+def _backend_tokens(chain):
+    """Chain tokens that need a real backend (pseudo-steps like blend50 do not)."""
+    try:
+        sys.path.insert(0, str(ROOT))
+        from models.denoise.pseudo import backend_tokens
+        return list(backend_tokens(list(chain)))
+    except Exception:
+        return [t for t in chain if not PSEUDO_RE.match(t)]
+    finally:
+        if sys.path and sys.path[0] == str(ROOT):
+            sys.path.pop(0)
+
+
+def _norm_set(raw):
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise SystemExit(f"variant 'set' must be an object of dotted keys, got {raw!r}")
+    for k in raw:
+        if not isinstance(k, str) or not k.strip():
+            raise SystemExit(f"variant 'set' has a bad key {k!r}")
+    return {k.strip(): v for k, v in raw.items()}
+
+
+def _norm_extra(raw):
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return shlex.split(raw)
+    if not isinstance(raw, (list, tuple)):
+        raise SystemExit(f"variant 'extra_args' must be a list, got {raw!r}")
+    return [str(x) for x in raw]
+
+
+def _slug(text):
+    return re.sub(r"[^A-Za-z0-9]+", "-", str(text)).strip("-").lower()
+
+
+def override_tag(overrides, music_separator=None, extra_args=()):
+    """Short deterministic id suffix for an override set: 'music-removal-off' or a hash8."""
+    parts = []
+    for key, val in overrides.items():
+        leaf = _slug(key.split(".")[-1])
+        if isinstance(val, bool):
+            parts.append(f"{leaf}-{'on' if val else 'off'}")
+        else:
+            parts.append(f"{leaf}-{_slug(json.dumps(val))}")
+    if music_separator:
+        parts.append("sep-" + _slug(os.path.splitext(str(music_separator))[0]))
+    if extra_args:
+        parts.append("x-" + _slug(" ".join(extra_args)))
+    tag = "_".join(parts)
+    if not tag or len(tag) > 40 or not ID_RE.match(tag):
+        canon = json.dumps([overrides, music_separator, list(extra_args)], sort_keys=True)
+        tag = hashlib.sha1(canon.encode()).hexdigest()[:8]
+    return tag
+
+
 def load_variants(path):
-    """Return variants [{id, chain, label, spec, group, note}], baseline first, deduplicated."""
+    """Return variants [{id, chain, label, spec, group, note, tag, set, music_separator,
+    extra_args}], baseline first. Identical entries merge; clashing ids are an error."""
     parse_chain, chain_id = _denoise_helpers()
     data = {}
     if path:
@@ -98,23 +170,66 @@ def load_variants(path):
             data = json.load(f)
     entries = list(data.get("variants") or [])
     entries.insert(0, {"chain": data.get("baseline", "none")})
-    out, seen = [], set()
+    out, by_id, dups = [], {}, []
     for entry in entries:
         if isinstance(entry, str):
             entry = {"chain": entry}
         chain = parse_chain(entry.get("chain"))
-        vid = chain_id(chain)
-        if vid in seen:
+        overrides = _norm_set(entry.get("set"))
+        sep = entry.get("music_separator") or None
+        extra = _norm_extra(entry.get("extra_args"))
+        has_over = bool(overrides or sep or extra)
+        vid = str(entry.get("id") or "") or (
+            f"{chain_id(chain)}.{override_tag(overrides, sep, extra)}" if has_over else chain_id(chain))
+        v = {"id": vid, "chain": list(chain),
+             "label": entry.get("label") or vid,
+             "spec": ">".join(chain),
+             "group": entry.get("group") or None,
+             "note": entry.get("note") or None,
+             "tag": entry.get("tag") or None,
+             "set": overrides, "music_separator": sep, "extra_args": extra}
+        if not ID_RE.match(vid):
+            raise SystemExit(f"variant id {vid!r} is not filename-safe (use letters, digits, . _ + -)")
+        if vid in by_id:
+            same = all(by_id[vid][k] == v[k] for k in ("chain", "set", "music_separator", "extra_args"))
+            if not same:
+                dups.append(vid)
             continue
-        seen.add(vid)
-        out.append({"id": vid, "chain": list(chain),
-                    "label": entry.get("label") or vid,
-                    "spec": ">".join(chain),
-                    "group": entry.get("group") or None,
-                    "note": entry.get("note") or None})
+        by_id[vid] = v
+        out.append(v)
+    if dups:
+        raise SystemExit(f"duplicate variant id(s) with different settings: {sorted(set(dups))}; "
+                         "give each variant a unique 'id'")
     if out[0]["id"] != "none":
-        out.insert(0, {"id": "none", "chain": [], "label": "none", "spec": "", "group": None, "note": None})
+        out.insert(0, {"id": "none", "chain": [], "label": "none", "spec": "", "group": None,
+                       "note": None, "tag": None, "set": {}, "music_separator": None,
+                       "extra_args": []})
     return out
+
+
+def pick_variants(variants, only_ids=None, max_variants=None, shuffle_seed=None):
+    """Keep the baseline plus the chosen variants, in file order.
+
+    only_ids: explicit ids. max_variants: total kept, baseline included; the first N in file
+    order, or a random subset when shuffle_seed is given (same seed, same subset).
+    """
+    base = [v for v in variants if v["id"] == "none"]
+    rest = [v for v in variants if v["id"] != "none"]
+    ids = [i.strip() for i in (only_ids or []) if i.strip()]
+    if ids:
+        unknown = [i for i in ids if i not in {v["id"] for v in rest} | {"none"}]
+        if unknown:
+            raise SystemExit(f"--only-ids: unknown id(s) {unknown}; known: {[v['id'] for v in variants]}")
+        rest = [v for v in rest if v["id"] in ids]
+    if max_variants is not None:
+        room = max(0, max_variants - len(base))
+        if shuffle_seed is not None:
+            import random
+            keep = {v["id"] for v in random.Random(shuffle_seed).sample(rest, min(room, len(rest)))}
+            rest = [v for v in rest if v["id"] in keep]
+        else:
+            rest = rest[:room]
+    return base + rest
 
 
 def filter_groups(variants, groups):
@@ -143,7 +258,7 @@ def check_availability(variants, cfg=None):
     skipped = {}
     for v in variants:
         reasons = []
-        for name in v["chain"]:
+        for name in _backend_tokens(v["chain"]):
             ok, why = avail.get(name, (False, "unknown backend (not in the registry)"))
             if not ok:
                 reasons.append(f"{name}: {why}")
@@ -203,6 +318,11 @@ def build_command(variant, files, args, input_dir=None):
            "--stop_after", args.stop_after]
     if variant["chain"]:
         cmd += ["--denoise", variant["spec"]]
+    if variant.get("music_separator"):
+        cmd += ["--music_separator", str(variant["music_separator"])]
+    for key, val in (variant.get("set") or {}).items():
+        cmd += ["--set", f"{key}={json.dumps(val, ensure_ascii=False)}"]
+    cmd += list(variant.get("extra_args") or [])
     if args.cache_dir:
         cmd += ["--cache_dir", str(args.cache_dir)]
     return cmd
@@ -248,6 +368,9 @@ def write_manifest(out_root, variants, stems, status, reference, reasons=None):
             "out_dir": str(vdir.resolve()), "job_id": f"exp-{v['id']}",
             "status": status.get(v["id"], "missing"),
             "group": v.get("group"), "note": v.get("note"),
+            "tag": v.get("tag"), "set": v.get("set") or {},
+            "music_separator": v.get("music_separator"),
+            "extra_args": v.get("extra_args") or [],
             "reason": (reasons or {}).get(v["id"]),
             "files": discover_dirs(vdir, stems)})
     write_json_atomic(Path(out_root) / MANIFEST_NAME, {
@@ -406,6 +529,14 @@ def parse_args(argv=None):
     p.add_argument("--only-available", action="store_true",
                    help="skip (and record as skipped, with the reason) variants whose chain has an unusable backend")
     p.add_argument("--groups", default="", help="comma list of variant groups to run (baseline always runs)")
+    p.add_argument("--only-ids", default="", help="comma list of variant ids to run (baseline always runs)")
+    p.add_argument("--max-variants", type=int, default=None,
+                   help="keep at most N variants in total, baseline included")
+    p.add_argument("--shuffle-seed", type=int, default=None,
+                   help="with --max-variants: random (reproducible) subset instead of the first N")
+    p.add_argument("--list", action="store_true", help="print the planned variants and work, then exit")
+    p.add_argument("--minutes-per-file-run", type=float, default=20.0,
+                   help="ASSUMPTION for the --list time estimate: minutes per (variant, file) run")
     p.add_argument("--main", default=str(ROOT / "main.py"))
     p.add_argument("--cwd", default=None, help="working dir for main (default: its folder)")
     p.add_argument("--reference-dir")
@@ -422,11 +553,39 @@ def parse_args(argv=None):
     return args
 
 
+def print_plan(variants, files, skipped, args):
+    rows = [("id", "group", "chain", "tag", "overrides", "available")]
+    for v in variants:
+        over = [f"{k}={json.dumps(x)}" for k, x in (v.get("set") or {}).items()]
+        if v.get("music_separator"):
+            over.append(f"music_separator={v['music_separator']}")
+        over += v.get("extra_args") or []
+        avail = ("SKIPPED: " + skipped[v["id"]]) if v["id"] in skipped else (
+            "yes" if args.only_available else "-")
+        rows.append((v["id"], v.get("group") or "-", v["spec"] or "none", v.get("tag") or "-",
+                     " ".join(over) or "-", avail))
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    for r in rows:
+        print("  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
+    runnable = len(variants) - len(skipped)
+    runs = runnable * len(files)
+    print(f"\nvariants: {len(variants)} ({len(skipped)} skipped, {runnable} to run)")
+    print(f"files: {len(files)}")
+    print(f"variant-file runs: {runs}")
+    mins = runs * args.minutes_per_file_run
+    print(f"sequential estimate: {mins:.0f} min ({mins / 60:.1f} h) "
+          f"ASSUMING {args.minutes_per_file_run:g} min per variant-file run; --parallel/--gpus divide it")
+
+
 def main(argv=None):
     args = parse_args(argv)
     variants = filter_groups(load_variants(args.variants), args.groups.split(","))
+    variants = pick_variants(variants, args.only_ids.split(","), args.max_variants, args.shuffle_seed)
     files = collect_files(args.audio_dir, args.files)
     skipped = check_availability(variants) if args.only_available else {}
+    if args.list:
+        print_plan(variants, files, skipped, args)
+        return 0
     for vid, why in skipped.items():
         print(f"[{vid}] SKIPPED (not available here): {why}", flush=True)
     if args.dry_run:

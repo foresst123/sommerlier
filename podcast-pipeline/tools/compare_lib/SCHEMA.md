@@ -5,7 +5,7 @@ Any metric may be `null` (stage missing, not computable). Extra keys are allowed
 
 ## Top level
 - `baseline`: variant id everything is compared against (`"none"`).
-- `variants`: `[{id, chain, label, status, note?, group?}]` (`group` is an optional tag from the variants file, shown next to the chip; status `skipped` = backend unavailable, reason in `note`). Variants with status `failed`/`missing` are
+- `variants`: `[{id, chain, label, status, note?, group?, tag?, set?}]` (`group` is an optional tag from the variants file, shown next to the chip; `tag` = human label of the variant's override set (also shown next to the chip), `set` = its dotted-key overrides passed to main.py as `--set` (shown in the chip tooltip); status `skipped` = backend unavailable, reason in `note`). Variants with status `failed`/`missing` are
   listed (with a `note`) but have no data below.
 - `files[]`: one entry per file stem: `name`, `duration` (s), `audio`, `text`, `text_diff`,
   `speakers`, `metrics`; all keyed by variant id (the baseline included).

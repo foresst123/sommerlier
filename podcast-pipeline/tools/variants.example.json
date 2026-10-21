@@ -71,6 +71,396 @@
       "label": "DBS-TIGER then DFN3 [analysis only]",
       "group": "analysis_only",
       "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). Nothing here is validated on Vietnamese."
+    },
+    {
+      "chain": "none",
+      "label": "Raw control: music stage off",
+      "group": "ctrl_music",
+      "note": "Control: no music removal and no denoise; shows what the pipeline's own music stage contributes.",
+      "set": {
+        "steps.music_removal": false
+      },
+      "tag": "music-stage-off"
+    },
+    {
+      "chain": "none",
+      "label": "Music scope spans",
+      "group": "ctrl_music",
+      "note": "Control: music removal only on detected music spans instead of the full file.",
+      "set": {
+        "pipeline.music_scope": "spans"
+      },
+      "tag": "scope-spans"
+    },
+    {
+      "chain": "dfn3",
+      "label": "DFN3, music scope spans",
+      "group": "ctrl_music",
+      "note": "DFN3 with music removal limited to detected spans.",
+      "set": {
+        "pipeline.music_scope": "spans"
+      },
+      "tag": "scope-spans"
+    },
+    {
+      "chain": "mf2se48",
+      "label": "MF2SE48, music scope spans",
+      "group": "ctrl_music",
+      "note": "MF2SE48 with music removal limited to detected spans.",
+      "set": {
+        "pipeline.music_scope": "spans"
+      },
+      "tag": "scope-spans"
+    },
+    {
+      "chain": "dfn3",
+      "label": "DFN3, Kim bleedless music separator",
+      "group": "ctrl_music",
+      "note": "DFN3 with another RoFormer checkpoint (unwa kim ft2 bleedless) in the pipeline music stage; checkpoint has no stated license.",
+      "tag": "sep-kim",
+      "music_separator": "mel_band_roformer_kim_ft2_bleedless_unwa.ckpt"
+    },
+    {
+      "chain": "rf_vocals_3005",
+      "label": "RF vocals 3005",
+      "group": "pipe_music",
+      "note": "Chain-owned music removal (pipeline music stage off): RoFormer vocals extraction as the first stage.",
+      "set": {
+        "steps.music_removal": false
+      },
+      "tag": "music-stage-off"
+    },
+    {
+      "chain": "rf_vocals_kim",
+      "label": "RF vocals Kim",
+      "group": "pipe_music",
+      "note": "Chain-owned music removal (pipeline music stage off): Kim RoFormer vocals extraction as the first stage.",
+      "set": {
+        "steps.music_removal": false
+      },
+      "tag": "music-stage-off"
+    },
+    {
+      "chain": "rf_vocals_3005>dfn3",
+      "label": "RF 3005 then DFN3",
+      "group": "pipe_music",
+      "note": "Chain-owned music removal (pipeline music stage off): Vocals extraction, then masking denoise.",
+      "set": {
+        "steps.music_removal": false
+      },
+      "tag": "music-stage-off"
+    },
+    {
+      "chain": "rf_vocals_3005>mf2se48",
+      "label": "RF 3005 then MF2SE48",
+      "group": "pipe_music",
+      "note": "Chain-owned music removal (pipeline music stage off): Vocals extraction, then MF2SE48 denoise.",
+      "set": {
+        "steps.music_removal": false
+      },
+      "tag": "music-stage-off"
+    },
+    {
+      "chain": "rf_vocals_3005>bsrnn26",
+      "label": "RF 3005 then BSRNN26",
+      "group": "pipe_music",
+      "note": "Chain-owned music removal (pipeline music stage off): Vocals extraction, then BSRNN26 denoise.",
+      "set": {
+        "steps.music_removal": false
+      },
+      "tag": "music-stage-off"
+    },
+    {
+      "chain": "rf_vocals_kim>dfn3",
+      "label": "RF Kim then DFN3",
+      "group": "pipe_music",
+      "note": "Chain-owned music removal (pipeline music stage off): Kim vocals extraction, then masking denoise.",
+      "set": {
+        "steps.music_removal": false
+      },
+      "tag": "music-stage-off"
+    },
+    {
+      "chain": "rf_vocals_kim>mf2se48",
+      "label": "RF Kim then MF2SE48",
+      "group": "pipe_music",
+      "note": "Chain-owned music removal (pipeline music stage off): Kim vocals extraction, then MF2SE48 denoise.",
+      "set": {
+        "steps.music_removal": false
+      },
+      "tag": "music-stage-off"
+    },
+    {
+      "chain": "rf_vocals_3005>rf_denoise",
+      "label": "RF 3005 then RF denoise",
+      "group": "pipe_music",
+      "note": "Chain-owned music removal (pipeline music stage off): Vocals extraction, then RoFormer denoise.",
+      "set": {
+        "steps.music_removal": false
+      },
+      "tag": "music-stage-off"
+    },
+    {
+      "chain": "rf_vocals_3005>rf_denoise>dfn3",
+      "label": "RF 3005, RF denoise, DFN3",
+      "group": "pipe_music",
+      "note": "Chain-owned music removal (pipeline music stage off): Three-stage chain: vocals, RoFormer denoise, masking denoise.",
+      "set": {
+        "steps.music_removal": false
+      },
+      "tag": "music-stage-off"
+    },
+    {
+      "chain": "rf_vocals_3005>dfn3>mf2se48",
+      "label": "RF 3005, DFN3, MF2SE48",
+      "group": "pipe_music",
+      "note": "Chain-owned music removal (pipeline music stage off): Three-stage chain: vocals, then two masking denoisers; check artefacts.",
+      "set": {
+        "steps.music_removal": false
+      },
+      "tag": "music-stage-off"
+    },
+    {
+      "chain": "rf_dereverb",
+      "label": "RF de-reverb",
+      "group": "pipe_reverb",
+      "note": "De-reverb stage alone; pipeline music stage stays on. License of the checkpoint possibly GPL-3.0, author unverified."
+    },
+    {
+      "chain": "uvr_deecho",
+      "label": "UVR de-echo",
+      "group": "pipe_reverb",
+      "note": "De-echo stage alone; pipeline music stage stays on."
+    },
+    {
+      "chain": "rf_dereverb>dfn3",
+      "label": "RF de-reverb then DFN3",
+      "group": "pipe_reverb",
+      "note": "De-reverb then masking denoise; pipeline music stage stays on."
+    },
+    {
+      "chain": "rf_vocals_3005>rf_dereverb",
+      "label": "RF 3005 then de-reverb",
+      "group": "pipe_reverb",
+      "note": "Chain-owned music removal (pipeline music stage off): vocals extraction, then de-reverb.",
+      "set": {
+        "steps.music_removal": false
+      },
+      "tag": "music-stage-off"
+    },
+    {
+      "chain": "rf_vocals_3005>uvr_deecho>dfn3",
+      "label": "RF 3005, de-echo, DFN3",
+      "group": "pipe_reverb",
+      "note": "Chain-owned music removal (pipeline music stage off): vocals, de-echo, masking denoise.",
+      "set": {
+        "steps.music_removal": false
+      },
+      "tag": "music-stage-off"
+    },
+    {
+      "chain": "rf_vocals_3005>rf_dereverb>dfn3",
+      "label": "RF 3005, de-reverb, DFN3",
+      "group": "pipe_reverb",
+      "note": "Chain-owned music removal (pipeline music stage off): three-stage chain vocals, de-reverb, masking denoise.",
+      "set": {
+        "steps.music_removal": false
+      },
+      "tag": "music-stage-off"
+    },
+    {
+      "chain": "rf_vocals_3005>rf_dereverb>rf_denoise>dfn3",
+      "label": "RF 3005, de-reverb, RF denoise, DFN3",
+      "group": "pipe_reverb",
+      "note": "Chain-owned music removal (pipeline music stage off): four-stage chain; check artefact accumulation.",
+      "set": {
+        "steps.music_removal": false
+      },
+      "tag": "music-stage-off"
+    },
+    {
+      "chain": "rf_crowd",
+      "label": "RF crowd",
+      "group": "pipe_crowd",
+      "note": "Crowd-removal model alone (keeps 'other' = input minus crowd); pipeline music stage stays on. Effect of the crowd model on talking bystanders is UNVERIFIED. "
+    },
+    {
+      "chain": "rf_crowd>dfn3",
+      "label": "RF crowd then DFN3",
+      "group": "pipe_crowd",
+      "note": "Crowd removal then masking denoise; music stage stays on. Effect of the crowd model on talking bystanders is UNVERIFIED. "
+    },
+    {
+      "chain": "rf_crowd>mf2se48",
+      "label": "RF crowd then MF2SE48",
+      "group": "pipe_crowd",
+      "note": "Crowd removal then MF2SE48; music stage stays on. Effect of the crowd model on talking bystanders is UNVERIFIED. "
+    },
+    {
+      "chain": "rf_vocals_3005>rf_crowd>dfn3",
+      "label": "RF 3005, crowd, DFN3",
+      "group": "pipe_crowd",
+      "note": "Chain-owned music removal (pipeline music stage off): vocals, crowd removal, denoise. Effect of the crowd model on talking bystanders is UNVERIFIED. ",
+      "set": {
+        "steps.music_removal": false
+      },
+      "tag": "music-stage-off"
+    },
+    {
+      "chain": "rf_crowd>rf_vocals_3005>dfn3",
+      "label": "Crowd, RF 3005, DFN3",
+      "group": "pipe_crowd",
+      "note": "Chain-owned music removal (pipeline music stage off): crowd removal first, then vocals, then denoise. Effect of the crowd model on talking bystanders is UNVERIFIED. ",
+      "set": {
+        "steps.music_removal": false
+      },
+      "tag": "music-stage-off"
+    },
+    {
+      "chain": "rf_vocals_3005>rf_crowd>rf_dereverb>dfn3",
+      "label": "RF 3005, crowd, de-reverb, DFN3",
+      "group": "pipe_crowd",
+      "note": "Chain-owned music removal (pipeline music stage off): four-stage chain. Effect of the crowd model on talking bystanders is UNVERIFIED. ",
+      "set": {
+        "steps.music_removal": false
+      },
+      "tag": "music-stage-off"
+    },
+    {
+      "chain": "dfn3>rf_vocals_3005",
+      "label": "DFN3 then RF 3005",
+      "group": "pipe_order",
+      "note": "Order test: denoise before vocals extraction (music stage off).",
+      "set": {
+        "steps.music_removal": false
+      },
+      "tag": "music-stage-off"
+    },
+    {
+      "chain": "mf2se48>rf_vocals_3005",
+      "label": "MF2SE48 then RF 3005",
+      "group": "pipe_order",
+      "note": "Order test: denoise before vocals extraction (music stage off).",
+      "set": {
+        "steps.music_removal": false
+      },
+      "tag": "music-stage-off"
+    },
+    {
+      "chain": "rf_denoise>rf_vocals_3005",
+      "label": "RF denoise then RF 3005",
+      "group": "pipe_order",
+      "note": "Order test: RoFormer denoise before vocals extraction (music stage off).",
+      "set": {
+        "steps.music_removal": false
+      },
+      "tag": "music-stage-off"
+    },
+    {
+      "chain": "dfn3>rf_dereverb",
+      "label": "DFN3 then de-reverb",
+      "group": "pipe_order",
+      "note": "Order test: denoise before de-reverb; pipeline music stage stays on."
+    },
+    {
+      "chain": "dfn3>mf2se48>bsrnn26",
+      "label": "DFN3, MF2SE48, BSRNN26",
+      "group": "pipe_stack",
+      "note": "Three masking stages. Stacking test: check artefact accumulation with more masking stages by listening and learned-MOS / speaker similarity."
+    },
+    {
+      "chain": "bsrnn26>mf2se48",
+      "label": "BSRNN26 then MF2SE48",
+      "group": "pipe_stack",
+      "note": "Two masking stages. Stacking test: check artefact accumulation with more masking stages by listening and learned-MOS / speaker similarity."
+    },
+    {
+      "chain": "mf2se48>mf2se48",
+      "label": "MF2SE48 twice",
+      "group": "pipe_stack",
+      "note": "Same model applied twice. Stacking test: check artefact accumulation with more masking stages by listening and learned-MOS / speaker similarity."
+    },
+    {
+      "chain": "dfn3>dfn3",
+      "label": "DFN3 twice",
+      "group": "pipe_stack",
+      "note": "Same model applied twice. Stacking test: check artefact accumulation with more masking stages by listening and learned-MOS / speaker similarity."
+    },
+    {
+      "chain": "dfn3>blend50",
+      "label": "DFN3, blend 50",
+      "group": "pipe_blend",
+      "note": "DFN3 with 50% of the chain input mixed back. Blend: mixes the chain's unfiltered input back at the given percent (Iwamoto 2022, arXiv 2201.06685). "
+    },
+    {
+      "chain": "mf2se48>blend50",
+      "label": "MF2SE48, blend 50",
+      "group": "pipe_blend",
+      "note": "MF2SE48 with 50% of the chain input mixed back. Blend: mixes the chain's unfiltered input back at the given percent (Iwamoto 2022, arXiv 2201.06685). "
+    },
+    {
+      "chain": "bsrnn26>blend50",
+      "label": "BSRNN26, blend 50",
+      "group": "pipe_blend",
+      "note": "BSRNN26 with 50% of the chain input mixed back. Blend: mixes the chain's unfiltered input back at the given percent (Iwamoto 2022, arXiv 2201.06685). "
+    },
+    {
+      "chain": "mf2se48>blend25",
+      "label": "MF2SE48, blend 25",
+      "group": "pipe_blend",
+      "note": "MF2SE48 with 25% of the chain input mixed back. Blend: mixes the chain's unfiltered input back at the given percent (Iwamoto 2022, arXiv 2201.06685). "
+    },
+    {
+      "chain": "dfn3>mf2se48>blend50",
+      "label": "DFN3, MF2SE48, blend 50",
+      "group": "pipe_blend",
+      "note": "Two stages, then 50% of the chain input mixed back. Blend: mixes the chain's unfiltered input back at the given percent (Iwamoto 2022, arXiv 2201.06685). "
+    },
+    {
+      "chain": "rf_vocals_3005>dfn3>blend50",
+      "label": "RF 3005, DFN3, blend 50",
+      "group": "pipe_blend",
+      "note": "Chain-owned music removal (pipeline music stage off): vocals, denoise, then 50% of the chain input (the original audio) mixed back. Blend: mixes the chain's unfiltered input back at the given percent (Iwamoto 2022, arXiv 2201.06685). ",
+      "set": {
+        "steps.music_removal": false
+      },
+      "tag": "music-stage-off"
+    },
+    {
+      "chain": "rf_vocals_3005>rf_dereverb>dfn3>blend30",
+      "label": "RF 3005, de-reverb, DFN3, blend 30",
+      "group": "pipe_blend",
+      "note": "Chain-owned music removal (pipeline music stage off): four-step chain with 30% of the chain input mixed back. Blend: mixes the chain's unfiltered input back at the given percent (Iwamoto 2022, arXiv 2201.06685). ",
+      "set": {
+        "steps.music_removal": false
+      },
+      "tag": "music-stage-off"
+    },
+    {
+      "chain": "dbs_tiger>rf_crowd>dfn3",
+      "label": "DBS-TIGER, crowd, DFN3 [analysis only]",
+      "group": "analysis_pipes",
+      "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). Nothing here is validated on Vietnamese.",
+      "set": {
+        "steps.music_removal": false
+      },
+      "tag": "music-stage-off"
+    },
+    {
+      "chain": "dbs_tiger>rf_dereverb>mf2se48",
+      "label": "DBS-TIGER, de-reverb, MF2SE48 [analysis only]",
+      "group": "analysis_pipes",
+      "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). Nothing here is validated on Vietnamese.",
+      "set": {
+        "steps.music_removal": false
+      },
+      "tag": "music-stage-off"
+    },
+    {
+      "chain": "mambattention>dfn3",
+      "label": "MambAttention then DFN3 [analysis only]",
+      "group": "analysis_pipes",
+      "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). Nothing here is validated on Vietnamese."
     }
   ]
 }

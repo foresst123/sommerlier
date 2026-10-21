@@ -56,6 +56,10 @@ def build_compare_data(manifest_path: str, files: Optional[List[str]] = None,
         row["status"] = status
         if v.get("group"):
             row["group"] = v["group"]
+        if v.get("tag"):
+            row["tag"] = str(v["tag"])
+        if v.get("set"):
+            row["set"] = dict(v["set"])
         if v.get("note"):
             row["note"] = str(v["note"])
         if status in ("failed", "missing", "skipped"):

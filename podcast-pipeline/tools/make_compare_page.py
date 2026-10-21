@@ -225,10 +225,13 @@ def _chips(variants, base):
         label = html.escape(str(v.get("label") or v["id"]))
         tip = html.escape(str(v.get("note") or " > ".join(map(str, v.get("chain") or [])) or "baseline"),
                           quote=True)
+        if v.get("set"):
+            tip += html.escape(" | set: " + json.dumps(v["set"], ensure_ascii=False), quote=True)
         cls = "chip base" if v["id"] == base else "chip"
         out.append(f'<button type="button" class="{cls}" data-vid="{vid}" title="{tip}" '
                    f'aria-pressed="false">{label}'
                    + (f' <span class="grp">{html.escape(str(v["group"]))}</span>' if v.get("group") else "")
+                   + (f' <span class="grp tag">{html.escape(str(v["tag"]))}</span>' if v.get("tag") else "")
                    + '</button>')
     return "".join(out)
 

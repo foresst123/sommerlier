@@ -39,7 +39,12 @@ from services.denoise_service import DenoiseService
 p = argparse.ArgumentParser()
 for f in ("--audio_dir", "--save_path", "--job_id", "--env", "--stop_after", "--denoise", "--cache_dir"):
     p.add_argument(f)
+p.add_argument("--music_separator")
+p.add_argument("--set", action="append")
 a = p.parse_args()
+Path(a.save_path).mkdir(parents=True, exist_ok=True)
+with open(Path(a.save_path) / "calls.json", "w") as _f:
+    json.dump({"argv": sys.argv[1:], "set": a.set or [], "music_separator": a.music_separator}, _f)
 
 
 class Audio:  # what DenoiseService needs from AudioData
@@ -225,7 +230,7 @@ def test_shipped_plan_skips_unavailable_backends_and_still_builds_a_page(tmp_pat
                "mambattention": "MAMBATTENTION_PYTHON is not set"}
     monkeypatch.setattr(md, "available_backends", lambda cfg=None: {
         k: ((False, reasons[k]) if k in reasons else (True, "")) for k in md.BACKENDS})
-    code, out = _run_plan(tmp_path)
+    code, out = _run_plan(tmp_path, ("--groups", "masking,chains,analysis_only"))
     assert code == 0
     console = capsys.readouterr().out
     for vid, why in (("bsrnn26", "URGENT26_DIR"), ("dbs_tiger", "DBS_TIGER_DIR"), ("mambattention", "MAMBATTENTION_PYTHON")):
@@ -261,3 +266,63 @@ def test_shipped_plan_with_the_real_availability_check(tmp_path):
     assert next(v for v in m["variants"] if v["id"] == "none")["status"] == "ok"
     assert not any(v["group"] == "chains" for v in m["variants"])
     _page_from(tmp_path, out)
+
+
+# ---- the multi-stage plan: ctrl_music + pipe_blend with per-variant overrides ----
+def _calls(out, vid):
+    return json.loads((out / vid / "calls.json").read_text())
+
+
+def test_ctrl_music_and_pipe_blend_with_the_real_availability_check(tmp_path):
+    import models.denoise as md
+    avail = md.available_backends()
+    code, out = _run_plan(tmp_path, ("--groups", "ctrl_music,pipe_blend"))
+    assert code == 0
+    m = json.loads((out / "variants_manifest.json").read_text())
+    st = {v["id"]: v for v in m["variants"]}
+    assert {v["group"] for v in m["variants"]} == {None, "ctrl_music", "pipe_blend"}
+    assert len(st) == 1 + 5 + 7
+    from models.denoise.pseudo import backend_tokens
+    for v in m["variants"]:
+        bad = [b for b in backend_tokens(v["chain"]) if not avail[b][0]]
+        assert (v["status"] == "skipped") == bool(bad), v["id"]
+        for key in ("set", "tag", "group"):
+            assert key in v, (v["id"], key)
+    raw = st["none.music-removal-off"]
+    assert raw["tag"] == "music-stage-off" and raw["set"] == {"steps.music_removal": False}
+    if raw["status"] == "ok":
+        assert "steps.music_removal=false" in _calls(out, raw["id"])["set"]
+    _page_from(tmp_path, out)
+
+
+def test_ctrl_music_and_pipe_blend_with_a_mocked_availability(tmp_path, monkeypatch):
+    import models.denoise as md
+    monkeypatch.setattr(md, "available_backends", lambda cfg=None: {
+        k: ((False, "BSRNN_NOT_SET") if k in ("bsrnn26", "rf_vocals_3005") else (True, "")) for k in md.BACKENDS})
+    code, out = _run_plan(tmp_path, ("--groups", "ctrl_music,pipe_blend"))
+    assert code == 0
+    m = json.loads((out / "variants_manifest.json").read_text())
+    st = {v["id"]: v for v in m["variants"]}
+    skipped = {k for k, v in st.items() if v["status"] == "skipped"}
+    assert skipped == {"bsrnn26+blend50", "rf_vocals_3005+dfn3+blend50.music-removal-off",
+                       "rf_vocals_3005+rf_dereverb+dfn3+blend30.music-removal-off"}
+    assert all(st[k]["status"] == "ok" for k in st if k not in skipped)
+    # blend steps are pseudo: dfn3>blend50 is runnable although no backend is called blend50
+    assert st["dfn3+blend50"]["status"] == "ok" and not st["dfn3+blend50"].get("reason")
+    c = _calls(out, "none.music-scope-spans")
+    assert c["set"] == ['pipeline.music_scope="spans"'] and "--denoise" not in c["argv"]
+    c = _calls(out, "none.music-removal-off")
+    assert c["set"] == ["steps.music_removal=false"]
+    sep = next(v for v in m["variants"] if v["tag"] == "sep-kim")
+    c = _calls(out, sep["id"])
+    assert c["music_separator"] == "mel_band_roformer_kim_ft2_bleedless_unwa.ckpt" and "--denoise" in c["argv"]
+    c = _calls(out, "dfn3+mf2se48+blend50")
+    assert c["set"] == [] and c["argv"][c["argv"].index("--denoise") + 1] == "dfn3>mf2se48>blend50"
+    # the blend actually ran in the real DenoiseService (backends may fall back, errors recorded)
+    den = json.loads((Path(st["dfn3+blend50"]["files"]["a"]) / "01b_denoise" / "denoise.json").read_text())
+    assert den["chain"] == ["dfn3", "blend50"]
+    data, text = _page_from(tmp_path, out)
+    row = {v["id"]: v for v in data["variants"]}
+    assert row["none.music-removal-off"]["tag"] == "music-stage-off"
+    assert row["none.music-removal-off"]["set"] == {"steps.music_removal": False}
+    assert "music-stage-off" in text and "scope-spans" in text

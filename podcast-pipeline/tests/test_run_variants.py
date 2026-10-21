@@ -18,8 +18,10 @@ import argparse, json, os, sys
 from pathlib import Path
 p = argparse.ArgumentParser()
 for f in ("--audio_dir", "--save_path", "--output_dir", "--job_id", "--env", "--stop_after",
-          "--denoise", "--cache_dir"):
+          "--denoise", "--cache_dir", "--music_separator"):
     p.add_argument(f)
+p.add_argument("--set", action="append")
+p.add_argument("--bss", action="store_true")
 a = p.parse_args()
 out = a.save_path or a.output_dir
 Path(out, "calls.txt").parent.mkdir(parents=True, exist_ok=True)
@@ -191,3 +193,137 @@ def test_without_only_available_nothing_is_skipped(env):
     assert rv.main(argv(env)) == 0
     m = json.loads((tmp / "out" / "variants_manifest.json").read_text())
     assert all(x["status"] == "ok" for x in m["variants"])
+
+
+# ------------------------------------------------------- overrides and planning
+def write_var(var, variants):
+    var.write_text(json.dumps({"variants": variants}))
+
+
+def test_override_variant_id_tag_and_baseline_rules(env):
+    _, _, _, var = env
+    write_var(var, [{"chain": "none"},  # exact baseline duplicate merges silently
+                    {"chain": "none", "tag": "music stage OFF",
+                     "set": {"steps.music_removal": False}},
+                    {"chain": "dfn3", "set": {"pipeline.music_scope": "full"}, "id": "dfn3-full"}])
+    vs = rv.load_variants(var)
+    assert [v["id"] for v in vs] == ["none", "none.music-removal-off", "dfn3-full"]
+    assert vs[0]["set"] == {} and vs[1]["tag"] == "music stage OFF" and vs[1]["chain"] == []
+    assert vs[1]["id"] == rv.load_variants(var)[1]["id"]  # deterministic
+    long = rv.override_tag({"models.bs_roformer.model": "a" * 60})
+    assert len(long) == 8 and rv.ID_RE.match(long)
+
+
+def test_duplicate_and_unsafe_ids_fail_early(env):
+    _, _, _, var = env
+    write_var(var, [{"chain": "dfn3", "id": "x"}, {"chain": "mf2se48", "id": "x"},
+                    {"chain": "none", "id": "none", "set": {"steps.a": False}}])
+    with pytest.raises(SystemExit) as e:
+        rv.load_variants(var)
+    assert "'none'" in str(e.value) and "'x'" in str(e.value)
+    write_var(var, [{"chain": "dfn3", "id": "a/b"}])
+    with pytest.raises(SystemExit, match="filename-safe"):
+        rv.load_variants(var)
+
+
+def test_command_has_set_music_separator_extra_args(env):
+    _, _, _, var = env
+    write_var(var, [{"chain": "dfn3", "music_separator": "m.ckpt", "extra_args": "--bss",
+                     "set": {"steps.music_removal": False, "models.bs_roformer.model": "x y.ckpt"}}])
+    v = rv.load_variants(var)[1]
+    args = rv.parse_args(argv(env))
+    cmd = rv.build_command(v, [], args)
+    assert cmd[cmd.index("--music_separator") + 1] == "m.ckpt"
+    sets = [cmd[i + 1] for i, c in enumerate(cmd) if c == "--set"]
+    assert sets == ['steps.music_removal=false', 'models.bs_roformer.model="x y.ckpt"']
+    assert cmd[-1] == "--bss"
+    base = rv.build_command(rv.load_variants(var)[0], [], args)
+    assert "--set" not in base and "--music_separator" not in base
+
+
+def test_dry_run_quotes_set_and_done_hash_depends_on_overrides(env, capsys, tmp_path):
+    _, _, _, var = env
+    write_var(var, [{"chain": "none", "set": {"models.bs_roformer.model": "a b.ckpt"}}])
+    assert rv.main(argv(env, "--dry-run")) == 0
+    out = capsys.readouterr().out
+    assert "--set 'models.bs_roformer.model=\"a b.ckpt\"'" in out
+    f = tmp_path / "f.wav"
+    f.write_bytes(b"x")
+    a = rv.build_command(rv.load_variants(var)[1], [f], rv.parse_args(argv(env)))
+    write_var(var, [{"chain": "none", "id": "none.music-removal-off", "set": {"models.bs_roformer.model": "b.ckpt"}}])
+    b = rv.build_command(rv.load_variants(var)[1], [f], rv.parse_args(argv(env)))
+    assert rv.run_hash(a, [f]) != rv.run_hash(b, [f])
+
+
+def test_run_manifest_and_compare_data_passthrough(env):
+    tmp, _, _, var = env
+    write_var(var, [{"chain": "none", "tag": "music stage OFF", "music_separator": "m.ckpt",
+                     "set": {"steps.music_removal": False}}])
+    assert rv.main(argv(env)) == 0
+    m = json.loads((tmp / "out" / "variants_manifest.json").read_text())
+    x = {v["id"]: v for v in m["variants"]}["none.music-removal-off_sep-m"]
+    assert x["set"] == {"steps.music_removal": False} and x["tag"] == "music stage OFF"
+    assert x["music_separator"] == "m.ckpt"
+    argv_ = calls(tmp, "none.music-removal-off_sep-m")[0]["argv"]
+    assert "steps.music_removal=false" in argv_ and "m.ckpt" in argv_
+    from tools.compare_lib.build import build_compare_data
+    data = build_compare_data(str(tmp / "out" / "variants_manifest.json"), embed=False)
+    row = {v["id"]: v for v in data["variants"]}["none.music-removal-off_sep-m"]
+    assert row["tag"] == "music stage OFF" and row["set"] == {"steps.music_removal": False}
+    assert "tag" not in data["variants"][0] and "set" not in data["variants"][0]
+    import tools.make_compare_page as mp
+    chips = mp._chips(data["variants"], "none")
+    assert "music stage OFF" in chips and "steps.music_removal" in chips
+
+
+def test_list_table_and_arithmetic(env, capsys):
+    tmp, _, _, var = env
+    write_var(var, [{"chain": "dfn3", "group": "g"},
+                    {"chain": "none", "tag": "music OFF", "set": {"steps.music_removal": False}}])
+    assert rv.main(argv(env, "--list", "--minutes-per-file-run", "10")) == 0
+    out = capsys.readouterr().out
+    assert "none.music-removal-off" in out and "steps.music_removal=false" in out and "music OFF" in out
+    assert "variants: 3" in out and "files: 2" in out and "variant-file runs: 6" in out
+    assert "60 min" in out and "ASSUMING 10 min" in out
+    assert not (tmp / "out").exists()  # nothing ran
+    assert rv.main(argv(env, "--list")) == 0
+    assert "120 min" in capsys.readouterr().out  # default 20 min
+
+
+def many(var, n=8):
+    write_var(var, [{"chain": "none", "id": f"v{i}", "set": {"steps.x": i}} for i in range(n)])
+
+
+def test_max_variants_shuffle_keeps_baseline_and_is_deterministic(env):
+    _, _, _, var = env
+    many(var)
+    vs = rv.load_variants(var)
+    first = rv.pick_variants(vs, max_variants=3)
+    assert [v["id"] for v in first] == ["none", "v0", "v1"]
+    a = rv.pick_variants(vs, max_variants=4, shuffle_seed=7)
+    b = rv.pick_variants(vs, max_variants=4, shuffle_seed=7)
+    assert [v["id"] for v in a] == [v["id"] for v in b] and len(a) == 4 and a[0]["id"] == "none"
+    ids = [v["id"] for v in a]
+    assert ids == sorted(ids, key=[v["id"] for v in vs].index)  # file order kept
+    assert any([v["id"] for v in rv.pick_variants(vs, max_variants=4, shuffle_seed=s)] != ids
+               for s in range(1, 20))
+    assert [v["id"] for v in rv.pick_variants(vs, max_variants=1, shuffle_seed=1)] == ["none"]
+
+
+def test_only_ids(env, capsys):
+    _, _, _, var = env
+    many(var)
+    got = rv.pick_variants(rv.load_variants(var), only_ids=["v3", "v5"])
+    assert [v["id"] for v in got] == ["none", "v3", "v5"]
+    with pytest.raises(SystemExit, match="unknown id"):
+        rv.pick_variants(rv.load_variants(var), only_ids=["nope"])
+    assert rv.main(argv(env, "--list", "--only-ids", "v3", "--max-variants", "5")) == 0
+    assert "variants: 2" in capsys.readouterr().out
+
+
+def test_only_available_ignores_pseudo_steps(env, monkeypatch, capsys):
+    _, _, _, var = env
+    write_var(var, [{"chain": "dfn3>blend50"}])
+    _fake_availability(monkeypatch, {})
+    assert rv._backend_tokens(["dfn3", "blend50"]) == ["dfn3"]
+    assert rv.check_availability(rv.load_variants(var)) == {}
