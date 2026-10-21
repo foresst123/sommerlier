@@ -138,3 +138,56 @@ def test_stem_clash_rejected(env, tmp_path):
     tmp, main, audio, var = env
     with pytest.raises(SystemExit):
         rv.collect_files(str(audio), [str(other / "a.wav")])
+
+
+def _fake_availability(monkeypatch, unavailable):
+    import models.denoise as md
+    real = md.available_backends
+    monkeypatch.setattr(md, "available_backends", lambda cfg=None: {
+        **{k: (True, "") for k in ("dfn3", "mf2se48")},
+        **{k: (False, why) for k, why in unavailable.items()}})
+    return real
+
+
+def test_groups_and_notes_flow_to_manifest_and_filter(env, capsys):
+    tmp, _, _, var = env
+    var.write_text(json.dumps({"variants": [
+        {"chain": "dfn3", "group": "masking", "note": "n1"},
+        {"chain": "dfn3>mf2se48", "group": "chains"}]}))
+    assert rv.main(argv(env, "--groups", "chains")) == 0
+    m = json.loads((tmp / "out" / "variants_manifest.json").read_text())
+    assert [x["id"] for x in m["variants"]] == ["none", "dfn3+mf2se48"]
+    assert m["variants"][1]["group"] == "chains" and m["variants"][1]["note"] is None
+    assert "group=chains" in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        rv.main(argv(env, "--groups", "nope"))
+    assert rv.main(argv(env)) == 0
+    m = json.loads((tmp / "out" / "variants_manifest.json").read_text())
+    assert {x["id"]: x["note"] for x in m["variants"]}["dfn3"] == "n1"
+
+
+def test_only_available_skips_with_reason_never_silently(env, monkeypatch, capsys):
+    tmp, _, _, var = env
+    var.write_text(json.dumps({"variants": [
+        {"chain": "dfn3"}, {"chain": "dbs_tiger", "group": "analysis_only"},
+        {"chain": "dbs_tiger>dfn3"}, {"chain": "ghost"}]}))
+    _fake_availability(monkeypatch, {"dbs_tiger": "DBS_TIGER_DIR is not set"})
+    assert rv.main(argv(env, "--only-available")) == 0  # skipped is not a failure
+    out = capsys.readouterr().out
+    assert "[dbs_tiger] SKIPPED" in out and "DBS_TIGER_DIR is not set" in out
+    assert "[ghost] SKIPPED" in out and "unknown backend" in out
+    assert "skipped 3 variant(s)" in out
+    assert calls(tmp, "dfn3") and not calls(tmp, "dbs_tiger") and not calls(tmp, "ghost")
+    m = json.loads((tmp / "out" / "variants_manifest.json").read_text())
+    v = {x["id"]: x for x in m["variants"]}
+    assert v["dfn3"]["status"] == "ok" and v["none"]["status"] == "ok"
+    assert v["dbs_tiger"]["status"] == "skipped" and "DBS_TIGER_DIR" in v["dbs_tiger"]["reason"]
+    assert v["dbs_tiger+dfn3"]["status"] == "skipped" and v["dfn3"]["reason"] is None
+    assert not (tmp / "out" / "dbs_tiger").exists() or not (tmp / "out" / "dbs_tiger" / "input").exists()
+
+
+def test_without_only_available_nothing_is_skipped(env):
+    tmp = env[0]
+    assert rv.main(argv(env)) == 0
+    m = json.loads((tmp / "out" / "variants_manifest.json").read_text())
+    assert all(x["status"] == "ok" for x in m["variants"])

@@ -1,10 +1,76 @@
 {
   "baseline": "none",
   "variants": [
-    {"chain": "none"},
-    {"chain": "dfn3"},
-    {"chain": "mf2se48"},
-    {"chain": "mpsenet"},
-    {"chain": "dfn3>mf2se48", "label": "DFN3 then MF2SE48"}
+    {
+      "chain": "none",
+      "label": "Baseline (no denoise)",
+      "group": "baseline"
+    },
+    {
+      "chain": "dfn3",
+      "label": "DeepFilterNet3",
+      "group": "masking",
+      "note": "Masking denoiser: removes steady noise; does not remove crowd voices. Compare by listening; metrics only show differences."
+    },
+    {
+      "chain": "mf2se48",
+      "label": "MossFormer2 SE 48k",
+      "group": "masking",
+      "note": "Masking denoiser: removes steady noise; does not remove crowd voices. Compare by listening; metrics only show differences."
+    },
+    {
+      "chain": "mpsenet",
+      "label": "MP-SENet (VoiceBank)",
+      "group": "masking",
+      "note": "Masking denoiser: removes steady noise; does not remove crowd voices. Compare by listening; metrics only show differences."
+    },
+    {
+      "chain": "mpsenet_dns",
+      "label": "MP-SENet (g_best_dns)",
+      "group": "masking",
+      "note": "Masking denoiser: removes steady noise; does not remove crowd voices. Compare by listening; metrics only show differences."
+    },
+    {
+      "chain": "bsrnn26",
+      "label": "BSRNN URGENT 2026",
+      "group": "masking",
+      "note": "Masking denoiser: removes steady noise; does not remove crowd voices. Compare by listening; metrics only show differences."
+    },
+    {
+      "chain": "dfn3>mf2se48",
+      "label": "DFN3 then MF2SE48",
+      "group": "chains",
+      "note": "Two-stage chain: check for double-processing artefacts by listening."
+    },
+    {
+      "chain": "mf2se48>dfn3",
+      "label": "MF2SE48 then DFN3",
+      "group": "chains",
+      "note": "Two-stage chain: check for double-processing artefacts by listening."
+    },
+    {
+      "chain": "bsrnn26>dfn3",
+      "label": "BSRNN26 then DFN3",
+      "group": "chains",
+      "note": "Two-stage chain: check for double-processing artefacts by listening."
+    },
+    {
+      "chain": "dbs_tiger",
+      "label": "DBS-TIGER stems (speech) [analysis only]",
+      "group": "analysis_only",
+      "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). Nothing here is validated on Vietnamese."
+    },
+    {
+      "chain": "mambattention",
+      "label": "MambAttention (separate env) [analysis only]",
+      "group": "analysis_only",
+      "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). Nothing here is validated on Vietnamese."
+    },
+    {
+      "chain": "dbs_tiger>dfn3",
+      "label": "DBS-TIGER then DFN3 [analysis only]",
+      "group": "analysis_only",
+      "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). Nothing here is validated on Vietnamese."
+    }
   ]
 }

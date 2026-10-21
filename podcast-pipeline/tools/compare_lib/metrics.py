@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
+from . import learned_mos
 from .io_stage import read_wav
 from .speaker_align import HOP, label_grid
 from .text_align import tokens
@@ -95,11 +96,34 @@ def _ecapa_cos(raw_path: str, var_path: str) -> Optional[float]:
         return None
 
 
+_RAW_MOS: Dict[tuple, Optional[dict]] = {}
+
+
+def _learned(path: Optional[str], sr: int, cache: bool = False) -> Optional[dict]:
+    """Learned-MOS scores of one wav (None if unconfigured); raw scores are cached per file."""
+    if not path or not os.path.isfile(path):
+        return None
+    key = (path, os.path.getmtime(path), os.path.getsize(path))
+    if cache and key in _RAW_MOS:
+        return _RAW_MOS[key]
+    res = learned_mos.score_wav(path, sr)
+    if cache:
+        _RAW_MOS[key] = res
+    return res
+
+
+def _mos_delta(var: Optional[dict], raw: Optional[dict]) -> Optional[dict]:
+    if not var or not raw:
+        return None
+    return {k: var[k] - raw[k] for k in var if k in raw and var[k] is not None and raw[k] is not None}
+
+
 def audio_metrics(raw_path: Optional[str], var_path: Optional[str],
-                  same_as_raw: bool = False, embed: bool = True) -> Dict[str, Optional[float]]:
+                  same_as_raw: bool = False, embed: bool = True) -> Dict[str, Optional[object]]:
     keys = ("noise_floor_db", "gated_frame_pct", "lag_samples", "corr_with_raw",
-            "hf_energy_ratio", "length_equal", "ecapa_cos")
-    out: Dict[str, Optional[float]] = {k: None for k in keys}
+            "hf_energy_ratio", "length_equal", "ecapa_cos", "learned_mos",
+            "learned_mos_delta")
+    out: Dict[str, Optional[object]] = {k: None for k in keys}
     var, sr = read_wav(var_path)
     if var is None:
         return out
@@ -110,6 +134,9 @@ def audio_metrics(raw_path: Optional[str], var_path: Optional[str],
     out["hf_energy_ratio"] = hf_energy_ratio(var, sr)
     if same_as_raw:
         out.update(lag_samples=0, corr_with_raw=1.0, length_equal=True, ecapa_cos=1.0)
+        if embed:
+            out["learned_mos"] = _learned(var_path, sr, cache=True)
+            out["learned_mos_delta"] = _mos_delta(out["learned_mos"], out["learned_mos"])
         return out
     raw, rsr = read_wav(raw_path)
     if raw is None:
@@ -121,6 +148,9 @@ def audio_metrics(raw_path: Optional[str], var_path: Optional[str],
         out["corr_with_raw"] = aligned_corr(raw, var, lag)
         if embed:
             out["ecapa_cos"] = _ecapa_cos(raw_path, var_path)
+    if embed:
+        out["learned_mos"] = _learned(var_path, sr)
+        out["learned_mos_delta"] = _mos_delta(out["learned_mos"], _learned(raw_path, rsr, cache=True))
     return out
 
 

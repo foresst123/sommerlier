@@ -189,3 +189,75 @@ def _variants(tmp):
     p = tmp / "v.json"
     p.write_text(json.dumps({"variants": [{"chain": "dfn3>mf2se48"}]}))
     return p
+
+
+# ---- the shipped plan: tools/variants.example.json with --only-available -------
+PLAN = ROOT / "tools" / "variants.example.json"
+
+
+def _run_plan(tmp, extra=()):
+    audio = tmp / "audio"
+    audio.mkdir()
+    t = np.arange(SR * 4) / SR
+    sf.write(str(audio / "a.wav"), (0.3 * np.sin(2 * np.pi * 300 * t)).astype("float32"), SR, subtype="PCM_16")
+    stub = tmp / "stub_main.py"
+    stub.write_text(STUB % {"root": str(ROOT)})
+    out = tmp / "out"
+    code = rv.main(["--audio-dir", str(audio), "--variants", str(PLAN), "--out-root", str(out),
+                    "--main", str(stub), "--env", "a100", "--stop-after", "asr",
+                    "--python", sys.executable, "--only-available", *extra])
+    return code, out
+
+
+def _page_from(tmp, out):
+    from tools.compare_lib.build import build_compare_data, write_compare_data
+    data = build_compare_data(str(out / "variants_manifest.json"), embed=False)
+    cd = tmp / "compare_data.json"
+    write_compare_data(data, str(cd))
+    html_path = tmp / "compare.html"
+    page.main([str(cd), "-o", str(html_path), "--embed", "clips"])
+    return data, html_path.read_text(encoding="utf-8")
+
+
+def test_shipped_plan_skips_unavailable_backends_and_still_builds_a_page(tmp_path, monkeypatch, capsys):
+    import models.denoise as md
+    reasons = {"bsrnn26": "URGENT26_DIR is not set", "dbs_tiger": "DBS_TIGER_DIR is not set",
+               "mambattention": "MAMBATTENTION_PYTHON is not set"}
+    monkeypatch.setattr(md, "available_backends", lambda cfg=None: {
+        k: ((False, reasons[k]) if k in reasons else (True, "")) for k in md.BACKENDS})
+    code, out = _run_plan(tmp_path)
+    assert code == 0
+    console = capsys.readouterr().out
+    for vid, why in (("bsrnn26", "URGENT26_DIR"), ("dbs_tiger", "DBS_TIGER_DIR"), ("mambattention", "MAMBATTENTION_PYTHON")):
+        assert f"[{vid}] SKIPPED" in console and why in console
+    m = json.loads((out / "variants_manifest.json").read_text())
+    st = {v["id"]: v for v in m["variants"]}
+    assert {k for k, v in st.items() if v["status"] == "skipped"} == {
+        "bsrnn26", "bsrnn26+dfn3", "dbs_tiger", "dbs_tiger+dfn3", "mambattention"}
+    assert all(st[k]["reason"] for k in st if st[k]["status"] == "skipped")
+    assert {k for k, v in st.items() if v["status"] == "ok"} == {
+        "none", "dfn3", "mf2se48", "mpsenet", "mpsenet_dns", "dfn3+mf2se48", "mf2se48+dfn3"}
+    assert st["dfn3"]["group"] == "masking" and st["dfn3+mf2se48"]["group"] == "chains"
+    assert "analysis" in st["dbs_tiger"]["note"].lower() and not (out / "dbs_tiger").exists()
+    data, text = _page_from(tmp_path, out)
+    row = {v["id"]: v for v in data["variants"]}
+    assert row["dbs_tiger"]["status"] == "skipped" and "DBS_TIGER_DIR" in row["dbs_tiger"]["note"]
+    assert row["dbs_tiger"]["group"] == "analysis_only"
+    assert 'data-vid="dfn3+mf2se48"' in text and '<span class="grp">chains</span>' in text
+
+
+def test_shipped_plan_with_the_real_availability_check(tmp_path):
+    import models.denoise as md
+    avail = md.available_backends()
+    code, out = _run_plan(tmp_path, ("--groups", "analysis_only,masking"))
+    assert code == 0
+    m = json.loads((out / "variants_manifest.json").read_text())
+    assert {v["group"] for v in m["variants"]} <= {None, "baseline", "masking", "analysis_only"}
+    for v in m["variants"]:
+        bad = [b for b in v["chain"] if not avail[b][0]]
+        assert (v["status"] == "skipped") == bool(bad), v["id"]
+        if bad:
+            assert avail[bad[0]][1] in v["reason"]
+    assert next(v for v in m["variants"] if v["id"] == "none")["status"] == "ok"
+    assert not any(v["group"] == "chains" for v in m["variants"])
+    _page_from(tmp_path, out)

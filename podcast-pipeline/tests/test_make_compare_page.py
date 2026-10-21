@@ -256,3 +256,41 @@ def test_old_review_page_untouched():
     if head.returncode != 0:
         pytest.skip("review page not in HEAD")
     assert (TOOLS / "make_review_page.py").read_bytes() == head.stdout
+
+
+def _with_mos(data, vals):
+    for f in data["files"]:
+        for vid, m in f["metrics"].items():
+            m["audio"]["learned_mos"] = vals
+            m["audio"]["learned_mos_delta"] = vals
+    return data
+
+
+@pytest.mark.skipif(not NODE, reason="node not on PATH")
+def test_learned_mos_block_with_and_without_keys(tmp_path, data):
+    f = json.dumps(data["files"][0])
+    old = run_node(build(tmp_path, data), f"c.metricsHtml('file',{f})")
+    assert "Learned MOS" not in old  # old compare_data.json: no block, page still renders
+    data = _with_mos(data, {"mos": 0.25, "dnsmos_ovrl": -0.5, "scoreq": None, "utmos": 0.0, "nisqa_mos": 0.1})
+    f = json.dumps(data["files"][0])
+    html = run_node(build(tmp_path, data, name="m.html"), f"c.metricsHtml('file',{f})")
+    assert "Learned MOS (delta vs raw, informational)" in html
+    assert "hallucinated" in html and "never a gate" in html
+    assert "+0.25" in html and "-0.5" in html and "—" in html
+    assert "learned_mos_delta" not in html.split("Learned MOS")[0]  # not in the generic audio table
+
+
+@pytest.mark.skipif(not NODE, reason="node not on PATH")
+def test_learned_mos_null_renders_dash(tmp_path, data):
+    data = _with_mos(data, None)
+    f = json.dumps(data["files"][0])
+    html = run_node(build(tmp_path, data), f"c.metricsHtml('file',{f})")
+    block = html.split("Learned MOS")[1]
+    assert block.count("—") >= 5
+
+
+def test_group_tag_next_to_chip(tmp_path, data):
+    data["variants"][1]["group"] = "analysis_only"
+    page = build(tmp_path, data)
+    assert page.count('<span class="grp">analysis_only</span>') == 1
+    assert page.count('<button type="button" class="chip') == 4

@@ -5,7 +5,7 @@ Any metric may be `null` (stage missing, not computable). Extra keys are allowed
 
 ## Top level
 - `baseline`: variant id everything is compared against (`"none"`).
-- `variants`: `[{id, chain, label, status, note?}]`. Variants with status `failed`/`missing` are
+- `variants`: `[{id, chain, label, status, note?, group?}]` (`group` is an optional tag from the variants file, shown next to the chip; status `skipped` = backend unavailable, reason in `note`). Variants with status `failed`/`missing` are
   listed (with a `note`) but have no data below.
 - `files[]`: one entry per file stem: `name`, `duration` (s), `audio`, `text`, `text_diff`,
   `speakers`, `metrics`; all keyed by variant id (the baseline included).
@@ -58,6 +58,20 @@ audio (variant wav vs raw):
 - `length_equal` (bool): up.
 - `ecapa_cos` (speaker-embedding cosine, first 30 s, raw vs variant): up. Computed only when
   `WESPEAKER_MODEL_PATH` points to a local ONNX file (WeSpeaker, not ECAPA; key kept per contract); else null.
+- `learned_mos` (dict or null): `{mos, dnsmos_ovrl, scoreq, utmos, nisqa_mos}`, each about 1-5, of the
+  variant wav; `learned_mos_delta` (dict or null): the same keys, variant minus raw (the baseline's
+  own audio is the raw wav, so its delta is 0). Both null unless the optional Uni-VERSA-Ext
+  predictor is configured (env `UNIVERSA_MODEL`, `UNIVERSA_CONFIG`, `UNIVERSA_REPO`; see
+  `learned_mos.py`) and `embed` is on. Direction: **neutral**. In `summary` the keys are flattened:
+  `audio.learned_mos.<key>`, `audio.learned_mos_delta.<key>`. Read it like this:
+  - It is a distilled mimic of DNSMOS/UTMOS/NISQA/SCOREQ plus a human-MOS head, NOT an independent
+    replacement for DNSMOS: it inherits their blind spots. Trained on English/Mandarin, never on Vietnamese.
+  - Learned MOS predictors reward hallucinated, fluent-sounding output (URGENT 2025 overview,
+    arXiv 2505.23212: the purely generative system topped DNSMOS/NISQA/UTMOS while hallucinating;
+    arXiv 2506.12260: an enhancer trained against the predictor produced non-speech it rated highly).
+  - It runs at 16 kHz, so it is blind above 8 kHz of a 24 kHz input (HF artefacts, the 8-12 kHz band).
+  - The HF weights carry no license and were trained on CC BY-NC-SA corpora: internal analysis only.
+  - Rule: delta only, never a gate or a loss; always read it next to `wer_vs_baseline` and `ecapa_cos`.
 
 diarization: `n_speakers` neutral (2 expected for a two-person conversation), `n_segments` neutral,
 `overlap_seconds` neutral, `median_segment_s` up (fragmentation lowers it),

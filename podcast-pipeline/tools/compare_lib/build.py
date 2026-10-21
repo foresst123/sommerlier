@@ -17,13 +17,24 @@ def _full_text(segs) -> str:
                     if s["text"].strip())
 
 
+def _flat(vals: dict, prefix: str = "") -> dict:
+    """Nested dicts flattened to 'a.b' keys (audio.learned_mos.<key>)."""
+    out = {}
+    for k, x in (vals or {}).items():
+        if isinstance(x, dict):
+            out.update(_flat(x, f"{prefix}{k}."))
+        else:
+            out[f"{prefix}{k}"] = x
+    return out
+
+
 def _summary(variants: List[dict], metrics_by_file: Dict[str, Dict[str, dict]]) -> dict:
     out: Dict[str, dict] = {}
     for v in variants:
         acc: Dict[str, List[float]] = {}
         for per_variant in metrics_by_file.values():
             for sec, vals in (per_variant.get(v["id"]) or {}).items():
-                for k, x in vals.items():
+                for k, x in _flat(vals).items():
                     if isinstance(x, (int, float)) and x == x:  # bools count, NaN does not
                         acc.setdefault(f"{sec}.{k}", []).append(float(x))
         out[v["id"]] = {k: sum(xs) / len(xs) for k, xs in sorted(acc.items())}
@@ -43,8 +54,13 @@ def build_compare_data(manifest_path: str, files: Optional[List[str]] = None,
         row = {"id": v["id"], "chain": v.get("chain", []), "label": v.get("label", v["id"])}
         status = v.get("status", "ok")
         row["status"] = status
-        if status in ("failed", "missing"):
-            row["note"] = f"skipped: variant status is {status}"
+        if v.get("group"):
+            row["group"] = v["group"]
+        if v.get("note"):
+            row["note"] = str(v["note"])
+        if status in ("failed", "missing", "skipped"):
+            why = v.get("reason") or f"variant status is {status}"
+            row["note"] = f"skipped: {why}" + (f" | {v['note']}" if v.get("note") else "")
         else:
             usable.append(v)
         variants_out.append(row)

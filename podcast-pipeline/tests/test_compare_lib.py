@@ -213,7 +213,8 @@ def test_build_schema_and_values(manifest):
     m = f["metrics"]["dfn3"]
     assert set(m) == {"audio", "diarization", "separation", "asr"}
     assert set(m["audio"]) == {"noise_floor_db", "gated_frame_pct", "lag_samples", "corr_with_raw",
-                               "hf_energy_ratio", "length_equal", "ecapa_cos"}
+                               "hf_energy_ratio", "length_equal", "ecapa_cos", "learned_mos",
+                               "learned_mos_delta"}
     assert set(m["asr"]) == {"n_words", "n_segments", "empty_segments", "words_per_sec",
                              "wer_vs_baseline", "wer_vs_reference", "words_in_quiet_frames"}
     assert m["audio"]["lag_samples"] == 0 and m["audio"]["corr_with_raw"] == pytest.approx(1.0)
@@ -252,3 +253,14 @@ def test_words_in_quiet_frames(tmp_path):
     segs = [{"start": 0, "end": 2, "speaker": "A", "text": "a b",
              "words": [{"word": "a", "start": 0.1, "end": 0.5}, {"word": "b", "start": 1.2, "end": 1.8}]}]
     assert M.asr_metrics(segs, str(p))["words_in_quiet_frames"] == 1
+
+
+def test_group_note_and_skipped_reason_pass_through(manifest):
+    m = json.loads(open(manifest).read())
+    m["variants"][1].update({"group": "masking", "note": "listen first"})
+    m["variants"][2].update({"status": "skipped", "reason": "dbs_tiger: DBS_TIGER_DIR is not set", "group": "analysis_only"})
+    json.dump(m, open(manifest, "w"))
+    v = {x["id"]: x for x in build_compare_data(manifest, embed=False)["variants"]}
+    assert v["dfn3"]["group"] == "masking" and v["dfn3"]["note"] == "listen first"
+    assert "group" not in v["none"] and "note" not in v["none"]
+    assert v["bad"]["status"] == "skipped" and "DBS_TIGER_DIR" in v["bad"]["note"] and v["bad"]["group"] == "analysis_only"

@@ -227,7 +227,9 @@ def _chips(variants, base):
                           quote=True)
         cls = "chip base" if v["id"] == base else "chip"
         out.append(f'<button type="button" class="{cls}" data-vid="{vid}" title="{tip}" '
-                   f'aria-pressed="false">{label}</button>')
+                   f'aria-pressed="false">{label}'
+                   + (f' <span class="grp">{html.escape(str(v["group"]))}</span>' if v.get("group") else "")
+                   + '</button>')
     return "".join(out)
 
 
@@ -358,6 +360,9 @@ var TIPS = {
   "speakers.der_vs_baseline": "Diarization error rate against the baseline diarization, not against ground truth.",
   "speakers.disagree_seconds": "Seconds where the variant's speaker differs from the baseline."
 };
+var MOS_KEYS = ["mos", "dnsmos_ovrl", "scoreq", "utmos", "nisqa_mos"];
+var MOS_TIP = "Learned predictor (distilled DNSMOS/UTMOS/NISQA/SCOREQ plus a human-MOS head), 16 kHz so blind above 8 kHz. " +
+  "It can reward hallucinated output. Delta only, never a gate: read it next to wer_vs_baseline and ecapa_cos.";
 var ORDER = {
   audio: ["noise_floor_db", "gated_frame_pct", "lag_samples", "corr_with_raw", "hf_energy_ratio", "length_equal", "ecapa_cos"],
   diarization: ["n_speakers", "n_segments", "overlap_seconds", "median_segment_s", "short_segments_lt_0_5s"],
@@ -498,7 +503,7 @@ function metricKeys(sec) {
     D.variants.forEach(function (v) {
       var o = sec === "speakers" ? get(f, ["speakers", v.id]) : get(f, ["metrics", v.id, sec]);
       if (o && typeof o === "object") Object.keys(o).forEach(function (k) {
-        if (k === "label_map" || k === "disagree_ranges" || k === "speaker_seconds") return;
+        if (k === "label_map" || k === "disagree_ranges" || k === "speaker_seconds" || k === "learned_mos" || k === "learned_mos_delta") return;
         if (ORDER[sec].indexOf(k) < 0 && !seen[k]) { seen[k] = 1; extra.push(k); }
       });
     });
@@ -521,6 +526,26 @@ function metricValue(sec, k, vid, mode, f) {
   return mean((D.files || []).map(function (ff) {
     return sec === "speakers" ? get(ff, ["speakers", vid, k]) : get(ff, ["metrics", vid, sec, k]);
   }));
+}
+/* informational block: learned MOS delta vs raw (absent in old data files) */
+function mosHtml(mode, f, vars, bi) {
+  if (!hasMetric("audio", "learned_mos_delta") && !hasMetric("audio", "learned_mos")) return "";
+  function val(vid, k) {
+    if (mode === "file") return get(f, ["metrics", vid, "audio", "learned_mos_delta", k]);
+    var s = get(D.summary, [vid, "audio.learned_mos_delta." + k]);
+    if (isNum(s)) return s;
+    return mean((D.files || []).map(function (ff) { return get(ff, ["metrics", vid, "audio", "learned_mos_delta", k]); }));
+  }
+  var head = vars.map(function (v) { return "<th" + (v.id === D.baseline ? ' class="basecol"' : "") + ">" + esc(v.label || v.id) + "</th>"; }).join("");
+  var rows = MOS_KEYS.map(function (k) {
+    var cells = vars.map(function (v, i) {
+      var x = val(v.id, k);
+      return '<td class="num' + (i === bi ? " basecol" : "") + '">' + esc(isNum(x) ? fmtDelta(x) || "0" : DASH) + "</td>";
+    }).join("");
+    return '<tr><th scope="row" title="' + esc(MOS_TIP) + '">' + esc(k) + ' <small class="dir">informative</small></th>' + cells + "</tr>";
+  }).join("");
+  return '<h3 title="' + esc(MOS_TIP) + '">Learned MOS (delta vs raw, informational)</h3><p class="empty">' + esc(MOS_TIP) +
+    '</p><div class="scroll"><table class="mt mos"><thead><tr><th>metric</th>' + head + "</tr></thead><tbody>" + rows + "</tbody></table></div>";
 }
 function miniBars(vals, baseIdx) {
   var nums = vals.filter(isNum), mx = Math.max.apply(null, nums.map(Math.abs).concat([1e-12]));
@@ -555,6 +580,7 @@ function metricsHtml(mode, f) {
         "<td>" + miniBars(vals, bi) + "</td></tr>";
     }).join("");
     out.push("<h3>" + esc(sd[1]) + '</h3><div class="scroll"><table class="mt"><thead><tr><th>metric</th>' + head + "<th>chart</th></tr></thead><tbody>" + rows + "</tbody></table></div>");
+    if (sec === "audio") out.push(mosHtml(mode, f, vars, bi));
   });
   return out.length ? out.join("") : '<p class="empty">No metrics in this data.</p>';
 }
@@ -891,6 +917,7 @@ button{cursor:pointer}button:hover{border-color:var(--accent)}
 .chips{display:flex;flex-wrap:wrap;gap:6px}
 .chip[aria-pressed=true]{background:var(--accent);border-color:var(--accent);color:#fff}
 .chip.base{border-style:dashed}
+.chip .grp{font-size:10px;opacity:.7;border:1px solid currentColor;border-radius:8px;padding:0 4px;margin-left:4px}
 .banner{margin:8px 0 4px;padding:8px 12px;border-left:4px solid var(--k-missing);background:var(--panel2);font-size:13px;border-radius:4px}
 .scroll{overflow-x:auto}
 table{border-collapse:collapse;width:100%}

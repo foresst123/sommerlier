@@ -8,7 +8,13 @@ different variants never collide and nothing is written into the user's audio di
 The baseline command carries no --denoise, so it is the pipeline's old behaviour.
 
 variants.json: {"baseline": "none", "variants": [{"chain": "none"}, {"chain": "dfn3"},
-                {"chain": "dfn3>mf2se48", "label": "DFN3 then MF2SE"}]}
+                {"chain": "dfn3>mf2se48", "label": "DFN3 then MF2SE", "group": "chains",
+                 "note": "free text shown as the chip tooltip"}]}
+
+--only-available skips (never silently) every variant whose chain names a backend that
+models.denoise.available_backends() reports unusable here: status "skipped" plus the reason in
+variants_manifest.json and in the console summary. --groups a,b runs only variants whose
+"group" is listed (the baseline always runs).
 
 Output: OUT/<variant id>/<file stem>/{01_music,01b_denoise,02_diarization,...},
 OUT/logs/<variant id>.log, OUT/<variant id>/.done, OUT/variants_manifest.json.
@@ -84,7 +90,7 @@ def _denoise_helpers():
 
 
 def load_variants(path):
-    """Return variants [{id, chain, label, spec}], baseline first, deduplicated."""
+    """Return variants [{id, chain, label, spec, group, note}], baseline first, deduplicated."""
     parse_chain, chain_id = _denoise_helpers()
     data = {}
     if path:
@@ -103,10 +109,47 @@ def load_variants(path):
         seen.add(vid)
         out.append({"id": vid, "chain": list(chain),
                     "label": entry.get("label") or vid,
-                    "spec": ">".join(chain)})
+                    "spec": ">".join(chain),
+                    "group": entry.get("group") or None,
+                    "note": entry.get("note") or None})
     if out[0]["id"] != "none":
-        out.insert(0, {"id": "none", "chain": [], "label": "none", "spec": ""})
+        out.insert(0, {"id": "none", "chain": [], "label": "none", "spec": "", "group": None, "note": None})
     return out
+
+
+def filter_groups(variants, groups):
+    """Keep the baseline and variants whose group is in `groups` (a list of names); no groups = keep all."""
+    wanted = {g.strip() for g in (groups or []) if g.strip()}
+    if not wanted:
+        return variants
+    known = {v["group"] for v in variants if v.get("group")}
+    unknown = wanted - known
+    if unknown:
+        raise SystemExit(f"unknown group(s) {sorted(unknown)}; the variants file has {sorted(known)}")
+    return [v for v in variants if v["id"] == "none" or v.get("group") in wanted]
+
+
+def check_availability(variants, cfg=None):
+    """Return {variant id: reason} for variants whose chain has a backend that is unusable here."""
+    try:
+        sys.path.insert(0, str(ROOT))
+        from models.denoise import available_backends
+        avail = available_backends(cfg)
+    except Exception as exc:
+        raise SystemExit(f"--only-available needs models.denoise to be importable: {exc!r}")
+    finally:
+        if sys.path and sys.path[0] == str(ROOT):
+            sys.path.pop(0)
+    skipped = {}
+    for v in variants:
+        reasons = []
+        for name in v["chain"]:
+            ok, why = avail.get(name, (False, "unknown backend (not in the registry)"))
+            if not ok:
+                reasons.append(f"{name}: {why}")
+        if reasons:
+            skipped[v["id"]] = "; ".join(reasons)
+    return skipped
 
 
 # ---------------------------------------------------------------------- files
@@ -196,7 +239,7 @@ def write_json_atomic(path, data):
     os.replace(tmp, path)
 
 
-def write_manifest(out_root, variants, stems, status, reference):
+def write_manifest(out_root, variants, stems, status, reference, reasons=None):
     entries = []
     for v in variants:
         vdir = Path(out_root) / v["id"]
@@ -204,6 +247,8 @@ def write_manifest(out_root, variants, stems, status, reference):
             "id": v["id"], "chain": v["chain"], "label": v["label"],
             "out_dir": str(vdir.resolve()), "job_id": f"exp-{v['id']}",
             "status": status.get(v["id"], "missing"),
+            "group": v.get("group"), "note": v.get("note"),
+            "reason": (reasons or {}).get(v["id"]),
             "files": discover_dirs(vdir, stems)})
     write_json_atomic(Path(out_root) / MANIFEST_NAME, {
         "version": 1, "baseline": "none",
@@ -229,11 +274,12 @@ def build_reference(stems, reference_dir, pairs):
 
 # --------------------------------------------------------------------- runner
 class Runner:
-    def __init__(self, args, variants, files):
+    def __init__(self, args, variants, files, skipped=None):
         self.args, self.variants, self.files = args, variants, files
+        self.skipped = dict(skipped or {})
         self.stems = [f.stem for f in files]
         self.out_root = Path(args.out_root)
-        self.status = {}
+        self.status = {vid: "skipped" for vid in self.skipped}
         self.procs = set()
         self.lock = threading.Lock()
         self.stop = threading.Event()
@@ -244,7 +290,7 @@ class Runner:
     def _manifest(self):
         with self.lock:
             write_manifest(self.out_root, self.variants, set(self.stems),
-                           self.status, self.reference)
+                           self.status, self.reference, self.skipped)
 
     def terminate_all(self, *_):
         self.stop.set()
@@ -259,7 +305,7 @@ class Runner:
     def run_one(self, index, variant):
         a = self.args
         vdir = self.out_root / variant["id"]
-        if self.stop.is_set():
+        if self.stop.is_set() or variant["id"] in self.skipped:
             return
         input_dir = vdir / "input"
         link_inputs(input_dir, self.files)
@@ -282,7 +328,8 @@ class Runner:
         log_path = self.out_root / "logs" / f"{variant['id']}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         t0, code = time.time(), None
-        print(f"[{variant['id']}] start (gpu={env.get('CUDA_VISIBLE_DEVICES', '-')}) "
+        grp = f" group={variant['group']}" if variant.get("group") else ""
+        print(f"[{variant['id']}] start{grp} (gpu={env.get('CUDA_VISIBLE_DEVICES', '-')}) "
               f"log={log_path}", flush=True)
         with open(log_path, "w", encoding="utf-8") as log:
             log.write("$ " + " ".join(cmd) + "\n")
@@ -356,6 +403,9 @@ def parse_args(argv=None):
     p.add_argument("--parallel", type=int, default=1)
     p.add_argument("--resume", action="store_true")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--only-available", action="store_true",
+                   help="skip (and record as skipped, with the reason) variants whose chain has an unusable backend")
+    p.add_argument("--groups", default="", help="comma list of variant groups to run (baseline always runs)")
     p.add_argument("--main", default=str(ROOT / "main.py"))
     p.add_argument("--cwd", default=None, help="working dir for main (default: its folder)")
     p.add_argument("--reference-dir")
@@ -374,18 +424,25 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
-    variants = load_variants(args.variants)
+    variants = filter_groups(load_variants(args.variants), args.groups.split(","))
     files = collect_files(args.audio_dir, args.files)
+    skipped = check_availability(variants) if args.only_available else {}
+    for vid, why in skipped.items():
+        print(f"[{vid}] SKIPPED (not available here): {why}", flush=True)
     if args.dry_run:
         for i, v in enumerate(variants):
+            if v["id"] in skipped:
+                continue
             gpu = args.gpus.split(",")[i % len(args.gpus.split(","))] if args.gpus else "-"
             print(f"[{v['id']}] CUDA_VISIBLE_DEVICES={gpu} " +
                   shlex.join(build_command(v, files, args)))
         return 0
-    status = Runner(args, variants, files).run()
+    status = Runner(args, variants, files, skipped).run()
     print(json.dumps(status))
+    if skipped:
+        print(f"skipped {len(skipped)} variant(s): {', '.join(skipped)} (reasons in the manifest)")
     print(f"manifest: {Path(args.out_root) / MANIFEST_NAME}")
-    return 0 if all(s == "ok" for s in status.values()) else 1
+    return 0 if all(s in ("ok", "skipped") for s in status.values()) else 1
 
 
 if __name__ == "__main__":
