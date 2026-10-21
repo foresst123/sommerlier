@@ -392,6 +392,8 @@ def validate_with_lhotse(path: str) -> List[Violation]:
         return []
     try:
         cuts = CutSet.from_file(path)
+        if cuts is None:            # lhotse returns None for a manifest with no cuts
+            return []
         for cut in cuts:
             for sup in cut.supervisions:
                 _ = (sup.id, sup.start, sup.duration, sup.channel)
@@ -417,12 +419,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         else:
             paths.append(item)
     cuts = [0]
+    empty: List[str] = []
 
     def counted():
         for path in paths:
+            n = 0
             for cut in iter_cuts(path):
+                n += 1
                 cuts[0] += 1
                 yield cut
+            if not n:
+                empty.append(os.path.basename(path))
 
     violations = validate_cuts(counted())
     if not args.no_lhotse:
@@ -437,6 +444,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"\n{len(paths)} files, {cuts[0]} cuts checked, {len(violations)} violations in {bad_cuts} cuts")
     for code, n in sorted(Counter(v.code for v in violations).items()):
         print(f"  {code}: {n}")
+    if empty:
+        print(f"note: {len(empty)} files have no cuts (not counted as violations), e.g. {empty[0]}")
     return 1 if violations else 0
 
 

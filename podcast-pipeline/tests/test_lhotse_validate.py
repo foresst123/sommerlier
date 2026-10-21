@@ -306,3 +306,11 @@ def test_validate_with_lhotse_loads_a_valid_manifest(tmp_path):
 def test_validate_with_lhotse_without_lhotse_is_empty(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "lhotse", None)       # makes `import lhotse` raise ImportError
     assert validate_with_lhotse(str(tmp_path / "missing.jsonl")) == []
+
+
+def test_cli_empty_manifest_is_a_note_not_a_violation(tmp_path, capsys):
+    from utils.lhotse_validate import main
+    (tmp_path / "empty.jsonl").write_text("", encoding="utf-8")
+    assert main([str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "0 violations" in out and "1 files have no cuts" in out
