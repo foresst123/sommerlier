@@ -218,3 +218,11 @@ Không có ground truth thì **"khác" không có nghĩa là "tốt hơn"**. `we
 - `run_variants.py` dùng `os.killpg` và `start_new_session`, chỉ chạy trên Linux/macOS, không chạy trên Windows.
 - Thời gian trong trang là trên timeline đã cắt nhạc, cùng hệ với các thư mục `0x_*`.
 - Biến thể baseline không truyền `--denoise`; nếu profile đặt `pipeline.denoise` khác `none` thì baseline sẽ không còn là "không lọc".
+
+## Xử lý sự cố: lần chạy "đứng im" ở dòng `start`
+
+`run_variants.py` chỉ in dòng bắt đầu và dòng kết thúc của mỗi biến thể; mọi tiến trình thật nằm trong `OUT/logs/<id>.log`. Xem `tail -f` file đó.
+
+Nếu log chỉ có đúng dòng lệnh, `[bootstrap] main environment OK` và `Output folder (clean two-channel data):`, thì `main.py` đang chờ bạn trả lời câu hỏi tương tác (`utils/env_bootstrap.ask_paths` hỏi thư mục khi stdin là terminal). Các phiên bản trước của bộ chạy để tiến trình con dùng chung terminal nên nó chờ Enter ở cửa sổ chạy lệnh. Từ commit sửa lỗi này, tiến trình con nhận `stdin=/dev/null` (không còn hỏi) và mọi lệnh đều kèm `--set outputs.clean_two_channel_dir=""` để lần chạy so sánh không ghi vào thư mục dữ liệu sạch dùng chung. Một biến thể vẫn có thể ghi đè bằng `set` riêng. Nếu thiếu `HF_TOKEN` mà một mô hình cần, tiến trình con sẽ báo lỗi ngay thay vì chờ nhập.
+
+Chọn GPU: `--gpus` gán MỘT GPU cho mỗi biến thể (vòng tròn). Profile a100 ánh xạ model vào hai GPU (`gpu_1: 0`, `gpu_2: 1`), nên với một lần chạy riêng lẻ hãy bỏ `--gpus` và đặt `CUDA_VISIBLE_DEVICES=2,3 python tools/run_variants.py ...` trên hai GPU còn trống.

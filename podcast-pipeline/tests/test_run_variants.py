@@ -237,6 +237,41 @@ def test_duplicate_and_unsafe_ids_fail_early(env):
         rv.load_variants(var)
 
 
+NO_EXPORT = 'outputs.clean_two_channel_dir=""'
+
+
+def test_every_command_keeps_the_run_out_of_the_shared_export_folder(env):
+    _, _, _, var = env
+    write_var(var, [{"chain": "dfn3"}])
+    args = rv.parse_args(argv(env))
+    for v in rv.load_variants(var):
+        cmd = rv.build_command(v, [], args)
+        assert cmd[cmd.index("--set") + 1] == NO_EXPORT
+
+
+def test_variant_can_override_the_export_default(env):
+    _, _, _, var = env
+    write_var(var, [{"chain": "dfn3", "set": {"outputs.clean_two_channel_dir": "/x/out"}}])
+    cmd = rv.build_command(rv.load_variants(var)[1], [], rv.parse_args(argv(env)))
+    sets = [cmd[i + 1] for i, c in enumerate(cmd) if c == "--set"]
+    assert sets == [NO_EXPORT, 'outputs.clean_two_channel_dir="/x/out"']   # later one wins
+
+
+def test_child_does_not_inherit_the_terminal_stdin(env, monkeypatch):
+    """main.py prompts for folders when stdin is a tty; the runner must hand it /dev/null."""
+    import subprocess
+    seen = {}
+    real = subprocess.Popen
+
+    def spy(cmd, **kw):
+        seen["stdin"] = kw.get("stdin")
+        return real(cmd, **kw)
+
+    monkeypatch.setattr(rv.subprocess, "Popen", spy)
+    assert rv.main(argv(env, "--only-ids", "none")) in (0, None)
+    assert seen["stdin"] == subprocess.DEVNULL
+
+
 def test_command_has_set_music_separator_extra_args(env):
     _, _, _, var = env
     write_var(var, [{"chain": "dfn3", "music_separator": "m.ckpt", "extra_args": "--bss",
@@ -246,10 +281,11 @@ def test_command_has_set_music_separator_extra_args(env):
     cmd = rv.build_command(v, [], args)
     assert cmd[cmd.index("--music_separator") + 1] == "m.ckpt"
     sets = [cmd[i + 1] for i, c in enumerate(cmd) if c == "--set"]
-    assert sets == ['steps.music_removal=false', 'models.bs_roformer.model="x y.ckpt"']
+    assert sets == [NO_EXPORT, 'steps.music_removal=false', 'models.bs_roformer.model="x y.ckpt"']
     assert cmd[-1] == "--bss"
     base = rv.build_command(rv.load_variants(var)[0], [], args)
-    assert "--set" not in base and "--music_separator" not in base
+    assert [base[i + 1] for i, c in enumerate(base) if c == "--set"] == [NO_EXPORT]
+    assert "--music_separator" not in base
 
 
 def test_dry_run_quotes_set_and_done_hash_depends_on_overrides(env, capsys, tmp_path):

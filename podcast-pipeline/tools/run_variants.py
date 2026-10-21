@@ -329,6 +329,9 @@ def build_command(variant, files, args, input_dir=None):
         cmd += ["--denoise", variant["spec"]]
     if variant.get("music_separator"):
         cmd += ["--music_separator", str(variant["music_separator"])]
+    # A comparison run is not a dataset export: keep it out of the shared clean-data folder.
+    # Placed before the variant's own settings, so a variant can still override it.
+    cmd += ["--set", 'outputs.clean_two_channel_dir=""']
     for key, val in (variant.get("set") or {}).items():
         cmd += ["--set", f"{key}={json.dumps(val, ensure_ascii=False)}"]
     cmd += list(variant.get("extra_args") or [])
@@ -532,8 +535,11 @@ class Runner:
             log.write("$ " + " ".join(cmd) + "\n")
             log.flush()
             try:
-                proc = subprocess.Popen(cmd, cwd=a.cwd, env=env, stdout=log,
-                                        stderr=subprocess.STDOUT, start_new_session=True)
+                # stdin=DEVNULL: main.py asks for folders on a terminal (utils/env_bootstrap.ask_paths)
+                # and would otherwise wait for Enter on ours while the log shows only the prompt.
+                proc = subprocess.Popen(cmd, cwd=a.cwd, env=env, stdin=subprocess.DEVNULL,
+                                        stdout=log, stderr=subprocess.STDOUT,
+                                        start_new_session=True)
             except OSError as exc:
                 log.write(f"could not start: {exc}\n")
                 self.status[variant["id"]] = "failed"

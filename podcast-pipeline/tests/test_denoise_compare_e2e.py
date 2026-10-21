@@ -19,6 +19,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 
+NO_EXPORT = 'outputs.clean_two_channel_dir=""'   # run_variants keeps comparison runs out of the shared export folder
+
+
 def _load(name, rel):
     spec = importlib.util.spec_from_file_location(name, ROOT / rel)
     mod = importlib.util.module_from_spec(spec)
@@ -313,14 +316,14 @@ def test_ctrl_music_and_pipe_blend_with_a_mocked_availability(tmp_path, monkeypa
     # blend steps are pseudo: dfn3>blend50 is runnable although no backend is called blend50
     assert st["dfn3+blend50"]["status"] in ("ok", "degraded") and not st["dfn3+blend50"].get("reason")
     c = _calls(out, "none.music-scope-spans")
-    assert c["set"] == ['pipeline.music_scope="spans"'] and "--denoise" not in c["argv"]
+    assert c["set"] == [NO_EXPORT, 'pipeline.music_scope="spans"'] and "--denoise" not in c["argv"]
     c = _calls(out, "none.music-removal-off")
-    assert c["set"] == ["steps.music_removal=false"]
+    assert c["set"] == [NO_EXPORT, "steps.music_removal=false"]
     sep = next(v for v in m["variants"] if v["tag"] == "sep-kim")
     c = _calls(out, sep["id"])
     assert c["music_separator"] == "mel_band_roformer_kim_ft2_bleedless_unwa.ckpt" and "--denoise" in c["argv"]
     c = _calls(out, "dfn3+mf2se48+blend50")
-    assert c["set"] == [] and c["argv"][c["argv"].index("--denoise") + 1] == "dfn3>mf2se48>blend50"
+    assert c["set"] == [NO_EXPORT] and c["argv"][c["argv"].index("--denoise") + 1] == "dfn3>mf2se48>blend50"
     # the blend actually ran in the real DenoiseService (backends may fall back, errors recorded)
     den = json.loads((Path(st["dfn3+blend50"]["files"]["a"]) / "01b_denoise" / "denoise.json").read_text())
     assert den["chain"] == ["dfn3", "blend50"]
