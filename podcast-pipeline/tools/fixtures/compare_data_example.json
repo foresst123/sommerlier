@@ -1,0 +1,1912 @@
+{
+ "version": 1,
+ "baseline": "none",
+ "variants": [
+  {
+   "id": "none",
+   "chain": [],
+   "label": "No filter",
+   "note": "baseline"
+  },
+  {
+   "id": "dfn3",
+   "chain": [
+    "dfn3"
+   ],
+   "label": "DeepFilterNet3"
+  },
+  {
+   "id": "mf2se48",
+   "chain": [
+    "mf2se48"
+   ],
+   "label": "MossFormer2 SE 48k"
+  },
+  {
+   "id": "dfn3+mf2se48",
+   "chain": [
+    "dfn3",
+    "mf2se48"
+   ],
+   "label": "DFN3 > MF2-SE48",
+   "note": "serial chain"
+  }
+ ],
+ "files": [
+  {
+   "name": "tap_01",
+   "duration": 19.8,
+   "audio": {
+    "raw": "/tmp/compare_fixture/tap_01_raw.wav",
+    "none": "/tmp/compare_fixture/tap_01_raw.wav",
+    "dfn3": "/tmp/compare_fixture/tap_01_dfn3.wav",
+    "mf2se48": "/tmp/compare_fixture/tap_01_mf2se48.wav",
+    "dfn3+mf2se48": "/tmp/compare_fixture/tap_01_dfn3_mf2se48.wav"
+   },
+   "text": {
+    "none": {
+     "segments": [
+      {
+       "start": 0.0,
+       "end": 4.2,
+       "speaker": "S1",
+       "text": "Chào các bạn, hôm nay chúng ta nói về cà phê rang xay"
+      },
+      {
+       "start": 4.5,
+       "end": 9.0,
+       "speaker": "S2",
+       "text": "Vâng, mình thấy cà phê Đà Lạt có vị chua nhẹ rất đặc biệt"
+      },
+      {
+       "start": 9.4,
+       "end": 13.5,
+       "speaker": "S1",
+       "text": "Đúng rồi, nhưng giá thì hơi cao so với Buôn Ma Thuột"
+      },
+      {
+       "start": 14.0,
+       "end": 19.5,
+       "speaker": "S2",
+       "text": "Mình nghĩ người uống nên thử nhiều loại trước khi chọn"
+      }
+     ],
+     "full_text": "Chào các bạn, hôm nay chúng ta nói về cà phê rang xay Vâng, mình thấy cà phê Đà Lạt có vị chua nhẹ rất đặc biệt Đúng rồi, nhưng giá thì hơi cao so với Buôn Ma Thuột Mình nghĩ người uống nên thử nhiều loại trước khi chọn"
+    },
+    "dfn3": {
+     "segments": [
+      {
+       "start": 0.0,
+       "end": 4.2,
+       "speaker": "A",
+       "text": "Chào các bạn, hôm nay chúng ta nói về cà phê rang xay"
+      },
+      {
+       "start": 4.5,
+       "end": 9.0,
+       "speaker": "B",
+       "text": "Vâng mình thấy cà phê Đà Lạt có vị chua nhẹ rất đặc biệt"
+      },
+      {
+       "start": 9.4,
+       "end": 13.5,
+       "speaker": "A",
+       "text": "Đúng rồi, nhưng giá thì hơi cao so với Buôn Ma Thuột"
+      },
+      {
+       "start": 14.0,
+       "end": 19.5,
+       "speaker": "B",
+       "text": "Mình nghĩ người uống nên thử nhiều loại trước khi chọn nhé"
+      }
+     ],
+     "full_text": "Chào các bạn, hôm nay chúng ta nói về cà phê rang xay Vâng mình thấy cà phê Đà Lạt có vị chua nhẹ rất đặc biệt Đúng rồi, nhưng giá thì hơi cao so với Buôn Ma Thuột Mình nghĩ người uống nên thử nhiều loại trước khi chọn nhé"
+    },
+    "mf2se48": {
+     "segments": [
+      {
+       "start": 0.0,
+       "end": 4.2,
+       "speaker": "A",
+       "text": "Chào các bạn hôm nay chúng ta nói về cà phê rang xay"
+      },
+      {
+       "start": 4.5,
+       "end": 9.0,
+       "speaker": "B",
+       "text": "Vâng mình thấy cà phê Đà Lạt có vị chua rất đặc biệt"
+      },
+      {
+       "start": 9.4,
+       "end": 13.5,
+       "speaker": "C",
+       "text": "Đúng rồi nhưng giá thì cao so với Buôn Ma Thuột"
+      },
+      {
+       "start": 14.0,
+       "end": 19.5,
+       "speaker": "B",
+       "text": "Mình nghĩ người uống thử nhiều loại trước khi chọn"
+      }
+     ],
+     "full_text": "Chào các bạn hôm nay chúng ta nói về cà phê rang xay Vâng mình thấy cà phê Đà Lạt có vị chua rất đặc biệt Đúng rồi nhưng giá thì cao so với Buôn Ma Thuột Mình nghĩ người uống thử nhiều loại trước khi chọn"
+    },
+    "dfn3+mf2se48": {
+     "segments": [
+      {
+       "start": 0.0,
+       "end": 4.2,
+       "speaker": "A",
+       "text": "Chào các bạn, hôm nay chúng ta nói về cà phê rang xay"
+      },
+      {
+       "start": 4.5,
+       "end": 9.0,
+       "speaker": "B",
+       "text": "Vâng, mình thấy cà phê Đà Lạt có vị chua nhẹ rất đặc biệt"
+      },
+      {
+       "start": 9.4,
+       "end": 13.5,
+       "speaker": "A",
+       "text": "Đúng rồi nhưng giá thì hơi cao so với Buôn Mê Thuột"
+      },
+      {
+       "start": 14.0,
+       "end": 19.5,
+       "speaker": "B",
+       "text": "Mình nghĩ người uống nên thử nhiều loại trước khi chọn"
+      }
+     ],
+     "full_text": "Chào các bạn, hôm nay chúng ta nói về cà phê rang xay Vâng, mình thấy cà phê Đà Lạt có vị chua nhẹ rất đặc biệt Đúng rồi nhưng giá thì hơi cao so với Buôn Mê Thuột Mình nghĩ người uống nên thử nhiều loại trước khi chọn"
+    }
+   },
+   "text_diff": {
+    "dfn3": {
+     "wer_vs_baseline": 0.04,
+     "ops": {
+      "sub": 1,
+      "ins": 1,
+      "del": 0,
+      "equal": 49
+     },
+     "wer_vs_reference": null,
+     "segments": [
+      {
+       "start": 0.0,
+       "end": 4.2,
+       "baseline_text": "Chào các bạn, hôm nay chúng ta nói về cà phê rang xay",
+       "variant_text": "Chào các bạn, hôm nay chúng ta nói về cà phê rang xay",
+       "ops": [
+        [
+         "equal",
+         "Chào"
+        ],
+        [
+         "equal",
+         "các"
+        ],
+        [
+         "equal",
+         "bạn,"
+        ],
+        [
+         "equal",
+         "hôm"
+        ],
+        [
+         "equal",
+         "nay"
+        ],
+        [
+         "equal",
+         "chúng"
+        ],
+        [
+         "equal",
+         "ta"
+        ],
+        [
+         "equal",
+         "nói"
+        ],
+        [
+         "equal",
+         "về"
+        ],
+        [
+         "equal",
+         "cà"
+        ],
+        [
+         "equal",
+         "phê"
+        ],
+        [
+         "equal",
+         "rang"
+        ],
+        [
+         "equal",
+         "xay"
+        ]
+       ],
+       "wer": 0.0
+      },
+      {
+       "start": 4.5,
+       "end": 9.0,
+       "baseline_text": "Vâng, mình thấy cà phê Đà Lạt có vị chua nhẹ rất đặc biệt",
+       "variant_text": "Vâng mình thấy cà phê Đà Lạt có vị chua nhẹ rất đặc biệt",
+       "ops": [
+        [
+         "sub",
+         "Vâng,",
+         "Vâng"
+        ],
+        [
+         "equal",
+         "mình"
+        ],
+        [
+         "equal",
+         "thấy"
+        ],
+        [
+         "equal",
+         "cà"
+        ],
+        [
+         "equal",
+         "phê"
+        ],
+        [
+         "equal",
+         "Đà"
+        ],
+        [
+         "equal",
+         "Lạt"
+        ],
+        [
+         "equal",
+         "có"
+        ],
+        [
+         "equal",
+         "vị"
+        ],
+        [
+         "equal",
+         "chua"
+        ],
+        [
+         "equal",
+         "nhẹ"
+        ],
+        [
+         "equal",
+         "rất"
+        ],
+        [
+         "equal",
+         "đặc"
+        ],
+        [
+         "equal",
+         "biệt"
+        ]
+       ],
+       "wer": 0.071
+      },
+      {
+       "start": 9.4,
+       "end": 13.5,
+       "baseline_text": "Đúng rồi, nhưng giá thì hơi cao so với Buôn Ma Thuột",
+       "variant_text": "Đúng rồi, nhưng giá thì hơi cao so với Buôn Ma Thuột",
+       "ops": [
+        [
+         "equal",
+         "Đúng"
+        ],
+        [
+         "equal",
+         "rồi,"
+        ],
+        [
+         "equal",
+         "nhưng"
+        ],
+        [
+         "equal",
+         "giá"
+        ],
+        [
+         "equal",
+         "thì"
+        ],
+        [
+         "equal",
+         "hơi"
+        ],
+        [
+         "equal",
+         "cao"
+        ],
+        [
+         "equal",
+         "so"
+        ],
+        [
+         "equal",
+         "với"
+        ],
+        [
+         "equal",
+         "Buôn"
+        ],
+        [
+         "equal",
+         "Ma"
+        ],
+        [
+         "equal",
+         "Thuột"
+        ]
+       ],
+       "wer": 0.0
+      },
+      {
+       "start": 14.0,
+       "end": 19.5,
+       "baseline_text": "Mình nghĩ người uống nên thử nhiều loại trước khi chọn",
+       "variant_text": "Mình nghĩ người uống nên thử nhiều loại trước khi chọn nhé",
+       "ops": [
+        [
+         "equal",
+         "Mình"
+        ],
+        [
+         "equal",
+         "nghĩ"
+        ],
+        [
+         "equal",
+         "người"
+        ],
+        [
+         "equal",
+         "uống"
+        ],
+        [
+         "equal",
+         "nên"
+        ],
+        [
+         "equal",
+         "thử"
+        ],
+        [
+         "equal",
+         "nhiều"
+        ],
+        [
+         "equal",
+         "loại"
+        ],
+        [
+         "equal",
+         "trước"
+        ],
+        [
+         "equal",
+         "khi"
+        ],
+        [
+         "equal",
+         "chọn"
+        ],
+        [
+         "ins",
+         "nhé"
+        ]
+       ],
+       "wer": 0.091
+      }
+     ]
+    },
+    "mf2se48": {
+     "wer_vs_baseline": 0.12,
+     "ops": {
+      "sub": 3,
+      "ins": 0,
+      "del": 3,
+      "equal": 44
+     },
+     "wer_vs_reference": null,
+     "segments": [
+      {
+       "start": 0.0,
+       "end": 4.2,
+       "baseline_text": "Chào các bạn, hôm nay chúng ta nói về cà phê rang xay",
+       "variant_text": "Chào các bạn hôm nay chúng ta nói về cà phê rang xay",
+       "ops": [
+        [
+         "equal",
+         "Chào"
+        ],
+        [
+         "equal",
+         "các"
+        ],
+        [
+         "sub",
+         "bạn,",
+         "bạn"
+        ],
+        [
+         "equal",
+         "hôm"
+        ],
+        [
+         "equal",
+         "nay"
+        ],
+        [
+         "equal",
+         "chúng"
+        ],
+        [
+         "equal",
+         "ta"
+        ],
+        [
+         "equal",
+         "nói"
+        ],
+        [
+         "equal",
+         "về"
+        ],
+        [
+         "equal",
+         "cà"
+        ],
+        [
+         "equal",
+         "phê"
+        ],
+        [
+         "equal",
+         "rang"
+        ],
+        [
+         "equal",
+         "xay"
+        ]
+       ],
+       "wer": 0.077
+      },
+      {
+       "start": 4.5,
+       "end": 9.0,
+       "baseline_text": "Vâng, mình thấy cà phê Đà Lạt có vị chua nhẹ rất đặc biệt",
+       "variant_text": "Vâng mình thấy cà phê Đà Lạt có vị chua rất đặc biệt",
+       "ops": [
+        [
+         "sub",
+         "Vâng,",
+         "Vâng"
+        ],
+        [
+         "equal",
+         "mình"
+        ],
+        [
+         "equal",
+         "thấy"
+        ],
+        [
+         "equal",
+         "cà"
+        ],
+        [
+         "equal",
+         "phê"
+        ],
+        [
+         "equal",
+         "Đà"
+        ],
+        [
+         "equal",
+         "Lạt"
+        ],
+        [
+         "equal",
+         "có"
+        ],
+        [
+         "equal",
+         "vị"
+        ],
+        [
+         "equal",
+         "chua"
+        ],
+        [
+         "del",
+         "nhẹ"
+        ],
+        [
+         "equal",
+         "rất"
+        ],
+        [
+         "equal",
+         "đặc"
+        ],
+        [
+         "equal",
+         "biệt"
+        ]
+       ],
+       "wer": 0.143
+      },
+      {
+       "start": 9.4,
+       "end": 13.5,
+       "baseline_text": "Đúng rồi, nhưng giá thì hơi cao so với Buôn Ma Thuột",
+       "variant_text": "Đúng rồi nhưng giá thì cao so với Buôn Ma Thuột",
+       "ops": [
+        [
+         "equal",
+         "Đúng"
+        ],
+        [
+         "sub",
+         "rồi,",
+         "rồi"
+        ],
+        [
+         "equal",
+         "nhưng"
+        ],
+        [
+         "equal",
+         "giá"
+        ],
+        [
+         "equal",
+         "thì"
+        ],
+        [
+         "del",
+         "hơi"
+        ],
+        [
+         "equal",
+         "cao"
+        ],
+        [
+         "equal",
+         "so"
+        ],
+        [
+         "equal",
+         "với"
+        ],
+        [
+         "equal",
+         "Buôn"
+        ],
+        [
+         "equal",
+         "Ma"
+        ],
+        [
+         "equal",
+         "Thuột"
+        ]
+       ],
+       "wer": 0.167
+      },
+      {
+       "start": 14.0,
+       "end": 19.5,
+       "baseline_text": "Mình nghĩ người uống nên thử nhiều loại trước khi chọn",
+       "variant_text": "Mình nghĩ người uống thử nhiều loại trước khi chọn",
+       "ops": [
+        [
+         "equal",
+         "Mình"
+        ],
+        [
+         "equal",
+         "nghĩ"
+        ],
+        [
+         "equal",
+         "người"
+        ],
+        [
+         "equal",
+         "uống"
+        ],
+        [
+         "del",
+         "nên"
+        ],
+        [
+         "equal",
+         "thử"
+        ],
+        [
+         "equal",
+         "nhiều"
+        ],
+        [
+         "equal",
+         "loại"
+        ],
+        [
+         "equal",
+         "trước"
+        ],
+        [
+         "equal",
+         "khi"
+        ],
+        [
+         "equal",
+         "chọn"
+        ]
+       ],
+       "wer": 0.091
+      }
+     ]
+    },
+    "dfn3+mf2se48": {
+     "wer_vs_baseline": 0.04,
+     "ops": {
+      "sub": 2,
+      "ins": 0,
+      "del": 0,
+      "equal": 48
+     },
+     "wer_vs_reference": null,
+     "segments": [
+      {
+       "start": 0.0,
+       "end": 4.2,
+       "baseline_text": "Chào các bạn, hôm nay chúng ta nói về cà phê rang xay",
+       "variant_text": "Chào các bạn, hôm nay chúng ta nói về cà phê rang xay",
+       "ops": [
+        [
+         "equal",
+         "Chào"
+        ],
+        [
+         "equal",
+         "các"
+        ],
+        [
+         "equal",
+         "bạn,"
+        ],
+        [
+         "equal",
+         "hôm"
+        ],
+        [
+         "equal",
+         "nay"
+        ],
+        [
+         "equal",
+         "chúng"
+        ],
+        [
+         "equal",
+         "ta"
+        ],
+        [
+         "equal",
+         "nói"
+        ],
+        [
+         "equal",
+         "về"
+        ],
+        [
+         "equal",
+         "cà"
+        ],
+        [
+         "equal",
+         "phê"
+        ],
+        [
+         "equal",
+         "rang"
+        ],
+        [
+         "equal",
+         "xay"
+        ]
+       ],
+       "wer": 0.0
+      },
+      {
+       "start": 4.5,
+       "end": 9.0,
+       "baseline_text": "Vâng, mình thấy cà phê Đà Lạt có vị chua nhẹ rất đặc biệt",
+       "variant_text": "Vâng, mình thấy cà phê Đà Lạt có vị chua nhẹ rất đặc biệt",
+       "ops": [
+        [
+         "equal",
+         "Vâng,"
+        ],
+        [
+         "equal",
+         "mình"
+        ],
+        [
+         "equal",
+         "thấy"
+        ],
+        [
+         "equal",
+         "cà"
+        ],
+        [
+         "equal",
+         "phê"
+        ],
+        [
+         "equal",
+         "Đà"
+        ],
+        [
+         "equal",
+         "Lạt"
+        ],
+        [
+         "equal",
+         "có"
+        ],
+        [
+         "equal",
+         "vị"
+        ],
+        [
+         "equal",
+         "chua"
+        ],
+        [
+         "equal",
+         "nhẹ"
+        ],
+        [
+         "equal",
+         "rất"
+        ],
+        [
+         "equal",
+         "đặc"
+        ],
+        [
+         "equal",
+         "biệt"
+        ]
+       ],
+       "wer": 0.0
+      },
+      {
+       "start": 9.4,
+       "end": 13.5,
+       "baseline_text": "Đúng rồi, nhưng giá thì hơi cao so với Buôn Ma Thuột",
+       "variant_text": "Đúng rồi nhưng giá thì hơi cao so với Buôn Mê Thuột",
+       "ops": [
+        [
+         "equal",
+         "Đúng"
+        ],
+        [
+         "sub",
+         "rồi,",
+         "rồi"
+        ],
+        [
+         "equal",
+         "nhưng"
+        ],
+        [
+         "equal",
+         "giá"
+        ],
+        [
+         "equal",
+         "thì"
+        ],
+        [
+         "equal",
+         "hơi"
+        ],
+        [
+         "equal",
+         "cao"
+        ],
+        [
+         "equal",
+         "so"
+        ],
+        [
+         "equal",
+         "với"
+        ],
+        [
+         "equal",
+         "Buôn"
+        ],
+        [
+         "sub",
+         "Ma",
+         "Mê"
+        ],
+        [
+         "equal",
+         "Thuột"
+        ]
+       ],
+       "wer": 0.167
+      },
+      {
+       "start": 14.0,
+       "end": 19.5,
+       "baseline_text": "Mình nghĩ người uống nên thử nhiều loại trước khi chọn",
+       "variant_text": "Mình nghĩ người uống nên thử nhiều loại trước khi chọn",
+       "ops": [
+        [
+         "equal",
+         "Mình"
+        ],
+        [
+         "equal",
+         "nghĩ"
+        ],
+        [
+         "equal",
+         "người"
+        ],
+        [
+         "equal",
+         "uống"
+        ],
+        [
+         "equal",
+         "nên"
+        ],
+        [
+         "equal",
+         "thử"
+        ],
+        [
+         "equal",
+         "nhiều"
+        ],
+        [
+         "equal",
+         "loại"
+        ],
+        [
+         "equal",
+         "trước"
+        ],
+        [
+         "equal",
+         "khi"
+        ],
+        [
+         "equal",
+         "chọn"
+        ]
+       ],
+       "wer": 0.0
+      }
+     ]
+    }
+   },
+   "speakers": {
+    "dfn3": {
+     "n_speakers": 2,
+     "speaker_seconds": {
+      "A": 8.7,
+      "B": 9.4
+     },
+     "label_map": {
+      "A": "S1",
+      "B": "S2"
+     },
+     "disagree_seconds": 0.0,
+     "disagree_ranges": [],
+     "der_vs_baseline": 0.0
+    },
+    "mf2se48": {
+     "n_speakers": 3,
+     "speaker_seconds": {
+      "A": 8.1,
+      "B": 5.0,
+      "C": 4.4
+     },
+     "label_map": {
+      "A": "S1",
+      "B": "S2",
+      "C": "S2"
+     },
+     "disagree_seconds": 4.6,
+     "disagree_ranges": [
+      {
+       "start": 9.4,
+       "end": 13.5,
+       "baseline": "S1",
+       "variant": "C",
+       "kind": "swap"
+      },
+      {
+       "start": 13.9,
+       "end": 14.4,
+       "baseline": "S2",
+       "variant": null,
+       "kind": "missing"
+      },
+      {
+       "start": 6.0,
+       "end": 6.4,
+       "baseline": null,
+       "variant": "A",
+       "kind": "extra"
+      }
+     ],
+     "der_vs_baseline": 0.17
+    },
+    "dfn3+mf2se48": {
+     "n_speakers": 2,
+     "speaker_seconds": {
+      "A": 8.4,
+      "B": 9.2
+     },
+     "label_map": {
+      "A": "S1",
+      "B": "S2"
+     },
+     "disagree_seconds": 1.1,
+     "disagree_ranges": [
+      {
+       "start": 8.9,
+       "end": 9.4,
+       "baseline": "S1",
+       "variant": "S2",
+       "kind": "overlap"
+      },
+      {
+       "start": 18.9,
+       "end": 19.5,
+       "baseline": "S2",
+       "variant": "S1",
+       "kind": "swap"
+      }
+     ],
+     "der_vs_baseline": 0.04
+    }
+   },
+   "metrics": {
+    "none": {
+     "audio": {
+      "noise_floor_db": -52.1,
+      "gated_frame_pct": 3.2,
+      "lag_samples": 0,
+      "corr_with_raw": 1.0,
+      "hf_energy_ratio": 1.0,
+      "length_equal": true,
+      "ecapa_cos": 1.0
+     },
+     "diarization": {
+      "n_speakers": 2,
+      "n_segments": 4,
+      "overlap_seconds": 0.8,
+      "median_segment_s": 4.4,
+      "short_segments_lt_0_5s": 0
+     },
+     "separation": {
+      "overlap_spans": 2,
+      "segments_separated": 2,
+      "failed_spans": 0,
+      "mean_similarity": 0.71
+     },
+     "asr": {
+      "n_words": 52,
+      "n_segments": 4,
+      "empty_segments": 0,
+      "words_per_sec": 2.7,
+      "wer_vs_baseline": 0.0,
+      "wer_vs_reference": null,
+      "words_in_quiet_frames": 6
+     }
+    },
+    "dfn3": {
+     "audio": {
+      "noise_floor_db": -61.4,
+      "gated_frame_pct": 9.8,
+      "lag_samples": 0,
+      "corr_with_raw": 0.93,
+      "hf_energy_ratio": 0.82,
+      "length_equal": true,
+      "ecapa_cos": 0.97
+     },
+     "diarization": {
+      "n_speakers": 2,
+      "n_segments": 4,
+      "overlap_seconds": 0.5,
+      "median_segment_s": 4.4,
+      "short_segments_lt_0_5s": 0
+     },
+     "separation": null,
+     "asr": {
+      "n_words": 51,
+      "n_segments": 4,
+      "empty_segments": 0,
+      "words_per_sec": 2.7,
+      "wer_vs_baseline": 0.026,
+      "wer_vs_reference": null,
+      "words_in_quiet_frames": 3
+     }
+    },
+    "mf2se48": {
+     "audio": {
+      "noise_floor_db": -66.0,
+      "gated_frame_pct": 15.3,
+      "lag_samples": 3,
+      "corr_with_raw": 0.88,
+      "hf_energy_ratio": 0.64,
+      "length_equal": true,
+      "ecapa_cos": 0.91
+     },
+     "diarization": {
+      "n_speakers": 3,
+      "n_segments": 5,
+      "overlap_seconds": 1.1,
+      "median_segment_s": 4.1,
+      "short_segments_lt_0_5s": 1
+     },
+     "separation": {
+      "overlap_spans": 3,
+      "segments_separated": 2,
+      "failed_spans": 1,
+      "mean_similarity": 0.62
+     },
+     "asr": {
+      "n_words": 45,
+      "n_segments": 4,
+      "empty_segments": 0,
+      "words_per_sec": 2.4,
+      "wer_vs_baseline": 0.19,
+      "wer_vs_reference": null,
+      "words_in_quiet_frames": 2
+     }
+    },
+    "dfn3+mf2se48": {
+     "audio": {
+      "noise_floor_db": -68.2,
+      "gated_frame_pct": 18.0,
+      "lag_samples": 3,
+      "corr_with_raw": 0.85,
+      "hf_energy_ratio": 0.58,
+      "length_equal": true,
+      "ecapa_cos": 0.89
+     },
+     "diarization": {
+      "n_speakers": 2,
+      "n_segments": 4,
+      "overlap_seconds": 0.6,
+      "median_segment_s": 4.3,
+      "short_segments_lt_0_5s": 0
+     },
+     "separation": {
+      "overlap_spans": 2,
+      "segments_separated": 2,
+      "failed_spans": 0,
+      "mean_similarity": 0.69
+     },
+     "asr": {
+      "n_words": 50,
+      "n_segments": 4,
+      "empty_segments": 0,
+      "words_per_sec": 2.6,
+      "wer_vs_baseline": 0.09,
+      "wer_vs_reference": null,
+      "words_in_quiet_frames": 1
+     }
+    }
+   }
+  },
+  {
+   "name": "tap_02",
+   "duration": 12.0,
+   "audio": {
+    "raw": "/tmp/compare_fixture/tap_02_raw.wav",
+    "none": "/tmp/compare_fixture/tap_02_raw.wav",
+    "dfn3": "/tmp/compare_fixture/tap_02_dfn3.wav",
+    "mf2se48": "/tmp/compare_fixture/tap_02_mf2se48.wav",
+    "dfn3+mf2se48": "/tmp/compare_fixture/tap_02_dfn3_mf2se48.wav"
+   },
+   "text": {
+    "none": {
+     "segments": [
+      {
+       "start": 0.0,
+       "end": 3.8,
+       "speaker": "S1",
+       "text": "Alo anh nghe đây ạ"
+      },
+      {
+       "start": 4.0,
+       "end": 7.9,
+       "speaker": "S2",
+       "text": "Em gọi để hỏi về đơn hàng hôm qua"
+      },
+      {
+       "start": 8.2,
+       "end": 11.6,
+       "speaker": "S1",
+       "text": "Dạ đơn đó đang được giao rồi em"
+      }
+     ],
+     "full_text": "Alo anh nghe đây ạ Em gọi để hỏi về đơn hàng hôm qua Dạ đơn đó đang được giao rồi em"
+    },
+    "dfn3": {
+     "segments": [
+      {
+       "start": 0.0,
+       "end": 3.8,
+       "speaker": "A",
+       "text": "Alo anh nghe đây ạ"
+      },
+      {
+       "start": 4.0,
+       "end": 7.9,
+       "speaker": "B",
+       "text": "Em gọi để hỏi về đơn hàng hôm qua"
+      },
+      {
+       "start": 8.2,
+       "end": 11.6,
+       "speaker": "A",
+       "text": "Dạ đơn đó đang được giao rồi em"
+      }
+     ],
+     "full_text": "Alo anh nghe đây ạ Em gọi để hỏi về đơn hàng hôm qua Dạ đơn đó đang được giao rồi em"
+    },
+    "mf2se48": {
+     "segments": [
+      {
+       "start": 0.0,
+       "end": 3.8,
+       "speaker": "B",
+       "text": "Alo anh nghe đây"
+      },
+      {
+       "start": 4.0,
+       "end": 7.9,
+       "speaker": "A",
+       "text": "Em gọi hỏi về đơn hàng hôm qua nha"
+      },
+      {
+       "start": 8.2,
+       "end": 11.6,
+       "speaker": "B",
+       "text": "Dạ đơn đó đang được giao rồi em"
+      }
+     ],
+     "full_text": "Alo anh nghe đây Em gọi hỏi về đơn hàng hôm qua nha Dạ đơn đó đang được giao rồi em"
+    },
+    "dfn3+mf2se48": {
+     "segments": [
+      {
+       "start": 0.0,
+       "end": 3.8,
+       "speaker": "A",
+       "text": "Alo anh nghe đây ạ"
+      },
+      {
+       "start": 4.0,
+       "end": 7.9,
+       "speaker": "B",
+       "text": "Em gọi để hỏi về đơn hàng qua"
+      },
+      {
+       "start": 8.2,
+       "end": 11.6,
+       "speaker": "A",
+       "text": "Dạ đơn đó đang được giao rồi"
+      }
+     ],
+     "full_text": "Alo anh nghe đây ạ Em gọi để hỏi về đơn hàng qua Dạ đơn đó đang được giao rồi"
+    }
+   },
+   "text_diff": {
+    "dfn3": {
+     "wer_vs_baseline": 0.0,
+     "ops": {
+      "sub": 0,
+      "ins": 0,
+      "del": 0,
+      "equal": 22
+     },
+     "wer_vs_reference": null,
+     "segments": [
+      {
+       "start": 0.0,
+       "end": 3.8,
+       "baseline_text": "Alo anh nghe đây ạ",
+       "variant_text": "Alo anh nghe đây ạ",
+       "ops": [
+        [
+         "equal",
+         "Alo"
+        ],
+        [
+         "equal",
+         "anh"
+        ],
+        [
+         "equal",
+         "nghe"
+        ],
+        [
+         "equal",
+         "đây"
+        ],
+        [
+         "equal",
+         "ạ"
+        ]
+       ],
+       "wer": 0.0
+      },
+      {
+       "start": 4.0,
+       "end": 7.9,
+       "baseline_text": "Em gọi để hỏi về đơn hàng hôm qua",
+       "variant_text": "Em gọi để hỏi về đơn hàng hôm qua",
+       "ops": [
+        [
+         "equal",
+         "Em"
+        ],
+        [
+         "equal",
+         "gọi"
+        ],
+        [
+         "equal",
+         "để"
+        ],
+        [
+         "equal",
+         "hỏi"
+        ],
+        [
+         "equal",
+         "về"
+        ],
+        [
+         "equal",
+         "đơn"
+        ],
+        [
+         "equal",
+         "hàng"
+        ],
+        [
+         "equal",
+         "hôm"
+        ],
+        [
+         "equal",
+         "qua"
+        ]
+       ],
+       "wer": 0.0
+      },
+      {
+       "start": 8.2,
+       "end": 11.6,
+       "baseline_text": "Dạ đơn đó đang được giao rồi em",
+       "variant_text": "Dạ đơn đó đang được giao rồi em",
+       "ops": [
+        [
+         "equal",
+         "Dạ"
+        ],
+        [
+         "equal",
+         "đơn"
+        ],
+        [
+         "equal",
+         "đó"
+        ],
+        [
+         "equal",
+         "đang"
+        ],
+        [
+         "equal",
+         "được"
+        ],
+        [
+         "equal",
+         "giao"
+        ],
+        [
+         "equal",
+         "rồi"
+        ],
+        [
+         "equal",
+         "em"
+        ]
+       ],
+       "wer": 0.0
+      }
+     ]
+    },
+    "mf2se48": {
+     "wer_vs_baseline": 0.136,
+     "ops": {
+      "sub": 0,
+      "ins": 1,
+      "del": 2,
+      "equal": 20
+     },
+     "wer_vs_reference": null,
+     "segments": [
+      {
+       "start": 0.0,
+       "end": 3.8,
+       "baseline_text": "Alo anh nghe đây ạ",
+       "variant_text": "Alo anh nghe đây",
+       "ops": [
+        [
+         "equal",
+         "Alo"
+        ],
+        [
+         "equal",
+         "anh"
+        ],
+        [
+         "equal",
+         "nghe"
+        ],
+        [
+         "equal",
+         "đây"
+        ],
+        [
+         "del",
+         "ạ"
+        ]
+       ],
+       "wer": 0.2
+      },
+      {
+       "start": 4.0,
+       "end": 7.9,
+       "baseline_text": "Em gọi để hỏi về đơn hàng hôm qua",
+       "variant_text": "Em gọi hỏi về đơn hàng hôm qua nha",
+       "ops": [
+        [
+         "equal",
+         "Em"
+        ],
+        [
+         "equal",
+         "gọi"
+        ],
+        [
+         "del",
+         "để"
+        ],
+        [
+         "equal",
+         "hỏi"
+        ],
+        [
+         "equal",
+         "về"
+        ],
+        [
+         "equal",
+         "đơn"
+        ],
+        [
+         "equal",
+         "hàng"
+        ],
+        [
+         "equal",
+         "hôm"
+        ],
+        [
+         "equal",
+         "qua"
+        ],
+        [
+         "ins",
+         "nha"
+        ]
+       ],
+       "wer": 0.222
+      },
+      {
+       "start": 8.2,
+       "end": 11.6,
+       "baseline_text": "Dạ đơn đó đang được giao rồi em",
+       "variant_text": "Dạ đơn đó đang được giao rồi em",
+       "ops": [
+        [
+         "equal",
+         "Dạ"
+        ],
+        [
+         "equal",
+         "đơn"
+        ],
+        [
+         "equal",
+         "đó"
+        ],
+        [
+         "equal",
+         "đang"
+        ],
+        [
+         "equal",
+         "được"
+        ],
+        [
+         "equal",
+         "giao"
+        ],
+        [
+         "equal",
+         "rồi"
+        ],
+        [
+         "equal",
+         "em"
+        ]
+       ],
+       "wer": 0.0
+      }
+     ]
+    },
+    "dfn3+mf2se48": {
+     "wer_vs_baseline": 0.091,
+     "ops": {
+      "sub": 0,
+      "ins": 0,
+      "del": 2,
+      "equal": 20
+     },
+     "wer_vs_reference": null,
+     "segments": [
+      {
+       "start": 0.0,
+       "end": 3.8,
+       "baseline_text": "Alo anh nghe đây ạ",
+       "variant_text": "Alo anh nghe đây ạ",
+       "ops": [
+        [
+         "equal",
+         "Alo"
+        ],
+        [
+         "equal",
+         "anh"
+        ],
+        [
+         "equal",
+         "nghe"
+        ],
+        [
+         "equal",
+         "đây"
+        ],
+        [
+         "equal",
+         "ạ"
+        ]
+       ],
+       "wer": 0.0
+      },
+      {
+       "start": 4.0,
+       "end": 7.9,
+       "baseline_text": "Em gọi để hỏi về đơn hàng hôm qua",
+       "variant_text": "Em gọi để hỏi về đơn hàng qua",
+       "ops": [
+        [
+         "equal",
+         "Em"
+        ],
+        [
+         "equal",
+         "gọi"
+        ],
+        [
+         "equal",
+         "để"
+        ],
+        [
+         "equal",
+         "hỏi"
+        ],
+        [
+         "equal",
+         "về"
+        ],
+        [
+         "equal",
+         "đơn"
+        ],
+        [
+         "equal",
+         "hàng"
+        ],
+        [
+         "del",
+         "hôm"
+        ],
+        [
+         "equal",
+         "qua"
+        ]
+       ],
+       "wer": 0.111
+      },
+      {
+       "start": 8.2,
+       "end": 11.6,
+       "baseline_text": "Dạ đơn đó đang được giao rồi em",
+       "variant_text": "Dạ đơn đó đang được giao rồi",
+       "ops": [
+        [
+         "equal",
+         "Dạ"
+        ],
+        [
+         "equal",
+         "đơn"
+        ],
+        [
+         "equal",
+         "đó"
+        ],
+        [
+         "equal",
+         "đang"
+        ],
+        [
+         "equal",
+         "được"
+        ],
+        [
+         "equal",
+         "giao"
+        ],
+        [
+         "equal",
+         "rồi"
+        ],
+        [
+         "del",
+         "em"
+        ]
+       ],
+       "wer": 0.125
+      }
+     ]
+    }
+   },
+   "speakers": {
+    "dfn3": {
+     "n_speakers": 2,
+     "speaker_seconds": {
+      "A": 7.1,
+      "B": 3.9
+     },
+     "label_map": {
+      "A": "S1",
+      "B": "S2"
+     },
+     "disagree_seconds": 0.0,
+     "disagree_ranges": [],
+     "der_vs_baseline": 0.0
+    },
+    "mf2se48": {
+     "n_speakers": 2,
+     "speaker_seconds": {
+      "A": 3.4,
+      "B": 7.0
+     },
+     "label_map": {
+      "A": "S2",
+      "B": "S1"
+     },
+     "disagree_seconds": 9.2,
+     "disagree_ranges": [
+      {
+       "start": 0.0,
+       "end": 3.8,
+       "baseline": "S1",
+       "variant": "B",
+       "kind": "swap"
+      },
+      {
+       "start": 4.0,
+       "end": 7.9,
+       "baseline": "S2",
+       "variant": "A",
+       "kind": "swap"
+      }
+     ],
+     "der_vs_baseline": 0.78
+    },
+    "dfn3+mf2se48": {
+     "n_speakers": 2,
+     "speaker_seconds": {
+      "A": 7.0,
+      "B": 3.8
+     },
+     "label_map": {
+      "A": "S1",
+      "B": "S2"
+     },
+     "disagree_seconds": 0.3,
+     "disagree_ranges": [
+      {
+       "start": 7.9,
+       "end": 8.2,
+       "baseline": "S2",
+       "variant": "S1",
+       "kind": "overlap"
+      }
+     ],
+     "der_vs_baseline": 0.03
+    }
+   },
+   "metrics": {
+    "none": {
+     "audio": {
+      "noise_floor_db": -48.0,
+      "gated_frame_pct": 2.0,
+      "lag_samples": 0,
+      "corr_with_raw": 1.0,
+      "hf_energy_ratio": 1.0,
+      "length_equal": true,
+      "ecapa_cos": 1.0
+     },
+     "diarization": {
+      "n_speakers": 2,
+      "n_segments": 3,
+      "overlap_seconds": 0.3,
+      "median_segment_s": 3.7,
+      "short_segments_lt_0_5s": 0
+     },
+     "separation": {
+      "overlap_spans": 1,
+      "segments_separated": 1,
+      "failed_spans": 0,
+      "mean_similarity": 0.8
+     },
+     "asr": {
+      "n_words": 21,
+      "n_segments": 3,
+      "empty_segments": 0,
+      "words_per_sec": 2.1,
+      "wer_vs_baseline": 0.0,
+      "wer_vs_reference": null,
+      "words_in_quiet_frames": 2
+     }
+    },
+    "dfn3": {
+     "audio": {
+      "noise_floor_db": -57.9,
+      "gated_frame_pct": 7.5,
+      "lag_samples": 0,
+      "corr_with_raw": 0.95,
+      "hf_energy_ratio": 0.85,
+      "length_equal": true,
+      "ecapa_cos": 0.98
+     },
+     "diarization": {
+      "n_speakers": 2,
+      "n_segments": 3,
+      "overlap_seconds": 0.3,
+      "median_segment_s": 3.7,
+      "short_segments_lt_0_5s": 0
+     },
+     "separation": null,
+     "asr": {
+      "n_words": 22,
+      "n_segments": 3,
+      "empty_segments": 0,
+      "words_per_sec": 2.2,
+      "wer_vs_baseline": 0.07,
+      "wer_vs_reference": null,
+      "words_in_quiet_frames": 1
+     }
+    },
+    "mf2se48": {
+     "audio": {
+      "noise_floor_db": -63.3,
+      "gated_frame_pct": 14.1,
+      "lag_samples": 3,
+      "corr_with_raw": 0.9,
+      "hf_energy_ratio": 0.7,
+      "length_equal": true,
+      "ecapa_cos": 0.93
+     },
+     "diarization": {
+      "n_speakers": 2,
+      "n_segments": 3,
+      "overlap_seconds": 0.4,
+      "median_segment_s": 3.7,
+      "short_segments_lt_0_5s": 0
+     },
+     "separation": {
+      "overlap_spans": 1,
+      "segments_separated": 0,
+      "failed_spans": 1,
+      "mean_similarity": null
+     },
+     "asr": {
+      "n_words": 19,
+      "n_segments": 3,
+      "empty_segments": 0,
+      "words_per_sec": 1.9,
+      "wer_vs_baseline": 0.28,
+      "wer_vs_reference": null,
+      "words_in_quiet_frames": 0
+     }
+    },
+    "dfn3+mf2se48": {
+     "audio": {
+      "noise_floor_db": -64.8,
+      "gated_frame_pct": 16.2,
+      "lag_samples": 3,
+      "corr_with_raw": 0.87,
+      "hf_energy_ratio": 0.66,
+      "length_equal": false,
+      "ecapa_cos": 0.9
+     },
+     "diarization": {
+      "n_speakers": 2,
+      "n_segments": 3,
+      "overlap_seconds": 0.3,
+      "median_segment_s": 3.7,
+      "short_segments_lt_0_5s": 0
+     },
+     "separation": {
+      "overlap_spans": 1,
+      "segments_separated": 1,
+      "failed_spans": 0,
+      "mean_similarity": 0.7
+     },
+     "asr": {
+      "n_words": 17,
+      "n_segments": 3,
+      "empty_segments": 0,
+      "words_per_sec": 1.8,
+      "wer_vs_baseline": 0.2,
+      "wer_vs_reference": null,
+      "words_in_quiet_frames": 0
+     }
+    }
+   }
+  }
+ ],
+ "summary": {
+  "none": {
+   "audio.corr_with_raw": 1.0,
+   "audio.ecapa_cos": 1.0,
+   "audio.gated_frame_pct": 2.6,
+   "audio.hf_energy_ratio": 1.0,
+   "audio.lag_samples": 0.0,
+   "audio.noise_floor_db": -50.05,
+   "diarization.median_segment_s": 4.05,
+   "diarization.n_segments": 3.5,
+   "diarization.n_speakers": 2.0,
+   "diarization.overlap_seconds": 0.55,
+   "diarization.short_segments_lt_0_5s": 0.0,
+   "separation.failed_spans": 0.0,
+   "separation.mean_similarity": 0.755,
+   "separation.overlap_spans": 1.5,
+   "separation.segments_separated": 1.5,
+   "asr.empty_segments": 0.0,
+   "asr.n_segments": 3.5,
+   "asr.n_words": 36.5,
+   "asr.wer_vs_baseline": 0.0,
+   "asr.words_in_quiet_frames": 4.0,
+   "asr.words_per_sec": 2.4
+  },
+  "dfn3": {
+   "audio.corr_with_raw": 0.94,
+   "audio.ecapa_cos": 0.975,
+   "audio.gated_frame_pct": 8.65,
+   "audio.hf_energy_ratio": 0.835,
+   "audio.lag_samples": 0.0,
+   "audio.noise_floor_db": -59.65,
+   "diarization.median_segment_s": 4.05,
+   "diarization.n_segments": 3.5,
+   "diarization.n_speakers": 2.0,
+   "diarization.overlap_seconds": 0.4,
+   "diarization.short_segments_lt_0_5s": 0.0,
+   "asr.empty_segments": 0.0,
+   "asr.n_segments": 3.5,
+   "asr.n_words": 36.5,
+   "asr.wer_vs_baseline": 0.048,
+   "asr.words_in_quiet_frames": 2.0,
+   "asr.words_per_sec": 2.45
+  },
+  "mf2se48": {
+   "audio.corr_with_raw": 0.89,
+   "audio.ecapa_cos": 0.92,
+   "audio.gated_frame_pct": 14.7,
+   "audio.hf_energy_ratio": 0.67,
+   "audio.lag_samples": 3.0,
+   "audio.noise_floor_db": -64.65,
+   "diarization.median_segment_s": 3.9,
+   "diarization.n_segments": 4.0,
+   "diarization.n_speakers": 2.5,
+   "diarization.overlap_seconds": 0.75,
+   "diarization.short_segments_lt_0_5s": 0.5,
+   "separation.failed_spans": 1.0,
+   "separation.mean_similarity": 0.62,
+   "separation.overlap_spans": 2.0,
+   "separation.segments_separated": 1.0,
+   "asr.empty_segments": 0.0,
+   "asr.n_segments": 3.5,
+   "asr.n_words": 32.0,
+   "asr.wer_vs_baseline": 0.235,
+   "asr.words_in_quiet_frames": 1.0,
+   "asr.words_per_sec": 2.15
+  },
+  "dfn3+mf2se48": {
+   "audio.corr_with_raw": 0.86,
+   "audio.ecapa_cos": 0.895,
+   "audio.gated_frame_pct": 17.1,
+   "audio.hf_energy_ratio": 0.62,
+   "audio.lag_samples": 3.0,
+   "audio.noise_floor_db": -66.5,
+   "diarization.median_segment_s": 4.0,
+   "diarization.n_segments": 3.5,
+   "diarization.n_speakers": 2.0,
+   "diarization.overlap_seconds": 0.45,
+   "diarization.short_segments_lt_0_5s": 0.0,
+   "separation.failed_spans": 0.0,
+   "separation.mean_similarity": 0.695,
+   "separation.overlap_spans": 1.5,
+   "separation.segments_separated": 1.5,
+   "asr.empty_segments": 0.0,
+   "asr.n_segments": 3.5,
+   "asr.n_words": 33.5,
+   "asr.wer_vs_baseline": 0.145,
+   "asr.words_in_quiet_frames": 0.5,
+   "asr.words_per_sec": 2.2
+  }
+ }
+}

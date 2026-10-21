@@ -1,0 +1,10 @@
+{
+  "baseline": "none",
+  "variants": [
+    {"chain": "none"},
+    {"chain": "dfn3"},
+    {"chain": "mf2se48"},
+    {"chain": "mpsenet"},
+    {"chain": "dfn3>mf2se48", "label": "DFN3 then MF2SE48"}
+  ]
+}
