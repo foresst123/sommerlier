@@ -56,9 +56,103 @@ python tools/make_compare_page.py /data/denoise_cmp/compare_data.json \
     -o /data/denoise_cmp/compare.html --embed clips
 ```
 
-`--only-available`: trước khi chạy, hỏi `available_backends()` về mọi backend trong chuỗi; biến thể nào có backend không dùng được thì **bỏ qua có ghi lại** (status `skipped`, lý do trong `variants_manifest.json`, dòng `SKIPPED` trên console, ghi chú trên chip của trang). Bỏ qua không làm mã thoát khác 0. `--groups masking,chains` chỉ chạy các nhóm được chọn (`group` là khóa tùy chọn của mỗi biến thể trong file JSON; baseline luôn chạy; tên nhóm lạ thì báo lỗi). Nhóm hiện có trong `variants.example.json`: `masking`, `chains`, `analysis_only`. Mỗi biến thể có thể có `note` (hiện ở tooltip của chip) và nhóm hiện thành thẻ nhỏ cạnh chip.
+`--only-available`: trước khi chạy, hỏi `available_backends()` về mọi backend trong chuỗi; biến thể nào có backend không dùng được thì **bỏ qua có ghi lại** (status `skipped`, lý do trong `variants_manifest.json`, dòng `SKIPPED` trên console, ghi chú trên chip của trang). Bỏ qua không làm mã thoát khác 0. `--groups masking,chains` chỉ chạy các nhóm được chọn (`group` là khóa tùy chọn của mỗi biến thể trong file JSON; baseline luôn chạy; tên nhóm lạ thì báo lỗi). Nhóm hiện có trong `variants.example.json`: `masking`, `chains`, `analysis_only`, `ctrl_music`, `pipe_music`, `pipe_reverb`, `pipe_crowd`, `pipe_order`, `pipe_stack`, `pipe_blend`, `analysis_pipes` (xem mục chuỗi nhiều giai đoạn). Mỗi biến thể có thể có `note` (hiện ở tooltip của chip) và nhóm hiện thành thẻ nhỏ cạnh chip.
 
 Khi tự gõ `--denoise` trong shell, phải đặt chuỗi trong nháy: `--denoise 'dfn3>mf2se48'`. Cấu hình riêng từng backend đặt ở khóa cấp cao nhất `"denoise": {"dfn3": {...}, "chunk_s": 30}` của config.json (không phải `pipeline.denoise`, đó chỉ là chuỗi SPEC).
+
+## Chuỗi nhiều giai đoạn (multi-stage)
+
+### Backend `audio-separator` và alias
+
+Backend chung `audio_separator` (khóa `checkpoint`, `stem_keep`, `invert`) cùng 7 alias. Đây là bộ tách nhạc/giọng/vang, không phải bộ tăng cường giọng nói: đầu ra làm đổi tín hiệu nên phải qua cổng kiểm chứng trước khi xuất. Cài: `requirements-denoise-audio-separator.txt`, chi tiết ở `podcast-pipeline/scripts/denoise_audio_separator.md`.
+
+| Alias | Checkpoint | Stem giữ lại | Giấy phép / ghi chú |
+|---|---|---|---|
+| `rf_vocals_3005` | model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt | `Vocals` | không nêu giấy phép; chính là RoFormer của bước nhạc profile a100 |
+| `rf_vocals_kim` | mel_band_roformer_kim_ft2_bleedless_unwa.ckpt | `vocals` | không nêu giấy phép |
+| `rf_denoise` | denoise_mel_band_roformer_aufr33_sdr_27.9959.ckpt | `dry` | không nêu giấy phép, không có model card |
+| `rf_denoise_aggr` | denoise_mel_band_roformer_aufr33_aggr_sdr_27.9768.ckpt | `dry` | mạnh hơn; có thể ăn phụ âm nhẹ (giả định) |
+| `rf_dereverb` | deverb_bs_roformer_8_384dim_10depth.ckpt | `noreverb` | có thể GPL-3.0 nếu là bản của anvuew (tác giả chưa xác minh) |
+| `uvr_deecho` | UVR-DeEcho-DeReverb.pth | `No Reverb` | kiến trúc VR; căn thời gian và mức âm chưa kiểm |
+| `rf_crowd` | mel_band_roformer_crowd_aufr33_viperx_sdr_8.7144.ckpt | `other` (= đầu vào trừ đám đông) | không nêu giấy phép; làm cho tiếng vỗ tay, tác dụng với người đứng cạnh nói chuyện CHƯA KIỂM |
+
+Bằng chứng: danh sách mô hình của audio-separator 0.47.1. Không checkpoint nào có giấy phép được nêu (mã UVR là MIT, trọng số thì không), và **không cái nào được kiểm chứng trên tiếng Việt**.
+
+### Bước giả `blendNN`
+
+`blendNN` (NN từ 0 đến 100) không phải backend, do `DenoiseService` xử lý: `ra = (1 - NN/100) * hiện_tại + (NN/100) * đầu_vào_của_chuỗi`. "Đầu vào của chuỗi" là sóng âm đi vào cả chuỗi (cũng đúng khi blend nằm giữa hai backend). Không được đứng đầu chuỗi và chuỗi phải có ít nhất một backend. `blend0` giữ nguyên kết quả lọc, `blend100` trả đầu vào. Không đăng ký trong `BACKENDS`; `--only-available` bỏ qua chúng qua `models.denoise.pseudo.backend_tokens`. `denoise.json` có thêm `steps` và `blend`. Cơ sở ý tưởng: Iwamoto 2022 (arXiv 2201.06685), Kimi-Audio trộn 1:1.
+
+### `--set` và `--music_scope`
+
+```bash
+python main.py ... --set steps.music_removal=false            # giá trị là JSON; không phải JSON thì là chuỗi
+python main.py ... --set pipeline.music_scope='"spans"' --set steps.noise_map=false
+python main.py ... --music_scope spans                         # tương đương --set pipeline.music_scope=spans
+```
+
+`--set KEY=VALUE` (lặp được) ghi đè khóa chấm trong profile như thể có trong config.json (`utils/config_override.py`).
+
+### Trường của mỗi biến thể
+
+| Trường | Ý nghĩa |
+|---|---|
+| `chain` | chuỗi SPEC, ví dụ `rf_vocals_3005>dfn3>blend50` |
+| `id` | tùy chọn; mặc định suy ra từ chuỗi, thêm `.<hậu tố>` khi có ghi đè (ví dụ `none.music-removal-off`; quá dài thì dùng hash8) |
+| `tag` | nhãn ngắn, đi vào manifest, `compare_data.json` và hiện thành thẻ trên trang |
+| `set` | object các khóa chấm sang giá trị JSON, thành `--set` |
+| `music_separator` | thành `--music_separator` (checkpoint của bước nhạc) |
+| `extra_args` | danh sách đối số thêm cho main.py |
+| `group`, `label`, `note` | như trước |
+
+### CẢNH BÁO: chuỗi chứa `rf_vocals_*` dựa vào việc tắt bước nhạc
+
+Profile a100 đã chạy RoFormer ở bước nhạc (`music_removal` bật, `music_scope` full). Chuỗi có `rf_vocals_*` mà không tắt bước đó sẽ áp RoFormer **hai lần**. Vì vậy mọi biến thể loại này có `"set": {"steps.music_removal": false}` và `"tag": "music-stage-off"`, và `tests/test_variants_integrity.py` kiểm điều đó (ngoại lệ phải có `double-music` trong tag). Khi tự thêm biến thể, nhớ đặt như vậy.
+
+### Các họ biến thể
+
+Tổng 58 biến thể (đã gồm baseline).
+
+| Nhóm | Số | Mục đích | Nhìn gì trong kết quả |
+|---|---|---|---|
+| `baseline` / `masking` / `chains` | 1 / 5 / 3 | không lọc; từng bộ lọc mặt nạ; hai giai đoạn | nền so sánh; sai khác khi nghe, tạo tác khi xếp chồng |
+| `analysis_only` | 3 | dbs_tiger, mambattention (chỉ phân tích) | chỉ nghe; không xuất |
+| `ctrl_music` | 5 | đối chứng bước nhạc của pipeline: raw (tắt hẳn), `music_scope=spans`, separator kim | bước nhạc tự nó đóng góp gì (nền nhiễu, WER so baseline); spans so với full |
+| `pipe_music` | 10 | bỏ nhạc bằng chuỗi (bước nhạc tắt), thêm 1-2 bộ lọc phía sau | còn nhạc không; WER so baseline; độ tương đồng giọng |
+| `pipe_reverb` | 7 | khử vang/echo, đứng riêng hoặc sau `rf_vocals_3005` | vang giảm không mà giọng không bị khô/méo; độ lệch thời gian (`lag_samples`) |
+| `pipe_crowd` | 6 | giọng nền/đám đông (tác dụng với người nói chuyện bên cạnh CHƯA KIỂM) | nghe xem tiếng nền có giảm không, giọng chính có bị cắt không; thứ tự crowd trước/sau |
+| `pipe_order` | 4 | thứ tự có quan trọng không | hai thứ tự cùng bộ lọc cho khác biệt WER/Learned MOS bao nhiêu |
+| `pipe_stack` | 4 | tạo tác tích lũy khi xếp chồng bộ lọc mặt nạ, kể cả lọc hai lần cùng mô hình | delta Learned MOS hoặc độ tương đồng giọng có giảm khi thêm giai đoạn không |
+| `pipe_blend` | 7 | trộn lại đầu vào chưa lọc (`blend25/30/50`) | WER so baseline có tiến về baseline trong khi nền nhiễu (`noise_floor_db_after`) vẫn giảm không |
+| `analysis_pipes` | 3 | chuỗi thử nghiệm với dbs_tiger/mambattention (chỉ phân tích) | chỉ nghe; chưa xuất trước khi nghe thử |
+
+### Ước lượng quy mô: `--list`
+
+```bash
+python tools/run_variants.py --audio-dir /data/vi_podcasts_20 --variants tools/variants.example.json \
+    --out-root /data/denoise_cmp --only-available --list --minutes-per-file-run 20
+```
+
+`--list` in từng biến thể (id, nhóm, chuỗi, tag, ghi đè, khả dụng), số biến thể, số file, số lượt biến thể x file và ước lượng tuần tự. **20 phút cho mỗi lượt (biến thể, file) là GIẢ ĐỊNH, chưa đo**; đổi bằng `--minutes-per-file-run`. Thu nhỏ bằng `--groups`, `--only-ids a,b`, `--max-variants N` (có `--shuffle-seed S` để lấy ngẫu nhiên lặp lại được; tính cả baseline). Với 3 file, cả 58 biến thể là 174 lượt, tức 3480 phút (58 giờ) tuần tự theo giả định đó, chia theo `--parallel`/`--gpus`.
+
+### Chạy theo giai đoạn (khuyến nghị)
+
+```bash
+# 1) trước hết: đối chứng bước nhạc + masking + blend, trên 3 file
+python tools/run_variants.py --audio-dir /data/vi_podcasts_3 --variants tools/variants.example.json \
+    --out-root /data/denoise_cmp1 --env a100 --stop-after asr --gpus 0,1 --parallel 2 --resume \
+    --only-available --groups ctrl_music,masking,pipe_blend
+# 2) sau đó các nhóm còn lại
+python tools/run_variants.py --audio-dir /data/vi_podcasts_3 --variants tools/variants.example.json \
+    --out-root /data/denoise_cmp2 --env a100 --stop-after asr --gpus 0,1 --parallel 2 --resume \
+    --only-available --groups pipe_music,pipe_reverb,pipe_crowd,pipe_order,pipe_stack,chains,analysis_only,analysis_pipes
+```
+
+### Nhắc nhở
+
+- Mở `01b_denoise/denoise.json` của từng biến thể và đọc `errors`: backend lỗi **rơi về âm thanh chưa lọc**, biến thể vẫn có status `ok` nhưng thực chất là bản chưa lọc.
+- Âm thanh xuất ra phải qua các cổng kiểm chứng (giữ danh tính người nói, WER ASR so baseline, không khẳng định xóa giọng đám đông).
+- Biến thể `analysis_only` và `analysis_pipes` không được xuất trước khi nghe thử.
+- Nhóm `pipe_crowd`, `pipe_reverb` chưa kiểm chứng trên tiếng Việt; tên checkpoint và stem lấy từ danh sách mô hình, chưa chạy thật.
 
 ## Các tab của trang
 
@@ -84,6 +178,7 @@ Không có ground truth thì **"khác" không có nghĩa là "tốt hơn"**. `we
 
 ## Chưa kiểm chứng (UNTESTED)
 
+- Backend `audio_separator` và 7 alias chạy với checkpoint thật; `blendNN` và các chuỗi nhiều giai đoạn trên GPU thật (test chỉ dùng backend giả/nhẹ); nghe thử mọi họ biến thể mới.
 - Backend thật `dfn3`, `mf2se48`, `mpsenet`, `mpsenet_dns` (chưa chạy với mô hình/trọng số thật; chỉ test bằng backend giả; `g_best_dns` chỉ được xác nhận là file tồn tại trong repo clone).
 - `dbs_tiger` nạp mô hình thật (chưa chạy checkpoint thật, chưa nghe thử stem trên tiếng Việt).
 - `mambattention`: worker thật và bước build `mamba_ssm` (cần CUDA) chưa chạy; test chỉ dùng worker giả.
