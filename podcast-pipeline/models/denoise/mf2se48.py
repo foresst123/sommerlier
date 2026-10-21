@@ -25,6 +25,16 @@ def _has_weights(path: str) -> bool:
     return bool(name) and os.path.isfile(os.path.join(path, name))
 
 
+def _pin_to_visible_gpu(net_cls, torch):
+    """Make ClearVoice use the GPU this process already sees.
+
+    Its get_free_gpu() asks nvidia-smi, which ignores CUDA_VISIBLE_DEVICES: under
+    CUDA_VISIBLE_DEVICES=1 it can return index 1 while torch only knows device 0
+    ("CUDA error: invalid device ordinal").
+    """
+    net_cls.get_free_gpu = lambda self: torch.cuda.current_device() if torch.cuda.is_available() else None
+
+
 class MossFormer2SE48Backend(DenoiseBackend):
     """MossFormer2_SE_48K, run in-process on arrays (no temp files).
 
@@ -78,6 +88,7 @@ class MossFormer2SE48Backend(DenoiseBackend):
         args = wrapper.args
         args.task, args.network, args.checkpoint_dir = "speech_enhancement", NETWORK, path
         self._seed_all()
+        _pin_to_visible_gpu(CLS_MossFormer2_SE_48K, torch)
         net = CLS_MossFormer2_SE_48K(args)  # downloads from HuggingFace only if last_best_checkpoint is absent
         if not _has_weights(path):
             raise DenoiseError(f"{self.name}: no usable checkpoint in {path}")
