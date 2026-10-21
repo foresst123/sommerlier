@@ -1,0 +1,6 @@
+# Optional: only for the audio_separator backend and its rf_* / uvr_* aliases (--denoise rf_vocals_3005 ...).
+# Already satisfied by requirements.txt (audio-separator>=0.47.0, soundfile, librosa); torch comes from there too.
+# audio-separator needs onnxruntime at import: pick ONE of the extras (cpu or gpu).
+audio-separator>=0.47.0
+soundfile>=0.13
+onnxruntime>=1.17   # DGX/CUDA box: use onnxruntime-gpu>=1.17 instead

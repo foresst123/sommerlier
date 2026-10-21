@@ -72,7 +72,9 @@ def test_get_backend_names_and_cfg_merge():
 def test_available_backends_never_raises_and_reports_missing(monkeypatch):
     res = available_backends()
     assert set(res) == {"identity", "fake_hp", "dfn3", "mf2se48", "mpsenet", "mpsenet_dns",
-                        "dbs_tiger", "mambattention", "bsrnn26"}
+                        "dbs_tiger", "mambattention", "bsrnn26", "audio_separator", "rf_vocals_3005",
+                        "rf_vocals_kim", "rf_denoise", "rf_denoise_aggr", "rf_dereverb", "uvr_deecho",
+                        "rf_crowd"}
     assert res["identity"] == (True, "") and res["fake_hp"][0] is True
     for ok, reason in res.values():
         assert isinstance(ok, bool) and isinstance(reason, str)
@@ -122,7 +124,7 @@ def test_import_is_light():
 def test_import_and_listing_pull_in_no_torch_in_a_fresh_interpreter():
     import subprocess
     code = ("import sys; import models.denoise as d; d.available_backends(); "
-            "bad=[m for m in ('torch','torchaudio','df','clearvoice','mamba_ssm','espnet2','einops') if m in sys.modules]; "
+            "bad=[m for m in ('torch','torchaudio','df','clearvoice','mamba_ssm','espnet2','einops','audio_separator','onnxruntime') if m in sys.modules]; "
             "print('BAD', bad); sys.exit(1 if bad else 0)")
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     r = subprocess.run([sys.executable, "-c", code], cwd=root, capture_output=True, text=True, env={**os.environ, "PYTHONPATH": root})
@@ -482,3 +484,20 @@ def test_mpsenet_wrapper_with_pass_through_model(tmp_path, monkeypatch, sr, n):
     # silent input stays silent instead of dividing by zero
     assert np.all(b.enhance(np.zeros(sr, np.float32), sr) == 0)
     b.unload()
+
+
+def test_audio_separator_aliases_registered_and_names_valid():
+    import re
+    from models.denoise.audio_separator import ALIASES
+    names = list(denoise.BACKENDS)
+    assert len(names) == len(set(names))
+    for cls in ALIASES:
+        assert denoise.BACKENDS[cls.name] is cls
+    assert "audio_separator" in denoise.BACKENDS
+    for n in names:
+        assert re.fullmatch(r"[a-z0-9_]+", n), n
+    assert not any(n.startswith("blend") for n in names)
+    res = denoise.available_backends()
+    assert set(res) == set(names)
+    for n, v in res.items():
+        assert isinstance(v[0], bool) and isinstance(v[1], str), n

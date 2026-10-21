@@ -1,12 +1,15 @@
 """Optional noise filter between music removal and diarization.
 
 A chain such as "dfn3>mf2se48" runs its backends in order on the post-music
-waveform. The result must be sample-aligned with the input: later stages map
+waveform. Pseudo-steps such as "blend50" (models/denoise/pseudo.py) are handled
+here: they mix the chain input back into the current audio. The result must be sample-aligned with the input: later stages map
 timestamps back through the music timeline, so a filter that changes the length
 (or shifts the audio) would silently corrupt every segment time. A chain that
 fails any check is dropped whole and the input waveform kept -- a variant with
 half a chain applied would be a different variant under the same name.
 """
+
+import time
 
 import numpy as np
 
@@ -107,19 +110,33 @@ class DenoiseService:
                 "samples": int(len(inp)), "lag_samples": 0,
                 "noise_floor_db_before": noise_floor_db(inp, sr),
                 "noise_floor_db_after": None, "corr_with_input": None,
-                "errors": []}
-        out = inp
+                "errors": [], "steps": [], "blend": None}
+        out = inp  # inp is also the chain input that blend steps mix back in
         try:
+            from models.denoise.pseudo import blend, parse_pseudo, validate_chain_tokens
             get_backend, parse_chain, chain_id = _load_api()
             chain = list(parse_chain(chain_spec))
             info["chain"] = chain
             info["chain_id"] = chain_id(chain)
+            validate_chain_tokens(chain)
         except Exception as exc:
             info["errors"].append(f"denoise unavailable: {exc}")
             chain = []
         for name in chain:
             backend = None
+            started = time.time()
+            pseudo = parse_pseudo(name)
             try:
+                if pseudo is not None:
+                    cand = blend(out, inp, pseudo[1])
+                    problem = _check(inp, cand, sr, name)
+                    if problem:
+                        raise ValueError(problem)
+                    out = cand
+                    info["blend"] = {"percent": pseudo[1]}
+                    info["steps"].append({"token": name, "kind": "blend",
+                                          "seconds": round(time.time() - started, 3)})
+                    continue
                 backend = get_backend(name, cfg, logger)
                 backend.load()
                 if logger:
@@ -129,6 +146,8 @@ class DenoiseService:
                 if problem:
                     raise ValueError(problem)
                 out = cand
+                info["steps"].append({"token": name, "kind": "backend",
+                                      "seconds": round(time.time() - started, 3)})
             except Exception as exc:
                 info["errors"].append(f"{name}: {exc}" if name not in str(exc) else str(exc))
                 out = inp
