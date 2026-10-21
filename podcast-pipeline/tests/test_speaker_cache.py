@@ -17,7 +17,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class _FakeExtractor:
-    """Stands in for TargetSpeakerExtractor: only the cache matters here."""
+    """Stands in for BssSeparator: only the cache matters here."""
 
     def __init__(self):
         self.target_embed_cache = {}
@@ -34,22 +34,22 @@ class _FakeExtractor:
 
 
 def _service(extractor):
-    from services.separation_service import TargetExtractionService
-    svc = TargetExtractionService.__new__(TargetExtractionService)
-    svc.tse_model = extractor
+    from services.separation_service import SeparationService
+    svc = SeparationService.__new__(SeparationService)
+    svc.bss_model = extractor
     svc.logger = None
     return svc
 
 
 def test_a_second_file_does_not_inherit_the_first_files_voices():
-    tse = _FakeExtractor()
-    svc = _service(tse)
+    bss = _FakeExtractor()
+    svc = _service(bss)
 
     svc.reset_stats()
-    assert tse.enroll("1", "voice-of-file-A") == "voice-of-file-A"
+    assert bss.enroll("1", "voice-of-file-A") == "voice-of-file-A"
 
     svc.reset_stats()                       # next file
-    got = tse.enroll("1", "voice-of-file-B")
+    got = bss.enroll("1", "voice-of-file-B")
 
     assert got == "voice-of-file-B", (
         "speaker 1 of the second file was scored against the first file's voice")
@@ -58,32 +58,32 @@ def test_a_second_file_does_not_inherit_the_first_files_voices():
 def test_without_the_reset_the_stale_voice_would_win():
     """Pins what the bug actually was, so a future refactor cannot quietly
     reintroduce it."""
-    tse = _FakeExtractor()
-    tse.enroll("1", "voice-of-file-A")
+    bss = _FakeExtractor()
+    bss.enroll("1", "voice-of-file-A")
 
-    assert tse.enroll("1", "voice-of-file-B") == "voice-of-file-A"
+    assert bss.enroll("1", "voice-of-file-B") == "voice-of-file-A"
 
 
 def test_resetting_stats_clears_the_cache():
-    tse = _FakeExtractor()
-    tse.target_embed_cache["1"] = "stale"
-    tse.target_embed_cache["2"] = "stale"
+    bss = _FakeExtractor()
+    bss.target_embed_cache["1"] = "stale"
+    bss.target_embed_cache["2"] = "stale"
 
-    _service(tse).reset_stats()
+    _service(bss).reset_stats()
 
-    assert tse.target_embed_cache == {}
+    assert bss.target_embed_cache == {}
 
 
 def test_a_separator_without_the_hook_is_tolerated():
-    """--tse off leaves tse_model as None, and older stubs lack the method."""
+    """--bss off leaves bss_model as None, and older stubs lack the method."""
     _service(None).reset_stats()
     _service(object()).reset_stats()
 
 
 def test_the_extractor_exposes_reset_speakers():
-    with open(os.path.join(ROOT, "models/tse_model.py"), encoding="utf-8") as f:
+    with open(os.path.join(ROOT, "models/bss_model.py"), encoding="utf-8") as f:
         tree = ast.parse(f.read())
     cls = next(n for n in tree.body
-               if isinstance(n, ast.ClassDef) and n.name == "TargetSpeakerExtractor")
+               if isinstance(n, ast.ClassDef) and n.name == "BssSeparator")
     names = [n.name for n in cls.body if isinstance(n, ast.FunctionDef)]
     assert "reset_speakers" in names

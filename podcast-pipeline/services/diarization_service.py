@@ -1,5 +1,9 @@
+import contextlib
 import os
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 import pandas as pd
 from typing import List, Tuple, Any
 from pyannote.core import Annotation
@@ -13,21 +17,112 @@ from utils.segment_utils import (
     df_to_list,
     deduplicate_segments_by_index,
     split_long_segments,
-    cut_by_speaker_label
+    split_at_seams,
+    filter_diarizer_noise,
+    cut_by_speaker_label,
+    merge_ghost_speakers,
+    bridge_interrupted_speaker_turns,
 )
 from algorithms.diarization.fusion import align_speakers_across_chunks
 from algorithms.diarization.overlap import detect_overlapping_segments
+from utils.acoustic_boundary import AcousticBoundaryFinder
+
+ENABLE_GHOST_MERGE = False
+
+
+@dataclass
+class _RawDiarization:
+    """The GPU half's output: the raw per-track dataframe, nothing filtered,
+    merged or split yet. Consumed by diarize_postprocess()."""
+    combined_df: "pd.DataFrame"
+    method: str
+
+
+class _GuardedVad:
+    """The boundary finder's view of a VAD: each call runs under the same
+    guard as vad.vad(), so a shared stateful model is never entered twice."""
+
+    def __init__(self, vad, guard):
+        self._vad, self._guard = vad, guard
+
+    def get_speech_timestamps(self, *args, **kwargs):
+        with self._guard:
+            return self._vad.get_speech_timestamps(*args, **kwargs)
+
 
 class DiarizationService:
     """Handles audio chunking, model inference (Pyannote/Sortformer), and cross-chunk fusion."""
     
-    def __init__(self, diarizer, vad_model=None, embedder=None, logger=None, diarizer_config=None):
-        self.diarizer = diarizer
-        self.vad_model = vad_model
-        self.embedder = embedder
+    def __init__(self, diarizer=None, vad_model=None, embedder=None, logger=None,
+                 diarizer_config=None, model_loader=None, performance_config=None):
+        self._diarizer = diarizer
+        self._vad_model = vad_model
+        self._embedder = embedder
+        self.model_loader = model_loader
         self.logger = logger
         self.diarizer_config = diarizer_config or {}
+        # Silero's stateful ONNX wrapper is shared by the lightweight per-file
+        # service copies used by the two-file diarization scheduler.
+        self._vad_lock = threading.Lock()
+        # With vad_per_worker each postprocess thread runs its own Silero
+        # instance (fork()) and takes no lock. Shared by every per-file view
+        # for the same reason _postprocess_state is.
+        self.performance_config = dict(performance_config or {})
+        self._vad_local = threading.local()
+        # Runs diarize_postprocess() in the background during the diarization
+        # stage-major pass, so the GPU worker diarize_raw() just freed can
+        # take the next file immediately instead of waiting for this file's
+        # CPU-only filter/VAD/merge/split/write tail. Mirrors
+        # SeparationService._async_state. parallel_stage_view("diarization")
+        # only shallow-copies DiarizationService, so this dict/lock (and the
+        # executor built from them) are shared across every concurrent
+        # file's view, not one each.
+        self._postprocess_state = {"executor": None, "lock": threading.Lock()}
+
+    # Models are fetched from the loader on use, not captured at construction.
+    # PipelineService loads each stage's models when that stage runs, so a
+    # reference taken here would be None for every stage that had not loaded
+    # yet -- and would stay None after it did.
+    def _model(self, held, name):
+        if held is not None:
+            return held
+        return self.model_loader.get(name) if self.model_loader else None
+
+    @property
+    def diarizer(self):
+        return self._model(self._diarizer, "diarizer")
+
+    @diarizer.setter
+    def diarizer(self, model):
+        self._diarizer = model
+
+    @property
+    def vad_model(self):
+        return self._model(self._vad_model, "vad")
+
+    @vad_model.setter
+    def vad_model(self, model):
+        self._vad_model = model
+
+    @property
+    def embedder(self):
+        return self._model(self._embedder, "embedder")
         
+    def _vad_for_thread(self):
+        """(vad, lock) for the calling thread: a private fork and no lock with
+        vad_per_worker, else the shared model and its lock. A model without
+        fork() stays shared."""
+        vad = self.vad_model
+        if vad is None:
+            return None, None
+        if self.performance_config.get("vad_per_worker", False) and callable(
+                getattr(vad, "fork", None)):
+            local = self._vad_local
+            if getattr(local, "source", None) is not vad:
+                local.source, local.vad = vad, vad.fork()
+            return local.vad, contextlib.nullcontext()
+        return vad, self._vad_lock
+
     def _log_segment_stats(self, stage: str, seg_list: list):
         """One line per pipeline stage so segment loss can be attributed."""
         if not self.logger:
@@ -44,27 +139,35 @@ class DiarizationService:
             f"<0.5s={sum(d < 0.5 for d in durs)} <0.2s={sum(d < 0.2 for d in durs)}"
         )
 
+    @embedder.setter
+    def embedder(self, model):
+        self._embedder = model
+
     def prepare_chunks(self, audio: AudioData, max_duration: float = 120.0, min_silence: float = 0.5) -> Tuple[List[DiarizationChunk], str]:
         """Deprecated. Returns a single dummy chunk since diarization now processes the full audio natively."""
         if self.logger:
             self.logger.info("Chunking bypassed. Diarization will process the full audio natively.")
         return [DiarizationChunk(path="memory", offset=0.0, duration=audio.duration)], ""
         
-    def run_diarization(self, chunks: List[DiarizationChunk], audio: AudioData, args: Any) -> DiarizationResult:
-        """Run diarization model on the full audio natively."""
+    def diarize_raw(self, chunks: List[DiarizationChunk], audio: AudioData, args: Any) -> "_RawDiarization":
+        """GPU-only half of diarization: the model call and building the raw
+        per-track dataframe. No filtering, merging or splitting happens here
+        -- see diarize_postprocess(). Safe to call from the thread that will
+        hand the GPU worker straight back to the next file; postprocessing
+        can then run in the background (see submit_postprocess)."""
         is_diarizen = not getattr(args, "dia3", False)
         import pandas as pd
         import torch
-        
+
         # Prepare memory tensor for pipeline
         audio_input = {
             "waveform": torch.from_numpy(audio.waveform).unsqueeze(0),
             "sample_rate": audio.sample_rate
         }
-        
+
         if self.logger:
             self.logger.info(f"Running diarization on the full audio file natively (Duration: {audio.duration:.2f}s)...")
-            
+
         # Both backends read the same bounds from config, but they take them at
         # different points: DiariZen applies them to its clustering config when
         # the worker loads the model, so passing them again per call makes the
@@ -89,14 +192,14 @@ class DiarizationService:
                 min_speakers=min_speakers,
                 max_speakers=max_speakers,
             )
-            
+
         data = []
         annotation = (
             diar_out.speaker_diarization
             if hasattr(diar_out, "speaker_diarization")
             else diar_out
         )
-        
+
         if annotation is not None:
             try:
                 for turn, _, speaker in annotation.itertracks(yield_label=True):
@@ -107,7 +210,7 @@ class DiarizationService:
                     })
             except Exception as e:
                 if self.logger: self.logger.error(f"Error iterating diarization result: {e}")
-                
+
         combined_df = pd.DataFrame(data) if data else pd.DataFrame(columns=["start", "end", "speaker"])
         combined_df = combined_df.sort_values("start").reset_index(drop=True)
 
@@ -115,16 +218,80 @@ class DiarizationService:
         # and split, so it cannot show whether a low segment count came from the
         # diarizer or from cut_by_speaker_label. Log both ends.
         self._log_segment_stats("raw", df_to_list(combined_df))
-        
+
+        return _RawDiarization(combined_df=combined_df, method="diarizen" if is_diarizen else "pyannote")
+
+    def diarize_postprocess(self, raw: "_RawDiarization", audio: AudioData, args: Any) -> DiarizationResult:
+        """CPU-only half: filter, seam-split, VAD, merge, bridge,
+        length-split, and build the final DiarizationResult. No GPU call
+        happens here, so this is safe to run on a background thread (see
+        submit_postprocess) while the GPU worker diarize_raw() used is
+        already free for the next file."""
+        import pandas as pd
+        combined_df = raw.combined_df
+        is_diarizen = raw.method == "diarizen"
+
+        # Drop clustering-jitter blips before anything else touches the list.
+        # Must run first, on the RAW diarizer output: filtering after merging
+        # (the old approach, inside cut_by_speaker_label) judged a short
+        # fragment by whether it happened to sit next to something it could
+        # merge into, and silently dropped genuine short overlap evidence
+        # otherwise. This keeps any fragment with a foreign-speaker overlap
+        # regardless of length, and only drops isolated sub-200ms noise.
+        #
+        # 200ms is still below the shortest real overlap measured on this
+        # corpus (0.24s), so a genuine backchannel survives this filter
+        # either way (via the foreign-overlap exemption or simply being long
+        # enough) -- raised from the original 150ms for a wider noise margin.
+        raw_for_filter = df_to_list(combined_df)
+        filtered_list = filter_diarizer_noise(raw_for_filter)
+        dropped = len(raw_for_filter) - len(filtered_list)
+        if self.logger and dropped:
+            self.logger.info(
+                f"Dropped {dropped} segment(s) under 200ms as diarizer noise "
+                "(any with a foreign-speaker overlap was kept regardless of length)"
+            )
+        combined_df = pd.DataFrame(filtered_list)
+        self._log_segment_stats("post-noise-filter", filtered_list)
+
+        # Cut at the joins first, before anything else looks at these segments.
+        #
+        # Excising the sung and standalone-music stretches leaves points where
+        # two parts of the recording that were never adjacent now touch. Those
+        # joins are the boundaries of what is genuinely continuous audio, so
+        # every step after this works inside one piece rather than repairing a
+        # segment that spans two: VAD sub-divides a piece, merging cannot
+        # bridge one, and a length split never has to reason about it.
+        #
+        # Read through getattr for the same reason music_map is: the pipeline
+        # sets it, a service built for a test has none, and no timeline must
+        # read as "nothing was cut".
+        timeline = getattr(self, "timeline", None)
+        seams = timeline.seams() if timeline else []
+        raw_list = df_to_list(combined_df)
+        if seams:
+            before = len(raw_list)
+            raw_list = split_at_seams(raw_list, seams)
+            if self.logger and len(raw_list) != before:
+                self.logger.info(
+                    f"Split {len(raw_list) - before} segment(s) at {len(seams)} "
+                    "cut join(s) before VAD; each piece is now one contiguous "
+                    "stretch of the source")
+            self._log_segment_stats("post-seam-split", raw_list)
+            combined_df = pd.DataFrame(raw_list)
+
         # Apply VAD to split long continuous segments if VAD is available
-        if getattr(args, "vad", False) and self.vad_model:
+        use_vad = bool(getattr(args, "vad", False) and self.vad_model)
+        vad, vad_guard = self._vad_for_thread() if use_vad else (None, None)
+        if use_vad:
             vad_audio = {"waveform": audio.waveform, "sample_rate": audio.sample_rate}
-            raw_list = self.vad_model.vad(combined_df, vad_audio)
+            with vad_guard:
+                raw_list = vad.vad(combined_df, vad_audio)
         else:
             raw_list = df_to_list(combined_df)
             
         # Apply merge and smooth logic
-        merge_gap = getattr(args, "merge_gap", 2.0)
+        merge_gap = getattr(args, "merge_gap", 0.5)
         # The merge loop keeps absorbing same-speaker turns until it hits this
         # ceiling, so the ceiling is what actually decides turn length -- a run
         # of it produced 47 segments piled against a 30s limit, none of them a
@@ -133,27 +300,128 @@ class DiarizationService:
         # source and silence. Keep merge and split reading the same number.
         max_seg = getattr(args, "max_segment_length", None) or 30.0
         self._log_segment_stats("post-vad", raw_list)
+        # Snapshot trước khi merge để stage_output lưu song song raw và processed.
+        raw_snapshot = [Segment(index=str(d.get("index", "00000")).zfill(5),
+                                start=d["start"], end=d["end"], speaker=d["speaker"])
+                        for d in raw_list]
         smoothed_list = cut_by_speaker_label(
-            raw_list, merge_gap=merge_gap, max_segment_length=max_seg, logger=self.logger)
+            raw_list, merge_gap=merge_gap,
+            max_segment_length=max_seg, logger=self.logger, seams=seams)
         self._log_segment_stats(f"post-merge(gap={merge_gap} max={max_seg})", smoothed_list)
+
+        # Dissolve speakers too small to be participants before anything
+        # downstream has to reason about them. Target extraction is the caller
+        # that cares: it refuses an overlap whose window holds three speakers
+        # and cannot enrol anyone with under 1.5s of clean audio, so a
+        # three-second cluster costs far more than its length.
+        # waveform/sr let the merge gate on WeSpeaker voice similarity
+        # instead of timeline position alone -- see utils/segment_utils.py.
+        # A lazily-built WeSpeaker embedder is deliberately used here rather
+        # than self.embedder (PyannoteEmbedder, a different model already
+        # loaded for diarization) so the merge decision matches the same
+        # model/threshold convention as the BSS QC similarity step.
+        # DISABLED: ghost-speaker merge is turned off; speakers stay as diarized.
+        # Set ENABLE_GHOST_MERGE = True at module level to restore it.
+        if ENABLE_GHOST_MERGE:
+            smoothed_list = merge_ghost_speakers(
+                smoothed_list, logger=self.logger,
+                waveform=audio.waveform, sr=audio.sample_rate,
+            )
+            self._log_segment_stats("post-ghost-merge", smoothed_list)
+
+        # A ... B ... A is normally kept as three turns.  When B overlaps both
+        # exposed A edges, it is an interrupted A turn instead: bridge A so
+        # separation sees one meaningful A/B overlap rather than two slivers.
+        bridge_gap = getattr(args, "bridge_gap", None)
+        bridge_gap = 3.0 if bridge_gap is None else bridge_gap
+        smoothed_list = bridge_interrupted_speaker_turns(
+            smoothed_list, bridge_gap=bridge_gap, logger=self.logger, seams=seams)
+        self._log_segment_stats(f"post-interrupted-bridge(gap={bridge_gap})", smoothed_list)
 
         # Split segments that are too long. Passing the waveform lets the cut
         # land on a pause instead of on the stopwatch, so a forced split stops
         # clipping words in half.
         final_list = split_long_segments(
             smoothed_list, max_duration=max_seg,
-            waveform=audio.waveform, sample_rate=audio.sample_rate)
+            waveform=audio.waveform, sample_rate=audio.sample_rate,
+            boundary_finder=AcousticBoundaryFinder(
+                audio.waveform, audio.sample_rate,
+                vad=_GuardedVad(vad, vad_guard) if use_vad else None,
+            ))
+        # split_long_segments rounds public timestamps to milliseconds. A tiny
+        # preserved overlap can therefore collapse to start == end only after
+        # that rounding, so validate once more at the final export boundary.
+        before_final_filter = len(final_list)
+        final_list = [
+            segment for segment in final_list
+            if segment["end"] > segment["start"]
+        ]
+        if self.logger and len(final_list) != before_final_filter:
+            self.logger.info(
+                f"Dropped {before_final_filter - len(final_list)} zero-duration "
+                "segment(s) after timestamp rounding"
+            )
         self._log_segment_stats("post-split", final_list)
-        
+
         # Build schemas
         final_segments = []
         for d in final_list:
             final_segments.append(Segment(index=str(d.get("index", "00000")).zfill(5), start=d["start"], end=d["end"], speaker=d["speaker"]))
             
-        num_spk = len(combined_df["speaker"].unique())
+        num_spk = len({d["speaker"] for d in final_list})
         
         return DiarizationResult(
             segments=final_segments,
             num_speakers=num_spk,
-            method="diarizen" if is_diarizen else "pyannote"
+            method="diarizen" if is_diarizen else "pyannote",
+            raw_segments=raw_snapshot,
         )
+
+    def run_diarization(self, chunks: List[DiarizationChunk], audio: AudioData, args: Any) -> DiarizationResult:
+        """Run diarization model on the full audio natively.
+
+        Thin wrapper kept for callers that want the whole thing synchronously
+        (file-major runs, tests). See diarize_raw()/diarize_postprocess() for
+        the split this composes -- PipelineService.run() calls those directly
+        so it can defer the CPU half during the diarization stage-major pass."""
+        return self.diarize_postprocess(self.diarize_raw(chunks, audio, args), audio, args)
+
+    def _postprocess_pool(self):
+        state = self._postprocess_state
+        with state["lock"]:
+            if state["executor"] is None:
+                workers = int((self.diarizer_config or {}).get("postprocess_workers", 2))
+                state["executor"] = ThreadPoolExecutor(
+                    max_workers=max(1, workers), thread_name_prefix="diar-post")
+            return state["executor"]
+
+    def submit_postprocess(self, raw: "_RawDiarization", audio: AudioData, args: Any,
+                           then=None):
+        """Run diarize_postprocess() on the shared background pool. Shared
+        (not per-file) the same way SeparationService's gpu/post executors
+        are -- parallel_stage_view("diarization") only shallow-copies
+        DiarizationService, so every concurrent file's view submits to the
+        same pool.
+
+        `then(result)`, when given, runs on the same pool thread right after
+        postprocessing (checkpoint commit, prefetch, audit writes). The
+        returned future resolves only once it has finished, and carries its
+        exception, so a waiter cannot see the file as done while that tail is
+        still running or has failed."""
+        def job():
+            result = self.diarize_postprocess(raw, audio, args)
+            if then is not None:
+                then(result)
+            return result
+        return self._postprocess_pool().submit(job)
+
+    def close_postprocess_pool(self):
+        """Shut down the background pool. Safe to call with nothing ever
+        submitted, and safe to call twice."""
+        state = getattr(self, "_postprocess_state", None)
+        if state is None:
+            return
+        with state["lock"]:
+            executor, state["executor"] = state["executor"], None
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=False)

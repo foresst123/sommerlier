@@ -1,6 +1,50 @@
 import os
 import argparse
+import hashlib
+import tempfile
+import urllib.request
 from huggingface_hub import snapshot_download, hf_hub_download
+
+
+DNSMOS_MODEL_URL = (
+    "https://raw.githubusercontent.com/microsoft/DNS-Challenge/"
+    "master/DNSMOS/DNSMOS/sig_bak_ovr.onnx"
+)
+DNSMOS_MODEL_SHA256 = "269fbebdb513aa23cddfbb593542ecc540284a91849ac50516870e1ac78f6edd"
+
+
+def download_dnsmos_model(base_dir):
+    """Provision the small official DNSMOS P.835 model used by input preflight."""
+    model_dir = os.path.join(base_dir, "dnsmos")
+    model_path = os.path.join(model_dir, "sig_bak_ovr.onnx")
+    os.makedirs(model_dir, exist_ok=True)
+
+    if os.path.isfile(model_path):
+        with open(model_path, "rb") as handle:
+            digest = hashlib.sha256(handle.read()).hexdigest()
+        if digest == DNSMOS_MODEL_SHA256:
+            print("    -> DNSMOS đã có và checksum hợp lệ.")
+            return model_path
+
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=model_dir, delete=False) as handle:
+            temp_path = handle.name
+            with urllib.request.urlopen(DNSMOS_MODEL_URL, timeout=60) as response:
+                while chunk := response.read(1024 * 1024):
+                    handle.write(chunk)
+        with open(temp_path, "rb") as handle:
+            digest = hashlib.sha256(handle.read()).hexdigest()
+        if digest != DNSMOS_MODEL_SHA256:
+            raise RuntimeError(
+                f"DNSMOS checksum mismatch: expected {DNSMOS_MODEL_SHA256}, got {digest}")
+        os.replace(temp_path, model_path)
+        temp_path = None
+        print("    -> Xong!")
+        return model_path
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
 
 def download_models(token=None):
     # Set cache directories
@@ -15,6 +59,14 @@ def download_models(token=None):
     os.environ["TORCH_HOME"] = torch_cache
     
     print(f"=====================================================")
+
+    # The input-quality gate is enabled by default and fail-closed, so this
+    # weight is part of a usable offline bundle rather than an optional metric.
+    print("\n[+] Đang tải mô hình: DNSMOS P.835 input-quality gate...")
+    try:
+        download_dnsmos_model(base_dir)
+    except Exception as e:
+        print(f"    -> Lỗi tải DNSMOS: {e}")
     print(f"BẮT ĐẦU TẢI MODELS VỀ THƯ MỤC: {base_dir}")
     print(f"=====================================================")
     
@@ -113,14 +165,31 @@ def download_models(token=None):
     except Exception as e:
         print(f"    -> Lỗi tải NeMo Sortformer: {e}. Có thể bỏ qua nếu dùng Pyannote.")
 
-    # 8. Download DialogueSidon (TSE separator used by sidon_worker.py)
-    print(f"\n[+] Đang tải mô hình: DialogueSidon (TSE)...")
+    # 8. Download the BS-RoFormer vocal checkpoint (audio-separator).
+    #    It does not come from the HF hub, so HF_HUB_OFFLINE does nothing for
+    #    it: without this the music-removal stage is the one stage that still
+    #    needs the network, and it fails deep into a run.
+    sep_dir = os.path.join(base_dir, "audio-separator")
+    os.makedirs(sep_dir, exist_ok=True)
+    ckpt = os.environ.get("BS_ROFORMER_MODEL",
+                          "model_bs_roformer_ep_368_sdr_12.9628.ckpt")
+    print(f"\n[+] Đang tải mô hình: BS-RoFormer ({ckpt})...")
     try:
-        for filename in ["ssl_encoder.pt2", "diffusion_head.pt2", "vae_decoder.pt2", "metadata.json"]:
-            hf_hub_download(repo_id="sarulab-speech/DialogueSidon", filename=filename)
+        from audio_separator.separator import Separator
+        sep = Separator(model_file_dir=sep_dir, log_level=40)
+        # download_model_files fetches the checkpoint and its config without
+        # building the model; load_model is the fallback for releases that do
+        # not expose it, and costs a model construction we throw away.
+        # This also writes download_checks.json into sep_dir -- the remote
+        # model list audio-separator fetches on every load. Without it the
+        # stage still needs the network even with the weights already there.
+        if hasattr(sep, "download_model_files"):
+            sep.download_model_files(ckpt)
+        else:
+            sep.load_model(model_filename=ckpt)
         print(f"    -> Xong!")
     except Exception as e:
-        print(f"    -> Lỗi tải DialogueSidon: {e}")
+        print(f"    -> Lỗi tải BS-RoFormer: {e}. Cần `pip install audio-separator`.")
 
     print(f"\n=====================================================")
     print(f"TẢI HOÀN TẤT! Toàn bộ models đã nằm trong: {base_dir}")
@@ -129,6 +198,7 @@ def download_models(token=None):
     print(f"export TORCH_HOME=\"{torch_cache}\"")
     print(f"export HOME=\"{base_dir}\"  # Dành cho PANNS")
     print(f"export XDG_CACHE_HOME=\"{base_dir}\"  # Dành cho NeMo")
+    print(f"export BS_ROFORMER_MODEL_DIR=\"{sep_dir}\"  # Dành cho BS-RoFormer")
     print(f"=====================================================")
 
 if __name__ == "__main__":

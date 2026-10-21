@@ -1,5 +1,6 @@
 import os
 import torch
+import numpy as np
 from models.whisper import load_asr_model
 
 class WhisperASR:
@@ -77,3 +78,43 @@ class WhisperASR:
             "language": det_lang,
             "words": words
         }
+
+    def transcribe_batch(self, audios_16k, vad_segments, language="en",
+                         batch_size=None, callback=None):
+        """Batch independent clips while preserving one result per clip.
+
+        The underlying WhisperX pipeline batches VAD spans. Packing clips into
+        one carrier array only supplies those independent spans to that API;
+        no decoder context crosses clip boundaries.
+        """
+        if not audios_16k:
+            return []
+        limit = max(1, int(batch_size or self.batch_size))
+        results = []
+        for start in range(0, len(audios_16k), limit):
+            arrays = [np.ascontiguousarray(a, dtype=np.float32)
+                      for a in audios_16k[start:start + limit]]
+            spans = []
+            offset = 0
+            for array, local in zip(arrays, vad_segments[start:start + limit]):
+                duration = len(array) / 16000.0
+                item = local[0] if local else {"start": 0.0, "end": duration}
+                lo = min(max(0.0, float(item.get("start", 0.0))), duration)
+                hi = min(max(lo, float(item.get("end", duration))), duration)
+                spans.append({"start": offset / 16000.0 + lo,
+                              "end": offset / 16000.0 + hi})
+                offset += len(array)
+            carrier = np.concatenate(arrays) if arrays else np.empty(0, np.float32)
+            output = self.model.transcribe(
+                carrier, spans, batch_size=limit, language=language,
+                print_progress=False)
+            segments = list((output or {}).get("segments", []))
+            detected = (output or {}).get("language", language)
+            for index in range(len(arrays)):
+                segment = segments[index] if index < len(segments) else {}
+                words = list(segment.get("words", []))
+                results.append({"text": str(segment.get("text", "")).strip(),
+                                "language": detected, "words": words})
+                if callback:
+                    callback()
+        return results

@@ -41,10 +41,10 @@ clust_ths=(0.5)
 #ASRMoE=(--ASRMoE --no-ASRMoE)
 ASRMoE=(--ASRMoE)
 # DEMUCS flag combinations (background music removal)
-# --demucs: Detect background music with PANNs, then extract vocals with Demucs
-# --no-demucs: No background music removal (default)
-#demucs_flags=(--demucs)
-demucs_flags=(--demucs)
+# --bs_roformer: Detect background music with PANNs, then extract vocals with BS-RoFormer
+# --no-bs_roformer: No background music removal (default)
+#bs_roformer_flags=(--bs_roformer)
+bs_roformer_flags=(--bs_roformer)
 # WhisperX word-level timestamp flags
 # --whisperx_word_timestamps: Enable word-level timestamps via WhisperX alignment
 # --no-whisperx_word_timestamps: Disable word-level timestamps (default)
@@ -88,17 +88,17 @@ for folder in "${folders[@]}"; do
               for clust in "${clust_ths[@]}"; do
                 for merge_gap in "${merge_gaps[@]}"; do
                   for asrmoe in "${ASRMoE[@]}"; do
-                    for demucs in "${demucs_flags[@]}"; do
+                    for bs_roformer in "${bs_roformer_flags[@]}"; do
                       for whisperx in "${whisperx_flags[@]}"; do
                         for qwen3omni in "${qwen3omni_flags[@]}"; do
                           for sepreformer in "${sepreformer_flags[@]}"; do
                             for overlap_th in "${overlap_thresholds[@]}"; do
                               for speaker_link_th in "${speaker_link_thresholds[@]}"; do
                                 for sortformer_pad_offset in "${sortformer_pad_offset_values[@]}"; do
-                                  echo "▶ Folder: ${folder}, ${vad}, ${dia3}, ${initprompt}, LLM=${llm}, seg_th=${seg}, min_cluster_size=${min_cluster}, clust_th=${clust}, merge_gap=${merge_gap}, ${asrmoe}, ${demucs}, ${whisperx}, ${qwen3omni}, ${sepreformer}, ${sortformer_param_flags[*]}, sortformer_pad_offset=${sortformer_pad_offset}, overlap_th=${overlap_th}, speaker_link_th=${speaker_link_th}, korean=${korean}"
+                                  echo "▶ Folder: ${folder}, ${vad}, ${dia3}, ${initprompt}, LLM=${llm}, seg_th=${seg}, min_cluster_size=${min_cluster}, clust_th=${clust}, merge_gap=${merge_gap}, ${asrmoe}, ${bs_roformer}, ${whisperx}, ${qwen3omni}, ${sepreformer}, ${sortformer_param_flags[*]}, sortformer_pad_offset=${sortformer_pad_offset}, overlap_th=${overlap_th}, speaker_link_th=${speaker_link_th}, korean=${korean}"
                                   /mnt/fr20tb/kyudan/miniforge3/envs/dataset/bin/python main_original_ASR_MoE.py \
                                     --input_folder_path "${folder}" \
-                                    ${vad} ${dia3} ${initprompt} ${asrmoe} ${demucs} ${whisperx} ${qwen3omni} ${sepreformer} \
+                                    ${vad} ${dia3} ${initprompt} ${asrmoe} ${bs_roformer} ${whisperx} ${qwen3omni} ${sepreformer} \
                                     ${sortformer_param_flags[@]} \
                                     --sortformer-pad-offset "${sortformer_pad_offset}" \
                                     --LLM "${llm}" \
