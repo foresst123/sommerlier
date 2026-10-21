@@ -173,6 +173,12 @@ def _build_parser():
                              "several as name=on,name=off. Exists so a run does not "
                              "have to edit config.json -- which a re-clone reverts "
                              "without saying so.")
+    parser.add_argument("--denoise", default="none", metavar="SPEC",
+                        help="Noise filter applied after music removal and before "
+                             "diarization (profile: pipeline.denoise): none, one backend "
+                             "(dfn3, mf2se48, mpsenet) or a serial chain such as "
+                             "dfn3>mf2se48. Each variant needs its own --job_id and "
+                             "--save_path so caches and outputs do not mix.")
     parser.add_argument(
         "--stop_after", type=str,
         choices=["input_quality", "music", "diarization", "separation",
@@ -256,6 +262,14 @@ def _from_config(key, value):
 # thresholds can live in the profile instead of the command line.
 for k, v in env_profile.get("pipeline", {}).items():
     _from_config(k, v)
+
+# A bad chain should stop the run now, not fail every file later.
+if str(getattr(args, "denoise", "none") or "none").strip().lower() not in ("", "none"):
+    try:
+        from services.denoise_service import parse_spec
+        parse_spec(args.denoise)
+    except Exception as _exc:
+        raise SystemExit(f"main.py: error: --denoise {args.denoise!r}: {_exc}")
 
 # "none" is how the command line cancels a profile that stops early.
 if getattr(args, "stop_after", None) == "none":

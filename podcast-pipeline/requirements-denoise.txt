@@ -1,0 +1,26 @@
+# Optional: only needed for the noise-filter stage (--denoise dfn3 / mf2se48 / mpsenet).
+# The pipeline without a filter does not import any of this. Torch itself comes from
+# requirements.txt (torch==2.8.0, torchaudio==2.8.0). Weights: scripts/denoise_weights.md.
+# Versions below are the latest published on PyPI when this was written; the upstream repos
+# (Rikorose/DeepFilterNet, modelscope/ClearerVoice-Studio) were read at the commits noted.
+
+# dfn3: DeepFilterNet3. 0.5.6 is the newest PyPI release; its wheel bundles the Rust libdf extension.
+# (repo main is 0.5.7-pre and declares numpy>=1.22,<2.0; check that against your numpy before installing)
+deepfilternet==0.5.6
+appdirs
+
+# mf2se48: ClearerVoice-Studio. Install with --no-deps (pip install --no-deps clearvoice==0.1.2),
+# because its metadata pins numpy<2, librosa==0.10.2.post1, opencv-python and scenedetect, which the
+# speech-enhancement path never imports. The runtime imports it does need are listed here:
+clearvoice==0.1.2
+einops
+joblib
+pydub
+rotary-embedding-torch==0.8.3
+torchinfo
+yamlargparse
+huggingface-hub>=0.26.2
+
+# mpsenet: not a pip package. git clone https://github.com/yxlu-0102/MP-SENet and set MPSENET_DIR.
+# Its model code needs einops (above). pesq / joblib / matplotlib are imported by upstream at module
+# level but only used for training metrics; models/denoise/mpsenet.py stubs them when absent.

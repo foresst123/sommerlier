@@ -919,6 +919,35 @@ class PipelineService:
         ).hexdigest()[:20]
         return f"v1-{digest}"
 
+    def _apply_denoise(self, args, config, checkpoint, audio_data, stage_out,
+                       computed_stages) -> None:
+        """Replace audio_data.waveform with the --denoise chain's output.
+
+        Cached beside processed_audio under a namespace holding the chain id, so
+        stage-major re-entries reload it and a changed chain recomputes. With no
+        chain nothing is read, written or renamed.
+        """
+        from services.denoise_service import DenoiseService, chain_id_of, is_none
+        spec = getattr(args, "denoise", None)
+        if is_none(spec):
+            return
+        cid = chain_id_of(spec)
+        if cid == "none":
+            return
+        checkpoint.namespaces["denoised_audio"] = (
+            f"{cid}-{checkpoint.namespaces['processed_audio']}")
+        cached = checkpoint.load_array("denoised_audio")
+        if cached is not None and len(cached) == len(audio_data.waveform):
+            audio_data.waveform = cached
+            if self.logger:
+                self.logger.info(f"Loading denoised ({cid}) waveform from checkpoint cache")
+            return
+        info = DenoiseService().apply(audio_data, spec, config.get("denoise"), self.logger)
+        checkpoint.save_array("denoised_audio", audio_data.waveform)
+        if "denoise" not in computed_stages:
+            stage_out.write_denoise(info, audio_data.waveform, audio_data.sample_rate)
+            computed_stages.add("denoise")
+
     def _strip_music(self, args, config, checkpoint, audio_data, audio_path,
                      music_map) -> bool:
         """Take the music out of the waveform. True when the waveform was changed.
@@ -1609,6 +1638,12 @@ class PipelineService:
             stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
                                       "stopped_after": "music"})
             return None
+
+        # Optional noise filter. After the music stop so 01_music/after_music.wav
+        # stays the unfiltered waveform; the length never changes, so the
+        # timeline and the music map above remain valid.
+        self._apply_denoise(args, config, checkpoint, audio_data, stage_out,
+                            computed_stages)
 
         # 3. Phân đoạn người nói, VAD và chia khối.
         # Chỉ ghi artifact khi thực sự tính toán. Chạy theo giai đoạn sẽ đọc lại
