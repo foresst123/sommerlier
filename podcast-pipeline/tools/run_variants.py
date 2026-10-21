@@ -38,6 +38,14 @@ Example on the DGX (two GPUs, variants in parallel, safe to re-run with --resume
 
 Note: main.py's output flag is --save_path (there is no --output_dir); the runner
 passes --save_path. A failed variant is logged and recorded as "failed"; the others go on.
+
+Silent fallbacks: when a denoise backend cannot load or run, DenoiseService keeps the unfiltered audio and
+only writes the error into <file dir>/01b_denoise/denoise.json. After each variant the runner reads that
+file for every file and gives a verdict: ok, fallback (errors, chain dropped), missing (non-none chain but
+no denoise.json) or suspect_noop (no errors but output identical to input). fallback/missing make the
+variant status "degraded" (subprocess exit 0, but the filter did not run): no .done marker (so --resume
+re-runs it) unless --accept-degraded, listed in the DEGRADED summary, and --strict exits 3. A degraded
+variant says nothing about what the filter does.
 """
 
 import argparse
@@ -61,6 +69,7 @@ AUDIO_EXTS = (".mp3", ".wav", ".m4a", ".flac", ".opus", ".ogg", ".aac")
 OUT_FLAG = "--save_path"
 DONE_MARKER = ".done"
 MANIFEST_NAME = "variants_manifest.json"
+NOOP_CORR = 0.99999  # corr_with_input at or above this = the filter changed nothing
 
 
 # ---------------------------------------------------------------- variant ids
@@ -359,10 +368,70 @@ def write_json_atomic(path, data):
     os.replace(tmp, path)
 
 
-def write_manifest(out_root, variants, stems, status, reference, reasons=None):
+# --------------------------------------------------------------- denoise report
+def _first_line(text, limit=200):
+    lines = str(text).strip().splitlines()
+    return (lines[0] if lines else "")[:limit]
+
+
+def _has_real_filter(chain):
+    """True when the chain runs a real backend (not blend pseudo-steps, not the identity test backend)."""
+    return any(t != "identity" for t in _backend_tokens(chain))
+
+
+def file_verdict(chain, info, exists=True):
+    """Verdict for one file from its parsed denoise.json (None = absent/corrupt).
+
+    Returns {"verdict","errors","corr_with_input","lag_samples"}; see the module docstring.
+    """
+    errors = [str(e) for e in (info or {}).get("errors") or []] if isinstance(info, dict) else []
+    corr = info.get("corr_with_input") if isinstance(info, dict) else None
+    lag = info.get("lag_samples") if isinstance(info, dict) else None
+    if not chain:
+        verdict = "ok"
+    elif not isinstance(info, dict):
+        verdict = "missing"
+        errors = errors or ["01b_denoise/denoise.json is " + ("unreadable" if exists else "absent")]
+    elif errors:
+        verdict = "fallback"
+    elif isinstance(corr, (int, float)) and corr >= NOOP_CORR and _has_real_filter(chain):
+        verdict = "suspect_noop"
+    else:
+        verdict = "ok"
+    return {"verdict": verdict, "errors": errors, "corr_with_input": corr, "lag_samples": lag}
+
+
+def denoise_report(chain, file_dirs, stems):
+    """{file stem: file_verdict} for a finished variant; a stem with no output dir counts as missing."""
+    report = {}
+    for stem in sorted(stems):
+        d = file_dirs.get(stem)
+        if d is None:
+            if chain:
+                report[stem] = file_verdict(chain, None, exists=False)
+                report[stem]["errors"] = ["no output directory for this file"]
+            continue
+        path = Path(d) / "01b_denoise" / "denoise.json"
+        exists = path.is_file()
+        try:
+            info = json.loads(path.read_text(encoding="utf-8")) if exists else None
+        except (OSError, ValueError):
+            info = None
+        report[stem] = file_verdict(chain, info, exists)
+    return report
+
+
+def report_counts(report, total):
+    bad = sum(1 for r in report.values() if r["verdict"] in ("fallback", "missing"))
+    noop = sum(1 for r in report.values() if r["verdict"] == "suspect_noop")
+    return {"degraded_files": bad, "suspect_files": noop, "total_files": total}
+
+
+def write_manifest(out_root, variants, stems, status, reference, reasons=None, reports=None):
     entries = []
     for v in variants:
         vdir = Path(out_root) / v["id"]
+        rep = (reports or {}).get(v["id"]) or {}
         entries.append({
             "id": v["id"], "chain": v["chain"], "label": v["label"],
             "out_dir": str(vdir.resolve()), "job_id": f"exp-{v['id']}",
@@ -372,6 +441,10 @@ def write_manifest(out_root, variants, stems, status, reference, reasons=None):
             "music_separator": v.get("music_separator"),
             "extra_args": v.get("extra_args") or [],
             "reason": (reasons or {}).get(v["id"]),
+            "denoise_report": rep.get("denoise_report", {}),
+            "degraded_files": rep.get("degraded_files", 0),
+            "suspect_files": rep.get("suspect_files", 0),
+            "total_files": rep.get("total_files", 0),
             "files": discover_dirs(vdir, stems)})
     write_json_atomic(Path(out_root) / MANIFEST_NAME, {
         "version": 1, "baseline": "none",
@@ -403,6 +476,7 @@ class Runner:
         self.stems = [f.stem for f in files]
         self.out_root = Path(args.out_root)
         self.status = {vid: "skipped" for vid in self.skipped}
+        self.reports = {}
         self.procs = set()
         self.lock = threading.Lock()
         self.stop = threading.Event()
@@ -413,7 +487,7 @@ class Runner:
     def _manifest(self):
         with self.lock:
             write_manifest(self.out_root, self.variants, set(self.stems),
-                           self.status, self.reference, self.skipped)
+                           self.status, self.reference, self.skipped, self.reports)
 
     def terminate_all(self, *_):
         self.stop.set()
@@ -439,7 +513,7 @@ class Runner:
             try:
                 if json.loads(marker.read_text()).get("hash") == digest:
                     print(f"[{variant['id']}] up to date, skipped", flush=True)
-                    self.status[variant["id"]] = "ok"
+                    self.status[variant["id"]] = self._assess(variant)
                     self._manifest()
                     return
             except (ValueError, OSError):
@@ -482,12 +556,27 @@ class Runner:
                     self.procs.discard(proc)
             log.write(f"\n[run_variants] exit status: {code} after {time.time() - t0:.0f}s\n")
         ok = code == 0 and not self.stop.is_set()
-        if ok:
-            marker.write_text(json.dumps({"hash": digest, "exit": 0}))
-        self.status[variant["id"]] = "ok" if ok else "failed"
-        print(f"[{variant['id']}] {'ok' if ok else 'FAILED'} (exit {code}, "
+        state = self._assess(variant) if ok else "failed"
+        if state == "ok" or (state == "degraded" and a.accept_degraded):
+            marker.write_text(json.dumps({"hash": digest, "exit": 0, "status": state}))
+        self.status[variant["id"]] = state
+        print(f"[{variant['id']}] {state.upper() if state != 'ok' else 'ok'} (exit {code}, "
               f"{time.time() - t0:.0f}s)", flush=True)
         self._manifest()
+
+    def _assess(self, variant):
+        """Read every file's denoise.json; record the report; "degraded" or "ok"."""
+        vdir = self.out_root / variant["id"]
+        report = denoise_report(variant["chain"], discover_dirs(vdir, set(self.stems)), self.stems)
+        counts = report_counts(report, len(self.stems))
+        self.reports[variant["id"]] = {"denoise_report": report, **counts}
+        if counts["suspect_files"]:
+            print(f"[{variant['id']}] WARNING: output identical to input in {counts['suspect_files']}/"
+                  f"{counts['total_files']} file(s) (suspect_noop)", flush=True)
+        if counts["degraded_files"]:
+            print(f"[{variant['id']}] DEGRADED: {degraded_reason(report, counts)}", flush=True)
+            return "degraded"
+        return "ok"
 
     def run(self):
         self.out_root.mkdir(parents=True, exist_ok=True)
@@ -514,6 +603,27 @@ class Runner:
             self.status[variant["id"]] = "failed"
 
 
+def degraded_reason(report, counts):
+    first = next((r for r in report.values() if r["verdict"] in ("fallback", "missing")), None)
+    err = _first_line(first["errors"][0]) if first and first["errors"] else "no error recorded"
+    return (f"{counts['degraded_files']}/{counts['total_files']} file(s) fell back to unfiltered audio "
+            f"or have no denoise.json; first error: {err}")
+
+
+def print_degraded_summary(reports, status):
+    rows = [(vid, r) for vid, r in reports.items() if status.get(vid) == "degraded"]
+    if not rows:
+        return
+    print("\n" + "=" * 70)
+    print(f"DEGRADED: {len(rows)} variant(s) ran but the filter did not apply; "
+          "their outputs are the unfiltered audio, NOT 'the filter has no effect'")
+    for vid, r in rows:
+        print(f"  {vid}: {degraded_reason(r['denoise_report'], r)}")
+    print("Fix the environment and re-run with --resume (degraded variants have no .done marker), "
+          "or pass --accept-degraded to keep them as they are.")
+    print("=" * 70)
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Run the pipeline for each noise-filter variant.")
     p.add_argument("--audio-dir")
@@ -534,6 +644,10 @@ def parse_args(argv=None):
                    help="keep at most N variants in total, baseline included")
     p.add_argument("--shuffle-seed", type=int, default=None,
                    help="with --max-variants: random (reproducible) subset instead of the first N")
+    p.add_argument("--accept-degraded", action="store_true",
+                   help="write the .done marker for a degraded variant too (so --resume keeps it)")
+    p.add_argument("--strict", action="store_true",
+                   help="exit with code 3 when any variant is degraded or failed")
     p.add_argument("--list", action="store_true", help="print the planned variants and work, then exit")
     p.add_argument("--minutes-per-file-run", type=float, default=20.0,
                    help="ASSUMPTION for the --list time estimate: minutes per (variant, file) run")
@@ -596,12 +710,16 @@ def main(argv=None):
             print(f"[{v['id']}] CUDA_VISIBLE_DEVICES={gpu} " +
                   shlex.join(build_command(v, files, args)))
         return 0
-    status = Runner(args, variants, files, skipped).run()
+    runner = Runner(args, variants, files, skipped)
+    status = runner.run()
     print(json.dumps(status))
+    print_degraded_summary(runner.reports, status)
     if skipped:
         print(f"skipped {len(skipped)} variant(s): {', '.join(skipped)} (reasons in the manifest)")
     print(f"manifest: {Path(args.out_root) / MANIFEST_NAME}")
-    return 0 if all(s in ("ok", "skipped") for s in status.values()) else 1
+    if args.strict and any(s in ("degraded", "failed") for s in status.values()):
+        return 3
+    return 0 if all(s in ("ok", "skipped", "degraded") for s in status.values()) else 1
 
 
 if __name__ == "__main__":

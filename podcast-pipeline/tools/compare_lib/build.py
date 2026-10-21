@@ -5,7 +5,7 @@ import os
 from typing import Dict, List, Optional
 
 from . import metrics as M
-from .io_stage import load_file_output, load_reference
+from .io_stage import denoise_entry, load_file_output, load_reference
 from .speaker_align import compare_speakers
 from .text_align import compare_transcripts
 
@@ -41,6 +41,16 @@ def _summary(variants: List[dict], metrics_by_file: Dict[str, Dict[str, dict]]) 
     return out
 
 
+BAD_VERDICTS = ("fallback", "missing")
+
+
+def _first_error(entries) -> str:
+    for e in entries:
+        if e.get("verdict") in BAD_VERDICTS and e.get("errors"):
+            return str(e["errors"][0]).strip().splitlines()[0][:200]
+    return ""
+
+
 def build_compare_data(manifest_path: str, files: Optional[List[str]] = None,
                        references: Optional[Dict[str, str]] = None, embed: bool = True) -> dict:
     with open(manifest_path, encoding="utf-8") as f:
@@ -54,6 +64,8 @@ def build_compare_data(manifest_path: str, files: Optional[List[str]] = None,
         row = {"id": v["id"], "chain": v.get("chain", []), "label": v.get("label", v["id"])}
         status = v.get("status", "ok")
         row["status"] = status
+        if status == "degraded":
+            row["degraded"] = True
         if v.get("group"):
             row["group"] = v["group"]
         if v.get("tag"):
@@ -76,6 +88,8 @@ def build_compare_data(manifest_path: str, files: Optional[List[str]] = None,
                 stems.append(stem)
 
     files_out, metrics_by_file = [], {}
+    manifest_by_id = {v["id"]: v for v in usable}
+    den_all: Dict[str, List[dict]] = {}
     for stem in stems:
         loaded = {v["id"]: load_file_output(v["files"][stem], stem)
                   for v in usable if stem in (v.get("files") or {})}
@@ -119,13 +133,42 @@ def build_compare_data(manifest_path: str, files: Optional[List[str]] = None,
                 "asr": M.asr_metrics(asr, var_wav, td.get("wer_vs_baseline"),
                                      td.get("wer_vs_reference")),
             }
+        denoise = {}
+        for vid, o in loaded.items():
+            mv = manifest_by_id[vid]
+            ent = denoise_entry(mv.get("chain"), o.get("denoise"), (mv.get("denoise_report") or {}).get(stem))
+            if ent is not None:
+                denoise[vid] = ent
+                den_all.setdefault(vid, []).append(ent)
         files_out.append({"name": stem, "duration": duration, "audio": audio, "text": text,
-                          "text_diff": text_diff, "speakers": speakers, "metrics": mets})
+                          "text_diff": text_diff, "speakers": speakers, "metrics": mets,
+                          "denoise": denoise})
         metrics_by_file[stem] = mets
+
+    summary_n = {v["id"]: sum(1 for m in metrics_by_file.values() if v["id"] in m) for v in variants_out}
+    excluded = {}
+    for row in variants_out:
+        ents = den_all.get(row["id"], [])
+        bad = sum(1 for e in ents if e.get("verdict") in BAD_VERDICTS)
+        mv = manifest_by_id.get(row["id"])
+        if mv is not None:
+            # the manifest counts files that never produced output too (total_files)
+            bad = max(bad, int(mv.get("degraded_files") or 0))
+            noop = sum(1 for e in ents if e.get("verdict") == "suspect_noop")
+            total = int(mv.get("total_files") or 0) or len(ents)
+            row["degraded"] = bool(bad or row.get("degraded"))
+            row["degraded_files"], row["total_files"] = bad, total
+            if row["degraded"]:
+                row["degraded_reason"] = (f"fell back to unfiltered audio in {bad}/{total} files"
+                                          + (f": {_first_error(ents)}" if _first_error(ents) else ""))
+            if noop:
+                row["suspect_noop_files"] = noop
+        excluded[row["id"]] = bad
 
     return {
         "version": VERSION, "baseline": base_id, "variants": variants_out, "files": files_out,
         "summary": _summary(variants_out, metrics_by_file),
+        "summary_n": summary_n, "summary_excluded_degraded": excluded,
     }
 
 

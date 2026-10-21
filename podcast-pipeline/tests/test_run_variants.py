@@ -37,6 +37,17 @@ for audio in sorted(Path(a.audio_dir).iterdir()):
     (d / "02_diarization" / "segments.json").write_text("[]")
     (d / "03_separation" / "stats.json").write_text("{}")
     (d / "05_asr" / "asr.json").write_text("[]")
+    if a.denoise:  # what DenoiseService leaves behind; the chain name picks the scenario
+        den = d / "01b_denoise" / "denoise.json"
+        info = {"chain_id": a.denoise, "errors": [], "corr_with_input": 0.9, "lag_samples": 0, "steps": [], "blend": None}
+        if a.denoise == "errc":
+            info["errors"] = ["errc: boom\\nsecond line"]
+        elif a.denoise in ("noop", "identity"):
+            info["corr_with_input"] = 1.0
+        if a.denoise == "corrupt":
+            den.write_text("{not json")
+        elif a.denoise != "nojson":
+            den.write_text(json.dumps(info))
 '''
 
 
@@ -327,3 +338,96 @@ def test_only_available_ignores_pseudo_steps(env, monkeypatch, capsys):
     _fake_availability(monkeypatch, {})
     assert rv._backend_tokens(["dfn3", "blend50"]) == ["dfn3"]
     assert rv.check_availability(rv.load_variants(var)) == {}
+
+
+# ---- denoise verdicts, degraded status, .done, --strict -----------------------------
+def _den(tmp, vid, stem="a"):
+    return json.loads((tmp / "out" / vid / stem / "01b_denoise" / "denoise.json").read_text())
+
+
+def _manifest(tmp):
+    m = json.loads((tmp / "out" / "variants_manifest.json").read_text())
+    return {x["id"]: x for x in m["variants"]}
+
+
+def _set_chains(env, *chains):
+    env[3].write_text(json.dumps({"variants": [{"chain": c} for c in chains]}))
+
+
+def test_file_verdict_per_case():
+    fv = rv.file_verdict
+    assert fv([], None)["verdict"] == "ok"                                   # no chain, no json needed
+    assert fv(["dfn3"], {"errors": [], "corr_with_input": 0.9})["verdict"] == "ok"
+    r = fv(["dfn3"], {"errors": ["dfn3: no weights"], "corr_with_input": 1.0, "lag_samples": 0})
+    assert r["verdict"] == "fallback" and r["errors"] == ["dfn3: no weights"]
+    assert fv(["dfn3"], None, exists=False)["verdict"] == "missing"
+    assert fv(["dfn3"], None, exists=True)["errors"] == ["01b_denoise/denoise.json is unreadable"]
+    assert fv(["dfn3"], {"errors": [], "corr_with_input": 1.0})["verdict"] == "suspect_noop"
+    assert fv(["dfn3"], {"errors": [], "corr_with_input": 0.999})["verdict"] == "ok"
+    assert fv(["identity"], {"errors": [], "corr_with_input": 1.0})["verdict"] == "ok"   # test backend is exempt
+    assert fv(["identity", "blend50"], {"errors": [], "corr_with_input": 1.0})["verdict"] == "ok"
+    assert fv(["identity", "dfn3"], {"errors": [], "corr_with_input": 1.0})["verdict"] == "suspect_noop"
+    assert fv(["dfn3"], {"errors": [], "corr_with_input": None})["verdict"] == "ok"
+
+
+def test_denoise_report_tolerates_absent_and_corrupt(tmp_path):
+    ok, bad, gone = tmp_path / "ok", tmp_path / "bad", tmp_path / "gone"
+    for d in (ok, bad, gone):
+        (d / "01b_denoise").mkdir(parents=True)
+    (ok / "01b_denoise" / "denoise.json").write_text(json.dumps({"errors": [], "corr_with_input": 0.8}))
+    (bad / "01b_denoise" / "denoise.json").write_text("{oops")
+    rep = rv.denoise_report(["dfn3"], {"ok": str(ok), "bad": str(bad), "gone": str(gone)}, ["ok", "bad", "gone", "nodir"])
+    assert {k: v["verdict"] for k, v in rep.items()} == {"ok": "ok", "bad": "missing", "gone": "missing", "nodir": "missing"}
+    assert rv.denoise_report([], {"ok": str(ok)}, ["ok", "x"]).keys() == {"ok"}
+    assert rv.report_counts(rep, 4) == {"degraded_files": 3, "suspect_files": 0, "total_files": 4}
+
+
+def test_status_transitions_and_manifest_keys(env, capsys):
+    tmp = env[0]
+    _set_chains(env, "dfn3", "errc", "nojson", "corrupt", "noop", "identity")
+    assert rv.main(argv(env)) == 0                      # default exit code unchanged
+    st = {k: v["status"] for k, v in _manifest(tmp).items()}
+    assert st == {"none": "ok", "dfn3": "ok", "errc": "degraded", "nojson": "degraded",
+                  "corrupt": "degraded", "noop": "ok", "identity": "ok"}
+    m = _manifest(tmp)
+    assert m["errc"]["degraded_files"] == 2 and m["errc"]["total_files"] == 2
+    rep = m["errc"]["denoise_report"]
+    assert set(rep) == {"a", "b"} and rep["a"]["verdict"] == "fallback"
+    assert rep["a"]["errors"] == ["errc: boom\nsecond line"] and rep["a"]["corr_with_input"] == 0.9
+    assert {"verdict", "errors", "corr_with_input", "lag_samples"} == set(rep["a"])
+    assert m["nojson"]["denoise_report"]["a"]["verdict"] == "missing"
+    assert m["noop"]["denoise_report"]["a"]["verdict"] == "suspect_noop" and m["noop"]["degraded_files"] == 0
+    assert m["noop"]["suspect_files"] == 2
+    assert m["identity"]["denoise_report"]["a"]["verdict"] == "ok"
+    assert m["none"]["denoise_report"]["a"]["verdict"] == "ok" and m["dfn3"]["degraded_files"] == 0
+    out = capsys.readouterr().out
+    assert "DEGRADED: 3 variant(s)" in out
+    block = out.split("DEGRADED: 3 variant(s)")[1]
+    assert "errc: 2/2 file(s)" in block and "first error: errc: boom" in block and "second line" not in block
+    assert "nojson:" in block and "corrupt:" in block and "dfn3:" not in block
+    assert "[noop] WARNING: output identical to input in 2/2" in out
+
+
+def test_degraded_has_no_done_marker_unless_accepted(env):
+    tmp = env[0]
+    _set_chains(env, "errc", "dfn3")
+    rv.main(argv(env))
+    assert not (tmp / "out" / "errc" / ".done").exists() and (tmp / "out" / "dfn3" / ".done").exists()
+    rv.main(argv(env, "--resume"))                      # degraded one is re-run, healthy one is not
+    assert len(calls(tmp, "errc")) == 2 and len(calls(tmp, "dfn3")) == 1
+    rv.main(argv(env, "--resume", "--accept-degraded"))
+    assert (tmp / "out" / "errc" / ".done").exists() and _manifest(tmp)["errc"]["status"] == "degraded"
+    rv.main(argv(env, "--resume"))                      # accepted: not re-run, still reported degraded
+    assert len(calls(tmp, "errc")) == 3
+    assert _manifest(tmp)["errc"]["status"] == "degraded" and _manifest(tmp)["errc"]["degraded_files"] == 2
+
+
+def test_strict_exit_code(env):
+    _set_chains(env, "dfn3")
+    assert rv.main(argv(env, "--strict")) == 0
+    _set_chains(env, "errc")
+    assert rv.main(argv(env)) == 0 and rv.main(argv(env, "--strict")) == 3
+    _set_chains(env, "bad")
+    assert rv.main(argv(env)) == 1 and rv.main(argv(env, "--strict")) == 3
+    _set_chains(env, "noop")                           # suspect_noop alone is not a failure
+    assert rv.main(argv(env, "--strict")) == 0

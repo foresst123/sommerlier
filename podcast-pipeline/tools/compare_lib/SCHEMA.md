@@ -7,14 +7,28 @@ Any metric may be `null` (stage missing, not computable). Extra keys are allowed
 - `baseline`: variant id everything is compared against (`"none"`).
 - `variants`: `[{id, chain, label, status, note?, group?, tag?, set?}]` (`group` is an optional tag from the variants file, shown next to the chip; `tag` = human label of the variant's override set (also shown next to the chip), `set` = its dotted-key overrides passed to main.py as `--set` (shown in the chip tooltip); status `skipped` = backend unavailable, reason in `note`). Variants with status `failed`/`missing` are
   listed (with a `note`) but have no data below.
+  Optional keys (older files lack them; treat as absent/false): `degraded` (bool: the runner status was `degraded`,
+  or some file's denoise verdict is `fallback`/`missing`), `degraded_files`, `total_files` (ints), `degraded_reason`
+  (short text with the first error), `suspect_noop_files` (files whose output was identical to the input). A degraded
+  variant has data, but its audio is the UNFILTERED input in the affected files: never read it as "the filter does nothing".
 - `files[]`: one entry per file stem: `name`, `duration` (s), `audio`, `text`, `text_diff`,
   `speakers`, `metrics`; all keyed by variant id (the baseline included).
 - `summary[variant][section.metric]`: mean over files of every numeric metric (bools count as 0/1;
-  files where it is null are skipped).
+  files where it is null are skipped). The means are NOT corrected for degraded files; read them with:
+- `summary_n[variant]`: number of files that contributed to that variant's means.
+- `summary_excluded_degraded[variant]`: number of files whose denoise verdict is `fallback`/`missing`. They are still
+  counted in `summary` (nothing is dropped silently); this number says how many of them are unfiltered audio.
 
 ## Time base
 All times are seconds on `01_music/after_music.wav` (the "cut" timeline), the same one the stage
 outputs use. A denoise stage keeps length, so the filtered wav shares it (see `lag_samples`).
+
+## files[].denoise[variant]
+`{verdict, errors[], corr_with_input, lag_samples, steps[], blend}` from the manifest's `denoise_report`
+(written by `run_variants.py`), else derived from `01b_denoise/denoise.json` (no `missing` verdict can be derived
+then). `verdict`: `ok`; `fallback` (errors recorded: the chain was dropped, the input kept); `missing` (non-none chain,
+no/unreadable denoise.json); `suspect_noop` (no errors but `corr_with_input` >= 0.99999 with a real, non-identity
+backend). `steps` and `blend` come from denoise.json (empty/null when absent). Absent for the baseline of old files.
 
 ## files[].audio
 `raw` = abs path of `01_music/after_music.wav`; `<variant id>` = that variant's

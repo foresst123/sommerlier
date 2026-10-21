@@ -240,8 +240,10 @@ def test_shipped_plan_skips_unavailable_backends_and_still_builds_a_page(tmp_pat
     assert {k for k, v in st.items() if v["status"] == "skipped"} == {
         "bsrnn26", "bsrnn26+dfn3", "dbs_tiger", "dbs_tiger+dfn3", "mambattention"}
     assert all(st[k]["reason"] for k in st if st[k]["status"] == "skipped")
-    assert {k for k, v in st.items() if v["status"] == "ok"} == {
+    # a runnable variant is ok, or degraded when its real backend cannot load in this environment
+    assert {k for k, v in st.items() if v["status"] in ("ok", "degraded")} == {
         "none", "dfn3", "mf2se48", "mpsenet", "mpsenet_dns", "dfn3+mf2se48", "mf2se48+dfn3"}
+    assert st["none"]["status"] == "ok"
     assert st["dfn3"]["group"] == "masking" and st["dfn3+mf2se48"]["group"] == "chains"
     assert "analysis" in st["dbs_tiger"]["note"].lower() and not (out / "dbs_tiger").exists()
     data, text = _page_from(tmp_path, out)
@@ -306,9 +308,10 @@ def test_ctrl_music_and_pipe_blend_with_a_mocked_availability(tmp_path, monkeypa
     skipped = {k for k, v in st.items() if v["status"] == "skipped"}
     assert skipped == {"bsrnn26+blend50", "rf_vocals_3005+dfn3+blend50.music-removal-off",
                        "rf_vocals_3005+rf_dereverb+dfn3+blend30.music-removal-off"}
-    assert all(st[k]["status"] == "ok" for k in st if k not in skipped)
+    assert all(st[k]["status"] in ("ok", "degraded") for k in st if k not in skipped)
+    assert st["none"]["status"] == "ok"
     # blend steps are pseudo: dfn3>blend50 is runnable although no backend is called blend50
-    assert st["dfn3+blend50"]["status"] == "ok" and not st["dfn3+blend50"].get("reason")
+    assert st["dfn3+blend50"]["status"] in ("ok", "degraded") and not st["dfn3+blend50"].get("reason")
     c = _calls(out, "none.music-scope-spans")
     assert c["set"] == ['pipeline.music_scope="spans"'] and "--denoise" not in c["argv"]
     c = _calls(out, "none.music-removal-off")
@@ -326,3 +329,50 @@ def test_ctrl_music_and_pipe_blend_with_a_mocked_availability(tmp_path, monkeypa
     assert row["none.music-removal-off"]["tag"] == "music-stage-off"
     assert row["none.music-removal-off"]["set"] == {"steps.music_removal": False}
     assert "music-stage-off" in text and "scope-spans" in text
+
+
+# ---- silent fallbacks must surface: degraded status, badges, banner ------------
+FAULTY_STUB = STUB.replace(
+    "info = DenoiseService().apply(au, a.denoise)",
+    "info = ({'chain': ['broken'], 'chain_id': 'broken', 'errors': ['broken: model weights not found\\ntrace'], "
+    "'corr_with_input': 1.0, 'lag_samples': 0, 'steps': [], 'blend': None} if a.denoise == 'broken' "
+    "else DenoiseService().apply(au, a.denoise))").replace(
+    '(d / "01b_denoise" / "denoise.json").write_text(json.dumps(info))',
+    'None if a.denoise == "ghost" else (d / "01b_denoise" / "denoise.json").write_text(json.dumps(info))')
+
+
+def test_degraded_variants_surface_in_manifest_data_and_page(tmp_path):
+    audio = tmp_path / "audio"
+    audio.mkdir()
+    t = np.arange(SR * 4) / SR
+    for name in ("a", "b"):
+        sf.write(str(audio / f"{name}.wav"), (0.3 * np.sin(2 * np.pi * 300 * t)).astype("float32"), SR, subtype="PCM_16")
+    stub = tmp_path / "stub_main.py"
+    stub.write_text(FAULTY_STUB % {"root": str(ROOT)})
+    var = tmp_path / "variants.json"
+    var.write_text(json.dumps({"variants": [{"chain": "fake_hp"}, {"chain": "broken"}, {"chain": "ghost"},
+                                            {"chain": "identity"}]}))
+    out = tmp_path / "out"
+    args = ["--audio-dir", str(audio), "--variants", str(var), "--out-root", str(out),
+            "--main", str(stub), "--env", "a100", "--stop-after", "asr", "--python", sys.executable]
+    assert rv.main(args) == 0
+    assert rv.main(args + ["--strict"]) == 3
+    m = {v["id"]: v for v in json.loads((out / "variants_manifest.json").read_text())["variants"]}
+    assert {k: v["status"] for k, v in m.items()} == {
+        "none": "ok", "fake_hp": "ok", "broken": "degraded", "ghost": "degraded", "identity": "ok"}
+    assert m["broken"]["denoise_report"]["a"]["verdict"] == "fallback"
+    assert m["ghost"]["denoise_report"]["a"]["verdict"] == "missing"
+    assert m["identity"]["denoise_report"]["a"]["verdict"] == "ok"
+    assert not (out / "broken" / ".done").exists() and (out / "fake_hp" / ".done").exists()
+
+    data, text = _page_from(tmp_path, out)
+    row = {v["id"]: v for v in data["variants"]}
+    assert row["broken"]["degraded"] and row["broken"]["degraded_files"] == 2 and row["broken"]["total_files"] == 2
+    assert "model weights not found" in row["broken"]["degraded_reason"]
+    assert row["ghost"]["degraded"] and not row["fake_hp"]["degraded"] and not row["none"]["degraded"]
+    assert data["summary_excluded_degraded"]["broken"] == 2 and data["summary_n"]["broken"] == 2
+    assert data["summary_excluded_degraded"]["fake_hp"] == 0
+    f = next(x for x in data["files"] if x["name"] == "a")
+    assert f["denoise"]["broken"]["verdict"] == "fallback" and f["denoise"]["fake_hp"]["verdict"] == "ok"
+    assert text.count('class="badge bad"') == 2 and "fell back to unfiltered audio in 2/2 files" in text
+    assert 'role="alert"' in text and "Degraded variants" in text

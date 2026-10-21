@@ -264,3 +264,54 @@ def test_group_note_and_skipped_reason_pass_through(manifest):
     assert v["dfn3"]["group"] == "masking" and v["dfn3"]["note"] == "listen first"
     assert "group" not in v["none"] and "note" not in v["none"]
     assert v["bad"]["status"] == "skipped" and "DBS_TIGER_DIR" in v["bad"]["note"] and v["bad"]["group"] == "analysis_only"
+
+
+# ---- degraded / suspect denoise passthrough --------------------------------------
+def _edit_manifest(manifest, fn):
+    m = json.loads(open(manifest).read())
+    fn(m)
+    json.dump(m, open(manifest, "w"))
+
+
+def test_old_manifest_without_denoise_keys_still_builds(manifest):
+    data = build_compare_data(manifest, embed=False)
+    v = {x["id"]: x for x in data["variants"]}
+    assert v["dfn3"]["degraded"] is False and v["dfn3"]["degraded_files"] == 0 and v["dfn3"]["total_files"] == 0
+    assert "degraded_reason" not in v["dfn3"] and "degraded" not in v["bad"]
+    assert data["files"][0]["denoise"] == {}                       # no denoise.json, no report: nothing invented
+    assert data["summary_n"]["dfn3"] == 1 and data["summary_excluded_degraded"]["dfn3"] == 0
+
+
+def test_manifest_denoise_report_reaches_variants_files_and_summary(manifest):
+    rep = {"f1": {"verdict": "fallback", "errors": ["dfn3: no weights\nmore"], "corr_with_input": 1.0, "lag_samples": 0}}
+
+    def edit(m):
+        m["variants"][1].update({"status": "degraded", "denoise_report": rep, "degraded_files": 1, "total_files": 1})
+    _edit_manifest(manifest, edit)
+    data = build_compare_data(manifest, embed=False)
+    v = {x["id"]: x for x in data["variants"]}["dfn3"]
+    assert v["status"] == "degraded" and v["degraded"] is True
+    assert v["degraded_files"] == 1 and v["total_files"] == 1
+    assert v["degraded_reason"] == "fell back to unfiltered audio in 1/1 files: dfn3: no weights"
+    d = data["files"][0]["denoise"]["dfn3"]
+    assert d["verdict"] == "fallback" and d["errors"] == ["dfn3: no weights\nmore"]
+    assert d["steps"] == [] and d["blend"] is None and d["corr_with_input"] == 1.0
+    assert data["summary_excluded_degraded"] == {"none": 0, "dfn3": 1, "bad": 0}
+    assert data["summary_n"]["dfn3"] == 1                         # the mean is not changed, only annotated
+    assert "audio.noise_floor_db" in data["summary"]["dfn3"]
+
+
+def test_denoise_entry_derived_from_the_stage_dir(manifest):
+    m = json.loads(open(manifest).read())
+    d = m["variants"][1]["files"]["f1"]
+    (open(os.path.join(d, "01b_denoise", "denoise.json"), "w")).write(json.dumps(
+        {"errors": [], "corr_with_input": 1.0, "lag_samples": 0, "steps": [{"token": "dfn3"}], "blend": None}))
+    data = build_compare_data(manifest, embed=False)
+    e = data["files"][0]["denoise"]["dfn3"]
+    assert e["verdict"] == "suspect_noop" and e["steps"] == [{"token": "dfn3"}]
+    assert {x["id"]: x for x in data["variants"]}["dfn3"]["suspect_noop_files"] == 1
+    assert data["summary_excluded_degraded"]["dfn3"] == 0
+    open(os.path.join(d, "01b_denoise", "denoise.json"), "w").write(json.dumps({"errors": ["x: y"]}))
+    data = build_compare_data(manifest, embed=False)
+    assert data["files"][0]["denoise"]["dfn3"]["verdict"] == "fallback"
+    assert {x["id"]: x for x in data["variants"]}["dfn3"]["degraded"] is True

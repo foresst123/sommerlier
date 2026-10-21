@@ -206,6 +206,8 @@ def prepare(data: dict, files: list, mode: str, max_mb: float, top_n: int, out_p
         "variants": variants,
         "files": files,
         "summary": data.get("summary") or {},
+        "summary_n": data.get("summary_n") or {},
+        "summary_excluded_degraded": data.get("summary_excluded_degraded") or {},
         "embed": {**stats, "urls": urls},
     }
     return page, clips
@@ -218,6 +220,26 @@ def _cmp_options(files):
     return "".join(out)
 
 
+def _degraded_text(v) -> str:
+    """'fell back to unfiltered audio in N/M files' (counts optional)."""
+    n, m = v.get("degraded_files"), v.get("total_files")
+    where = f" in {n}/{m} files" if isinstance(n, int) and isinstance(m, int) and m else ""
+    return "fell back to unfiltered audio" + where
+
+
+def _banner(variants) -> str:
+    bad = [v for v in variants if v.get("degraded")]
+    if not bad:
+        return ""
+    items = "".join(f"<li><strong>{html.escape(str(v.get('label') or v['id']))}</strong>: "
+                    f"{html.escape(_degraded_text(v))}"
+                    + (f" ({html.escape(str(v['degraded_reason']))})" if v.get("degraded_reason") else "")
+                    + "</li>" for v in bad)
+    return ('<div class="banner bad" role="alert"><strong>Degraded variants: the filter did not run, '
+            'the audio is the unfiltered input.</strong> Their numbers say nothing about what the '
+            f'filter does.<ul>{items}</ul></div>')
+
+
 def _chips(variants, base):
     out = []
     for v in variants:
@@ -227,11 +249,18 @@ def _chips(variants, base):
                           quote=True)
         if v.get("set"):
             tip += html.escape(" | set: " + json.dumps(v["set"], ensure_ascii=False), quote=True)
+        if v.get("degraded"):
+            tip += html.escape(" | DEGRADED: " + str(v.get("degraded_reason") or _degraded_text(v)), quote=True)
         cls = "chip base" if v["id"] == base else "chip"
+        if v.get("degraded"):
+            cls += " degraded"
         out.append(f'<button type="button" class="{cls}" data-vid="{vid}" title="{tip}" '
                    f'aria-pressed="false">{label}'
                    + (f' <span class="grp">{html.escape(str(v["group"]))}</span>' if v.get("group") else "")
                    + (f' <span class="grp tag">{html.escape(str(v["tag"]))}</span>' if v.get("tag") else "")
+                   + (f' <span class="badge bad">{html.escape(_degraded_text(v))}</span>' if v.get("degraded") else "")
+                   + (' <span class="badge warn">output identical to input</span>'
+                      if v.get("suspect_noop_files") else "")
                    + '</button>')
     return "".join(out)
 
@@ -247,13 +276,14 @@ def render_page(data: dict, files: list, mode="clips", max_mb=DEFAULT_MAX_MB,
         "BASELINE": html.escape(base_label),
         "FILES": _cmp_options(page["files"]),
         "CHIPS": _chips(page["variants"], base),
+        "DEGRADED": _banner(page["variants"]),
         "NFILES": str(len(page["files"])),
         "DATA": _js_json(page),
         "CLIPS": _js_json(clips),
         "SCRIPT": SCRIPT,
     }
     # one pass, so a placeholder-looking string inside the data is never expanded
-    return re.sub(r"__(TITLE|BASELINE|FILES|CHIPS|NFILES|DATA|CLIPS|SCRIPT)__",
+    return re.sub(r"__(TITLE|BASELINE|FILES|CHIPS|DEGRADED|NFILES|DATA|CLIPS|SCRIPT)__",
                   lambda m: subs[m.group(1)], PAGE)
 
 
@@ -668,6 +698,18 @@ function speakerAt(f, t0, t1) {
   return best;
 }
 
+/* warning line for the selected variant/file when its denoise verdict is not ok (absent in old data) */
+function denoiseWarn(f, vid) {
+  var d = get(f, ["denoise", vid]);
+  if (!d || !d.verdict || d.verdict === "ok") return "";
+  var err = (d.errors && d.errors.length) ? String(d.errors[0]).split("\n")[0] : "";
+  if (d.verdict === "suspect_noop")
+    return '<p class="vwarn warn" role="note">Suspect: this filter\'s output is identical to its input for this file (corr_with_input ' +
+      esc(fmt(d.corr_with_input)) + "). It may not have run.</p>";
+  return '<p class="vwarn" role="alert"><strong>' + (d.verdict === "missing" ? "No denoise.json for this file" : "Filter fell back to the unfiltered audio") +
+    "</strong>: these numbers do not show what the filter does." + (err ? " First error: " + esc(err) : "") + "</p>";
+}
+
 function renderText() {
   var f = curFile(), box = $("tab-text");
   if (!f) { box.innerHTML = '<p class="empty">No files in this data.</p>'; return; }
@@ -678,7 +720,7 @@ function renderText() {
   var td = get(f, ["text_diff", S.vid]);
   if (!td) { box.innerHTML = '<p class="empty">No text comparison for ' + esc(vlabel(S.vid)) + " in this file.</p>"; return; }
   var ops = td.ops || {};
-  var tot = '<div class="stats">' +
+  var tot = denoiseWarn(f, S.vid) + '<div class="stats">' +
     stat("WER vs baseline", td.wer_vs_baseline, "distance from the baseline transcript, not an error rate") +
     stat("WER vs reference", td.wer_vs_reference, "against a human reference; " + DASH + " when none exists") +
     stat("sub", ops.sub) + stat("ins", ops.ins) + stat("del", ops.del) + stat("equal", ops.equal) + "</div>";
@@ -728,6 +770,7 @@ function renderSpeakers() {
   var sp = get(f, ["speakers", S.vid]);
   var bsegs = get(f, ["text", D.baseline, "segments"]) || [], vsegs = get(f, ["text", S.vid, "segments"]) || [];
   if (!sp && !vsegs.length) { box.innerHTML = '<p class="empty">No speaker comparison for ' + esc(vlabel(S.vid)) + " in this file.</p>"; return; }
+  var warn = denoiseWarn(f, S.vid);
   var dur = _n(f.duration);
   [bsegs, vsegs].forEach(function (a) { a.forEach(function (s) { dur = Math.max(dur, _n(s.end)); }); });
   if (!(dur > 0)) dur = 1;
@@ -753,7 +796,7 @@ function renderSpeakers() {
     stat("disagree_seconds", sp && sp.disagree_seconds, "seconds where the speaker differs") +
     stat("der_vs_baseline", sp && sp.der_vs_baseline, "DER against the baseline diarization, not ground truth") +
     stat("ranges", rs.length) + "</div>";
-  box.innerHTML = stats +
+  box.innerHTML = warn + stats +
     '<div class="ctl"><button type="button" id="zin">zoom in</button><button type="button" id="zout">zoom out</button><button type="button" id="zreset">reset zoom</button>' +
     '<span class="meta">' + esc(fmtTime(S.zoom[0])) + " - " + esc(fmtTime(S.zoom[1])) + "</span></div>" +
     '<div class="tlwrap" id="tlwrap">' + svg + '</div><div class="legend">' + legend + " " + kinds + "</div>" +
@@ -762,12 +805,24 @@ function renderSpeakers() {
     (mapTxt ? '<p class="meta">label_map: ' + mapTxt + "</p>" : "") + "</div></div>";
 }
 
+/* how many files each variant's summary mean covers, and how many fell back (absent in old data) */
+function summaryNote() {
+  var n = D.summary_n || {}, ex = D.summary_excluded_degraded || {};
+  if (!Object.keys(n).length && !Object.keys(ex).length) return "";
+  var total = (D.files || []).length;
+  var parts = D.variants.filter(function (v) { return isNum(n[v.id]) && (n[v.id] < total || ex[v.id] > 0); }).map(function (v) {
+    return esc(v.label || v.id) + ": mean over " + n[v.id] + "/" + total + " files" +
+      (ex[v.id] > 0 ? ", <strong>" + ex[v.id] + " fell back to unfiltered audio (still counted in the mean)</strong>" : "");
+  });
+  return '<p class="empty" id="sumnote">' + (parts.length ? "Summary means: " + parts.join("; ") + "." :
+    "Summary means cover all " + total + " file(s) for every variant; none fell back.") + "</p>";
+}
 function renderMetrics() {
   var f = curFile(), box = $("tab-metrics");
   var ctl = '<div class="ctl"><label><input type="radio" name="mm" value="summary"' + (S.mmode === "summary" ? " checked" : "") +
     '> summary (mean over files)</label><label><input type="radio" name="mm" value="file"' + (S.mmode === "file" ? " checked" : "") +
     "> this file</label></div>";
-  box.innerHTML = ctl + metricsHtml(S.mmode, f);
+  box.innerHTML = ctl + summaryNote() + (S.mmode === "file" ? denoiseWarn(f, S.vid) : "") + metricsHtml(S.mmode, f);
 }
 function renderHeader() {
   $("summary").innerHTML = summaryHtml();
@@ -872,7 +927,7 @@ function init() {
 }
 
 root.__cmp = {esc: esc, fmt: fmt, fmtDelta: fmtDelta, diffHtml: diffHtml, timelineSvg: timelineSvg, rangesHtml: rangesHtml,
-              judge: judge, DIRS: DIRS, setData: function (d, c) { D = d; CLIPS = c || {}; }, metricsHtml: metricsHtml,
+              judge: judge, DIRS: DIRS, setData: function (d, c) { D = d; CLIPS = c || {}; }, metricsHtml: metricsHtml, denoiseWarn: denoiseWarn, summaryNote: summaryNote,
               miniBars: miniBars, summaryHtml: summaryHtml, setState: function (s) { for (var k in s) S[k] = s[k]; }};
 if (root.document) {
   if (root.document.readyState === "loading") root.document.addEventListener("DOMContentLoaded", init); else init();
@@ -921,6 +976,13 @@ button{cursor:pointer}button:hover{border-color:var(--accent)}
 .chip[aria-pressed=true]{background:var(--accent);border-color:var(--accent);color:#fff}
 .chip.base{border-style:dashed}
 .chip .grp{font-size:10px;opacity:.7;border:1px solid currentColor;border-radius:8px;padding:0 4px;margin-left:4px}
+.chip.degraded{border-color:var(--bad)}
+.badge{font-size:10px;font-weight:700;border-radius:8px;padding:0 6px;margin-left:4px;border:1px solid currentColor}
+.badge.bad{color:#fff;background:var(--bad);border-color:var(--bad)}
+.badge.warn{color:#5c4300;background:#f5b942;border-color:#d99a00}
+.banner.bad{border-left-color:var(--bad);background:var(--bad-bg)}.banner ul{margin:4px 0 0;padding-left:20px}
+.vwarn{margin:6px 0;padding:6px 10px;border-left:4px solid var(--bad);background:var(--bad-bg);border-radius:4px;font-size:13px}
+.vwarn.warn{border-left-color:var(--k-missing);background:var(--panel2)}
 .banner{margin:8px 0 4px;padding:8px 12px;border-left:4px solid var(--k-missing);background:var(--panel2);font-size:13px;border-radius:4px}
 .scroll{overflow-x:auto}
 table{border-collapse:collapse;width:100%}
@@ -988,6 +1050,7 @@ svg.mb .vb{fill:var(--accent)}svg.mb .bb{fill:var(--dim)}svg.mb .nb{fill:var(--l
   </div>
   <div class="row"><span class="meta">variants</span><div class="chips" role="group" aria-label="variants">__CHIPS__</div>
     <span class="meta">keys: 1 2 3 tabs, [ ] variant, Esc stops audio</span></div>
+  __DEGRADED__
   <div class="banner" role="note"><strong>Different does not mean better.</strong> Every comparison here is against the baseline transcript and diarization, which are not ground truth.<span id="refnote"></span></div>
   <div id="summary"></div>
   <noscript><p class="banner">This page needs JavaScript to show its data.</p></noscript>

@@ -14,6 +14,7 @@ Every stage may be missing; its entry is then None.
 
 import json
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -129,6 +130,31 @@ def load_file_output(path: str, name: Optional[str] = None) -> Dict[str, Any]:
                        if sep_rows is not None or sep_stats is not None else None),
         "asr": asr,
     }
+
+
+NOOP_CORR = 0.99999  # same threshold as run_variants.py
+
+
+def denoise_entry(chain, info, from_manifest=None) -> Optional[Dict[str, Any]]:
+    """files[].denoise[variant]: verdict/errors/corr/lag from the manifest's denoise_report row
+    (preferred) or derived from the stage's denoise.json; steps and blend come from the json.
+    None when neither source says anything."""
+    info = info if isinstance(info, dict) else None
+    row = dict(from_manifest) if isinstance(from_manifest, dict) else None
+    if row is None:
+        if info is None:
+            return None
+        errors = [str(e) for e in info.get("errors") or []]
+        corr = info.get("corr_with_input")
+        real = any(t != "identity" and not re.fullmatch(r"blend\d{1,3}", str(t)) for t in chain or [])
+        verdict = ("fallback" if errors else
+                   "suspect_noop" if isinstance(corr, (int, float)) and corr >= NOOP_CORR and real else "ok")
+        row = {"verdict": verdict, "errors": errors, "corr_with_input": corr,
+               "lag_samples": info.get("lag_samples")}
+    row.setdefault("errors", [])
+    row["steps"] = (info or {}).get("steps") or []
+    row["blend"] = (info or {}).get("blend")
+    return row
 
 
 def load_reference(path: Optional[str]) -> Optional[List[dict]]:

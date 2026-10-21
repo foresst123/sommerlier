@@ -294,3 +294,56 @@ def test_group_tag_next_to_chip(tmp_path, data):
     page = build(tmp_path, data)
     assert page.count('<span class="grp">analysis_only</span>') == 1
     assert page.count('<button type="button" class="chip') == 4
+
+
+# ---- degraded / suspect variants -------------------------------------------------
+def _mark(data, vid, **kw):
+    next(v for v in data["variants"] if v["id"] == vid).update(kw)
+
+
+def test_degraded_and_suspect_badges_banner(tmp_path, data):
+    _mark(data, "dfn3", status="degraded", degraded=True, degraded_files=2, total_files=3,
+          degraded_reason="fell back to unfiltered audio in 2/3 files: dfn3: no <weights>")
+    _mark(data, "mf2se48", suspect_noop_files=1)
+    page = build(tmp_path, data)
+    assert page.count('class="badge bad"') == 1
+    assert "fell back to unfiltered audio in 2/3 files" in page
+    assert page.count('class="badge warn"') == 1 and "output identical to input" in page
+    assert 'class="banner bad" role="alert"' in page and "Degraded variants" in page
+    assert "no &lt;weights&gt;" in page and "no <weights>" not in page.split("<script")[0]
+    assert "chip degraded" in page
+
+
+def test_page_without_the_new_keys_has_no_badges(tmp_path, data):
+    page = build(tmp_path, data)
+    assert 'class="badge' not in page.split("<style>")[1].split("</style>")[1].split("<script")[0]
+    assert 'role="alert"' not in page.split("<script")[0]
+    assert page.count('<button type="button" class="chip') == 4
+
+
+@pytest.mark.skipif(not NODE, reason="node not on PATH")
+def test_per_file_warning_and_summary_note(tmp_path, data):
+    f = data["files"][0]
+    f["denoise"] = {"dfn3": {"verdict": "fallback", "errors": ["dfn3: no <weights>\ntrace"], "corr_with_input": 1.0},
+                    "mf2se48": {"verdict": "suspect_noop", "errors": [], "corr_with_input": 1.0},
+                    "dfn3+mf2se48": {"verdict": "ok", "errors": []}}
+    data["summary_n"] = {"dfn3": 1, "mf2se48": 2}
+    data["summary_excluded_degraded"] = {"dfn3": 1, "mf2se48": 0}
+    page = build(tmp_path, data)
+    expr = "[c.denoiseWarn(%s,'dfn3'),c.denoiseWarn(%s,'mf2se48'),c.denoiseWarn(%s,'dfn3+mf2se48'),c.denoiseWarn(%s,'none')]"
+    fj = json.dumps(embedded(page, "data")["files"][0])
+    w = run_node(page, expr % (fj, fj, fj, fj))
+    assert 'role="alert"' in w[0] and "First error: dfn3: no &lt;weights&gt;" in w[0] and "trace" not in w[0]
+    assert "identical to its input" in w[1] and "vwarn warn" in w[1]
+    assert w[2] == "" and w[3] == ""
+    note = run_node(page, "c.summaryNote()")
+    assert "DeepFilterNet3: mean over 1/" in note and "1 fell back to unfiltered audio" in note
+
+
+@pytest.mark.skipif(not NODE, reason="node not on PATH")
+def test_warning_and_note_absent_in_old_data(tmp_path, data):
+    page = build(tmp_path, data)
+    fj = json.dumps(embedded(page, "data")["files"][0])
+    assert run_node(page, "c.denoiseWarn(%s,'dfn3')" % fj) == ""
+    assert run_node(page, "c.summaryNote()") == ""
+    assert "Summary" not in run_node(page, "c.metricsHtml('summary',%s)" % fj)
