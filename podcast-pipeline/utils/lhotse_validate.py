@@ -23,6 +23,7 @@ Further MUST clauses outside the section 9 table are reported as EXT12..EXT17:
  15 backchannel ids use k = 0, 1, 2... per anchor turn (4.4)
  16 no top-level supervision field is null (2)
  17 turn: backchannel_ids is a list, transition is {"type": gap|overlap, "duration": s} (4.3)
+ 18 turn / backchannel has duration > 0; 0 is for events only (4.1)
 
 Tolerance is 1 ms, 10 ms along alignment chains.
 
@@ -178,7 +179,7 @@ def validate_cut(cut: dict, tol: float = DEFAULT_TOL, ali_tol: float = DEFAULT_A
         if _is_audio_turn(sup) and isinstance(sup.get("channel"), int) and (sup.get("custom") or {}).get("role") in ("user", "assistant"):
             per_channel.setdefault(sup["channel"], []).append(sup)
     for channel, turns in per_channel.items():
-        turns.sort(key=lambda s: s["start"])
+        turns.sort(key=lambda s: (s["start"], s["start"] + s["duration"]))
         for prev, nxt in zip(turns, turns[1:]):
             over = prev["start"] + prev["duration"] - nxt["start"]
             if over > tol:
@@ -303,6 +304,9 @@ def _check_extra(sup: dict, custom: dict, by_id: dict, timed: bool, tol: float, 
     for key, value in sup.items():
         if value is None:
             bad(16, sup, f"top-level field {key!r} is null; omit the key (null is only kept inside custom)")
+    # 18: only events may have duration 0
+    if etype in ("turn", "backchannel") and timed and sup["duration"] <= tol:
+        bad(18, sup, f"{etype} has duration {sup['duration']}; duration 0 is reserved for events")
     # 12: prompt at the start of the conversation
     if etype == "prompt" and timed and abs(sup["start"]) > tol:
         bad(12, sup, f"prompt must start at 0, got {sup['start']}")
@@ -387,13 +391,14 @@ def validate_file(path: str) -> List[Violation]:
 def validate_with_lhotse(path: str) -> List[Violation]:
     """Load the manifest with lhotse (CutSet.from_file) and report what it rejects; [] without lhotse."""
     try:
-        from lhotse import CutSet
+        from lhotse import CutSet, validate as lhotse_validate
     except ImportError:
         return []
     try:
         cuts = CutSet.from_file(path)
         if cuts is None:            # lhotse returns None for a manifest with no cuts
             return []
+        lhotse_validate(cuts, read_data=False)
         for cut in cuts:
             for sup in cut.supervisions:
                 _ = (sup.id, sup.start, sup.duration, sup.channel)
@@ -405,11 +410,44 @@ def validate_with_lhotse(path: str) -> List[Violation]:
     return []
 
 
+def collect_stats(cuts: Iterable[dict]) -> Dict[str, List[float]]:
+    """Full-duplex statistics: cross-channel overlap, trailing silence of turns, backchannel offset from its anchor."""
+    out: Dict[str, List[float]] = {"overlap": [], "trailing_silence": [], "backchannel_lead": []}
+    roles: Counter = Counter()
+    for cut in cuts:
+        sups = [s for s in cut.get("supervisions") or [] if isinstance(s, dict)]
+        by_id = {s.get("id"): s for s in sups}
+        turns = sorted((s for s in sups if _is_audio_turn(s)), key=lambda s: (s["start"], s["start"] + s["duration"]))
+        for a, b in zip(turns, turns[1:]):
+            if a.get("channel") != b.get("channel") and a["start"] + a["duration"] - b["start"] > DEFAULT_TOL:
+                out["overlap"].append(a["start"] + a["duration"] - b["start"])
+        for s in turns:
+            roles[(s.get("channel"), (s.get("custom") or {}).get("role"))] += 1
+            words = (s.get("alignment") or {}).get("word") or []
+            if words and all(isinstance(w, (list, tuple)) and len(w) == 4 and _num(w[1]) and _num(w[2]) for w in words):
+                out["trailing_silence"].append(s["duration"] - (words[-1][1] + words[-1][2] - s["start"]))
+        for s in sups:
+            anchor = by_id.get((s.get("custom") or {}).get("anchor_id"))
+            if _event_type(s) == "backchannel" and anchor and _num(s.get("start")) and _num(anchor.get("start")):
+                out["backchannel_lead"].append(s["start"] - anchor["start"])
+    out["roles"] = roles  # type: ignore[assignment]
+    return out
+
+
+def _quantiles(values: List[float]) -> str:
+    if not values:
+        return "no samples"
+    v = sorted(values)
+    return (f"n={len(v)} mean={sum(v) / len(v):.3f}s p10={v[len(v) // 10]:.3f} "
+            f"median={v[len(v) // 2]:.3f} p90={v[9 * len(v) // 10]:.3f} max={v[-1]:.3f}")
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Validate a SpeechWorld full-duplex Lhotse manifest (spec 2.2.0).")
     ap.add_argument("manifest", nargs="+", help=".jsonl / .jsonl.gz files or directories of them "
                                                 "(all cuts are checked together, so INV02 spans files)")
     ap.add_argument("--max-print", type=int, default=50, help="violations to print (default 50, 0 = all)")
+    ap.add_argument("--stats", action="store_true", help="also print full-duplex statistics")
     ap.add_argument("--no-lhotse", action="store_true", help="skip the lhotse CutSet.from_file load check")
     args = ap.parse_args(argv)
     paths: List[str] = []
@@ -420,6 +458,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             paths.append(item)
     cuts = [0]
     empty: List[str] = []
+    all_cuts: List[dict] = []   # only filled with --stats
 
     def counted():
         for path in paths:
@@ -427,6 +466,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             for cut in iter_cuts(path):
                 n += 1
                 cuts[0] += 1
+                if args.stats:
+                    all_cuts.append(cut)
                 yield cut
             if not n:
                 empty.append(os.path.basename(path))
@@ -444,6 +485,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"\n{len(paths)} files, {cuts[0]} cuts checked, {len(violations)} violations in {bad_cuts} cuts")
     for code, n in sorted(Counter(v.code for v in violations).items()):
         print(f"  {code}: {n}")
+    if args.stats:
+        st = collect_stats(all_cuts)
+        print("\nfull-duplex statistics")
+        for key in ("overlap", "trailing_silence", "backchannel_lead"):
+            print(f"  {key:17s} {_quantiles(st[key])}")
+        for (ch, role), n in sorted(st["roles"].items(), key=lambda kv: str(kv[0])):
+            print(f"  channel {ch} -> {role}: {n} turns")
     if empty:
         print(f"note: {len(empty)} files have no cuts (not counted as violations), e.g. {empty[0]}")
     return 1 if violations else 0

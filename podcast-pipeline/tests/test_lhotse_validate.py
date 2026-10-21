@@ -129,6 +129,7 @@ BREAKERS = {
     "EXT16_null": (16, lambda c: sup(c, 0).update(gender=None)),
     "EXT17_backchannel_ids": (17, lambda c: sup(c, 2)["custom"].pop("backchannel_ids")),
     "EXT17_transition": (17, lambda c: sup(c, 2)["custom"].update(transition={"type": "cut"})),
+    "EXT18_zero_turn": (18, lambda c: sup(c, 0).update(duration=0.0)),
     "INV11_speaker_backchannel": (11, lambda c: sup(c, 1).update(speaker="Backchannel")),
 }
 
@@ -314,3 +315,25 @@ def test_cli_empty_manifest_is_a_note_not_a_violation(tmp_path, capsys):
     assert main([str(tmp_path)]) == 0
     out = capsys.readouterr().out
     assert "0 violations" in out and "1 files have no cuts" in out
+
+
+def test_zero_length_turn_at_the_same_start_is_not_an_overlap():
+    cut = make_cut()
+    sup(cut, 2).update(channel=0, start=0.0, duration=0.0)   # sorts before the long turn, as in the reference tool
+    assert "INV06" not in codes(cut)
+    assert "EXT18" in codes(cut)
+
+
+def test_spec_authors_sample_is_valid():
+    """tests/data/spec_sample.jsonl is the 3-cut sample shipped with the spec's reference tooling."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "spec_sample.jsonl")
+    assert validate_file(path) == []
+
+
+def test_stats_flag_prints_statistics(tmp_path, capsys):
+    from utils.lhotse_validate import main
+    path = tmp_path / "m.jsonl"
+    path.write_text(json.dumps(make_cut()) + "\n", encoding="utf-8")
+    assert main([str(path), "--no-lhotse", "--stats"]) == 0
+    out = capsys.readouterr().out
+    assert "backchannel_lead" in out and "channel 0 -> user: 1 turns" in out
