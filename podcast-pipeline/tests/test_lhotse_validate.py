@@ -130,6 +130,8 @@ BREAKERS = {
     "EXT17_backchannel_ids": (17, lambda c: sup(c, 2)["custom"].pop("backchannel_ids")),
     "EXT17_transition": (17, lambda c: sup(c, 2)["custom"].update(transition={"type": "cut"})),
     "EXT18_zero_turn": (18, lambda c: sup(c, 0).update(duration=0.0)),
+    "EXT19_compressed_alignment": (19, lambda c: sup(c, 0)["alignment"]["word"].__init__(
+        [[w, 0.05 + 0.02 * i, 0.02, None] for i, w in enumerate("a b c d e f g h".split())])),
     "INV11_speaker_backchannel": (11, lambda c: sup(c, 1).update(speaker="Backchannel")),
 }
 

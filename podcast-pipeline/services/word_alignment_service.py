@@ -6,8 +6,12 @@ silently attach words to the wrong spans.  This service deliberately runs after
 refinement and speaker relabel and aligns ``TranscriptSegment.text`` again.
 
 WhisperX supplies the CTC trellis implementation and selects a language-specific
-Wav2Vec2 model.  For Vietnamese its default is
-``nguyenvulebinh/wav2vec2-base-vi-vlsp2020``.  Models are loaded lazily so a
+Wav2Vec2 model.  Do NOT rely on its Vietnamese default
+(``nguyenvulebinh/wav2vec2-base-vi-vlsp2020``): it loads into the stock
+Wav2Vec2ForCTC with its ``feature_transform.*`` weights dropped and emits gibberish,
+so the forced alignment degenerates to ~1 frame per character (word times squeezed
+to ~1/3 of the audio).  config.json pins ``nguyenvulebinh/wav2vec2-base-vietnamese-250h``,
+which decodes correctly.  Models are loaded lazily so a
 checkpointed file does not pay any model or VRAM cost.
 """
 

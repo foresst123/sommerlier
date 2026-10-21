@@ -24,6 +24,7 @@ Further MUST clauses outside the section 9 table are reported as EXT12..EXT17:
  16 no top-level supervision field is null (2)
  17 turn: backchannel_ids is a list, transition is {"type": gap|overlap, "duration": s} (4.3)
  18 turn / backchannel has duration > 0; 0 is for events only (4.1)
+ 19 median speech rate of the cut's turns is plausible (a broken aligner squeezes words into ~11 words/s)
 
 Tolerance is 1 ms, 10 ms along alignment chains.
 
@@ -54,6 +55,8 @@ VALID_PAIRS: Dict[Tuple[str, str], Tuple[bool, bool]] = {
 FORBIDDEN_TEXT = "<>[]"
 DEFAULT_TOL = 0.001
 DEFAULT_ALI_TOL = 0.010
+MAX_SPEECH_RATE = 8.0      # words per second, median over a cut's turns
+RATE_MIN_WORDS = 5
 
 
 @dataclass(frozen=True)
@@ -172,6 +175,7 @@ def validate_cut(cut: dict, tol: float = DEFAULT_TOL, ali_tol: float = DEFAULT_A
                 bad(8, sup, f"{bid!r} does not point back to this turn via anchor_id")
 
     _check_backchannel_numbering(sups, bad)
+    _check_speech_rate(sups, bad)
 
     # 6: same-channel turns do not overlap
     per_channel: Dict[object, List[dict]] = {}
@@ -339,6 +343,27 @@ def _check_extra(sup: dict, custom: dict, by_id: dict, timed: bool, tol: float, 
                 isinstance(transition, dict) and transition.get("type") in ("gap", "overlap")
                 and _num(transition.get("duration"))):
             bad(17, sup, f'custom.transition {transition!r} is not {{"type": "gap"|"overlap", "duration": s}}')
+
+
+def _check_speech_rate(sups: List[dict], bad) -> None:
+    """19: word timing must be physically plausible; a broken forced aligner packs words at ~1 frame per character."""
+    rates = []
+    for sup in sups:
+        words = (sup.get("alignment") or {}).get("word") if isinstance(sup.get("alignment"), dict) else None
+        if _event_type(sup) != "turn" or not isinstance(words, list) or len(words) < RATE_MIN_WORDS:
+            continue
+        try:
+            span = words[-1][1] + words[-1][2] - words[0][1]
+        except (TypeError, IndexError):
+            continue
+        if _num(span) and span > 0:
+            rates.append(len(words) / span)
+    if rates:
+        rates.sort()
+        median = rates[len(rates) // 2]
+        if median > MAX_SPEECH_RATE:
+            bad(19, None, f"median speech rate {median:.1f} words/s over {len(rates)} turns exceeds "
+                          f"{MAX_SPEECH_RATE}; the alignment looks compressed")
 
 
 def _check_backchannel_numbering(sups: List[dict], bad) -> None:

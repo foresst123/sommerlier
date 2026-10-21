@@ -140,7 +140,7 @@
           "thinking": false
         },
         "word_alignment": {
-          "model_name": "nguyenvulebinh/wav2vec2-base-vi-vlsp2020",
+          "model_name": "nguyenvulebinh/wav2vec2-base-vietnamese-250h",
           "device": "auto",
           "interpolate_method": "nearest",
           "batch_seconds": 180
@@ -400,7 +400,7 @@
           "max_new_tokens": 1024
         },
         "word_alignment": {
-          "model_name": "nguyenvulebinh/wav2vec2-base-vi-vlsp2020",
+          "model_name": "nguyenvulebinh/wav2vec2-base-vietnamese-250h",
           "device": "auto",
           "interpolate_method": "nearest",
           "batch_seconds": 180,
