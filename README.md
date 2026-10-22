@@ -1,4 +1,4 @@
-# training
+# training-separation
 
 Branch chuyên xử lý phần **huấn luyện**, tách khỏi pipeline xử lý audio. Nhánh này
 không chia sẻ lịch sử với các nhánh khác (orphan) và chỉ chứa những file cần cho huấn
