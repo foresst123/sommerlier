@@ -69,8 +69,9 @@ class DeepFilterNet3Backend(DenoiseBackend):
         self._seed_all()
         try:
             # log_file=None keeps df from writing enhance.log into the model folder
-            model, df_state, _, _ = init_df(path, post_filter=bool(self.cfg.get("post_filter", False)),
-                                            log_level="WARNING", log_file=None)
+            # 0.5.6 returns (model, df_state, suffix); the repo's main adds a fourth value (epoch)
+            model, df_state = init_df(path, post_filter=bool(self.cfg.get("post_filter", False)),
+                                      log_level="WARNING", log_file=None)[:2]
         except SystemExit:  # init_df calls exit(1) when the checkpoint cannot be found
             raise DenoiseError(f"{self.name}: DeepFilterNet could not load a checkpoint from {path}")
         if self.device != "auto":
