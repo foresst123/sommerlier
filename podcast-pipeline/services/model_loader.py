@@ -301,7 +301,7 @@ class ModelLoader:
         # --stop_after names the last stage to run, so anything that halts
         # before ASR must not pay for a 3GB model it will never call.
         stop_after = getattr(self.args, "stop_after", None)
-        if stop_after in ("diarization", "separation", "music_removal"):
+        if stop_after in ("denoise", "diarization", "separation", "music_removal"):
             if self.logger:
                 self.logger.info(
                     f"Skipping ASR models (--stop_after {stop_after} runs before ASR)")

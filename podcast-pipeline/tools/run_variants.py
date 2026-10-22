@@ -351,7 +351,7 @@ def run_hash(cmd, files):
 
 # ------------------------------------------------------------------ discovery
 def discover_dirs(vdir, stems):
-    """Map file stem -> per-file output dir (holds 02_diarization and/or 05_asr)."""
+    """Map file stem -> per-file output dir (holds 01b_denoise, 02_diarization and/or 05_asr)."""
     found = {}
     if not vdir.is_dir():
         return found
@@ -359,7 +359,7 @@ def discover_dirs(vdir, stems):
         if Path(root) == vdir:
             dirs[:] = [d for d in dirs if d != "input"]
         has = set(dirs)
-        if Path(root).name in stems and ({"02_diarization", "05_asr"} & has):
+        if Path(root).name in stems and ({"01b_denoise", "02_diarization", "05_asr"} & has):
             found.setdefault(Path(root).name, str(Path(root).resolve()))
             dirs[:] = []
     return found

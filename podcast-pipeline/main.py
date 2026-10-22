@@ -188,7 +188,7 @@ def _build_parser():
                              "--save_path so caches and outputs do not mix.")
     parser.add_argument(
         "--stop_after", type=str,
-        choices=["input_quality", "music", "diarization", "separation",
+        choices=["input_quality", "music", "denoise", "diarization", "separation",
                  "music_removal", "asr",
                  "captioning", "refinement", "speaker_relabel", "transcript_review",
                  "persona_profile", "word_alignment", "conversation_exports", "none"],

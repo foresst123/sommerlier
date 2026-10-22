@@ -625,7 +625,7 @@ class PipelineService:
         return pids
 
     # Thứ tự các điểm dừng của run(); None (chạy hết) tới được mọi bước.
-    _STOP_ORDER = ("input_quality", "music", "diarization", "separation", "music_removal",
+    _STOP_ORDER = ("input_quality", "music", "denoise", "diarization", "separation", "music_removal",
                    "asr", "captioning", "refinement", "speaker_relabel",
                    "transcript_review", "persona_profile", "conversation_selection",
                    "word_alignment", "conversation_exports")
@@ -1644,6 +1644,13 @@ class PipelineService:
         # timeline and the music map above remain valid.
         self._apply_denoise(args, config, checkpoint, audio_data, stage_out,
                             computed_stages)
+
+        if getattr(args, "stop_after", None) == "denoise":
+            if self.logger:
+                self.logger.info("Stopping after the noise filter as requested by --stop_after.")
+            stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
+                                      "stopped_after": "denoise"})
+            return None
 
         # 3. Phân đoạn người nói, VAD và chia khối.
         # Chỉ ghi artifact khi thực sự tính toán. Chạy theo giai đoạn sẽ đọc lại

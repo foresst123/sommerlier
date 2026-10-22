@@ -711,3 +711,12 @@ def test_input_quality_scores_several_files_at_once_on_the_performance_path():
     on = {"enabled": True, "stages": {}}
     assert _stage_parallelism(_args(performance_config=on), "input_quality") == 4
     assert _stage_parallelism(_args(), "input_quality") == 1
+
+
+def test_stop_after_denoise_ends_inside_the_diarization_pass():
+    """The noise filter runs in the diarization pass; that pass is told to stop after it."""
+    pipe = FakePipeline()
+    run_batch_by_stage(pipe, _args(stop_after="denoise"), {}, ["f1", "f2"])
+    stages = [s for s, _ in pipe.calls]
+    assert stages[-2:] == ["denoise", "denoise"]
+    assert "diarization" not in stages and "separation" not in stages and "asr" not in stages

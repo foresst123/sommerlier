@@ -173,6 +173,12 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
     # pipeline release the resident LLM after selection and makes every
     # --stop_after value an actual stage boundary.
     stop_gate = original_stop
+    # "denoise" is not a pass of its own: the noise filter runs inside the
+    # diarization pass, just before the diarizer loads. Stopping there means running
+    # that pass with stop_after="denoise" so it returns once the filter is done.
+    stop_inside_diarization = original_stop == "denoise"
+    if stop_inside_diarization:
+        stop_gate = "diarization"
 
     for stage in stages:
         if stage is not None and stop_gate is not None:
@@ -259,7 +265,7 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
             monitor.record("stage_started", stage=label, files=len(pending))
 
         stage_args = copy.copy(args)
-        stage_args.stop_after = stage
+        stage_args.stop_after = "denoise" if (stop_inside_diarization and stage == "diarization") else stage
         # Whether this batch goes on past this stage; a stage that hands the LLM
         # to the next one only keeps it when there is a next one.
         stage_args.batch_continues = stop_gate != stage
