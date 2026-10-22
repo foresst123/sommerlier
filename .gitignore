@@ -1,0 +1,9 @@
+.venv/
+.claude/
+.superpowers/
+.playwright-mcp/
+__pycache__/
+.pytest_cache/
+.DS_Store
+*.log
+:memory:.ses
