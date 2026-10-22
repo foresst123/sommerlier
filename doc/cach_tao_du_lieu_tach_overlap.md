@@ -9,7 +9,7 @@ Quy ước nhãn: **[đã có]** là điều code/số đo hiện tại đã là
 - Huấn luyện mô hình tách hai người nói chồng nhau trên hội thoại tiếng Việt. Hai họ mô hình dùng chung một nguồn dữ liệu:
   - **BSS** (tách mù): `(mix, s1, s2)`, loss PIT SI-SNR.
   - **TSE** (tách theo người mục tiêu): `(mix, enrollment, target)`, loss SI-SNR trực tiếp, không PIT.
-- **Train và suy luận phải giống nhau.** Mẫu train có hình dạng giống đầu vào lúc suy luận. Hệ quả: mẫu BSS dài đúng 4 s, dựng theo cùng thứ tự ưu tiên, và bộ chia cửa sổ lúc suy luận (`WindowPlanner`, hiện nhắm 15 s) phải ép ra mẫu 4 s theo cùng thứ tự (danh sách thay đổi ở mục 11) [đề xuất]. Thứ tự planner hiện khác mục 5; xem mục 11.4.
+- **Train và suy luận phải giống nhau.** Mẫu train có hình dạng giống đầu vào lúc suy luận. Hệ quả: mẫu BSS dài đúng 4 s, dựng theo cùng thứ tự ưu tiên, và bộ chia cửa sổ lúc suy luận (`WindowPlanner`, hiện nhắm 15 s) phải ép ra mẫu 4 s theo cùng thứ tự (danh sách thay đổi ở mục 11) [đề xuất].
 - Ground truth tự dựng: mix = tổng các stem sạch (cộng nhiễu nền), nên mỗi stem là đáp án chính xác. Không dùng đầu ra của mô hình sinh làm dữ liệu.
 
 ## 2. Luồng dữ liệu
@@ -19,7 +19,7 @@ cache diarization (360 recording, 351 h)
    │  measure_real_overlap_stats.py
    ▼
 pairs.csv  ── mỗi dòng = một overlap thật (độ dài lượt, độ dài overlap, kiểu chồng, chênh mức)
-   │  collect_overlap_samples.py: ~100 clip thật làm tập test, loại recording của chúng khỏi train
+   │  collect_overlap_samples.py: ~100 clip thật làm tập test, loại recording của chúng khỏi cả train và val
    ▼
 render_mix_dataset.py  ── mỗi mẫu bắt đầu từ MỘT dòng pairs.csv,
    │                        dựng lại bằng đoạn sạch của chính recording đó (mẫu overlap có thể lấy từ recording khác theo `--mix`, nhưng âm thanh luôn từ recording đang dựng)
@@ -79,7 +79,7 @@ Mỗi bước chỉ dùng phần 4 s còn dư:
    - `R' ≥ 2`: mỗi người 1 s solo;
    - `0.6 ≤ R' < 2`: chia đều `R'/2` (≥ 0.3 s, bằng `min_clip`) mỗi người;
    - `R' < 0.6`: không solo. Solo có khi và chỉ khi L ≤ 2.9 s.
-4. **Ngữ cảnh dư**: phần còn lại sau solo chia nửa cộng vào ctx hai bên (nếu `4 − L < 0.5`: ctx = `(4 − L)/2` mỗi bên và chấp nhận overlap sát mép; "thiếu ctx" ở trường hợp 5 nghĩa là đoạn sạch nối tiếp ngắn hơn ctx đã tính).
+4. **Ngữ cảnh dư**: phần còn lại sau solo chia nửa cộng vào ctx hai bên (nếu `4 − L < 0.5`: ctx = `(4 − L)/2` mỗi bên và chấp nhận overlap sát mép; ctx tối thiểu = 0.25 s, hoặc (4 − L)/2 khi 4 − L < 0.5; thiếu dưới mức này → bỏ mẫu (trường hợp 5); thiếu phần ctx dư → câu hỏi mở ở mục 5.2).
 
 Thứ tự thời gian: `[solo X][ctx trái][LÕI][ctx phải][solo Y]`. Bên nào của solo là A hay B **chọn ngẫu nhiên** mỗi mẫu (tránh thiên lệch vị trí); với partial ctx trái thuộc người bắt đầu trước.
 
@@ -109,21 +109,21 @@ L = 1 s (contained): solo 1 s + ctx 0.5 s + lõi 1 s + ctx 0.5 s + solo 1 s = 4 
 
 | # | Trường hợp | Dựng thế nào | Dùng khi train? |
 |---|---|---|---|
-| 1 | **Contained** | lõi = lượt của B nằm trong A; ctx hai bên đều là phần nối tiếp của đoạn A | có, L 0.3–4 s (L lớn thì biên co lại theo bước 2) |
+| 1 | **Contained** | lõi = lượt của B nằm trong A; ctx hai bên đều là phần nối tiếp của đoạn A | có, L 0.3–4 s (L lớn thì biên co lại theo bước 2 và 4) |
 | 2 | **Partial** | ctx trái nối tiếp đoạn A, ctx phải nối tiếp đoạn B | có |
 | 3 | **Full** | hai lượt trùng đầu/cuối (dung sai 0.25 s): không có tiếng liền quanh lõi. ctx để im lặng trên cả hai stem; nếu mẫu được cộng nhiễu, mix ở đó là nhiễu nền từ `noise_bank()` [đã có] | có, hiếm (1.3%) |
 | 4 | **Nhiều overlap** (2–5) | lõi = khối từ đầu overlap đầu đến cuối overlap cuối (Lb), khoảng giữa là tiếng liền mạch; người giữ sàn có thể xen kẽ. **Renderer hiện chỉ dựng một cặp từ `pairs.csv`**, nên cần dựng nhóm cặp + nội dung đoạn nối; v1 có thể bỏ trường hợp này [mở] | có nếu Lb ≤ 4 s, cần code mới |
 | 5 | **Thiếu đoạn sạch** | thiếu đoạn sạch cho solo của một người → chia phần solo đó vào ctx hai bên nếu đoạn sạch của lõi đủ dài, nếu không để im lặng ở chỗ solo (stem = 0), vẫn dùng mẫu; thiếu cho lõi hoặc cho ctx tối thiểu → bỏ mẫu | một phần |
-| 6 | **Ngoài phạm vi** (L < 0.3 s, hoặc L / Lb > 4 s) | không dựng | loại khỏi train |
+| 6 | **Ngoài phạm vi** (L < 0.3 s, hoặc L > 4 s, hoặc Lb > 4 s) | không dựng | loại khỏi train |
 
 Với các mẫu bị bỏ ở trường hợp 5 và 6: **suy luận vẫn cố tách như bình thường**; chỉ dữ liệu train bỏ chúng. Lọc template L < 0.3 hoặc > 4 s *trước* khi bốc để nhóm strat/hard không phí lượt thử.
 
 ### 5.2 Nguồn tín hiệu để dựng lõi
 
-- Lõi tổng hợp từ hai đoạn sạch (không dùng audio overlap thật); L = cột `overlap` của dòng `pairs.csv`. [đã có: `pull()` bốc đoạn sạch cho từng mẫu; độ dài hiện theo `first_len`/`second_len` rồi cắt theo cửa sổ.] Khi `first_len` < L + 2·ctx (contained) hoặc < ctx trái + L (partial): [mở] bỏ qua `first_len` và lấy đoạn sạch dài hơn, hay giữ `first_len` và để im lặng phần thiếu.
+- Lõi tổng hợp từ hai đoạn sạch (không dùng audio overlap thật); L = cột `overlap` của dòng `pairs.csv`. [đã có: `pull()` bốc đoạn sạch cho từng mẫu; độ dài hiện theo `first_len`/`second_len` rồi cắt theo cửa sổ.] Khi `first_len` < L + 2·ctx (contained) hoặc < ctx trái + L (partial): phần ctx tối thiểu thiếu thì bỏ mẫu (trường hợp 5); với phần ctx dư: [mở] bỏ qua `first_len` và lấy đoạn sạch dài hơn, hay giữ `first_len` và để im lặng phần thiếu.
 - Trong một mẫu, lõi/ctx và solo của cùng người lấy từ các đoạn sạch không giao nhau về thời gian; giữa các mẫu được dùng lại đoạn sạch nhưng vị trí cắt bốc ngẫu nhiên (không dùng một đoạn cố định cho cả file). Ctx nối tiếp đúng đoạn sạch dùng cho lõi.
 - Điểm cắt đoạn sạch: `AcousticBoundaryFinder` (VAD, chỗ lặng) giống lúc suy luận, thay cho `snap` ±80 ms hiện tại [đề xuất]; điểm cắt dời tối đa ±80 ms tới chỗ lặng, sai lệch độ dài dồn vào ctx dư, rồi cắt/đệm cuối cho đúng 4·sr. Cắt giữa từ làm mô hình thấy đầu/cuối cụt mà lúc suy luận không có.
-- Ghép: crossfade 20 ms như planner [hiện code chỉ fade 10 ms mỗi đoạn trên nền im lặng].
+- Ghép: crossfade 20 ms như planner, chỉ giữa hai khúc liền nhau trên cùng một stem; mép khúc giáp im lặng thì fade 20 ms [hiện code chỉ fade 10 ms mỗi đoạn trên nền im lặng].
 - Mix = tổng stem + nhiễu nền (xác suất 0.5) [đã có]; nhiễu hiện không lưu thành file nên SpeechBrain thiếu cột `noise_wav` (mục 11).
 
 ### 5.3 Câu hỏi thường gặp
@@ -143,7 +143,7 @@ Một mẫu = `(mix, enrollment, target)`.
  Mix (3–4 s, lõi overlap nguyên vẹn)  ─┘                    (tiếng sạch của A trong mix)
 ```
 
-- **Mix**: lõi overlap + phần nối tiếp liền mạch của hai đoạn sạch quanh nó, tổng độ dài T bốc đều trong [3, 4] s (T ≥ L); ctx mỗi bên = `(T − L)/2` (partial: trái từ A, phải từ B); đoạn sạch không đủ → bỏ mẫu. **Không ghép solo, không áp quy tắc biên 0.25 s.** Bao quát các trường hợp được dựng ở mục 5.1. [mở]: dùng luôn mix 4 s của BSS (một renderer, khớp suy luận) thay cho mix 3–4 s riêng.
+- **Mix**: lõi overlap + phần nối tiếp liền mạch của hai đoạn sạch quanh nó, tổng độ dài T bốc đều trong [max(3, L), 4] s; ctx mỗi bên = `(T − L)/2` (partial: trái từ A, phải từ B); đoạn sạch không đủ → bỏ mẫu. **Không ghép solo, không áp quy tắc biên 0.25 s.** Bao quát các trường hợp được dựng ở mục 5.1. [mở]: dùng luôn mix 4 s của BSS (một renderer, khớp suy luận) thay cho mix 3–4 s riêng.
 - **Enrollment**: một đoạn sạch của người mục tiêu, lấy ở **cùng recording**, **nằm ngoài mix** (không giao về thời gian với đoạn nào dùng trong mix), không ai khác nói trong ±0.3 s, không nhạc. Đề xuất dài ~3 s nếu đủ, tối thiểu 1 s sau khi ghép (không thì bỏ mẫu); người chen ít đoạn sạch thì ghép các đoạn sạch của họ lại. Lúc test, `collect_overlap_samples.py` dựng tham chiếu dài tới 30 s (`--ref-seconds`): cần chốt độ dài enrollment lúc suy luận cho khớp [mở].
 - **Target**: tiếng sạch (stem) của người mục tiêu trong mix, đúng độ dài mix.
 - **Hai mẫu mỗi mix**: target A (enrollment A) rồi target B (enrollment B); mô hình học cả hai phía từ một overlap.
@@ -165,7 +165,7 @@ Một mẫu = `(mix, enrollment, target)`.
 |---|---|---|---|
 | MossFormer2 | 4 s | danh sách 3 cột `mix s1 s2`, 16 kHz | trainer mặc định cắt ngẫu nhiên 2 s mỗi file mỗi epoch: phải đặt độ dài đoạn 4 s, không thì overlap có thể bị cắt mất |
 | SpeechBrain | 4 s | CSV: ID, duration, mix_wav, s1_wav, s2_wav (`noise_wav` cần thêm, hiện chưa lưu) | trainer mặc định dùng đoạn 4–6 s: đặt đúng 4 s |
-| TIGER | 4 s | `mix.json`, `s1.json`, `s2.json`; mỗi file là một mảng JSON `[đường dẫn, số mẫu]` | mặc định 3 s, file ngắn hơn bị bỏ im lặng: đặt 4 s |
+| TIGER | 4 s | `mix.json`, `s1.json`, `s2.json`; mỗi file là một mảng JSON các cặp `[đường dẫn, số mẫu]`, một cặp mỗi mẫu | mặc định 3 s, file ngắn hơn bị bỏ im lặng: đặt 4 s |
 
 Chưa kiểm bằng cách chạy từng trainer.
 
@@ -179,16 +179,16 @@ Kế hoạch cũ nêu 10–30 giờ đoạn đã render, ví dụ `--n 20000`. C
 
 - mẫu BSS dài đúng 4·sr mẫu; mix = s1 + s2 (+ nhiễu) trong sai số số học;
 - mỗi stem ≥ 0.15 s tiếng nói;
-- lõi L trong 0.3–4 s; bố cục `[solo X][ctx trái][LÕI][ctx phải][solo Y]` đúng theo trường `layout` trong `chunks.jsonl` (X, Y khác nhau, tổng độ dài = 4·sr);
+- lõi L trong 0.3–4 s; trường `layout` trong `chunks.jsonl` có các khúc liền nhau, không chồng, theo thứ tự [solo X]? [ctx trái] [LÕI] [ctx phải] [solo Y]? (solo có thể vắng; nếu có cả hai thì X ≠ Y), tổng độ dài = 4·sr; độ dài ctx/solo khớp bảng mục 5 trừ mẫu có cờ `case5` (solo dồn vào ctx hoặc để im) hoặc kiểu full (ctx im lặng trên cả hai stem);
 - enrollment TSE không giao với mix, cùng recording, cùng split;
 - phân phối dựng so với thật ở mục 4, chấp nhận lệch có chủ ý: bỏ L < 0.3 và > 4 s, L chia nhóm đều ở phần strat; validator hiện so `template_overlap` (cặp) với `event_duration_s` (sự kiện), cần sửa cho cùng đơn vị;
 - recording trong tập test (`--exclude-index`) không xuất hiện ở train.
 
 ## 11. Việc cần làm để code khớp thiết kế
 
-1. `render_mix_dataset.py`: dựng theo thứ tự lõi → ctx 0.25 s → solo → ctx dư (thay `MARGIN = 0.2`); ctx nối tiếp đúng đoạn sạch của lõi; vị trí solo A/B ngẫu nhiên; cắt bằng `AcousticBoundaryFinder` thay `snap` ±80 ms; crossfade 20 ms; đệm/cắt đúng 4·sr mẫu; thay `LEN_BINS` bằng 3 nhóm (0.3–0.5, 0.5–1, 1–4 s) và lọc template L < 0.3 hoặc > 4 s; thêm cờ `--min-clip` (0.3, hiện cứng 0.25); ghi trường `layout` vào `chunks.jsonl` (danh sách {loại: solo|ctx|core, người: A|B, bắt đầu, kết thúc theo mẫu}); port `utils/acoustic_boundary.py` từ `origin/solid-architecture` (có fallback năng lượng khi không có Silero); lưu `noise.wav` và cột `noise_wav` cho SpeechBrain; TIGER đặt 4 s (cũng `--window` help và các dòng ghi TIGER 3 s trong `ke_hoach_thu_nghiem_tach_giong_theo_vong.md`, khoảng dòng 57, 100, 122, 162).
+1. `render_mix_dataset.py`: dựng theo thứ tự lõi → ctx 0.25 s → solo → ctx dư (thay `MARGIN = 0.2`); ctx nối tiếp đúng đoạn sạch của lõi; vị trí solo A/B ngẫu nhiên; cắt bằng `AcousticBoundaryFinder` thay `snap` ±80 ms; crossfade 20 ms; đệm/cắt đúng 4·sr mẫu; thay `LEN_BINS` bằng 3 nhóm (0.3–0.5, 0.5–1, 1–4 s) và lọc template L < 0.3 hoặc > 4 s; thêm cờ `--min-clip` (0.3, hiện cứng 0.25); ghi trường `layout` vào `chunks.jsonl` (danh sách {loại: solo|ctx|core, người: A|B, bắt đầu, kết thúc tính bằng sample trong mẫu, src_start, src_end tính bằng giây trên recording}) và cờ `case5`; port `utils/acoustic_boundary.py` từ `origin/solid-architecture` (có fallback năng lượng khi không có Silero); lưu `noise.wav` và cột `noise_wav` cho SpeechBrain; TIGER đặt 4 s (cũng `--window` help và các dòng ghi TIGER 3 s trong `ke_hoach_thu_nghiem_tach_giong_theo_vong.md`, khoảng dòng 57, 100, 122, 162).
 2. Dựng nhóm cặp cho trường hợp nhiều overlap (hoặc chốt bỏ ở v1).
-3. Xuất manifest TSE (hai mẫu mỗi mix, nhóm enrollment ứng viên ngoài mix).
+3. Xuất manifest TSE (hai mẫu mỗi mix, nhóm enrollment ứng viên ngoài mix, mỗi ứng viên lưu src_start/src_end để validator kiểm không giao).
 4. `WindowPlanner` (`utils/separation_window.py`, nhánh `solid-architecture`): mục tiêu 15 → 4 s; `preferred_context` đổi từ "ctx trước, đệm sau" sang "biên 0.25 s → solo → ctx dư"; `padding_min_seconds` (1.0 s) và ngưỡng 1 s tiếng nói bắt buộc đổi theo quy tắc solo mới; giữ crossfade 20 ms; thử [solo A…solo B] rồi [solo B…solo A], lấy cách đầu đủ đoạn sạch; chỉnh `context_seconds` 2.0, `max_context_seconds` 2.2, dung sai 0.35 s trong `build()`; `self.target` đang cứng 15 s (`round(15.0*sr)`) cần thành tham số; `padding_min_seconds` cũng là độ dài tối thiểu mỗi đoạn (`self.minimum`), giảm còn ~0.3 s cho solo; quy tắc tách lõi dài (`_split_core_bounds`, `min_piece`) xét lại khi lõi > 4 s.
 5. `validate_mix_dataset.py`: so `template_overlap` với quantile cột `overlap` của `pairs.csv` (qua `--stats`) thay vì `event_duration_s`; kiểm `mix = s1 + s2 + noise` cho chunk có nhiễu khi đã lưu `noise.wav` (hiện chỉ kiểm chunk không nhiễu).
 6. Viết `audit_clean_pool.py` để biết số giờ nội dung sạch duy nhất.
@@ -197,6 +197,6 @@ Kế hoạch cũ nêu 10–30 giờ đoạn đã render, ví dụ `--n 20000`. C
 ## 12. Câu hỏi còn mở
 
 - Nhiều overlap (trường hợp 4): nguồn đoạn nối; Lb > 4 s bỏ cả khối hay tách; có đưa vào v1 không.
-- Đoạn sạch nối tiếp ngắn hơn ctx cần: lấy đoạn dài hơn hay để im lặng (mục 5.2).
+- Đoạn sạch nối tiếp đủ ctx tối thiểu nhưng ngắn hơn ctx dư: lấy đoạn dài hơn hay để im lặng (mục 5.2).
 - TSE: dùng mix 4 s của BSS hay mix 3–4 s riêng; độ dài enrollment lúc suy luận (train ~3 s, test hiện tới 30 s).
-- TSE mẫu người mục tiêu không nói trong overlap: cần loss riêng (SI-SNR không xác định với đích 0); bỏ cho tới khi chốt loss.
+- TSE mẫu âm (người mục tiêu không nói trong mix): cần loss riêng (SI-SNR không xác định với đích 0); bỏ cho tới khi chốt loss.
