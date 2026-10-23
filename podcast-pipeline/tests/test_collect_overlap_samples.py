@@ -102,3 +102,18 @@ def test_parallel_scan_matches_serial(tmp_path):
     two = cos.scan_all(recs, 1.0, 0.1, 2)
     assert [len(e) for e, _ in one] == [len(e) for e, _ in two]
     assert one[0][0][0]["start"] == two[0][0][0]["start"]
+
+
+def test_references_are_nearest_clips_up_to_four_seconds(tmp_path):
+    _recording(tmp_path / "run" / "_final" / "p", "recA", 4)
+    out = tmp_path / "out"
+    idx = cos.build(cos.stage_recordings([str(tmp_path / "run")]), str(out), n=4, context=60.0)
+    for s in idx:
+        meta = json.loads((out / s["folder"] / "meta.json").read_text())
+        ov = meta["overlap"]
+        guard = meta["reference_rule"]["excluded"]
+        assert guard[0] <= ov["start"] and ov["end"] <= guard[1]
+        for spk, ref in meta["references"].items():
+            assert ref["seconds"] <= cos.REF_SECONDS + 1e-6
+            for a, b in ref["clips"]:
+                assert b <= guard[0] - 0.3 + 1e-6 or a >= guard[1] + 0.3 - 1e-6

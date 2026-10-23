@@ -10,7 +10,9 @@ across short, medium and long, and across recordings. Each sample folder holds:
                          and slides inward at the recording's edges), so it holds
                          every overlap that falls in it
   speakers/<SPK>/reference.wav   clean single-speaker speech of that speaker from
-                         elsewhere in the recording (nobody else talking), plus
+                         elsewhere in the recording (nobody else talking), nearest
+                         clips first, at most --ref-seconds (4 s, the training
+                         enrollment rule), none within 4 s of the overlap; plus
                          clips/ with the pieces it was built from
   separated/             the separator's output for segments touching the overlap,
                          when it was written
@@ -41,8 +43,11 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from utils.separation_layout import pick_enrollment  # noqa: E402
 
 CACHE_SR = 24000
+REF_SECONDS = 4.0     # enrollment length, the same rule as training (utils/separation_layout)
+REF_GUARD = 4.0       # reference clips stay this far from the overlap (outside any window W <= 8 s)
 BINS = [("short", 0.0, 0.5), ("medium", 0.5, 2.0), ("long", 2.0, 5.0), ("xlong", 5.0, 1e9)]
 
 
@@ -291,7 +296,7 @@ def select(events: List[dict], n: int, seed: int, context: float) -> List[dict]:
 
 
 def write_sample(e: dict, rec: dict, segs: List[dict], out_dir: str, context: float,
-                 ref_seconds: float, margin: float) -> dict:
+                 ref_seconds: float, margin: float, ref_guard: float = REF_GUARD) -> dict:
     import soundfile as sf
     audio, sr = rec["audio"]()
     total = len(audio) / sr
@@ -307,12 +312,15 @@ def write_sample(e: dict, rec: dict, segs: List[dict], out_dir: str, context: fl
     in_ctx = [(a, b) for a, b in cross_speaker_overlaps(segs) if a < c1 and b > c0]
     speakers = sorted({s["speaker"] for s in segs if s["start"] < c1 and s["end"] > c0})
     refs = {}
+    guard = (e["start"] - ref_guard, e["end"] + ref_guard)
     for spk in speakers:
         clips = clean_clips(segs, spk, margin, 1.0)
-        # longest first, up to ref_seconds
-        clips.sort(key=lambda c: c[0] - c[1])
+        # the training rule (utils/separation_layout.pick_enrollment): nearest clean clips
+        # first, none within `margin` of the window the model will see, up to ref_seconds
+        order = pick_enrollment(clips, [guard], (e["start"] + e["end"]) / 2, margin, k=len(clips))
         chosen, acc = [], 0.0
-        for a, b in clips:
+        for i in order:
+            a, b = clips[i]
             if acc >= ref_seconds:
                 break
             chosen.append((a, min(b, a + (ref_seconds - acc))))
@@ -350,6 +358,8 @@ def write_sample(e: dict, rec: dict, segs: List[dict], out_dir: str, context: fl
             "bss_failed_spans": [_plain(sp) for s in touching for sp in s.get("bss_failed_spans") or []],
             "separated_clips": copied},
         "references": refs,
+        "reference_rule": {"order": "nearest_first", "seconds": ref_seconds, "margin": margin,
+                           "excluded": [round(guard[0], 3), round(guard[1], 3)]},
     }
     with open(os.path.join(out_dir, "meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
@@ -357,7 +367,7 @@ def write_sample(e: dict, rec: dict, segs: List[dict], out_dir: str, context: fl
 
 
 def build(recs: List[dict], out: str, n: int = 100, context: float = 60.0, seed: int = 0,
-          merge_gap: float = 1.0, min_overlap: float = 0.1, ref_seconds: float = 30.0,
+          merge_gap: float = 1.0, min_overlap: float = 0.1, ref_seconds: float = REF_SECONDS,
           margin: float = 0.3, workers: int = 1) -> List[dict]:
     segs_of, events = {}, []
     by_path = {r["path"]: r for r in recs}
@@ -387,7 +397,8 @@ def main():
     p.add_argument("--context", type=float, default=60.0, help="seconds of context per sample")
     p.add_argument("--merge-gap", type=float, default=1.0, help="overlaps closer than this form one event")
     p.add_argument("--min-overlap", type=float, default=0.1)
-    p.add_argument("--ref-seconds", type=float, default=30.0, help="clean reference length per speaker")
+    p.add_argument("--ref-seconds", type=float, default=REF_SECONDS,
+                   help="clean reference (enrollment) length per speaker, nearest clips first")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--workers", type=int, default=min(8, os.cpu_count() or 1),
                    help="processes reading recordings in parallel")

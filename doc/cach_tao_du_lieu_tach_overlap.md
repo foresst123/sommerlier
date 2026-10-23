@@ -143,7 +143,7 @@ Khi đoạn nối tiếp của lõi ngắn hơn ngân sách ctx, hoặc một ng
 4. để im lặng ở mép ngoài;
 5. nếu vẫn không đủ lõi hoặc ctx 0.25 s thì **bỏ mẫu**.
 
-Mẫu giữ lại nhờ các bước 1–4 ghi tên bước vào trường `fallback` (`null` nếu không cần dự phòng). Planner áp đúng chuỗi này lúc suy luận.
+Mẫu giữ lại nhờ các bước 1–4 ghi tên bước vào trường `fallback` (`null` nếu không cần dự phòng); tên lý do trong code `utils/separation_layout.py`: `ctx_short` (ctx co về tối thiểu, phần thiếu dồn vào solo thêm), `solo_to_ctx` (thiếu solo, dồn vào ctx), `silence_pad` (để im lặng ở mép), `tse_shrunk` (mix TSE co lại vì nguồn ngắn); drop khi thiếu lõi hoặc ctx tối thiểu. Code mặc định `--tse-mix none` (không dựng TSE cho đỡ tốn render); dùng `plain` để dựng. Planner áp đúng chuỗi này lúc suy luận.
 
 ### 5.3 Các trường hợp
 
