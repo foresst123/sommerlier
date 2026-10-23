@@ -1,0 +1,117 @@
+{
+  "baseline": "none",
+  "variants": [
+    {
+      "chain": "mpsenet_dns>blend25>dfn3>dry50",
+      "label": "Stage 1 MP-SENet DNS + blend25, stage 2 DeepFilterNet3 + dry50 [analysis only]",
+      "group": "two_stage",
+      "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). Two-stage plan: stage 1 is a gentle model (kept at 75% filtered + 25% raw), stage 2 a stronger model that is itself softened by dry50 (mixes back what stage 2 was given, i.e. the stage-1 output, not the raw audio). Blend and dry percentages are starting values to tune by listening. Nothing here is validated on Vietnamese."
+    },
+    {
+      "chain": "mpsenet_dns>blend25>bsrnn26>dry50",
+      "label": "Stage 1 MP-SENet DNS + blend25, stage 2 BSRNN26 + dry50 [analysis only]",
+      "group": "two_stage",
+      "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). Two-stage plan: stage 1 is a gentle model (kept at 75% filtered + 25% raw), stage 2 a stronger model that is itself softened by dry50 (mixes back what stage 2 was given, i.e. the stage-1 output, not the raw audio). Blend and dry percentages are starting values to tune by listening. Nothing here is validated on Vietnamese."
+    },
+    {
+      "chain": "mpsenet_dns>blend25>mpsenet>dry50",
+      "label": "Stage 1 MP-SENet DNS + blend25, stage 2 MP-SENet VoiceBank + dry50 [analysis only]",
+      "group": "two_stage",
+      "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). Two-stage plan: stage 1 is a gentle model (kept at 75% filtered + 25% raw), stage 2 a stronger model that is itself softened by dry50 (mixes back what stage 2 was given, i.e. the stage-1 output, not the raw audio). Blend and dry percentages are starting values to tune by listening. Nothing here is validated on Vietnamese."
+    },
+    {
+      "chain": "mpsenet_dns>blend25>re_use>dry50",
+      "label": "Stage 1 MP-SENet DNS + blend25, stage 2 RE-USE + dry50 [analysis only]",
+      "group": "two_stage",
+      "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). Two-stage plan: stage 1 is a gentle model (kept at 75% filtered + 25% raw), stage 2 a stronger model that is itself softened by dry50 (mixes back what stage 2 was given, i.e. the stage-1 output, not the raw audio). Blend and dry percentages are starting values to tune by listening. Nothing here is validated on Vietnamese."
+    },
+    {
+      "chain": "mf2se48>blend25>dfn3>dry50",
+      "label": "Stage 1 MF2SE48 (music scope spans) + blend25, stage 2 DeepFilterNet3 + dry50 [analysis only]",
+      "group": "two_stage",
+      "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). Two-stage plan: stage 1 is a gentle model (kept at 75% filtered + 25% raw), stage 2 a stronger model that is itself softened by dry50 (mixes back what stage 2 was given, i.e. the stage-1 output, not the raw audio). Blend and dry percentages are starting values to tune by listening. Nothing here is validated on Vietnamese.",
+      "set": {
+        "pipeline.music_scope": "spans"
+      },
+      "tag": "scope-spans"
+    },
+    {
+      "chain": "mf2se48>blend25>bsrnn26>dry50",
+      "label": "Stage 1 MF2SE48 (music scope spans) + blend25, stage 2 BSRNN26 + dry50 [analysis only]",
+      "group": "two_stage",
+      "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). Two-stage plan: stage 1 is a gentle model (kept at 75% filtered + 25% raw), stage 2 a stronger model that is itself softened by dry50 (mixes back what stage 2 was given, i.e. the stage-1 output, not the raw audio). Blend and dry percentages are starting values to tune by listening. Nothing here is validated on Vietnamese.",
+      "set": {
+        "pipeline.music_scope": "spans"
+      },
+      "tag": "scope-spans"
+    },
+    {
+      "chain": "mf2se48>blend25>mpsenet>dry50",
+      "label": "Stage 1 MF2SE48 (music scope spans) + blend25, stage 2 MP-SENet VoiceBank + dry50 [analysis only]",
+      "group": "two_stage",
+      "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). Two-stage plan: stage 1 is a gentle model (kept at 75% filtered + 25% raw), stage 2 a stronger model that is itself softened by dry50 (mixes back what stage 2 was given, i.e. the stage-1 output, not the raw audio). Blend and dry percentages are starting values to tune by listening. Nothing here is validated on Vietnamese.",
+      "set": {
+        "pipeline.music_scope": "spans"
+      },
+      "tag": "scope-spans"
+    },
+    {
+      "chain": "mf2se48>blend25>re_use>dry50",
+      "label": "Stage 1 MF2SE48 (music scope spans) + blend25, stage 2 RE-USE + dry50 [analysis only]",
+      "group": "two_stage",
+      "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). Two-stage plan: stage 1 is a gentle model (kept at 75% filtered + 25% raw), stage 2 a stronger model that is itself softened by dry50 (mixes back what stage 2 was given, i.e. the stage-1 output, not the raw audio). Blend and dry percentages are starting values to tune by listening. Nothing here is validated on Vietnamese.",
+      "set": {
+        "pipeline.music_scope": "spans"
+      },
+      "tag": "scope-spans"
+    },
+    {
+      "chain": "rf_crowd>blend25>dfn3>dry50",
+      "label": "Stage 1 RF crowd + blend25, stage 2 DeepFilterNet3 + dry50 [analysis only]",
+      "group": "two_stage",
+      "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). Two-stage plan: stage 1 is a gentle model (kept at 75% filtered + 25% raw), stage 2 a stronger model that is itself softened by dry50 (mixes back what stage 2 was given, i.e. the stage-1 output, not the raw audio). Blend and dry percentages are starting values to tune by listening. Nothing here is validated on Vietnamese."
+    },
+    {
+      "chain": "rf_crowd>blend25>bsrnn26>dry50",
+      "label": "Stage 1 RF crowd + blend25, stage 2 BSRNN26 + dry50 [analysis only]",
+      "group": "two_stage",
+      "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). Two-stage plan: stage 1 is a gentle model (kept at 75% filtered + 25% raw), stage 2 a stronger model that is itself softened by dry50 (mixes back what stage 2 was given, i.e. the stage-1 output, not the raw audio). Blend and dry percentages are starting values to tune by listening. Nothing here is validated on Vietnamese."
+    },
+    {
+      "chain": "rf_crowd>blend25>mpsenet>dry50",
+      "label": "Stage 1 RF crowd + blend25, stage 2 MP-SENet VoiceBank + dry50 [analysis only]",
+      "group": "two_stage",
+      "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). Two-stage plan: stage 1 is a gentle model (kept at 75% filtered + 25% raw), stage 2 a stronger model that is itself softened by dry50 (mixes back what stage 2 was given, i.e. the stage-1 output, not the raw audio). Blend and dry percentages are starting values to tune by listening. Nothing here is validated on Vietnamese."
+    },
+    {
+      "chain": "rf_crowd>blend25>re_use>dry50",
+      "label": "Stage 1 RF crowd + blend25, stage 2 RE-USE + dry50 [analysis only]",
+      "group": "two_stage",
+      "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). Two-stage plan: stage 1 is a gentle model (kept at 75% filtered + 25% raw), stage 2 a stronger model that is itself softened by dry50 (mixes back what stage 2 was given, i.e. the stage-1 output, not the raw audio). Blend and dry percentages are starting values to tune by listening. Nothing here is validated on Vietnamese."
+    },
+    {
+      "chain": "mf2se48>blend25>dfn3>dry50",
+      "label": "Stage 1 MF2SE48 + blend25, stage 2 DeepFilterNet3 + dry50 [analysis only]",
+      "group": "two_stage",
+      "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). Two-stage plan: stage 1 is a gentle model (kept at 75% filtered + 25% raw), stage 2 a stronger model that is itself softened by dry50 (mixes back what stage 2 was given, i.e. the stage-1 output, not the raw audio). Blend and dry percentages are starting values to tune by listening. Nothing here is validated on Vietnamese."
+    },
+    {
+      "chain": "mf2se48>blend25>bsrnn26>dry50",
+      "label": "Stage 1 MF2SE48 + blend25, stage 2 BSRNN26 + dry50 [analysis only]",
+      "group": "two_stage",
+      "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). Two-stage plan: stage 1 is a gentle model (kept at 75% filtered + 25% raw), stage 2 a stronger model that is itself softened by dry50 (mixes back what stage 2 was given, i.e. the stage-1 output, not the raw audio). Blend and dry percentages are starting values to tune by listening. Nothing here is validated on Vietnamese."
+    },
+    {
+      "chain": "mf2se48>blend25>mpsenet>dry50",
+      "label": "Stage 1 MF2SE48 + blend25, stage 2 MP-SENet VoiceBank + dry50 [analysis only]",
+      "group": "two_stage",
+      "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). Two-stage plan: stage 1 is a gentle model (kept at 75% filtered + 25% raw), stage 2 a stronger model that is itself softened by dry50 (mixes back what stage 2 was given, i.e. the stage-1 output, not the raw audio). Blend and dry percentages are starting values to tune by listening. Nothing here is validated on Vietnamese."
+    },
+    {
+      "chain": "mf2se48>blend25>re_use>dry50",
+      "label": "Stage 1 MF2SE48 + blend25, stage 2 RE-USE + dry50 [analysis only]",
+      "group": "two_stage",
+      "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). Two-stage plan: stage 1 is a gentle model (kept at 75% filtered + 25% raw), stage 2 a stronger model that is itself softened by dry50 (mixes back what stage 2 was given, i.e. the stage-1 output, not the raw audio). Blend and dry percentages are starting values to tune by listening. Nothing here is validated on Vietnamese."
+    }
+  ]
+}

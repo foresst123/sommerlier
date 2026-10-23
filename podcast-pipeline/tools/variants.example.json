@@ -483,6 +483,24 @@
         "pipeline.music_scope": "spans"
       },
       "tag": "scope-spans"
+    },
+    {
+      "chain": "re_use>blend25",
+      "label": "RE-USE, blend 25",
+      "group": "pipe_blend",
+      "note": "RE-USE with 25% of the chain input mixed back. Blend: mixes the chain's unfiltered input back at the given percent (Iwamoto 2022, arXiv 2201.06685). RE-USE has no strength or threshold setting of its own (vendor scripts expose only chunk size, hop and bandwidth extension), so a lighter touch is made by mixing the input back. Nothing here is validated on Vietnamese."
+    },
+    {
+      "chain": "re_use>blend50",
+      "label": "RE-USE, blend 50",
+      "group": "pipe_blend",
+      "note": "RE-USE with 50% of the chain input mixed back. Blend: mixes the chain's unfiltered input back at the given percent (Iwamoto 2022, arXiv 2201.06685). RE-USE has no strength or threshold setting of its own (vendor scripts expose only chunk size, hop and bandwidth extension), so a lighter touch is made by mixing the input back. Nothing here is validated on Vietnamese."
+    },
+    {
+      "chain": "re_use>blend75",
+      "label": "RE-USE, blend 75",
+      "group": "pipe_blend",
+      "note": "RE-USE with 75% of the chain input mixed back. Blend: mixes the chain's unfiltered input back at the given percent (Iwamoto 2022, arXiv 2201.06685). RE-USE has no strength or threshold setting of its own (vendor scripts expose only chunk size, hop and bandwidth extension), so a lighter touch is made by mixing the input back. Nothing here is validated on Vietnamese."
     }
   ]
 }
