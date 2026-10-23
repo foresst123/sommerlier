@@ -16,6 +16,7 @@ It binds to 127.0.0.1 by default. There is no login: pass --host 0.0.0.0 only on
 trust, since anyone who can reach the port can read the audio and write notes.
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -83,8 +84,8 @@ function mk(it,i){const tr=document.createElement('tr');if(it.ref)tr.className='
   cb.addEventListener('change',()=>setHidden([it.key],cb.checked));tr.children[4].appendChild(cb)}
  tr.children[0].textContent=i+1;const v=tr.children[1];v.textContent=it.label||it.variant;
  v.insertAdjacentHTML('beforeend',badge(it)+`<small></small>`);
- v.querySelector('small').textContent=(it.ref?'Âm thanh gốc (chưa lọc) · ':(it.type==='ket_hop'?'kết hợp · ':'đơn · '))+it.stem+' · '+(it.size/1048576).toFixed(1)+' MB';
- const a=tr.querySelector('audio');a.src=`/audio/${encodeURIComponent(it.variant)}/${encodeURIComponent(it.stem)}/${kind}`;
+ v.querySelector('small').textContent=(it.ref?'Âm thanh gốc (chưa lọc) · ':(it.type==='ket_hop'?'kết hợp · ':'đơn · '))+it.stem+' · '+(it.size/1048576).toFixed(1)+' MB · mã '+(it.fp||'?');
+ const a=tr.querySelector('audio');a.dataset.fp=it.fp||'';a.src=`/audio/${encodeURIComponent(it.variant)}/${encodeURIComponent(it.stem)}/${kind}`;
  a.addEventListener('play',()=>{if($('#syncPos').checked&&active&&active!==a&&Math.abs(a.currentTime-lastPos)>0.3)a.currentTime=lastPos;active=a;
   document.querySelectorAll('audio').forEach(o=>{if(o!==a)o.pause()});showPos()});
  a.addEventListener('timeupdate',()=>{if(a===active){lastPos=a.currentTime;showPos()}});
@@ -95,7 +96,7 @@ function mk(it,i){const tr=document.createElement('tr');if(it.ref)tr.className='
   notes[it.key]={note:t.value};s.textContent='đã lưu';apply()}catch(e){s.textContent='LỖI lưu: '+e.message}},600)});
  return tr}
 function seek(a,d){if(!a)return;const dur=isFinite(a.duration)?a.duration:Infinity;a.currentTime=Math.max(0,Math.min(dur,a.currentTime+d));active=a;lastPos=a.currentTime;showPos()}
-function showPos(){const el=$('#pos');if(!el)return;const tr=active&&active.closest('tr');el.textContent=active?((tr&&tr.children[1].childNodes[0].textContent)||'')+' · '+active.currentTime.toFixed(1)+'s':''}
+function showPos(){const el=$('#pos');if(!el)return;const tr=active&&active.closest('tr');el.textContent=active?((tr&&tr.children[1].childNodes[0].textContent)||'')+' · mã '+(active.dataset.fp||'?')+' · '+active.currentTime.toFixed(1)+'s':''}
 function target(){return active||[...document.querySelectorAll('#rows tr')].filter(t=>t.style.display!=='none').map(t=>t.querySelector('audio'))[0]}
 async function setHidden(keys,flag){keys.forEach(k=>{if(flag)hidden[k]=true;else delete hidden[k]});apply();
  try{await api('/api/hidden',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keys,hidden:flag})})}catch(e){$('#state').textContent='LỖI lưu trạng thái ẩn: '+e.message}}
@@ -157,7 +158,27 @@ class State:
         self.root = os.path.abspath(out_root)
         self.notes_path = os.path.join(self.root, "denoise_notes.json")
         self.hidden_path = os.path.join(self.root, "denoise_hidden.json")
+        self._fp = {}
         self.lock = threading.Lock()
+
+    def fingerprint(self, path):
+        """Short id of a file's content: size plus the start, middle and end 64 KB (cached by size and mtime).
+
+        Two rows with the same value hold the same audio; it is shown on the page so a mix-up is visible.
+        """
+        try:
+            st = os.stat(path)
+        except OSError:
+            return ""
+        key = (path, st.st_size, st.st_mtime_ns)
+        if key not in self._fp:
+            h = hashlib.sha1(str(st.st_size).encode())
+            with open(path, "rb") as f:
+                for off in (0, max(0, st.st_size // 2 - 32768), max(0, st.st_size - 65536)):
+                    f.seek(off)
+                    h.update(f.read(65536))
+            self._fp[key] = h.hexdigest()[:8]
+        return self._fp[key]
 
     def manifest_rows(self):
         try:
@@ -186,12 +207,12 @@ class State:
                 dn = os.path.join(sdir, KINDS["denoise"])
                 mu = os.path.join(sdir, KINDS["music"])
                 if os.path.isfile(dn):
-                    items.append({"key": f"{v}/{stem}", "variant": v, "stem": stem, "size": os.path.getsize(dn), "label": v,
+                    items.append({"key": f"{v}/{stem}", "variant": v, "stem": stem, "size": os.path.getsize(dn), "fp": self.fingerprint(dn), "label": v,
                                   "status": row_status(rows.get(v)), "type": variant_type(v, rows.get(v)),
                                   "has_denoise": True, "ref": False})
                 elif os.path.isfile(mu) and (v == "none" or ref is None):
                     ref = {"key": f"{v}/{stem}", "variant": v, "label": f"{v} (gốc)", "stem": stem,
-                           "size": os.path.getsize(mu), "status": None, "type": "goc", "has_denoise": False, "ref": True}
+                           "size": os.path.getsize(mu), "fp": self.fingerprint(mu), "status": None, "type": "goc", "has_denoise": False, "ref": True}
         if ref:
             items.insert(0, ref)
         return items
