@@ -50,6 +50,7 @@ tr.ref td{background:color-mix(in srgb,var(--accent) 8%,var(--card))}
 td.v{font-weight:600;word-break:break-all;min-width:200px}td.v small{display:block;color:var(--muted);font-weight:400}
 .badge{display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;background:var(--warnbg);color:var(--warn);margin-left:6px}
 audio{width:320px;max-width:100%}
+.seek{display:flex;gap:6px;margin-top:4px}.seek button{padding:2px 9px;font-size:12px}
 textarea{width:100%;min-width:240px;min-height:54px;resize:vertical;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--text);font:inherit}
 tr.dim{opacity:.45}td.h{text-align:center;width:52px}
 .bar input[type=text]{padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--text);width:150px}
@@ -66,28 +67,36 @@ button{padding:6px 12px;border:1px solid var(--line);border-radius:6px;backgroun
 <label title="Hiện lại các hàng đã tích Ẩn để xem hoặc bỏ ẩn"><input id="showHid" type="checkbox"> hiện cả hàng đã ẩn <span id="nHid"></span></label>
 <input id="prefix" type="text" placeholder="tên bắt đầu bằng..." aria-label="Ẩn theo tiền tố"><button id="hidePrefix" title="Ẩn mọi variant có tên bắt đầu bằng chuỗi này">Ẩn theo tên</button>
 <button id="unhideAll">Bỏ ẩn tất cả</button>
+<span title="Tua hàng đang nghe; phím ← và → cũng tua 5 giây, phím cách để phát/dừng"><button id="gBack">◀ 5s</button> <button id="gFwd">5s ▶</button></span>
+<label title="Khi bấm phát một hàng khác, bắt đầu đúng vị trí của hàng vừa nghe để so sánh cùng một đoạn"><input id="syncPos" type="checkbox" checked> giữ cùng vị trí khi đổi hàng</label> <span id="pos"></span>
 <button id="csv">Xuất ghi chú CSV</button><span id="state">đang tải...</span></div></header>
 <main><table><thead><tr><th>#</th><th>Variant</th><th>Âm thanh sau lọc</th><th>Ghi chú</th><th title="Tích để ẩn hàng này (có thể bỏ ẩn sau)">Ẩn</th></tr></thead>
 <tbody id="rows"></tbody></table></main>
 <script>
-const $=s=>document.querySelector(s);let items=[],notes={},timers={},hidden={};
+const $=s=>document.querySelector(s);let items=[],notes={},timers={},hidden={},active=null,lastPos=0;
 function badge(it){return it.status&&it.status!=='ok'?`<span class="badge">${it.status.toUpperCase()}</span>`:''}
 async function api(path,opt){const r=await fetch(path,opt);if(!r.ok)throw new Error(r.status);return r.json()}
 function mk(it,i){const tr=document.createElement('tr');if(it.ref)tr.className='ref';tr.dataset.key=it.key;
  const kind=it.has_denoise?'denoise':'music';
- tr.innerHTML=`<td></td><td class="v"></td><td><audio controls preload="none"></audio></td><td><textarea></textarea><div class="saved"></div></td><td class="h"></td>`;
+ tr.innerHTML=`<td></td><td class="v"></td><td><audio controls preload="none"></audio><div class="seek"><button type="button" class="sk" data-d="-5">−5s</button><button type="button" class="sk" data-d="5">+5s</button></div></td><td><textarea></textarea><div class="saved"></div></td><td class="h"></td>`;
  if(!it.ref){const cb=document.createElement('input');cb.type='checkbox';cb.className='hid';cb.title='Ẩn hàng này';cb.checked=!!hidden[it.key];
   cb.addEventListener('change',()=>setHidden([it.key],cb.checked));tr.children[4].appendChild(cb)}
  tr.children[0].textContent=i+1;const v=tr.children[1];v.textContent=it.label||it.variant;
  v.insertAdjacentHTML('beforeend',badge(it)+`<small></small>`);
  v.querySelector('small').textContent=(it.ref?'Âm thanh gốc (chưa lọc) · ':(it.type==='ket_hop'?'kết hợp · ':'đơn · '))+it.stem+' · '+(it.size/1048576).toFixed(1)+' MB';
  const a=tr.querySelector('audio');a.src=`/audio/${encodeURIComponent(it.variant)}/${encodeURIComponent(it.stem)}/${kind}`;
- a.addEventListener('play',()=>document.querySelectorAll('audio').forEach(o=>{if(o!==a)o.pause()}));
+ a.addEventListener('play',()=>{if($('#syncPos').checked&&active&&active!==a&&Math.abs(a.currentTime-lastPos)>0.3)a.currentTime=lastPos;active=a;
+  document.querySelectorAll('audio').forEach(o=>{if(o!==a)o.pause()});showPos()});
+ a.addEventListener('timeupdate',()=>{if(a===active){lastPos=a.currentTime;showPos()}});
+ tr.querySelectorAll('.sk').forEach(b=>b.addEventListener('click',()=>seek(a,Number(b.dataset.d))));
  const t=tr.querySelector('textarea');t.value=(notes[it.key]||{}).note||'';
  t.addEventListener('input',()=>{const s=tr.querySelector('.saved');s.textContent='đang lưu...';clearTimeout(timers[it.key]);
   timers[it.key]=setTimeout(async()=>{try{await api('/api/notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:it.key,note:t.value})});
   notes[it.key]={note:t.value};s.textContent='đã lưu';apply()}catch(e){s.textContent='LỖI lưu: '+e.message}},600)});
  return tr}
+function seek(a,d){if(!a)return;const dur=isFinite(a.duration)?a.duration:Infinity;a.currentTime=Math.max(0,Math.min(dur,a.currentTime+d));active=a;lastPos=a.currentTime;showPos()}
+function showPos(){const el=$('#pos');if(!el)return;const tr=active&&active.closest('tr');el.textContent=active?((tr&&tr.children[1].childNodes[0].textContent)||'')+' · '+active.currentTime.toFixed(1)+'s':''}
+function target(){return active||[...document.querySelectorAll('#rows tr')].filter(t=>t.style.display!=='none').map(t=>t.querySelector('audio'))[0]}
 async function setHidden(keys,flag){keys.forEach(k=>{if(flag)hidden[k]=true;else delete hidden[k]});apply();
  try{await api('/api/hidden',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keys,hidden:flag})})}catch(e){$('#state').textContent='LỖI lưu trạng thái ẩn: '+e.message}}
 function syncHidden(){document.querySelectorAll('#rows tr').forEach(tr=>{const cb=tr.querySelector('input.hid');if(cb)cb.checked=!!hidden[tr.dataset.key]})}
@@ -111,6 +120,10 @@ async function refresh(){try{const [list,n,hd2]=await Promise.all([api('/api/lis
 $('#hidePrefix').addEventListener('click',()=>{const p=$('#prefix').value.trim();if(!p)return;
  const keys=items.filter(x=>!x.ref&&x.variant.startsWith(p)&&!hidden[x.key]).map(x=>x.key);if(keys.length)setHidden(keys,true);$('#prefix').value=''});
 $('#unhideAll').addEventListener('click',()=>{const keys=Object.keys(hidden);if(keys.length)setHidden(keys,false)});
+$('#gBack').addEventListener('click',()=>seek(target(),-5));$('#gFwd').addEventListener('click',()=>seek(target(),5));
+document.addEventListener('keydown',e=>{if(/^(TEXTAREA|INPUT|SELECT|BUTTON)$/.test((e.target||{}).tagName||'')||e.ctrlKey||e.metaKey||e.altKey)return;
+ if(e.key==='ArrowLeft'){e.preventDefault();seek(target(),-5)}else if(e.key==='ArrowRight'){e.preventDefault();seek(target(),5)}
+ else if(e.key===' '&&active){e.preventDefault();active.paused?active.play():active.pause()}});
 $('#csv').addEventListener('click',()=>{const q=s=>'"'+String(s).replace(/"/g,'""')+'"';
  const rows=[['variant','stem','note']].concat(items.map(it=>[it.variant,it.stem,(notes[it.key]||{}).note||'']).filter(r=>r[2].trim()));
  const b=new Blob([rows.map(r=>r.map(q).join(',')).join('\n')],{type:'text/csv'});
