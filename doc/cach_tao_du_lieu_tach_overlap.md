@@ -43,16 +43,21 @@ chunks.jsonl (nguồn sự thật) + render_report.json
   - 70% từ chính recording đang dựng;
   - 20% "strat" từ cả split, chia đều theo nhóm độ dài L;
   - 10% "hard" (L ≥ 1 s, chênh mức gần 0 hoặc rất rộng).
-- **Bốc giống nhau cho mọi W** [đã có]:
-  - Nhóm độ dài có cạnh cố định trong `separation_layout`, không phụ thuộc W.
-  - Template được bốc từ danh sách đầy đủ, **rồi mới loại** nếu L < `--l-min` hoặc L > W.
-  - Cùng seed thì mọi W thấy cùng chuỗi template và cùng đoạn sạch. Vì vậy so mô hình có W khác nhau là so trên cùng các overlap; mẫu bị loại vì L > W chỉ là các ô trống trong chuỗi.
-- **Template thuộc sự kiện nhiều overlap** (trường hợp 4) bị loại, không sinh dòng nào; số lượng ghi trong `render_report.json` [đã có].
+- **Bốc giống nhau cho mọi W** [đã có, `pick_template`]:
+  - Nhóm strat có cạnh cố định `STRAT_EDGES = (0.5, 1.0)`, không phụ thuộc W: `[l_min, 0.5)`, `[0.5, 1)`, `[1, ∞)`.
+  - Template được bốc từ danh sách chưa lọc theo W. Nếu L nằm ngoài `[l_min, W]`, template được thay ngay trong lần thử đó bằng một ứng viên hợp lệ cùng loại (real → strat → hard).
+  - Mỗi lần thử lấy đúng 6 số ngẫu nhiên. Vì vậy, cùng seed, lần thử thứ k bốc **cùng template cho mọi W** khi template đó hợp lệ ở cả hai W.
+- **Template thuộc sự kiện nhiều cặp** (trường hợp 4: các overlap cách nhau ≤ `--merge-gap`, kể cả cùng `t`) bị bỏ khỏi danh sách template, không sinh dòng nào [đã có]. `pairs.csv` cũ không có cột `t` thì mỗi dòng được coi là một sự kiện một cặp.
 - **Chia tập theo recording** [đã có]:
   - val mặc định 8% số recording (`--val-share 0.08`), **phân tầng theo `events_per_min`** (lấy từ `recordings.csv`). Lý do: overlap rất tập trung, một nửa trong 18.623 sự kiện nằm ở 64/360 recording, còn recording p10 chỉ có ≤ 4 sự kiện. `render_report.json` cảnh báo khi val có < 1000 template;
-  - `--group-regex`: recording cùng nhóm luôn cùng split. Áp dụng cả cho **loại tập test**: một recording thuộc nhóm có recording test thì cũng bị loại;
-  - tên recording là ID YouTube nên regex không suy ra được show hay host. Cần `--group-map` (CSV `video_id,group`) từ metadata của cache [đề xuất, mở: metadata];
-  - hai mẫu TSE cùng mix luôn cùng split; kho enrollment theo recording nên không vượt split. TIGER `test/` là bản sao val.
+  - nhóm giữ chung split [đã có]:
+    - `--group-map` là CSV hai cột `recording,group` (ví dụ ID video → kênh) và được ưu tiên;
+    - nếu không có `--group-map` thì nhóm theo `--group-regex` (group 1 nếu có);
+    - còn lại mỗi recording là một nhóm.
+    - Tên recording là ID YouTube nên regex không suy ra được show; cần lập file map từ metadata [mở: metadata];
+  - `--exclude-index` loại **cả nhóm** của mỗi recording test;
+  - hai mẫu TSE cùng mix luôn cùng split; kho enrollment theo recording nên không vượt split. TIGER `test/` là bản sao val;
+  - lúc bắt đầu build, `manifests/tse/` và `tse_mixes.jsonl` cũ bị xóa; audio stereo được downmix về mono.
 
 ## 3. Định nghĩa và tham số
 
@@ -139,7 +144,7 @@ W = 4, L = 1 s, contained: solo 1 + ctx 0.5 + lõi 1 + ctx 0.5 + solo 1
  B                      |██ LÕI ██|              ░░ solo ░░
 ```
 
-Hệ quả: khi cả hai solo đều đủ, vị trí lõi chỉ phụ thuộc L (ví dụ W = 4, L = 0.46 thì lõi luôn bắt đầu ở 1.77 s). Điều này chỉ an toàn nếu planner dựng đúng cùng bố cục. Validator in phân bố vị trí lõi; jitter là ablation [mở].
+Hệ quả: khi cả hai solo đều đủ, vị trí lõi chỉ phụ thuộc L (ví dụ W = 4, L = 0.46 thì lõi luôn bắt đầu ở 1.77 s). Điều này chỉ an toàn nếu planner dựng đúng cùng bố cục. Validator in tỷ lệ lõi trong cửa sổ, chưa in phân bố vị trí lõi; jitter là ablation [mở].
 
 ### 5.2 Khi thiếu đoạn sạch: một chuỗi dự phòng (`separation_layout.fallback`)
 
@@ -173,7 +178,7 @@ Lý do bỏ mẫu được đếm trong `render_report.json`. Planner phải áp
 | 1 | contained | lõi = lượt của B nằm trong A; ctx hai bên nối tiếp đoạn A | có |
 | 2 | partial | ctx trái nối tiếp đoạn A, ctx phải nối tiếp đoạn B | có |
 | 3 | full | ctx im lặng trên cả hai stem | có (1.3%) |
-| 4 | nhiều overlap trong một sự kiện (cặp cách nhau ≤ `--merge-gap`) | template bị loại. Cặp/sự kiện ≈ 1.021, nên ~2.1% sự kiện; tỷ lệ thật ghi vào `render_report.json` (`multi_overlap`). Nếu > 5% thì đưa vào v1 [DGX] | không (v1) |
+| 4 | nhiều overlap trong một sự kiện (cặp cách nhau ≤ `--merge-gap`) | template bị bỏ. Cặp/sự kiện ≈ 1.021, nên ~2.1% sự kiện. Tỷ lệ thật ghi ở `render_report.json`: `multi_overlap.multi_pair_event_share` và `multi_pair_templates_skipped`. Nếu > 5% thì đưa vào v1 [DGX] | không (v1) |
 | 5 | không đủ đoạn sạch cho lõi hoặc ctx tối thiểu | không dựng | không |
 | 6 | L < `--l-min` hoặc L > W | không dựng | không |
 
@@ -188,25 +193,29 @@ Lý do bỏ mẫu được đếm trong `render_report.json`. Planner phải áp
   - Contained: một đoạn sạch của A dài ≥ L + 2·ctx.
   - Partial: đoạn A ≥ ctx trái + L; đoạn B ≥ L + ctx phải.
   - Full: hai đoạn ≥ L.
-- **Mép lõi tự nhiên.** Mép lõi là nơi lúc suy luận có onset/offset thật, nên không được là chỗ cắt cụt giữa từ.
-  - Contained: nếu B có một đoạn sạch dài trong `[L, L + 0.3 s]` thì dùng nguyên đoạn đó làm lõi (giữ đầu và cuối tự nhiên); khi đó L = độ dài đoạn.
-  - Không có thì cắt từ đoạn dài hơn và dời **cả hai mép lõi** tới chỗ lặng.
-  - Partial: mép cuối của A (cuối lõi) và mép đầu của B (đầu lõi) được dời tới chỗ lặng.
-  - Mép ngoài của mỗi run (giáp solo hoặc mép cửa sổ) dời ≤ 80 ms. Mép chạm lõi dời ≤ 20 ms khi L < 0.4 s.
-  - Độ dài các khúc giữ đúng ngân sách: điểm cắt chỉ dời *vị trí lấy trên nguồn*.
-  - L thực dựng được lưu (`L`) và ghi `whole_clip_core`. Khi sai lệch L đo trên DGX là nhỏ thì hạ `--l-min` xuống 0.2 [DGX].
-- **Bộ tìm điểm cắt**: `AcousticBoundaryFinder` (`utils/acoustic_boundary.py`, chép nguyên từ `solid-architecture`), mặc định theo năng lượng; `--no-snap` để tắt. Số điểm cắt theo phương pháp ghi trong `cuts`. Silero VAD như lúc suy luận chưa nối vào [đề xuất, DGX].
+- **Mép lõi tự nhiên.** Mép lõi là nơi lúc suy luận có onset/offset thật, nên không được là chỗ cắt cụt giữa từ. Việc dời điểm cắt chỉ đổi **vị trí lấy trên nguồn** của một run, không đổi độ dài run. Riêng lõi B của contained (cắt từ đoạn dài) thì L thực dựng nhận phần lệch của mép cuối. Cụ thể:
+  - Contained: nếu B có một đoạn sạch dài trong `[L, L + 0.3 s]` (`WHOLE_CLIP_SLACK`) thì luôn dùng nguyên đoạn đó làm lõi (`WHOLE_CLIP_P = 1.0`). Khi đó L = độ dài đoạn và `core_edges = "whole_clip"`.
+  - Contained, không có đoạn như vậy: đầu lõi B dời tới chỗ lặng, rồi cuối lõi B dời tới chỗ lặng (L đổi theo, vẫn trong `[l_min, W]`): `"snapped"`.
+  - Partial: A được dời theo **điểm dừng** (cuối lõi), B theo điểm bắt đầu (đầu lõi): `"snapped"`.
+  - Full: cả hai lõi dời theo điểm bắt đầu (`core_edges` vẫn ghi `"random"`).
+  - Run solo và run ctx chỉ dời theo điểm bắt đầu.
+  - Biên độ dời: ≤ 80 ms; với run lõi khi L < 0.4 s thì ≤ 20 ms.
+  - `--no-snap`: không dời, `core_edges = "random"` (trừ `whole_clip`).
+  - L thực dựng lưu ở `L`. Khi sai lệch L đo trên DGX là nhỏ thì hạ `--l-min` xuống 0.2 [DGX].
+- **Bộ tìm điểm cắt**: `AcousticBoundaryFinder` (`utils/acoustic_boundary.py`, chép nguyên từ `solid-architecture`), theo năng lượng. Số lần dời theo từng phương pháp ghi trong `cut_method`. Silero VAD như lúc suy luận chưa có cờ (`--vad silero`) [đề xuất, DGX].
 - **Không giao nhau**: trong một mẫu, các run của cùng một người lấy từ các đoạn nguồn không giao nhau. Giữa các mẫu được dùng lại đoạn sạch, nhưng vị trí cắt bốc ngẫu nhiên.
 - **Ghép**: mỗi run (một khúc nguồn liền mạch) được đọc kèm đệm, resample 24 → 16 kHz riêng, rồi đặt vào stem. Mối nối giữa hai run chồng ≤ 20 ms với ramp tuyến tính bù nhau, kể cả khi đổi người (solo B → ctx A). Ramp không bao giờ ăn vào lõi.
-- **Mức**: mỗi người dùng **một gain**, tính trên run chứa lõi của người đó và áp cho mọi khúc của người đó. Giữ chênh lệch mức tự nhiên giữa solo và lõi như lúc suy luận. A về −23 dB; B về −23 dB + chênh mức của template (± jitter 1 dB; ca hard dùng chênh mức riêng của nó).
+- **Mức**: mỗi người dùng **một gain**, tính trên run chứa lõi của người đó (`render_layout` trả về `core_runs`) và áp cho mọi khúc của người đó. Giữ chênh lệch mức tự nhiên giữa solo và lõi như lúc suy luận. A về −23 dB; B về −23 dB + chênh mức của template (± jitter 1 dB; ca hard dùng chênh mức riêng của nó).
 - **Mix**: `M = A + B (+ N)` ở float32. Không resample mix riêng. Nếu đỉnh > 0.95 thì A, B, M, N chia cùng một hệ số.
 - **Nhiễu**:
   - nền của chính recording (khoảng trống ≥ 0.8 s giữa các segment), xác suất `--noise-prob` 0.5;
   - SNR 25–45 dB (80%) hoặc 10–25 dB (20%);
   - đích là stem không có nhiễu thêm;
   - lưu `<id>_noise.wav`, nên `mix = s1 + s2 + noise` kiểm được [đã có].
-  - Cờ tùy chọn [đã có, mặc định tắt]: SNR lấy theo `snr_db` của chính recording (`recordings.csv`, ±3 dB), và lọc khoảng trống có tiếng nói sót khỏi kho nhiễu.
-  - Nếu bật cùng `--noise-prob` cao (0.8–1.0), nền liên tục sẽ che các bước nhảy nền ở mối nối và ở lõi (nơi nền của hai stem cộng lại). Lúc này đây là ablation [mở].
+  - Cờ tùy chọn [đã có, mặc định tắt]:
+    - `--noise-snr-from-recording`: SNR = `snr_db` của chính recording (`recordings.csv`) ± 3 dB, kẹp trong 5–60 dB;
+    - `--noise-clean-gaps`: bỏ khoảng trống mà mức khung 25 ms dao động > 10 dB (p95 − p10), tức nhiều khả năng có tiếng nói hoặc cười sót.
+  - Bật hai cờ này cùng `--noise-prob` cao (0.8–1.0) thì nền liên tục che các bước nhảy nền ở mối nối và ở lõi (nơi nền của hai stem cộng lại). Mặc định vẫn là `--noise-prob 0.5`; đây là ablation [mở].
 
 ### 5.5 Câu hỏi thường gặp
 
@@ -235,10 +244,11 @@ Lý do bỏ mẫu được đếm trong `render_report.json`. Planner phải áp
   - Mix TSE ghi ở `tse/<split>/` và `tse_mixes.jsonl`.
 - **Enrollment** (`separation_layout.pick_enrollment` / `default_enrollment`):
   - đoạn sạch của người mục tiêu, cùng recording, không chạm (±0.3 s) mọi khúc nguồn của mix, không ai khác nói trong ±0.3 s, không nhạc;
-  - **một kho enrollment cho mỗi (recording, speaker)**: `enroll/<recording>/<speaker>.wav` + `.json`. Kho nhận cả đoạn ngắn hơn 1 s và ghép lại khi cần, để người chen ít đoạn dài vẫn có enrollment;
+  - **một kho enrollment cho mỗi (recording, speaker)**: `enroll/<recording>/<speaker>.wav` + `.json`, gồm các đoạn sạch ≥ `--min-clip` (mỗi đoạn ≤ 4 s, tối đa 120 đoạn / 240 s, rải đều trên recording). Đoạn ngắn được ghép lại khi cần, để người chen ít đoạn dài vẫn có enrollment;
   - mỗi mẫu lưu tối đa 8 ứng viên **gần lõi nhất về thời gian** (`enroll_candidates`, kèm `src_start`/`src_end`) và một tổ hợp mặc định `enroll_default` (gần nhất trước, ghép tới 4 s, tối thiểu 1 s; thiếu thì bỏ mẫu);
   - train: bốc lại trong các ứng viên mỗi epoch (việc của dataloader phía trainer); suy luận: tổ hợp gần nhất;
-  - `collect_overlap_samples.py` dùng cùng quy tắc cho tham chiếu của tập test TSE [đã có; kiểm lại trên cache: DGX].
+  - `collect_overlap_samples.py` dùng cùng quy tắc (`pick_enrollment`, gần nhất trước, 4 s) cho tham chiếu của tập test TSE [đã có; kiểm trên cache: DGX].
+  - `render_report.json` đếm số mẫu thiếu enrollment (`enroll_short`). `audit_clean_pool.py` đếm template có enrollment ≥ 1 s theo vai (`enroll_ok:holder` / `enroll_ok:interrupter`) và template bị bỏ vì nhiều cặp (`drop:multi_overlap`).
 - **Target**: stem của người mục tiêu, đúng độ dài mix.
 - **Hai mẫu mỗi mix**: (enrollment A → A, `target_role: holder`) và (enrollment B → B, `interrupter`). Báo kết quả theo vai; vai chen là ca khó mà pipeline cần.
 - **Mẫu âm** (người mục tiêu không nói): không dùng cho tới khi chọn loss riêng [mở].
@@ -273,7 +283,7 @@ Mỗi dòng `chunks.jsonl` gồm:
   - `core` [đầu, cuối] (mẫu);
   - `slots`: các ô danh nghĩa liền nhau {kind: pad|solo|ctx|core, who, start, end};
   - `layout`: các khúc nguồn {kind, who: A|B, run, start, end (mẫu trong sample), fade_in, fade_out (mẫu), src_start, src_end (giây trên recording)}. Lõi xuất hiện một lần cho mỗi người; các khúc cùng `run` liền nhau trên nguồn;
-  - `solo_order`, `fallback`, `whole_clip_core`, `cuts`, `holder`, `interrupter`;
+  - `solo_order`, `fallback`, `core_edges` (`whole_clip`|`snapped`|`random`), `whole_clip_core`, `cut_method` (số lần dời theo từng phương pháp), `holder`, `interrupter`;
   - `layout_cfg`: tham số `LayoutConfig` đã dùng; validator cần trường này;
   - `fade_samples`.
 - **Tương thích cũ**: `overlap_in_window` (= L) và `overlap_start_in_window`.
@@ -281,10 +291,10 @@ Mỗi dòng `chunks.jsonl` gồm:
 Mỗi dòng TSE (`manifests/tse/*.jsonl`) gồm: `id`, `mix_id`, `split`, `recording`, `mix`, `target`, `target_role`, `target_speaker`, `samples`, `sr`, `enroll_bank`, `enroll_seconds`, `enroll_candidates`, `enroll_default`.
 
 `render_report.json` ghi:
-- tham số render;
+- tham số render, gồm `merge_gap` và khối `noise` {`prob`, `snr_from_recording`, `clean_gaps`};
 - số recording và template theo split, số template ngoài `[l_min, W]`;
-- `multi_overlap` (cặp/sự kiện, tỷ lệ sự kiện nhiều cặp);
-- theo split: số lần thử, số dòng, số mẫu bị bỏ theo lý do (`drop:*`), số dòng theo `fallback`;
+- `multi_overlap`: `pairs`, `events`, `pairs_per_event`, `multi_pair_event_share`, `multi_pair_templates_skipped`;
+- theo split: số lần thử, số dòng, số mẫu bị bỏ theo lý do (`drop:*`), số dòng theo `fallback`, `enroll_short`, số dòng TSE;
 - cảnh báo.
 
 ## 9. Kiểm tra và đánh giá
@@ -302,10 +312,15 @@ Mỗi dòng TSE (`manifests/tse/*.jsonl`) gồm: `id`, `mix_id`, `split`, `recor
 - không recording nào ở cả hai split, không dùng recording test;
 - in so sánh với số đo thật:
   - quantile L so với cột `overlap` của `pairs.csv` (cùng đơn vị cặp, kèm tỷ lệ cặp nằm ngoài `[l_min, W]`);
-  - tỷ lệ lõi trong cửa sổ, phân bố vị trí lõi, tỷ lệ `fallback`, tỷ lệ có solo của cả hai;
+  - tỷ lệ lõi trong cửa sổ, tỷ lệ `fallback`, tỷ lệ có solo của cả hai;
   - kiểu chồng, chênh mức, nhiễu.
 
-`eval_separation.py` [đã có]: SI-SDRi **vùng lõi** (đọc `layout`, lõi ± 0.1 s) và SI-SDRi cả cửa sổ, chia theo kiểu chồng, nhóm L và vai.
+`eval_separation.py` [đã có]: SI-SDRi **vùng lõi** (đọc `layout`, lõi ± `--pad` 0.1 s) và SI-SDRi cả cửa sổ, chia theo kiểu chồng, nhóm L và vai.
+
+```
+python tools/eval_separation.py --data <bộ render> --est <thư mục ước lượng> [--est-pattern '{id}_est{k}.wav'] \
+    [--tse --tse-pattern '{id}.wav'] [--split val] [--pad 0.1] [--out kết_quả.csv]
+```
 - SI-SDRi cả cửa sổ chủ yếu đo phần solo/ctx (ở W = 4, L = 0.46, lõi chỉ chiếm ~12%) và tăng theo W. Vì vậy chọn mô hình theo SI-SDRi vùng lõi cùng các chỉ số trên clip thật (mục 6 của kế hoạch vòng).
 - Nối vào bước val của trainer [đề xuất]. Loss phụ có trọng số vùng lõi chỉ là ablation [mở].
 - Nghe ngẫu nhiên ~20 mẫu mỗi bộ [DGX].
@@ -313,7 +328,7 @@ Mỗi dòng TSE (`manifests/tse/*.jsonl`) gồm: `id`, `mix_id`, `split`, `recor
 ## 10. Số lượng
 
 - Kế hoạch cũ nêu 10–30 giờ đoạn đã render (ví dụ `--n 20000`, ≈ 22 h ở W = 4). Con số cuối chưa chốt.
-- Giới hạn thật là số giờ **nội dung sạch duy nhất**: `audit_clean_pool.py` [đã có] đếm giờ sạch theo speaker và kho của người chen. Chạy trên cache: [DGX].
+- Giới hạn thật là số giờ **nội dung sạch duy nhất**: `audit_clean_pool.py` [đã có] đếm giờ sạch theo speaker, kho của người chen, `enroll_ok:*` và `drop:multi_overlap`. Chạy trên cache: [DGX].
 - Chưa chạy trên cache thật. Mẫu thử định dạng: `--n 200 --files 5` cho mỗi W, rồi `validate_mix_dataset.py` [DGX].
 
 ## 11. Việc còn lại (xếp theo giá trị / chi phí)
@@ -327,16 +342,16 @@ Mỗi dòng TSE (`manifests/tse/*.jsonl`) gồm: `id`, `mix_id`, `split`, `recor
    - cùng quy tắc mép lõi tự nhiên;
    - `separation_layout.py` và `acoustic_boundary.py` phải giống hệt ở cả hai nhánh.
 2. **Lọc đoạn "sạch" bị lẫn tiếng** (DiariZen bỏ sót backchannel: "ừ", "vâng" của người chen nằm trong đích của người giữ sàn sẽ dạy mô hình giữ backchannel ở sai stem). Cách làm: kiểm nhất quán embedding speaker theo cửa sổ trượt (ECAPA so với tâm speaker) và/hoặc mô hình phát hiện overlap; bỏ đoạn bị gắn cờ; báo tỷ lệ bỏ trong `audit_clean_pool` [DGX].
-3. **`--group-map`** (`video_id,group` từ metadata show/kênh) để chia tập theo show hoặc host; báo kết quả cả hai cách chia [mở: metadata].
+3. **File cho `--group-map`** (`recording,group` từ metadata show/kênh). Cờ đã có, còn thiếu dữ liệu. Báo kết quả cả hai cách chia [mở: metadata].
 4. **Độ thật của tiếng chen**: lệch mức âm cho B ở contained (ví dụ U(−6, 0) dB cho 30% mẫu, ablation); ưu tiên đoạn B < 0.8 s giống backchannel; hiệu chỉnh bằng mức đo trong overlap của ~100 clip test [DGX].
-5. **Silero VAD** cho bộ tìm điểm cắt (`cut_method` theo từng mẫu), giống lúc suy luận [DGX].
-6. Chạy trên DGX: `audit_clean_pool.py`, mẫu thử cho từng W, validator, nghe thử, chạy thử từng trainer, nối `eval_separation.py` vào val.
+5. **Silero VAD** cho bộ tìm điểm cắt (cờ `--vad silero`, chưa có), giống lúc suy luận [DGX].
+6. Chạy trên DGX: `audit_clean_pool.py`, mẫu thử cho từng W, validator, nghe thử, chạy thử từng trainer; nối SI-SDRi vùng lõi vào bước val phía trainer (chưa có).
 
 ## 12. Câu hỏi còn mở (danh sách duy nhất)
 
 1. `--l-min` 0.25 → 0.2: chờ đo tỷ lệ L < 0.25 / 0.3 trên `pairs.csv` và sai lệch L thực dựng [DGX].
 2. Trường hợp 4: nếu `multi_overlap` > 5% thì đưa vào v1 [DGX].
-3. Metadata show/host cho `--group-map`.
+3. Metadata show/host để lập file `--group-map`.
 4. W cuối cho từng mô hình và `W_tse`.
 5. Schema manifest TSE theo trainer TSE được chọn (kế hoạch vòng, nhánh TSE).
 6. Mẫu âm TSE: loss nào (ví dụ loss năng lượng cho đích 0); nguồn mẫu âm từ vùng diarization báo overlap sai.
