@@ -54,6 +54,8 @@ button{padding:6px 12px;border:1px solid var(--line);border-radius:6px;backgroun
 </style></head><body>
 <header><h1>Denoise: nghe thử và ghi chú</h1>
 <div class="bar"><input id="q" type="search" placeholder="Lọc theo tên variant..." aria-label="Lọc">
+<label title="Một bộ lọc duy nhất (blend chỉ là tỉ lệ trộn, không tính là bộ lọc)"><input id="tDon" type="checkbox" checked> Đơn <span id="nDon"></span></label>
+<label title="Hai bộ lọc trở lên nối tiếp"><input id="tKet" type="checkbox" checked> Kết hợp <span id="nKet"></span></label>
 <label><input id="onlyNotes" type="checkbox"> chỉ hàng có ghi chú</label>
 <label><input id="hideDeg" type="checkbox"> ẩn variant lỗi (DEGRADED)</label>
 <button id="csv">Xuất ghi chú CSV</button><span id="state">đang tải...</span></div></header>
@@ -68,7 +70,7 @@ function mk(it,i){const tr=document.createElement('tr');if(it.ref)tr.className='
  tr.innerHTML=`<td></td><td class="v"></td><td><audio controls preload="none"></audio></td><td><textarea></textarea><div class="saved"></div></td>`;
  tr.children[0].textContent=i+1;const v=tr.children[1];v.textContent=it.label||it.variant;
  v.insertAdjacentHTML('beforeend',badge(it)+`<small></small>`);
- v.querySelector('small').textContent=(it.ref?'Âm thanh gốc (chưa lọc) · ':'')+it.stem+' · '+(it.size/1048576).toFixed(1)+' MB';
+ v.querySelector('small').textContent=(it.ref?'Âm thanh gốc (chưa lọc) · ':(it.type==='ket_hop'?'kết hợp · ':'đơn · '))+it.stem+' · '+(it.size/1048576).toFixed(1)+' MB';
  const a=tr.querySelector('audio');a.src=`/audio/${encodeURIComponent(it.variant)}/${encodeURIComponent(it.stem)}/${kind}`;
  a.addEventListener('play',()=>document.querySelectorAll('audio').forEach(o=>{if(o!==a)o.pause()}));
  const t=tr.querySelector('textarea');t.value=(notes[it.key]||{}).note||'';
@@ -76,12 +78,14 @@ function mk(it,i){const tr=document.createElement('tr');if(it.ref)tr.className='
   timers[it.key]=setTimeout(async()=>{try{await api('/api/notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:it.key,note:t.value})});
   notes[it.key]={note:t.value};s.textContent='đã lưu';apply()}catch(e){s.textContent='LỖI lưu: '+e.message}},600)});
  return tr}
-function apply(){const q=$('#q').value.toLowerCase(),on=$('#onlyNotes').checked,hd=$('#hideDeg').checked;
+function apply(){const q=$('#q').value.toLowerCase(),on=$('#onlyNotes').checked,hd=$('#hideDeg').checked,don=$('#tDon').checked,ket=$('#tKet').checked;
+ $('#nDon').textContent='('+items.filter(x=>x.type==='don').length+')';$('#nKet').textContent='('+items.filter(x=>x.type==='ket_hop').length+')';
  document.querySelectorAll('#rows tr').forEach(tr=>{const it=items.find(x=>x.key===tr.dataset.key)||{};
  const has=((notes[it.key]||{}).note||'').trim()!=='';
- tr.style.display=(it.variant||'').toLowerCase().includes(q)&&(!on||has)&&(!hd||!it.status||it.status==='ok'||it.ref)?'':'none'})}
+ const typeOk=it.ref||(it.type==='ket_hop'?ket:don);
+ tr.style.display=(it.variant||'').toLowerCase().includes(q)&&(!on||has)&&(!hd||!it.status||it.status==='ok'||it.ref)&&typeOk?'':'none'})}
 async function refresh(){try{const [list,n]=await Promise.all([api('/api/list'),api('/api/notes')]);notes=n;
- const sig=JSON.stringify(list.items.map(x=>[x.key,x.size,x.status]));
+ const sig=JSON.stringify(list.items.map(x=>[x.key,x.size,x.status,x.type]));
  if(sig!==refresh.sig){refresh.sig=sig;items=list.items;const body=$('#rows');
   const keep={};body.querySelectorAll('tr').forEach(tr=>{keep[tr.dataset.key]=tr.querySelector('textarea').value});
   body.innerHTML='';items.forEach((it,i)=>{const tr=mk(it,i);if(keep[it.key]!==undefined)tr.querySelector('textarea').value=keep[it.key];body.appendChild(tr)});}
@@ -89,7 +93,7 @@ async function refresh(){try{const [list,n]=await Promise.all([api('/api/list'),
   if(document.activeElement!==t){const v=(notes[tr.dataset.key]||{}).note||'';if(t.value!==v)t.value=v}});
  apply();$('#state').textContent=`${items.length} hàng · cập nhật ${new Date().toLocaleTimeString()}`}
  catch(e){$('#state').textContent='mất kết nối: '+e.message}}
-['q','onlyNotes','hideDeg'].forEach(id=>$('#'+id).addEventListener('input',apply));
+['q','onlyNotes','hideDeg','tDon','tKet'].forEach(id=>$('#'+id).addEventListener('input',apply));
 $('#csv').addEventListener('click',()=>{const q=s=>'"'+String(s).replace(/"/g,'""')+'"';
  const rows=[['variant','stem','note']].concat(items.map(it=>[it.variant,it.stem,(notes[it.key]||{}).note||'']).filter(r=>r[2].trim()));
  const b=new Blob([rows.map(r=>r.map(q).join(',')).join('\n')],{type:'text/csv'});
@@ -98,27 +102,43 @@ refresh();setInterval(refresh,10000);
 </script></body></html>"""
 
 
+def row_status(row):
+    if not row:
+        return None
+    return row.get("status") or ("degraded" if row.get("degraded") else None)
+
+
+def variant_type(variant_id, row=None):
+    """"don" for one filter, "ket_hop" for two or more in a chain, "goc" for none.
+
+    The chain comes from the manifest when it has one, otherwise from the id up to its first
+    dot (what follows the dot is a pipeline setting such as music-removal-off, not a filter).
+    A blend ratio (blend50) mixes the filtered audio back with the input, so it is not a filter.
+    """
+    chain = (row or {}).get("chain")
+    if not isinstance(chain, str) or not chain:
+        chain = variant_id.split(".", 1)[0]
+    steps = [t for t in re.split(r"[>+]", chain) if t and t != "none" and not re.match(r"^blend\d*$", t)]
+    return "goc" if not steps else ("don" if len(steps) == 1 else "ket_hop")
+
+
 class State:
     def __init__(self, out_root):
         self.root = os.path.abspath(out_root)
         self.notes_path = os.path.join(self.root, "denoise_notes.json")
         self.lock = threading.Lock()
 
-    def statuses(self):
+    def manifest_rows(self):
         try:
             with open(os.path.join(self.root, "variants_manifest.json"), encoding="utf-8") as f:
                 data = json.load(f)
         except (OSError, ValueError):
             return {}
         rows = data.get("variants") if isinstance(data, dict) else data
-        out = {}
-        for r in rows if isinstance(rows, list) else []:
-            if isinstance(r, dict) and r.get("id"):
-                out[r["id"]] = r.get("status") or ("degraded" if r.get("degraded") else None)
-        return out
+        return {r["id"]: r for r in rows if isinstance(r, dict) and r.get("id")} if isinstance(rows, list) else {}
 
     def scan(self):
-        status = self.statuses()
+        rows = self.manifest_rows()
         items, ref = [], None
         try:
             variants = sorted(d for d in os.listdir(self.root)
@@ -136,10 +156,11 @@ class State:
                 mu = os.path.join(sdir, KINDS["music"])
                 if os.path.isfile(dn):
                     items.append({"key": f"{v}/{stem}", "variant": v, "stem": stem, "size": os.path.getsize(dn), "label": v,
-                                  "status": status.get(v), "has_denoise": True, "ref": False})
+                                  "status": row_status(rows.get(v)), "type": variant_type(v, rows.get(v)),
+                                  "has_denoise": True, "ref": False})
                 elif os.path.isfile(mu) and (v == "none" or ref is None):
                     ref = {"key": f"{v}/{stem}", "variant": v, "label": f"{v} (gốc)", "stem": stem,
-                           "size": os.path.getsize(mu), "status": None, "has_denoise": False, "ref": True}
+                           "size": os.path.getsize(mu), "status": None, "type": "goc", "has_denoise": False, "ref": True}
         if ref:
             items.insert(0, ref)
         return items
