@@ -9,7 +9,7 @@ Quy ước: **[đã xác minh]** là đã mở trang chính hoặc chạy; **[ch
 | Việc | Trạng thái |
 |---|---|
 | Backend RE-USE (`re_use`, `re_use_laughter`), chạy trong môi trường riêng | Có mã và test; **đã chạy `re_use` và `re_use.music-scope-spans` trên DGX, `ok`**; `re_use_laughter` chưa chạy |
-| Bước `dryNN` và tập 64 biến thể hai tầng (`tools/variants_two_stage.json`: 16 nhóm `two_stage` có `blend25` ở tầng 1, 16 nhóm `two_stage_noblend` không có (cả hai `dry50` ở tầng 2), thêm 32 biến thể quét `dry30` và `dry70` trên nền không blend) | Có mã và test; trên DGX mới chạy xong 4 biến thể nhóm `two_stage` (mf2se48 tầng 1 với dfn3 và re_use). 12 biến thể còn lại của nhóm đó và cả 16 biến thể nhóm `two_stage_noblend` chưa chạy |
+| Bước `dryNN` và tập 96 biến thể hai tầng (`tools/variants_two_stage.json`: 16 nhóm `two_stage` có `blend25` ở tầng 1, 16 nhóm `two_stage_noblend` không có (cả hai `dry50` ở tầng 2), thêm 48 biến thể quét `dry10`, `dry20`, `dry40` trên nền không blend, cùng nhóm `dry30` có từ trước) | Có mã và test; trên DGX mới chạy xong 4 biến thể nhóm `two_stage` (mf2se48 tầng 1 với dfn3 và re_use). 12 biến thể còn lại của nhóm đó và cả 16 biến thể nhóm `two_stage_noblend` chưa chạy |
 | UniPASE (thử bằng mã chính thức) | Chưa chạy được, môi trường `unipase` thiếu `torch` |
 | Tầng 3 | **Chưa có gì trong mã.** Chỉ có mục 5 dưới đây |
 
@@ -25,7 +25,7 @@ Mỗi biến thể là một chuỗi: một mô hình tầng 1 nhẹ, trộn l�
 - Tầng 2: `dfn3`, `bsrnn26`, `mpsenet`, `re_use`.
 - 4 × 4 = **16 biến thể**, nhóm `two_stage` (id ví dụ `mf2se48+blend25+re_use+dry50.music-scope-spans`).
 - Thêm **16 biến thể nhóm `two_stage_noblend`** cùng các cặp tầng 1 và tầng 2, nhưng **bỏ `blend25` ở tầng 1** (chuỗi dạng `mf2se48>dfn3>dry50`); tầng 2 vẫn `dry50`, và đầu vào của tầng 2 là kết quả tầng 1 nguyên bản. Hai nhóm vì thế chỉ khác đúng một thứ là có hay không `blend25` ở tầng 1. Chạy riêng nhóm này bằng `--groups two_stage_noblend`.
-- Thêm hai nhóm **quét mức `dry`** trên nền không có blend: `two_stage_noblend_dry30` (giữ 70% kết quả tầng 2, trộn lại 30%) và `two_stage_noblend_dry70` (giữ 30%, trộn lại 70%), mỗi nhóm 16 biến thể. Cùng với `two_stage_noblend` (`dry50`) tạo thành dãy quét 30/50/70. Tổng **64 biến thể**.
+- Thêm các nhóm **quét mức `dry`** trên nền không có blend: `two_stage_noblend_dry10`, `_dry20`, `_dry30`, `_dry40` (giữ lại 90/80/70/60% kết quả tầng 2, trộn lại 10/20/30/40% đầu vào tầng 2), mỗi nhóm 16 biến thể. Cùng với `two_stage_noblend` (`dry50`) tạo thành dãy quét 10/20/30/40/50. Đã bỏ mức 70 vì trộn lại quá nhiều thì gần như không còn khử nhiễu. Tổng **96 biến thể**.
 - `blend25` và `dry50` là **giá trị khởi đầu tự đặt**, chưa tối ưu. Chỉnh bằng nghe thử.
 
 ### `blendNN` và `dryNN`
