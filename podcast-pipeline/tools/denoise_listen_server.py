@@ -9,6 +9,9 @@ finish while it is running show up without a reload. Standard library only.
     python tools/denoise_listen_server.py --out-root /home/lamkd2/data/denoise_all --port 8765
     # on your laptop:  ssh -L 8765:localhost:8765 <dgx>   then open http://localhost:8765
 
+Rows can be hidden with a checkbox; the choice is kept in OUT/denoise_hidden.json and can be undone
+from the page. --hide-initial v1,v2 hides those variants the first time (while that file is absent).
+
 It binds to 127.0.0.1 by default. There is no login: pass --host 0.0.0.0 only on a network you
 trust, since anyone who can reach the port can read the audio and write notes.
 """
@@ -48,6 +51,8 @@ td.v{font-weight:600;word-break:break-all;min-width:200px}td.v small{display:blo
 .badge{display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;background:var(--warnbg);color:var(--warn);margin-left:6px}
 audio{width:320px;max-width:100%}
 textarea{width:100%;min-width:240px;min-height:54px;resize:vertical;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--text);font:inherit}
+tr.dim{opacity:.45}td.h{text-align:center;width:52px}
+.bar input[type=text]{padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--text);width:150px}
 textarea:focus{outline:2px solid var(--accent)}.saved{font-size:11px;color:var(--ok);height:14px}
 button{padding:6px 12px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--text);cursor:pointer}
 @media (max-width:640px){header,main{padding-left:12px;padding-right:12px}}
@@ -58,16 +63,21 @@ button{padding:6px 12px;border:1px solid var(--line);border-radius:6px;backgroun
 <label title="Hai bộ lọc trở lên nối tiếp"><input id="tKet" type="checkbox" checked> Kết hợp <span id="nKet"></span></label>
 <label><input id="onlyNotes" type="checkbox"> chỉ hàng có ghi chú</label>
 <label><input id="hideDeg" type="checkbox"> ẩn variant lỗi (DEGRADED)</label>
+<label title="Hiện lại các hàng đã tích Ẩn để xem hoặc bỏ ẩn"><input id="showHid" type="checkbox"> hiện cả hàng đã ẩn <span id="nHid"></span></label>
+<input id="prefix" type="text" placeholder="tên bắt đầu bằng..." aria-label="Ẩn theo tiền tố"><button id="hidePrefix" title="Ẩn mọi variant có tên bắt đầu bằng chuỗi này">Ẩn theo tên</button>
+<button id="unhideAll">Bỏ ẩn tất cả</button>
 <button id="csv">Xuất ghi chú CSV</button><span id="state">đang tải...</span></div></header>
-<main><table><thead><tr><th>#</th><th>Variant</th><th>Âm thanh sau lọc</th><th>Ghi chú</th></tr></thead>
+<main><table><thead><tr><th>#</th><th>Variant</th><th>Âm thanh sau lọc</th><th>Ghi chú</th><th title="Tích để ẩn hàng này (có thể bỏ ẩn sau)">Ẩn</th></tr></thead>
 <tbody id="rows"></tbody></table></main>
 <script>
-const $=s=>document.querySelector(s);let items=[],notes={},timers={};
+const $=s=>document.querySelector(s);let items=[],notes={},timers={},hidden={};
 function badge(it){return it.status&&it.status!=='ok'?`<span class="badge">${it.status.toUpperCase()}</span>`:''}
 async function api(path,opt){const r=await fetch(path,opt);if(!r.ok)throw new Error(r.status);return r.json()}
 function mk(it,i){const tr=document.createElement('tr');if(it.ref)tr.className='ref';tr.dataset.key=it.key;
  const kind=it.has_denoise?'denoise':'music';
- tr.innerHTML=`<td></td><td class="v"></td><td><audio controls preload="none"></audio></td><td><textarea></textarea><div class="saved"></div></td>`;
+ tr.innerHTML=`<td></td><td class="v"></td><td><audio controls preload="none"></audio></td><td><textarea></textarea><div class="saved"></div></td><td class="h"></td>`;
+ if(!it.ref){const cb=document.createElement('input');cb.type='checkbox';cb.className='hid';cb.title='Ẩn hàng này';cb.checked=!!hidden[it.key];
+  cb.addEventListener('change',()=>setHidden([it.key],cb.checked));tr.children[4].appendChild(cb)}
  tr.children[0].textContent=i+1;const v=tr.children[1];v.textContent=it.label||it.variant;
  v.insertAdjacentHTML('beforeend',badge(it)+`<small></small>`);
  v.querySelector('small').textContent=(it.ref?'Âm thanh gốc (chưa lọc) · ':(it.type==='ket_hop'?'kết hợp · ':'đơn · '))+it.stem+' · '+(it.size/1048576).toFixed(1)+' MB';
@@ -78,13 +88,17 @@ function mk(it,i){const tr=document.createElement('tr');if(it.ref)tr.className='
   timers[it.key]=setTimeout(async()=>{try{await api('/api/notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:it.key,note:t.value})});
   notes[it.key]={note:t.value};s.textContent='đã lưu';apply()}catch(e){s.textContent='LỖI lưu: '+e.message}},600)});
  return tr}
-function apply(){const q=$('#q').value.toLowerCase(),on=$('#onlyNotes').checked,hd=$('#hideDeg').checked,don=$('#tDon').checked,ket=$('#tKet').checked;
+async function setHidden(keys,flag){keys.forEach(k=>{if(flag)hidden[k]=true;else delete hidden[k]});apply();
+ try{await api('/api/hidden',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keys,hidden:flag})})}catch(e){$('#state').textContent='LỖI lưu trạng thái ẩn: '+e.message}}
+function syncHidden(){document.querySelectorAll('#rows tr').forEach(tr=>{const cb=tr.querySelector('input.hid');if(cb)cb.checked=!!hidden[tr.dataset.key]})}
+function apply(){syncHidden();const showH=$('#showHid').checked;$('#nHid').textContent='('+items.filter(x=>!x.ref&&hidden[x.key]).length+')';const q=$('#q').value.toLowerCase(),on=$('#onlyNotes').checked,hd=$('#hideDeg').checked,don=$('#tDon').checked,ket=$('#tKet').checked;
  $('#nDon').textContent='('+items.filter(x=>x.type==='don').length+')';$('#nKet').textContent='('+items.filter(x=>x.type==='ket_hop').length+')';
  document.querySelectorAll('#rows tr').forEach(tr=>{const it=items.find(x=>x.key===tr.dataset.key)||{};
  const has=((notes[it.key]||{}).note||'').trim()!=='';
  const typeOk=it.ref||(it.type==='ket_hop'?ket:don);
- tr.style.display=(it.variant||'').toLowerCase().includes(q)&&(!on||has)&&(!hd||!it.status||it.status==='ok'||it.ref)&&typeOk?'':'none'})}
-async function refresh(){try{const [list,n]=await Promise.all([api('/api/list'),api('/api/notes')]);notes=n;
+ tr.style.display=(it.variant||'').toLowerCase().includes(q)&&(!on||has)&&(!hd||!it.status||it.status==='ok'||it.ref)&&typeOk&&(!hidden[it.key]||showH||it.ref)?'':'none';
+ tr.classList.toggle('dim',!!hidden[it.key]&&showH)})}
+async function refresh(){try{const [list,n,hd2]=await Promise.all([api('/api/list'),api('/api/notes'),api('/api/hidden')]);notes=n;hidden=hd2;
  const sig=JSON.stringify(list.items.map(x=>[x.key,x.size,x.status,x.type]));
  if(sig!==refresh.sig){refresh.sig=sig;items=list.items;const body=$('#rows');
   const keep={};body.querySelectorAll('tr').forEach(tr=>{keep[tr.dataset.key]=tr.querySelector('textarea').value});
@@ -93,7 +107,10 @@ async function refresh(){try{const [list,n]=await Promise.all([api('/api/list'),
   if(document.activeElement!==t){const v=(notes[tr.dataset.key]||{}).note||'';if(t.value!==v)t.value=v}});
  apply();$('#state').textContent=`${items.length} hàng · cập nhật ${new Date().toLocaleTimeString()}`}
  catch(e){$('#state').textContent='mất kết nối: '+e.message}}
-['q','onlyNotes','hideDeg','tDon','tKet'].forEach(id=>$('#'+id).addEventListener('input',apply));
+['q','onlyNotes','hideDeg','tDon','tKet','showHid'].forEach(id=>$('#'+id).addEventListener('input',apply));
+$('#hidePrefix').addEventListener('click',()=>{const p=$('#prefix').value.trim();if(!p)return;
+ const keys=items.filter(x=>!x.ref&&x.variant.startsWith(p)&&!hidden[x.key]).map(x=>x.key);if(keys.length)setHidden(keys,true);$('#prefix').value=''});
+$('#unhideAll').addEventListener('click',()=>{const keys=Object.keys(hidden);if(keys.length)setHidden(keys,false)});
 $('#csv').addEventListener('click',()=>{const q=s=>'"'+String(s).replace(/"/g,'""')+'"';
  const rows=[['variant','stem','note']].concat(items.map(it=>[it.variant,it.stem,(notes[it.key]||{}).note||'']).filter(r=>r[2].trim()));
  const b=new Blob([rows.map(r=>r.map(q).join(',')).join('\n')],{type:'text/csv'});
@@ -126,6 +143,7 @@ class State:
     def __init__(self, out_root):
         self.root = os.path.abspath(out_root)
         self.notes_path = os.path.join(self.root, "denoise_notes.json")
+        self.hidden_path = os.path.join(self.root, "denoise_hidden.json")
         self.lock = threading.Lock()
 
     def manifest_rows(self):
@@ -181,6 +199,33 @@ class State:
         except (OSError, ValueError):
             return {}
 
+    def load_hidden(self):
+        try:
+            with open(self.hidden_path, encoding="utf-8") as f:
+                data = json.load(f)
+            return {k: True for k, v in data.items() if v} if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def set_hidden(self, keys, hidden):
+        with self.lock:
+            cur = self.load_hidden()
+            for k in keys:
+                if hidden:
+                    cur[k] = True
+                else:
+                    cur.pop(k, None)
+            tmp = f"{self.hidden_path}.tmp{os.getpid()}"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(cur, f, ensure_ascii=False, indent=1)
+            os.replace(tmp, self.hidden_path)
+
+    def seed_hidden(self, variants):
+        """Hide these variants once, only if nothing has been hidden or unhidden yet."""
+        if variants and not os.path.exists(self.hidden_path):
+            want = set(variants)
+            self.set_hidden([it["key"] for it in self.scan() if it["variant"] in want and not it["ref"]], True)
+
     def save_note(self, key, note):
         with self.lock:
             notes = self.load_notes()
@@ -223,6 +268,8 @@ def make_handler(state):
                 self._json({"items": state.scan()})
             elif path == "/api/notes":
                 self._json(state.load_notes())
+            elif path == "/api/hidden":
+                self._json(state.load_hidden())
             elif path.startswith("/audio/"):
                 parts = [unquote(p) for p in path[len("/audio/"):].split("/")]
                 real = state.resolve(*parts) if len(parts) == 3 else None
@@ -234,7 +281,20 @@ def make_handler(state):
                 self.send_error(404)
 
         def do_POST(self):
-            if urlparse(self.path).path != "/api/notes":
+            route = urlparse(self.path).path
+            if route == "/api/hidden":
+                try:
+                    n = int(self.headers.get("Content-Length", "0"))
+                    data = json.loads(self.rfile.read(min(n, 1 << 20)))
+                    keys, flag = [str(k) for k in data["keys"]], bool(data["hidden"])
+                except (ValueError, KeyError, TypeError):
+                    self.send_error(400)
+                    return
+                known = {it["key"] for it in state.scan() if not it["ref"]}
+                state.set_hidden([k for k in keys if k in known], flag)
+                self._json({"ok": True})
+                return
+            if route != "/api/notes":
                 self.send_error(404)
                 return
             try:
@@ -296,10 +356,12 @@ def main():
     ap.add_argument("--out-root", required=True)
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--hide-initial", default="", help="comma-separated variant ids to hide the first time")
     a = ap.parse_args()
     state = State(a.out_root)
     if not os.path.isdir(state.root):
         raise SystemExit(f"no such folder: {state.root}")
+    state.seed_hidden([v.strip() for v in a.hide_initial.split(",") if v.strip()])
     srv = ThreadingHTTPServer((a.host, a.port), make_handler(state))
     print(f"serving {state.root} on http://{a.host}:{a.port}  (notes: {state.notes_path})", flush=True)
     try:
