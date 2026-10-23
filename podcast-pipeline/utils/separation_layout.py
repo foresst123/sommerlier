@@ -176,6 +176,8 @@ def fallback(b: Budget, a: Avail, cfg: LayoutConfig = LayoutConfig()):
         g0, g1 = _split(missing, max(0, spare[0]), max(0, spare[1]))
         got = [got[0] + g0, got[1] + g1]
         missing -= g0 + g1
+        if g0 + g1:
+            reasons.append("solo_other")
     pad_l, pad_r = b.pad_left, b.pad_right
     if missing:
         pad_l, pad_r = pad_l + missing // 2, pad_r + missing - missing // 2
@@ -328,6 +330,19 @@ def check_layout(row: dict, cfg: Optional[LayoutConfig] = None, tol: int = 2) ->
     if sorted(q["who"] for q in cores) != ["A", "B"]:
         p.append(f"{rid}: core pieces {[q['who'] for q in cores]}")
     f = int(round(cfg.fade * sr))
+    # the pieces must be exactly what the shared rule derives from the slots: same runs,
+    # extensions and fades, so every junction overlaps by one fade and no fade enters the core
+    if "core" in kinds and pat in CTX_OWNER:
+        fields = ("run", "kind", "who", "start", "end", "fade_in", "fade_out")
+        try:
+            want = [dict(q, run=k) for k, r in enumerate(make_runs(slots, pat, cfg)) for q in r["pieces"]]
+        except Exception as e:      # malformed slots are reported above
+            want = [{"error": str(e)}]
+        got_p = sorted((tuple(q.get(k) for k in fields) for q in pieces))
+        want_p = sorted((tuple(q.get(k) for k in fields) for q in want))
+        if got_p != want_p:
+            diff = next((g for g in got_p if g not in want_p), None) or next((w for w in want_p if w not in got_p), None)
+            p.append(f"{rid}: pieces differ from the rule (make_runs) at {dict(zip(fields, diff or ()))}")
     for q in pieces:
         if q["start"] < 0 or q["end"] > n or q["end"] <= q["start"]:
             p.append(f"{rid}: piece {q['kind']}/{q['who']} outside window")

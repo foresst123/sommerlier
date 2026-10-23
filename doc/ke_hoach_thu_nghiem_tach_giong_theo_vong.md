@@ -72,7 +72,7 @@ Cài đặt đề xuất để bắt đầu (chưa kiểm chứng bằng chạy 
 - Chia tập theo recording, val phân tầng; ~100 clip thật làm test, recording của chúng bị loại khỏi train.
 - Chọn mô hình theo SI-SDRi **vùng lõi** và các chỉ số trên clip thật (mục 6).
 
-Trạng thái: `measure_real_overlap_stats.py` đã chạy; `render_mix_dataset.py` và `validate_mix_dataset.py` đã viết nhưng **chưa chạy trên cache thật** và đang được sửa theo đặc tả; `audit_clean_pool.py` chưa viết. Lịch sử: `tools/make_mix_dataset.py` (24 kHz, ~2–14 s, mức ±10 dB) là bộ dựng đầu tiên. Các tham số ban đầu (25/50/25 kiểu chồng, SNR 5–25 dB, 30 recording) đã được thay bằng số đo thật.
+Trạng thái: `measure_real_overlap_stats.py` đã chạy. `render_mix_dataset.py`, `validate_mix_dataset.py`, `eval_separation.py` và `audit_clean_pool.py` đã viết theo đặc tả và đã test trên dữ liệu tổng hợp, nhưng **chưa chạy trên cache thật**. **Trước khi train thật**, `WindowPlanner` (nhánh `solid-architecture`) phải dùng chung `utils/separation_layout.py`; nếu không, đầu vào lúc suy luận khác mẫu train (mục 11 của đặc tả). Lịch sử: `tools/make_mix_dataset.py` (24 kHz, ~2–14 s, mức ±10 dB) là bộ dựng đầu tiên. Các tham số ban đầu (25/50/25 kiểu chồng, SNR 5–25 dB, 30 recording) đã được thay bằng số đo thật.
 
 Trong pipeline, suy luận chỉ chạy trên **đoạn overlap**, nên đầu vào hầu như luôn có hai người. Ba mô hình vòng 1 không theo dõi hoán vị giữa các cửa sổ, nên overlap dài hơn W (bị chia thành nhiều cửa sổ) cần bộ căn hoán vị theo tương quan ở vùng chồng.
 
