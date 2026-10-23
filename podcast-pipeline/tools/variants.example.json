@@ -461,6 +461,28 @@
       "label": "MambAttention then DFN3 [analysis only]",
       "group": "analysis_pipes",
       "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). Nothing here is validated on Vietnamese."
+    },
+    {
+      "chain": "re_use",
+      "label": "RE-USE NemotronLabs (separate env) [analysis only]",
+      "group": "analysis_only",
+      "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). NVIDIA RE-USE, OpenMDW 1.1. Trained on synthetic single-speaker speech (en/de/es/fr/zh), no Vietnamese; it keeps the main speaker and suppresses others where voices overlap, so check overlap regions; the model card does not discuss hallucination."
+    },
+    {
+      "chain": "re_use_laughter",
+      "label": "RE-USE laughter checkpoint (separate env) [analysis only]",
+      "group": "analysis_only",
+      "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). Companion RE-USE checkpoint meant to preserve laughter better; same caveats as re_use. Laughter preservation is the vendor's claim, unverified here."
+    },
+    {
+      "chain": "re_use",
+      "label": "RE-USE, music scope spans [analysis only]",
+      "group": "ctrl_music",
+      "note": "ANALYSIS ONLY: do not export this output as training audio before a listening test and the verification gates (speaker identity, ASR WER vs baseline, no crowd-voice claim). RE-USE with music removal limited to detected spans (the best-rated scope in the first listening round).",
+      "set": {
+        "pipeline.music_scope": "spans"
+      },
+      "tag": "scope-spans"
     }
   ]
 }

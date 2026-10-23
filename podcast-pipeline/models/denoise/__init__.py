@@ -16,6 +16,7 @@ from .mpsenet import MPSENetBackend, MPSENetDNSBackend
 from .dbs_tiger import DBSTigerBackend
 from .mambattention import MambAttentionBackend
 from .bsrnn_urgent import BSRNN26Backend
+from .re_use import ReUseBackend, ReUseLaughterBackend
 from .audio_separator import ALIASES as _AS_ALIASES, AudioSeparatorBackend
 
 __all__ = ["DenoiseBackend", "DenoiseError", "get_backend", "parse_chain", "chain_id",
@@ -24,6 +25,7 @@ __all__ = ["DenoiseBackend", "DenoiseError", "get_backend", "parse_chain", "chai
 BACKENDS = {cls.name: cls for cls in (IdentityBackend, FakeHighPassBackend, DeepFilterNet3Backend,
                                       MossFormer2SE48Backend, MPSENetBackend, MPSENetDNSBackend,
                                       DBSTigerBackend, MambAttentionBackend, BSRNN26Backend,
+                                      ReUseBackend, ReUseLaughterBackend,
                                       AudioSeparatorBackend, *_AS_ALIASES)}
 
 _TOKEN = re.compile(r"[a-z0-9_]+")

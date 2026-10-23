@@ -74,7 +74,7 @@ def test_available_backends_never_raises_and_reports_missing(monkeypatch):
     assert set(res) == {"identity", "fake_hp", "dfn3", "mf2se48", "mpsenet", "mpsenet_dns",
                         "dbs_tiger", "mambattention", "bsrnn26", "audio_separator", "rf_vocals_3005",
                         "rf_vocals_kim", "rf_denoise", "rf_denoise_aggr", "rf_dereverb", "uvr_deecho",
-                        "rf_crowd"}
+                        "rf_crowd", "re_use", "re_use_laughter"}
     assert res["identity"] == (True, "") and res["fake_hp"][0] is True
     for ok, reason in res.values():
         assert isinstance(ok, bool) and isinstance(reason, str)
