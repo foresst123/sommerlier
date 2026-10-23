@@ -1,9 +1,13 @@
 """Pseudo-steps in a denoise chain: tokens the service handles itself, not backends.
 
     blendNN   NN in 0..100: out = (1 - NN/100) * current + (NN/100) * chain_input
+    dryNN     NN in 0..100: out = (1 - NN/100) * current + (NN/100) * step_input
 
 chain_input is the waveform entering the whole chain (the raw audio of the stage), also
-when the blend sits between two backends. Pure functions, no heavy imports.
+when the blend sits between two backends. step_input is the waveform that entered the nearest
+backend before the token: in `a>blend25>b>dry50` the dry50 mixes back what b was given (a's
+output blended with the raw audio), not the raw audio, so a second stage can be made lighter
+without bringing back the noise the first stage removed. Pure functions, no heavy imports.
 """
 import re
 from typing import List, Optional, Tuple
@@ -11,14 +15,17 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 _BLEND = re.compile(r"blend(\d{1,3})")
+_DRY = re.compile(r"dry(\d{1,3})")
 
 
 def parse_pseudo(token) -> Optional[Tuple[str, int]]:
-    """("blend", NN) for a valid blend token; None for anything else (incl. blend101)."""
-    m = _BLEND.fullmatch(str(token).strip().lower())
-    if not m or int(m.group(1)) > 100:
-        return None
-    return "blend", int(m.group(1))
+    """("blend", NN) or ("dry", NN) for a valid pseudo-step; None for anything else (incl. blend101)."""
+    t = str(token).strip().lower()
+    for kind, rx in (("blend", _BLEND), ("dry", _DRY)):
+        m = rx.fullmatch(t)
+        if m:
+            return (kind, int(m.group(1))) if int(m.group(1)) <= 100 else None
+    return None
 
 
 def is_pseudo(token) -> bool:
@@ -34,6 +41,8 @@ def describe(token) -> str:
     p = parse_pseudo(token)
     if p is None:
         return f"backend {token}"
+    if p[0] == "dry":
+        return f"dry: {100 - p[1]}% filtered + {p[1]}% input of the preceding backend"
     return f"blend: {100 - p[1]}% filtered + {p[1]}% chain input"
 
 
@@ -47,6 +56,12 @@ def validate_chain_tokens(tokens) -> None:
                          "there is no filtered audio to blend yet")
     if not backend_tokens(tokens):
         raise ValueError("a denoise chain needs at least one backend, not only pseudo-steps")
+    seen_backend = False
+    for t in tokens:
+        if not is_pseudo(t):
+            seen_backend = True
+        elif parse_pseudo(t)[0] == "dry" and not seen_backend:
+            raise ValueError(f"pseudo-step {t!r} needs a backend step before it")
 
 
 def blend(current: np.ndarray, chain_input: np.ndarray, percent: int) -> np.ndarray:

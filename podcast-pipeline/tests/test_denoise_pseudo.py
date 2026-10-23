@@ -184,3 +184,52 @@ def test_golden_ids():
     assert chain_id_of("dfn3>mf2se48") == "dfn3+mf2se48"
     cid = chain_id_of("DFN3>blend50")
     assert cid == "dfn3+blend50" and cid.replace("+", "").isalnum()
+
+
+# --- dryNN: mix back the input of the preceding backend --------------------
+
+@pytest.mark.parametrize("tok,val", [("dry5", 5), ("dry050", 50), ("dry0", 0), ("dry100", 100), ("DRY30", 30)])
+def test_parse_dry(tok, val):
+    assert parse_pseudo(tok) == ("dry", val) and is_pseudo(tok)
+
+
+@pytest.mark.parametrize("tok", ["dry101", "dry", "dryx", "xdry50", "dry-1", "drying50"])
+def test_parse_dry_invalid(tok):
+    assert parse_pseudo(tok) is None
+
+
+def test_dry_needs_a_backend_before_it():
+    validate_chain_tokens(["a", "dry50"])
+    validate_chain_tokens(["a", "blend25", "b", "dry50"])
+    with pytest.raises(ValueError, match="cannot be first"):
+        validate_chain_tokens(["dry50", "a"])
+    assert "preceding backend" in describe("dry50") and backend_tokens(["a", "dry50", "b"]) == ["a", "b"]
+
+
+def test_dry_after_the_first_backend_equals_blend_of_the_chain_input():
+    before, out_dry, _ = run("half>dry50")
+    _, out_blend, _ = run("half>blend50")
+    assert np.allclose(out_dry, out_blend, atol=1e-7) and np.allclose(out_dry, 0.75 * before, atol=1e-6)
+
+
+def test_dry_mixes_back_the_input_of_its_own_stage_not_the_raw_audio():
+    # half, half: the second stage was given 0.5x and outputs 0.25x; dry50 gives 0.5*0.25x + 0.5*0.5x = 0.375x.
+    # blend50 would reach for the raw x instead: 0.5*0.25x + 0.5*x = 0.625x.
+    before, out_dry, info = run("half>half>dry50")
+    assert np.allclose(out_dry, 0.375 * before, atol=1e-6)
+    _, out_blend, _ = run("half>half>blend50")
+    assert np.allclose(out_blend, 0.625 * before, atol=1e-6)
+    assert info["dry"] == [{"percent": 50}] and info["blend"] is None
+    assert [(s["token"], s["kind"]) for s in info["steps"]] == [("half", "backend"), ("half", "backend"), ("dry50", "dry")]
+
+
+def test_two_stage_chain_with_a_light_first_stage_and_a_light_second_stage():
+    # half, blend50 -> 0.75x; second half sees 0.75x and gives 0.375x; dry50 -> 0.5*0.375x + 0.5*0.75x = 0.5625x
+    before, out, info = run("half>blend50>half>dry50")
+    assert np.allclose(out, 0.5625 * before, atol=1e-6)
+    assert info["chain_id"] == "half+blend50+half+dry50" and info["errors"] == []
+
+
+def test_dry_before_any_backend_is_refused_and_keeps_the_unfiltered_audio():
+    before, out, info = run("dry50>half")
+    assert np.array_equal(out, before) and info["errors"] and "cannot be first" in info["errors"][0]

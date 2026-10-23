@@ -112,6 +112,7 @@ class DenoiseService:
                 "noise_floor_db_after": None, "corr_with_input": None,
                 "errors": [], "steps": [], "blend": None}
         out = inp  # inp is also the chain input that blend steps mix back in
+        step_in = inp  # what the latest backend step was given; dry steps mix this back in
         try:
             from models.denoise.pseudo import blend, parse_pseudo, validate_chain_tokens
             get_backend, parse_chain, chain_id = _load_api()
@@ -128,17 +129,22 @@ class DenoiseService:
             pseudo = parse_pseudo(name)
             try:
                 if pseudo is not None:
-                    cand = blend(out, inp, pseudo[1])
+                    kind, pct = pseudo
+                    cand = blend(out, inp if kind == "blend" else step_in, pct)
                     problem = _check(inp, cand, sr, name)
                     if problem:
                         raise ValueError(problem)
                     out = cand
-                    info["blend"] = {"percent": pseudo[1]}
-                    info["steps"].append({"token": name, "kind": "blend",
+                    if kind == "blend":
+                        info["blend"] = {"percent": pct}
+                    else:
+                        info.setdefault("dry", []).append({"percent": pct})
+                    info["steps"].append({"token": name, "kind": kind,
                                           "seconds": round(time.time() - started, 3)})
                     continue
                 backend = get_backend(name, cfg, logger)
                 backend.load()
+                step_in = out
                 if logger:
                     logger.info(f"[denoise] {name} on {len(inp) / sr:.1f}s of audio")
                 cand = np.asarray(backend.enhance(out, sr), dtype=np.float32)
