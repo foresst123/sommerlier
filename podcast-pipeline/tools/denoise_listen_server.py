@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""Live listening table for the denoise variants, with a notes column.
+
+Scans OUT/<variant>/<stem>/01b_denoise/after_denoise.wav for every variant, serves them on a
+port as one page (an audio player per row, the unfiltered audio on top as the reference) and
+keeps your notes in OUT/denoise_notes.json. The list refreshes by itself, so variants that
+finish while it is running show up without a reload. Standard library only.
+
+    python tools/denoise_listen_server.py --out-root /home/lamkd2/data/denoise_all --port 8765
+    # on your laptop:  ssh -L 8765:localhost:8765 <dgx>   then open http://localhost:8765
+
+It binds to 127.0.0.1 by default. There is no login: pass --host 0.0.0.0 only on a network you
+trust, since anyone who can reach the port can read the audio and write notes.
+"""
+import argparse
+import json
+import os
+import re
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import unquote, urlparse
+
+KINDS = {"denoise": os.path.join("01b_denoise", "after_denoise.wav"),
+         "music": os.path.join("01_music", "after_music.wav")}
+SAFE = re.compile(r"^[^/\\]+$")
+MAX_NOTE = 20000
+CHUNK = 1 << 16
+
+PAGE = r"""<!doctype html>
+<html lang="vi"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Denoise nghe thử</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--text:#1d2530;--muted:#667085;--line:#dfe3ea;--accent:#2563eb;--warn:#b45309;--warnbg:#fef3c7;--ok:#15803d}
+@media (prefers-color-scheme:dark){:root{--bg:#12161c;--card:#1a2029;--text:#e6e9ee;--muted:#94a0b2;--line:#2b3441;--accent:#6ea0ff;--warn:#f5b45a;--warnbg:#3a2c12;--ok:#4ade80}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,sans-serif}
+header{position:sticky;top:0;z-index:3;background:var(--bg);padding:12px 16px;border-bottom:1px solid var(--line)}
+h1{font-size:17px;margin:0 0 8px}.bar{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+input[type=search]{padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--text);min-width:220px}
+label{color:var(--muted)}#state{color:var(--muted);margin-left:auto}
+main{padding:12px 16px 40px;overflow-x:auto}
+table{border-collapse:collapse;width:100%;min-width:760px;background:var(--card);border:1px solid var(--line)}
+th,td{padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top;text-align:left}
+th{background:var(--card);color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+tr.ref td{background:color-mix(in srgb,var(--accent) 8%,var(--card))}
+td.v{font-weight:600;word-break:break-all;min-width:200px}td.v small{display:block;color:var(--muted);font-weight:400}
+.badge{display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;background:var(--warnbg);color:var(--warn);margin-left:6px}
+audio{width:320px;max-width:100%}
+textarea{width:100%;min-width:240px;min-height:54px;resize:vertical;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--text);font:inherit}
+textarea:focus{outline:2px solid var(--accent)}.saved{font-size:11px;color:var(--ok);height:14px}
+button{padding:6px 12px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--text);cursor:pointer}
+@media (max-width:640px){header,main{padding-left:12px;padding-right:12px}}
+</style></head><body>
+<header><h1>Denoise: nghe thử và ghi chú</h1>
+<div class="bar"><input id="q" type="search" placeholder="Lọc theo tên variant..." aria-label="Lọc">
+<label><input id="onlyNotes" type="checkbox"> chỉ hàng có ghi chú</label>
+<label><input id="hideDeg" type="checkbox"> ẩn variant lỗi (DEGRADED)</label>
+<button id="csv">Xuất ghi chú CSV</button><span id="state">đang tải...</span></div></header>
+<main><table><thead><tr><th>#</th><th>Variant</th><th>Âm thanh sau lọc</th><th>Ghi chú</th></tr></thead>
+<tbody id="rows"></tbody></table></main>
+<script>
+const $=s=>document.querySelector(s);let items=[],notes={},timers={};
+function badge(it){return it.status&&it.status!=='ok'?`<span class="badge">${it.status.toUpperCase()}</span>`:''}
+async function api(path,opt){const r=await fetch(path,opt);if(!r.ok)throw new Error(r.status);return r.json()}
+function mk(it,i){const tr=document.createElement('tr');if(it.ref)tr.className='ref';tr.dataset.key=it.key;
+ const kind=it.has_denoise?'denoise':'music';
+ tr.innerHTML=`<td></td><td class="v"></td><td><audio controls preload="none"></audio></td><td><textarea></textarea><div class="saved"></div></td>`;
+ tr.children[0].textContent=i+1;const v=tr.children[1];v.textContent=it.label||it.variant;
+ v.insertAdjacentHTML('beforeend',badge(it)+`<small></small>`);
+ v.querySelector('small').textContent=(it.ref?'Âm thanh gốc (chưa lọc) · ':'')+it.stem+' · '+(it.size/1048576).toFixed(1)+' MB';
+ const a=tr.querySelector('audio');a.src=`/audio/${encodeURIComponent(it.variant)}/${encodeURIComponent(it.stem)}/${kind}`;
+ a.addEventListener('play',()=>document.querySelectorAll('audio').forEach(o=>{if(o!==a)o.pause()}));
+ const t=tr.querySelector('textarea');t.value=(notes[it.key]||{}).note||'';
+ t.addEventListener('input',()=>{const s=tr.querySelector('.saved');s.textContent='đang lưu...';clearTimeout(timers[it.key]);
+  timers[it.key]=setTimeout(async()=>{try{await api('/api/notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:it.key,note:t.value})});
+  notes[it.key]={note:t.value};s.textContent='đã lưu';apply()}catch(e){s.textContent='LỖI lưu: '+e.message}},600)});
+ return tr}
+function apply(){const q=$('#q').value.toLowerCase(),on=$('#onlyNotes').checked,hd=$('#hideDeg').checked;
+ document.querySelectorAll('#rows tr').forEach(tr=>{const it=items.find(x=>x.key===tr.dataset.key)||{};
+ const has=((notes[it.key]||{}).note||'').trim()!=='';
+ tr.style.display=(it.variant||'').toLowerCase().includes(q)&&(!on||has)&&(!hd||!it.status||it.status==='ok'||it.ref)?'':'none'})}
+async function refresh(){try{const [list,n]=await Promise.all([api('/api/list'),api('/api/notes')]);notes=n;
+ const sig=JSON.stringify(list.items.map(x=>[x.key,x.size,x.status]));
+ if(sig!==refresh.sig){refresh.sig=sig;items=list.items;const body=$('#rows');
+  const keep={};body.querySelectorAll('tr').forEach(tr=>{keep[tr.dataset.key]=tr.querySelector('textarea').value});
+  body.innerHTML='';items.forEach((it,i)=>{const tr=mk(it,i);if(keep[it.key]!==undefined)tr.querySelector('textarea').value=keep[it.key];body.appendChild(tr)});}
+ else document.querySelectorAll('#rows tr').forEach(tr=>{const t=tr.querySelector('textarea');
+  if(document.activeElement!==t){const v=(notes[tr.dataset.key]||{}).note||'';if(t.value!==v)t.value=v}});
+ apply();$('#state').textContent=`${items.length} hàng · cập nhật ${new Date().toLocaleTimeString()}`}
+ catch(e){$('#state').textContent='mất kết nối: '+e.message}}
+['q','onlyNotes','hideDeg'].forEach(id=>$('#'+id).addEventListener('input',apply));
+$('#csv').addEventListener('click',()=>{const q=s=>'"'+String(s).replace(/"/g,'""')+'"';
+ const rows=[['variant','stem','note']].concat(items.map(it=>[it.variant,it.stem,(notes[it.key]||{}).note||'']).filter(r=>r[2].trim()));
+ const b=new Blob([rows.map(r=>r.map(q).join(',')).join('\n')],{type:'text/csv'});
+ const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='denoise_notes.csv';a.click()});
+refresh();setInterval(refresh,10000);
+</script></body></html>"""
+
+
+class State:
+    def __init__(self, out_root):
+        self.root = os.path.abspath(out_root)
+        self.notes_path = os.path.join(self.root, "denoise_notes.json")
+        self.lock = threading.Lock()
+
+    def statuses(self):
+        try:
+            with open(os.path.join(self.root, "variants_manifest.json"), encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return {}
+        rows = data.get("variants") if isinstance(data, dict) else data
+        out = {}
+        for r in rows if isinstance(rows, list) else []:
+            if isinstance(r, dict) and r.get("id"):
+                out[r["id"]] = r.get("status") or ("degraded" if r.get("degraded") else None)
+        return out
+
+    def scan(self):
+        status = self.statuses()
+        items, ref = [], None
+        try:
+            variants = sorted(d for d in os.listdir(self.root)
+                              if SAFE.match(d) and not d.startswith(".") and d != "logs"
+                              and os.path.isdir(os.path.join(self.root, d)))
+        except OSError:
+            return []
+        for v in variants:
+            vdir = os.path.join(self.root, v)
+            for stem in sorted(os.listdir(vdir)):
+                sdir = os.path.join(vdir, stem)
+                if stem == "input" or not os.path.isdir(sdir):
+                    continue
+                dn = os.path.join(sdir, KINDS["denoise"])
+                mu = os.path.join(sdir, KINDS["music"])
+                if os.path.isfile(dn):
+                    items.append({"key": f"{v}/{stem}", "variant": v, "stem": stem, "size": os.path.getsize(dn), "label": v,
+                                  "status": status.get(v), "has_denoise": True, "ref": False})
+                elif os.path.isfile(mu) and (v == "none" or ref is None):
+                    ref = {"key": f"{v}/{stem}", "variant": v, "label": f"{v} (gốc)", "stem": stem,
+                           "size": os.path.getsize(mu), "status": None, "has_denoise": False, "ref": True}
+        if ref:
+            items.insert(0, ref)
+        return items
+
+    def resolve(self, variant, stem, kind):
+        if kind not in KINDS or not (SAFE.match(variant) and SAFE.match(stem)) or ".." in (variant, stem):
+            return None
+        path = os.path.realpath(os.path.join(self.root, variant, stem, KINDS[kind]))
+        if not path.startswith(self.root + os.sep) or not os.path.isfile(path):
+            return None
+        return path
+
+    def load_notes(self):
+        try:
+            with open(self.notes_path, encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def save_note(self, key, note):
+        with self.lock:
+            notes = self.load_notes()
+            if note.strip():
+                notes[key] = {"note": note, "updated": time.strftime("%Y-%m-%dT%H:%M:%S")}
+            else:
+                notes.pop(key, None)
+            tmp = f"{self.notes_path}.tmp{os.getpid()}"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(notes, f, ensure_ascii=False, indent=1)
+            os.replace(tmp, self.notes_path)
+
+
+def make_handler(state):
+    class H(BaseHTTPRequestHandler):
+        server_version = "denoise-listen"
+
+        def log_message(self, *a):
+            pass
+
+        def _json(self, obj, code=200):
+            body = json.dumps(obj, ensure_ascii=False).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            path = urlparse(self.path).path
+            if path == "/":
+                body = PAGE.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif path == "/api/list":
+                self._json({"items": state.scan()})
+            elif path == "/api/notes":
+                self._json(state.load_notes())
+            elif path.startswith("/audio/"):
+                parts = [unquote(p) for p in path[len("/audio/"):].split("/")]
+                real = state.resolve(*parts) if len(parts) == 3 else None
+                if real is None:
+                    self.send_error(404)
+                    return
+                self._send_file(real)
+            else:
+                self.send_error(404)
+
+        def do_POST(self):
+            if urlparse(self.path).path != "/api/notes":
+                self.send_error(404)
+                return
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+                data = json.loads(self.rfile.read(min(n, 4 * MAX_NOTE)))
+                key, note = str(data["key"]), str(data["note"])
+            except (ValueError, KeyError, TypeError):
+                self.send_error(400)
+                return
+            known = {it["key"] for it in state.scan()}
+            if key not in known or len(note) > MAX_NOTE:
+                self.send_error(400)
+                return
+            state.save_note(key, note)
+            self._json({"ok": True})
+
+        def _send_file(self, real):
+            size = os.path.getsize(real)
+            start, end, code = 0, size - 1, 200
+            m = re.match(r"bytes=(\d*)-(\d*)$", self.headers.get("Range", "").strip())
+            if m and (m.group(1) or m.group(2)):
+                if m.group(1):
+                    start = int(m.group(1))
+                    end = int(m.group(2)) if m.group(2) else size - 1
+                else:
+                    start = max(0, size - int(m.group(2)))
+                end = min(end, size - 1)
+                if start > end or start >= size:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.end_headers()
+                    return
+                code = 206
+            self.send_response(code)
+            self.send_header("Content-Type", "audio/wav")
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(end - start + 1))
+            if code == 206:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.end_headers()
+            try:
+                with open(real, "rb") as f:
+                    f.seek(start)
+                    left = end - start + 1
+                    while left > 0:
+                        chunk = f.read(min(CHUNK, left))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        left -= len(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    return H
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--out-root", required=True)
+    ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--host", default="127.0.0.1")
+    a = ap.parse_args()
+    state = State(a.out_root)
+    if not os.path.isdir(state.root):
+        raise SystemExit(f"no such folder: {state.root}")
+    srv = ThreadingHTTPServer((a.host, a.port), make_handler(state))
+    print(f"serving {state.root} on http://{a.host}:{a.port}  (notes: {state.notes_path})", flush=True)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()
