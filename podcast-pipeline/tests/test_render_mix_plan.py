@@ -57,7 +57,7 @@ def test_whole_short_clip_becomes_the_core():
             # the clip itself spans exactly the core; its fades lie outside
             assert core_b["src_start"] + (c0 - core_b["start"]) / SR == pytest.approx(50.0, abs=1e-4)
             assert lay["L"] == pytest.approx(0.55, abs=1e-4)
-    assert 25 < hits < 80      # holder must be X (p = 0.5) and the coin p = 0.5
+    assert 70 < hits < 130     # whenever the holder is X (p = 0.5), the short clip of Y is used
 
 
 def test_short_sources_go_through_the_fallback_or_drop():
@@ -92,21 +92,82 @@ def test_snap_moves_cuts_and_is_recorded():
         assert lo <= s <= hi
         return lo, "energy_pause"
     lay, _ = rmd.plan_chunk(random.Random(0), _t(1.0), RICH, 4 * SR, CFG, 24000, snap=snap)
-    assert calls and lay["cuts"] == {"energy_pause": len(calls)}
+    assert calls and lay["cut_method"] == {"energy_pause": len(calls)}
     assert all(hi - lo <= 2 * rmd.SNAP + 1e-9 for _, lo, hi in calls)
     assert sl.check_layout(_row(lay)) == []
 
 
 def test_templates_outside_l_min_and_window_are_never_drawn():
     ts = [_t(x) for x in (0.1, 0.24, 0.25, 0.8, 3.9, 4.0, 4.2, 7.0)]
-    use = rmd.usable_templates(ts, 0.25, 4.0)
-    assert [t["overlap"] for t in use] == [0.25, 0.8, 3.9, 4.0]
-    bins = sl.len_bins(4.0, 0.25)
     rng = random.Random(0)
-    got = {rmd.pick_template(rng, "strat", [], use, bins, 4.0)[0]["overlap"] for _ in range(300)}
+    got = {rmd.pick_template(rng, "strat", [], ts, 0.25, 4.0)[0]["overlap"] for _ in range(400)}
     assert got == {0.25, 0.8, 3.9, 4.0}
-    hard = [rmd.pick_template(rng, "hard", [], use, bins, 4.0)[0] for _ in range(50)]
-    assert all(1.0 <= t["overlap"] <= 4.0 for t in hard)
+    got = {rmd.pick_template(rng, "real", ts, ts, 0.25, 4.0)[0]["overlap"] for _ in range(400)}
+    assert got == {0.25, 0.8, 3.9, 4.0}
+    hard = [rmd.pick_template(rng, "hard", [], ts, 0.25, 4.0) for _ in range(50)]
+    assert all(k == "hard" and 1.0 <= t["overlap"] <= 4.0 for t, k in hard)
+    assert rmd.pick_template(rng, "real", [_t(5.0)], [_t(6.0)], 0.25, 4.0) == (None, "hard")
+
+
+def test_template_draws_are_the_same_for_every_window():
+    """Unfiltered lists, W-independent bins, a fixed number of draws: the k-th draw is the
+    same template for W = 3 and W = 4 whenever it lies in range for both."""
+    pool = [_t(x, t=float(i)) for i, x in enumerate(np.linspace(0.25, 3.9, 60))]
+    own = pool[:15] + [_t(3.5)]
+
+    def draws(W):
+        rng = random.Random(7)
+        out = []
+        for _ in range(300):
+            t, kind = rmd.pick_template(rng, rng.choices(["real", "strat", "hard"], [0.7, 0.2, 0.1])[0],
+                                        own, pool, 0.25, W)
+            rng.gauss(0, 1)
+            rng.getrandbits(32)
+            out.append((kind, t["overlap"]))
+        return out
+    a, b = draws(3.0), draws(4.0)
+    both = [(x, y) for x, y in zip(a, b) if y[1] <= 3.0]
+    assert len(both) > 200 and all(x == y for x, y in both)
+    assert all(x[1] <= 3.0 for x in a)
+
+
+def test_snapping_makes_core_edges_natural():
+    """Periodic 200 ms syllables with 60 ms pauses: a random point is in a pause 23% of the
+    time. Snapped core edges (partial A end, B start, contained B both edges) land in pauses."""
+    sr = 24000
+    period, on = int(0.26 * sr), int(0.20 * sr)
+    x = (0.1 * np.random.default_rng(0).standard_normal(200 * sr)).astype("float32")
+    x[(np.arange(len(x)) % period) >= on] *= 0.001
+    pools = {"X": [(0.0, 90.0)], "Y": [(100.0, 190.0)]}
+    snap = rmd.make_snapper(x, sr)
+
+    def in_pause(t):
+        return (int(round(t * sr)) % period) >= on - int(0.005 * sr)
+
+    hits = {"partial_A_end": [], "partial_B_start": [], "contained_B_start": [], "contained_B_end": []}
+    for i in range(120):
+        for pat in ("partial", "contained"):
+            lay, why = rmd.plan_chunk(random.Random(i), _t(random.Random(i).choice([0.5, 1.0, 2.0]), pat), pools,
+                                      4 * SR, CFG, sr, snap=snap)
+            assert lay is not None and sl.check_layout(_row(lay)) == [], why
+            c0, c1 = lay["core"]
+            for p in lay["layout"]:
+                if p["kind"] != "core":
+                    continue
+                # source time of the core edges of this piece
+                s0 = p["src_start"] + (c0 - p["start"]) / SR
+                s1 = p["src_start"] + (c1 - p["start"]) / SR
+                if pat == "partial" and p["who"] == "A":
+                    hits["partial_A_end"].append(in_pause(s1))
+                if pat == "partial" and p["who"] == "B":
+                    hits["partial_B_start"].append(in_pause(s0))
+                if pat == "contained" and p["who"] == "B":
+                    hits["contained_B_start"].append(in_pause(s0))
+                    hits["contained_B_end"].append(in_pause(s1))
+            if pat == "contained":
+                assert lay["core_edges"] == "snapped"
+    rates = {k: float(np.mean(v)) for k, v in hits.items()}
+    assert all(r > 0.6 for r in rates.values()), rates
 
 
 def test_multi_pair_share_counts_events():

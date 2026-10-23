@@ -10,7 +10,9 @@ Reads only the segments of every recording (no audio), so it is cheap on the ful
                               is planned with render_mix_dataset.plan_chunk for each
                               --window, without audio, and the outcome is counted: nominal,
                               kept through a fallback (which one), or dropped (why).
-                              This estimates drop and fallback rates before any rendering.
+                              This estimates drop and fallback rates before any rendering,
+                              and how many planned mixes would get a TSE enrollment of
+                              >= 1 s per role (enroll_ok:holder / enroll_ok:interrupter).
 
 Writes speakers.csv, feasibility.csv and summary.json under --out.
 
@@ -52,27 +54,44 @@ def speaker_rows(name: str, segs: List[dict], margin: float, min_clips: List[flo
 
 
 def feasibility(name: str, segs: List[dict], templates: List[dict], windows: List[float], margin: float,
-                min_clip: float, l_min: float, seed: int, sr: int = 16000) -> Dict[float, Counter]:
+                min_clip: float, l_min: float, seed: int, sr: int = 16000,
+                merge_gap: float = 1.0) -> Dict[float, Counter]:
     pools = {}
     for s in sorted({x["speaker"] for x in segs}):
         c = cos.clean_clips(segs, s, margin, min_clip)
         if c:
             pools[s] = c
+    enroll = {s: rmd.enroll_clips(segs, s, margin, min_clip) for s in pools}
     out = {}
     for w in windows:
         cfg = sl.LayoutConfig(sr=sr, l_min=l_min)
         n = sl.window_samples(w, sr)
         c = Counter()
         rng = random.Random(seed)
-        for t in templates:
+        multi, _, _ = rmd.multi_overlap_flags(templates, merge_gap)
+        for t, is_multi in zip(templates, multi):
             c["templates"] += 1
+            if is_multi:
+                c["drop:multi_overlap"] += 1
+                continue
             if not l_min - 1e-9 <= t["overlap"] <= w + 1e-9:
                 c["drop:out_of_range"] += 1
                 continue
             lay, why = rmd.plan_chunk(rng, t, pools, n, cfg, sr)
             if lay is None:
                 c[f"drop:{why}"] += 1
-            elif lay["fallback"]:
+                continue
+            # TSE: would this mix get an enrollment of >= 1 s for each role (same rule as the renderer)?
+            exclude = [(p["src_start"], p["src_end"]) for p in lay["layout"]]
+            for who, role in (("A", "holder"), ("B", "interrupter")):
+                spk = lay["holder"] if who == "A" else lay["interrupter"]
+                clips = enroll[spk]
+                core = next(p for p in lay["layout"] if p["kind"] == "core" and p["who"] == who)
+                cand = sl.pick_enrollment(clips, exclude, (core["src_start"] + core["src_end"]) / 2, margin,
+                                          rmd.ENROLL_K)
+                ok = sl.default_enrollment(clips, cand, rmd.ENROLL_SECONDS, rmd.ENROLL_MIN) is not None
+                c[f"enroll_ok:{role}"] += ok
+            if lay["fallback"]:
                 c["fallback"] += 1
                 for x in lay["fallback"].split("+"):
                     c[f"fallback:{x}"] += 1

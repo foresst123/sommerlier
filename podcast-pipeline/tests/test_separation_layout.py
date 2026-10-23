@@ -217,3 +217,29 @@ def test_budget_check_catches_unflagged_deviation():
     assert fb.pad_left == fb.pad_right == 0 and why
     assert sl.check_layout(_row("contained", b=fb, fallback="+".join(why))) == []
     assert any("budget" in x for x in sl.check_layout(_row("contained", b=fb, fallback=None)))
+
+
+def test_check_layout_rederives_the_crossfade_rule():
+    """Regression (round 3, B4): a junction that overlaps less than one fade, or a layout
+    with hard cuts, is rejected because the pieces are re-derived with make_runs."""
+    import copy
+    row = _row("contained", 1.0)
+    r = copy.deepcopy(row)
+    solo = next(q for q in r["layout"] if q["kind"] == "solo" and q["end"] < r["core"][0])
+    solo["end"] -= 160
+    solo["fade_out"] = 160
+    solo["src_end"] -= 160 / SR
+    assert any("make_runs" in x for x in sl.check_layout(r))
+    r = copy.deepcopy(row)
+    for q in r["layout"]:
+        q["fade_in"] = q["fade_out"] = 0
+    assert any("make_runs" in x for x in sl.check_layout(r))
+
+
+def test_fallback_names_the_other_solo_step():
+    n = 4 * SR
+    b = sl.plan_budget(n, CFG.n(1.0), CFG)
+    # B has no solo, ctx cannot grow: B's solo time goes to A's solo
+    fb, why = sl.fallback(b, sl.Avail(ctx_left=CFG.n(0.5), ctx_right=CFG.n(0.5), ctx_total=CFG.n(1.0),
+                                      solo=(sl.INF, 0)), CFG)
+    assert "solo_other" in why and fb.solo == (CFG.n(2.0), 0) and fb.total == n

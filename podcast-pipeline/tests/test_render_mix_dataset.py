@@ -150,14 +150,181 @@ def test_noise_off_gives_exact_sums(tmp_path):
 
 
 def test_template_stream_is_the_same_for_every_window(tmp_path):
+    """Regression: with a template between the two W values (3.5 s), W = 3 and W = 4 still
+    draw the same template at every row whose template is in range for both."""
     names = ["default_a", "default_b", "default_c"]
     recs = [_rec(n, i) for i, n in enumerate(names)]
-    tp = {n: [t for t in _templates([n])[n] if 0.25 <= t["overlap"] <= 3.0] for n in names}
-    a = rmd.build(recs, tp, str(tmp_path / "w3"), n=15, window=3.0, seed=2, val_share=0.0, noise_prob=0.0)
-    b = rmd.build(recs, tp, str(tmp_path / "w4"), n=15, window=4.0, seed=2, val_share=0.0, noise_prob=0.0)
+    tp = {n: [dict(t) for t in _templates([n])[n] if 0.25 <= t["overlap"] <= 3.0] +
+          [{"t": 90.0, "overlap": 3.5, "pattern": "partial", "first_len": 6.0, "second_len": 4.0,
+            "delta_db": 0.0, "rec": n}] for n in names}
+    a = rmd.build(recs, tp, str(tmp_path / "w3"), n=30, window=3.0, seed=2, val_share=0.0, noise_prob=0.0)
+    b = rmd.build(recs, tp, str(tmp_path / "w4"), n=30, window=4.0, seed=2, val_share=0.0, noise_prob=0.0)
+    assert len(a) == len(b) == 30
     seq = lambda rows: [(r["recording"], r["kind"], r["template_overlap"], r["pattern"]) for r in rows]  # noqa: E731
-    assert seq(a) == seq(b)
+    pairs = [(x, y) for x, y in zip(seq(a), seq(b)) if y[2] <= 3.0]
+    assert len(pairs) >= 20 and all(x == y for x, y in pairs)
+    assert any(y[2] == 3.5 for y in seq(b)) and all(x[2] <= 3.0 for x in seq(a))
     assert {r["samples"] for r in a} == {48000} and {r["samples"] for r in b} == {64000}
+
+
+def _two_level_rec(name):
+    """Each speaker has one loud and one quiet segment, 12 dB apart."""
+    rng = np.random.default_rng(0)
+    audio = (0.0005 * rng.standard_normal(200 * SR)).astype("float32")
+    segs = []
+    for spk, t, amp in (("A", 0, 0.2), ("B", 40, 0.2), ("A", 80, 0.05), ("B", 120, 0.05)):
+        audio[t * SR:(t + 30) * SR] += (amp * rng.standard_normal(30 * SR)).astype("float32")
+        segs.append({"start": float(t), "end": t + 30.0, "speaker": spk})
+    return {"path": f"cache/{name}", "segments": lambda: segs, "audio": lambda: (audio, SR)}
+
+
+def test_level_difference_in_the_core_is_the_templates(tmp_path):
+    """Regression (round 3, B1): the gain comes from each speaker's core run, so the core
+    level difference equals delta_db even when a solo comes from a 12 dB quieter clip."""
+    rec = _two_level_rec("default_g")
+    tp = {"default_g": [dict(t=0, overlap=1.0, pattern="contained", first_len=5, second_len=1, delta_db=0.0,
+                             rec="default_g")]}
+    rows = rmd.build([rec], tp, str(tmp_path / "o"), n=40, window=4.0, seed=0, val_share=0.0, noise_prob=0.0,
+                     subtype="FLOAT", snap=False)
+    err = []
+    for r in rows:
+        s1, s2 = sf.read(r["paths"]["s1"])[0], sf.read(r["paths"]["s2"])[0]
+        A, B = (s1, s2) if r["target_order"] == "holder,interrupter" else (s2, s1)
+        c0, c1 = r["core"]
+
+        def db(x):
+            return 10 * np.log10(np.mean(x ** 2))
+        err.append(db(B[c0 + 400:c1 - 400]) - db(A[c0 + 400:c1 - 400]) - r["delta_db"])
+    assert len(err) >= 30 and np.max(np.abs(err)) < 1.0, np.max(np.abs(err))
+
+
+def test_multi_overlap_templates_give_no_rows(tmp_path):
+    names = ["default_m"]
+    tp = _templates(names)
+    tp["default_m"] += [dict(t=200.0, overlap=0.6, pattern="contained", first_len=5, second_len=0.6, delta_db=0.0,
+                             rec="default_m"),
+                        dict(t=201.0, overlap=0.7, pattern="contained", first_len=5, second_len=0.7, delta_db=0.0,
+                             rec="default_m")]
+    out = tmp_path / "o"
+    rows = rmd.build([_rec("default_m", 0)], tp, str(out), n=40, window=4.0, seed=0, val_share=0.0, noise_prob=0.0)
+    assert rows and not {0.6, 0.7} & {r["template_overlap"] for r in rows}
+    rep = json.loads((out / "render_report.json").read_text())
+    assert rep["multi_overlap"]["multi_pair_templates_skipped"] == 2
+    assert rep["multi_overlap"]["multi_pair_event_share"] == pytest.approx(1 / 7, abs=1e-3)
+
+
+def test_stale_tse_outputs_are_removed(tmp_path):
+    names = ["default_a", "default_b"]
+    recs = [_rec(n, i, n_seg=10) for i, n in enumerate(names)]
+    out = tmp_path / "o"
+    rmd.build(recs, _templates(names), str(out), n=8, window=4.0, seed=0, val_share=0.5, tse_mix="plain")
+    assert (out / "manifests" / "tse" / "train.jsonl").exists() and (out / "tse_mixes.jsonl").exists()
+    rmd.build(recs, _templates(names), str(out), n=8, window=4.0, seed=0, val_share=0.5, tse_mix="none")
+    assert not (out / "manifests" / "tse").exists() and not (out / "tse_mixes.jsonl").exists()
+
+
+def test_stereo_input_is_downmixed():
+    x = np.random.default_rng(0).standard_normal((2 * SR, 2)).astype("float32")
+    got = rmd.read_run(x, SR, 16000, 0.5, 8000)
+    assert np.allclose(got, rmd.read_run(x.mean(axis=1), SR, 16000, 0.5, 8000), atol=1e-6)
+    rec = _rec("default_s", 0)
+    audio, _ = rec["audio"]()
+    st = np.stack([audio, audio], axis=1)
+    stereo = {"path": "cache/default_s", "segments": rec["segments"], "audio": lambda: (st, SR)}
+    assert rmd.noise_bank(rec["segments"](), st, SR) is not None
+    assert rmd.mono(st).ndim == 1
+
+
+def test_noise_options(tmp_path):
+    sr = 16000
+    rng = np.random.default_rng(0)
+    steady = 0.01 * rng.standard_normal(3 * sr)
+    burst = steady.copy()
+    burst[sr:sr + sr // 3] += 0.3 * rng.standard_normal(sr // 3)
+    assert rmd.stationary(steady, sr) and not rmd.stationary(burst, sr)
+    names = ["default_n"]
+    rows = rmd.build([_rec("default_n", 0)], _templates(names), str(tmp_path / "o"), n=30, window=4.0, seed=0,
+                     val_share=0.0, noise_prob=1.0, rec_snr={"default_n": 20.0}, noise_snr_from_recording=True,
+                     noise_clean_gaps=True)
+    snr = [r["noise_snr_db"] for r in rows]
+    assert snr and all(17.0 - 1e-6 <= x <= 23.0 + 1e-6 for x in snr)
+    rows = rmd.build([_rec("default_n", 0)], _templates(names), str(tmp_path / "p"), n=30, window=4.0, seed=0,
+                     val_share=0.0, noise_prob=1.0, rec_snr={"default_n": 20.0})
+    assert any(x["noise_snr_db"] > 25 for x in rows)      # flag off: the fixed bands
+
+
+def test_enrollment_from_short_clips_only():
+    """Regression (round 3, B5): a speaker whose clean clips are all shorter than 1 s still
+    gets an enrollment, concatenated from the nearest clips up to >= 1 s."""
+    segs = [{"start": 0.0, "end": 30.0, "speaker": "A"}]
+    t = 40.0
+    for i in range(12):
+        segs.append({"start": t, "end": t + 0.6, "speaker": "B"})
+        t += 2.0
+    clips = rmd.enroll_clips(segs, "B", 0.3, 0.25)
+    assert len(clips) == 12 and all(b - a == pytest.approx(0.6) for a, b in clips)
+    bank = {"B": {"path": "/x/default_e/B.wav", "clips": [{"offset": 0, "len": 9600, "src_start": a, "src_end": b}
+                                                         for a, b in clips]},
+            "A": {"path": "/x/default_e/A.wav", "clips": [{"offset": 0, "len": 64000, "src_start": 0.0,
+                                                           "src_end": 4.0}]}}
+    lay = {"n": 64000, "sr": 16000, "holder": "A", "interrupter": "B",
+           "layout": [{"kind": "core", "who": "A", "src_start": 20.0, "src_end": 21.0},
+                      {"kind": "core", "who": "B", "src_start": 50.0, "src_end": 50.6}]}
+    from collections import Counter
+    st = Counter()
+    rows = rmd.tse_rows({"id": "m", "split": "train", "recording": "default_e", "mix": "m.wav", "A": "a.wav",
+                         "B": "b.wav"}, lay, bank, 0.3, st)
+    tb = next(r for r in rows if r["target_role"] == "interrupter")
+    assert len(tb["enroll_default"]) >= 2
+    assert sum(tb["enroll_candidates"][i]["len"] for i in tb["enroll_default"]) >= 16000
+    assert all(not (c["src_start"] < 50.9 and c["src_end"] > 49.7) for c in tb["enroll_candidates"])
+
+
+def test_exclude_held_removes_the_whole_group():
+    recs = [{"path": f"cache/{n}"} for n in ("showA_1", "showA_2", "showB_1", "solo")]
+    keep = rmd.exclude_held(recs, {"showA_1"}, r"^(show\w)_")
+    assert [r["path"] for r in keep] == ["cache/showB_1", "cache/solo"]
+    keep = rmd.exclude_held(recs, {"showA_1"}, None, {"showA_1": "ch1", "solo": "ch1"})
+    assert [r["path"] for r in keep] == ["cache/showA_2", "cache/showB_1"]
+    assert rmd.exclude_held(recs, {"showA_1"})[0]["path"] == "cache/showA_2"
+
+
+def test_eval_separation_scores_the_core(tmp_path):
+    import eval_separation as ev
+    names = ["default_v"]
+    rows = rmd.build([_rec("default_v", 0)], _templates(names), str(tmp_path / "o"), n=6, window=4.0, seed=0,
+                     val_share=0.0, noise_prob=0.0, subtype="FLOAT")
+    est = tmp_path / "est"
+    est.mkdir()
+    rng = np.random.default_rng(0)
+    for r in rows:      # near-perfect estimates, in swapped order (PIT must undo it)
+        for k, tag in ((1, "s2"), (2, "s1")):
+            x = sf.read(r["paths"][tag])[0]
+            sf.write(str(est / f"{r['id']}_est{k}.wav"), x + 1e-4 * rng.standard_normal(len(x)), 16000,
+                     subtype="FLOAT")
+    res = ev.evaluate_bss(rows, lambda i, k: str(est / f"{i}_est{k}.wav"))
+    assert len(res) == 2 * len(rows)
+    assert all(x["core_si_sdri"] > 20 and x["full_si_sdri"] > 20 for x in res)
+    assert {x["role"] for x in res} == {"holder", "interrupter"}
+    for r in rows:      # the mixture itself: no improvement
+        for k in (1, 2):
+            sf.write(str(est / f"{r['id']}_est{k}.wav"), sf.read(r["paths"]["mix"])[0], 16000, subtype="FLOAT")
+    res = ev.evaluate_bss(rows, lambda i, k: str(est / f"{i}_est{k}.wav"))
+    assert all(abs(x["core_si_sdri"]) < 1e-6 for x in res)
+    text = ev.summarize(res)
+    assert "pattern=contained" in text and "role=interrupter" in text
+
+
+def test_eval_separation_tse(tmp_path):
+    import eval_separation as ev
+    names = [f"default_t{i}" for i in range(2)]
+    out = tmp_path / "o"
+    rmd.build([_rec(n, i, n_seg=10) for i, n in enumerate(names)], _templates(names), str(out), n=6,
+              window=4.0, seed=0, val_share=0.5, noise_prob=0.0, tse_mix="plain", subtype="FLOAT")
+    trows = val.load_tse(str(out))
+    mixes = {m["id"]: m for m in val.load_rows(str(out), "tse_mixes.jsonl")}
+    res = ev.evaluate_tse(trows, mixes, lambda i: next(t["target"] for t in trows if t["id"] == i))
+    assert len(res) == len(trows) and all(x["core_si_sdri"] > 30 for x in res)
 
 
 @pytest.mark.parametrize("mode", ["plain", "bss"])
