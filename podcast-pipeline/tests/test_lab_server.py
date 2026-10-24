@@ -229,3 +229,10 @@ def test_variant_is_named_after_its_chain_not_the_ui_trial_id(cfg):
     variants, argv, info = ls.build_run(cfg, p)
     assert variants["variants"][0]["id"] == info["id"] == "re_use+blend30"
     assert ls.sanitize("a b/c") == "a-b-c"
+
+
+def test_music_removal_off_becomes_a_global_set_and_unset_keeps_the_default(cfg):
+    _, argv, _ = ls.build_run(cfg, payload(cfg, music_removal=False))
+    assert argv[argv.index("--set") + 1] == "steps.music_removal=false"
+    assert "--set" not in ls.build_run(cfg, payload(cfg, music_removal=True))[1]
+    assert "--set" not in ls.build_run(cfg, payload(cfg))[1]

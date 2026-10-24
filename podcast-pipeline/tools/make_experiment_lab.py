@@ -1710,6 +1710,31 @@ PAGE = PAGE.replace(
   const topbar = document.querySelector('.topbar');
   if (topbar) topbar.insertBefore(chip, topbar.querySelector('.spacer')?.nextSibling || null);
 
+  // ---- where the pipeline stops: the legacy control sits in the hidden rail, so expose it next to "Chạy" ----
+  (() => {
+    const stop = $('stop'); if (!stop || !topbar) return;
+    const OPTS = [['denoise', 'denoise · chỉ khử nhiễu (nhanh)'], ['diarization', 'diarization'], ['separation', 'separation'], ['asr', 'asr · chạy đủ, có số liệu ASR']];
+    if (!stop.querySelector('option[value="denoise"]')) { const o = document.createElement('option'); o.textContent = 'denoise'; stop.insertBefore(o, stop.firstChild); }
+    const css = document.createElement('style');
+    css.textContent = '.stop-pick{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);white-space:nowrap}.stop-pick select{border:1px solid var(--line);background:var(--s2);color:var(--text);border-radius:7px;padding:6px 8px;max-width:210px}';
+    document.head.appendChild(css);
+    const pick = document.createElement('label'); pick.className = 'stop-pick'; pick.setAttribute('data-raw', '');
+    pick.innerHTML = '<span>Dừng sau</span><select id="stopAfter" aria-label="Dừng pipeline sau bước">' + OPTS.map(([v, t]) => `<option value="${v}">${t}</option>`).join('') + '</select>';
+    topbar.insertBefore(pick, chip);
+    const music = document.createElement('label'); music.className = 'stop-pick'; music.setAttribute('data-raw', '');
+    music.title = 'Bước tách nhạc (BS-RoFormer) chạy trước denoise. Tạm tắt mặc định.';
+    music.innerHTML = '<input type="checkbox" id="musicRemoval"><span>Tách nhạc (BS-RoFormer)</span>';
+    topbar.insertBefore(music, chip);
+    const musicBox = music.querySelector('input'); let musicSaved = null; try { musicSaved = localStorage.getItem('denoise-lab-music'); } catch (_) {}
+    musicBox.checked = musicSaved === 'on';
+    musicBox.onchange = () => { try { localStorage.setItem('denoise-lab-music', musicBox.checked ? 'on' : 'off'); } catch (_) {} window.dirty?.(); };
+    const sel = pick.querySelector('select');
+    let saved = null; try { saved = localStorage.getItem('denoise-lab-stop'); } catch (_) {}
+    const apply = v => { stop.value = v; stop.dispatchEvent(new Event('change', {bubbles: true})); };
+    sel.value = OPTS.some(([v]) => v === saved) ? saved : 'denoise'; apply(sel.value);
+    sel.onchange = () => { try { localStorage.setItem('denoise-lab-stop', sel.value); } catch (_) {} apply(sel.value); window.dirty?.(); };
+  })();
+
   let runDialog = null, paintTimer = null;
   const elapsedNow = () => (T.st?.elapsedSeconds || 0) + (T.state === 'running' ? (Date.now() - T.polledAt) / 1000 : 0);
   const paint = () => {
@@ -1852,7 +1877,7 @@ PAGE = PAGE.replace(
   if (typeof baseRender === 'function') window.renderVariants = function () { const out = baseRender.apply(this, arguments); window.__renderCurrentModels?.(); return out; };
   // the chosen server file travels with the recipe
   const baseRecipe = window.recipe;
-  if (typeof baseRecipe === 'function') window.recipe = function () { const r = baseRecipe.apply(this, arguments); if (inputFile) r.settings.input_files = [inputFile]; return r; };
+  if (typeof baseRecipe === 'function') window.recipe = function () { const r = baseRecipe.apply(this, arguments); if (inputFile) r.settings.input_files = [inputFile]; const mb = $('musicRemoval'); if (mb) r.settings.music_removal = mb.checked; return r; };
 
   api('/api/config').then(c => {
     cfg = c;

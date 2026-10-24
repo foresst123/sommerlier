@@ -284,3 +284,15 @@ def test_status_dialog_warns_early_about_a_skipped_variant_and_does_not_flag_pen
     page = lab.PAGE
     assert "'CẢNH BÁO: ' + st.warning" in page and "' · cảnh báo'" in page
     assert "(st.state !== 'running' && v.status !== 'ok')" in page  # 'missing' while running is not an error
+
+
+def test_stop_after_is_a_visible_control_defaulting_to_denoise():
+    page = lab.PAGE
+    assert 'id="stopAfter"' in page and "OPTS.some(([v]) => v === saved) ? saved : 'denoise'" in page
+    assert "'denoise-lab-stop'" in page and "stop.insertBefore(o, stop.firstChild)" in page
+
+
+def test_music_removal_is_a_visible_toggle_that_defaults_to_off_and_travels_with_the_recipe():
+    page = lab.PAGE
+    assert 'id="musicRemoval"' in page and "musicBox.checked = musicSaved === 'on'" in page
+    assert "r.settings.music_removal = mb.checked" in page

@@ -504,3 +504,14 @@ def test_main_runs_when_preflight_passes_and_can_be_skipped(env, monkeypatch, ca
     assert "[preflight] ok:" in capsys.readouterr().out
     assert rv.main(argv(env, "--preflight-modules", "no_such_module_for_preflight",
                         "--no-preflight", "--only-ids", "none")) == 0
+
+
+def test_global_set_reaches_every_command_including_the_baseline_before_the_variants_own_set(env):
+    _, _, _, var = env
+    write_var(var, [{"chain": "dfn3", "set": {"steps.music_removal": True}}])
+    args = rv.parse_args(argv(env, "--set", "steps.music_removal=false", "--set", "pipeline.music_scope=spans"))
+    for v in rv.load_variants(var):
+        cmd = rv.build_command(v, [], args)
+        sets = [cmd[i + 1] for i, c in enumerate(cmd) if c == "--set"]
+        assert sets[:3] == [NO_EXPORT, "steps.music_removal=false", "pipeline.music_scope=spans"]
+    assert [cmd for cmd in [rv.build_command(rv.load_variants(var)[1], [], args)]][0][-2:] == ["--set", "steps.music_removal=true"]  # the variant still wins

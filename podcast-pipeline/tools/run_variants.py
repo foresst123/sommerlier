@@ -333,6 +333,8 @@ def build_command(variant, files, args, input_dir=None):
     # A comparison run is not a dataset export: keep it out of the shared clean-data folder.
     # Placed before the variant's own settings, so a variant can still override it.
     cmd += ["--set", 'outputs.clean_two_channel_dir=""']
+    for item in getattr(args, "global_set", None) or []:
+        cmd += ["--set", str(item)]
     for key, val in (variant.get("set") or {}).items():
         cmd += ["--set", f"{key}={json.dumps(val, ensure_ascii=False)}"]
     cmd += list(variant.get("extra_args") or [])
@@ -671,6 +673,9 @@ def parse_args(argv=None):
     p.add_argument("--preflight-modules", default="torch,torchaudio",
                    help="modules the interpreter must import cleanly (comma list)")
     p.add_argument("--timeout", type=float, default=0, help="seconds per variant, 0 = none")
+    p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", dest="global_set",
+                   help="main.py --set applied to EVERY variant command, baseline included, before the variant's own "
+                        "`set` (so a variant can still override it), e.g. --set steps.music_removal=false")
     args = p.parse_args(argv)
     if not args.audio_dir and not args.files:
         p.error("one of --audio-dir or --files is required")

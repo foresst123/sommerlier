@@ -208,6 +208,8 @@ def build_run(cfg, payload):
     if chunk not in (None, ""):
         entry["set"] = {"denoise.chunk_s": number(chunk), **entry["set"]}
     argv = ["--env", str(s["env"]), "--stop-after", str(s["stop_after"]), "--parallel", "1"]
+    if s.get("music_removal") is False:  # BS-RoFormer music stage off, baseline included (an absent key keeps the pipeline default)
+        argv += ["--set", "steps.music_removal=false"]
     if s.get("only_available", True):
         argv.append("--only-available")
     if s.get("resume", True):
