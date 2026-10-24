@@ -52,7 +52,8 @@ class BadRequest(Exception):
 
 class Config:
     def __init__(self, audio_roots, out_root, jobid, launcher, conda_env, conda_sh, python, dry_run):
-        self.audio_roots = [Path(p).expanduser().resolve() for p in audio_roots]
+        # --audio-root must be a folder; given a file, browse the folder that holds it
+        self.audio_roots = [(r.parent if r.is_file() else r) for r in (Path(p).expanduser().resolve() for p in audio_roots)]
         self.out_root = Path(out_root).expanduser().resolve()
         self.jobid, self.launcher = str(jobid or ""), launcher
         self.conda_env, self.conda_sh, self.python, self.dry_run = conda_env, conda_sh, python, dry_run
@@ -81,8 +82,10 @@ def list_dir(cfg, raw):
     if not raw:
         return {"path": "", "parent": None, "dirs": [str(r) for r in cfg.audio_roots], "files": [], "roots": True}
     p = safe_path(raw, cfg.audio_roots)
+    if p.is_file():
+        p = p.parent  # a file path lists the folder it sits in
     if not p.is_dir():
-        raise BadRequest(f"không phải thư mục: {raw}")
+        raise BadRequest(f"thư mục không tồn tại: {raw}")
     dirs, files = [], []
     for e in sorted(p.iterdir(), key=lambda x: x.name.lower()):
         if e.name.startswith("."):
@@ -410,6 +413,10 @@ def main(argv=None):
     if "{jobid}" in a.launcher and not a.jobid:
         ap.error("--jobid is required by the default --launcher (or pass --launcher '')")
     cfg = Config(a.audio_root, a.out_root, a.jobid, a.launcher, a.conda_env, a.conda_sh, a.python, a.dry_run)
+    for r in cfg.audio_roots:  # resolve() accepts paths that do not exist, so say so here instead of failing in the browser
+        if not r.is_dir():
+            ap.error(f"--audio-root không phải thư mục tồn tại: {r}"
+                     + (" (symlink hỏng?)" if r.is_symlink() else "") + "  -> kiểm tra: ls -ld <đường dẫn>")
     cfg.out_root.mkdir(parents=True, exist_ok=True)
     srv = ThreadingHTTPServer((a.host, a.port), make_handler(cfg, load_page()))
     print(f"[lab] http://{a.host}:{a.port}  audio={[str(r) for r in cfg.audio_roots]}  out={cfg.out_root}  "

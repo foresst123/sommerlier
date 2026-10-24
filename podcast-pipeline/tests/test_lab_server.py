@@ -106,3 +106,17 @@ def test_run_id_cannot_escape_the_runs_directory(cfg):
     p["runId"] = "../../evil"
     out = ls.start_run(cfg, p)
     assert Path(out["runDir"]).parent == cfg.out_root / "lab_runs"
+
+
+def test_file_audio_root_falls_back_to_its_folder(tmp_path):
+    f = tmp_path / "data" / "a1.mp3"
+    f.parent.mkdir()
+    f.write_bytes(b"x")
+    c = ls.Config([f], tmp_path / "out", "1", "", "som", "", "python", True)
+    assert c.audio_roots == [f.parent.resolve()]
+    assert [x["name"] for x in ls.list_dir(c, "")["files"]] == [] and ls.list_dir(c, str(f.parent))["files"][0]["name"] == "a1.mp3"
+
+
+def test_listing_a_file_path_lists_its_folder(cfg):
+    d = ls.list_dir(cfg, str(cfg.audio_roots[0] / "a.wav"))
+    assert d["path"] == str(cfg.audio_roots[0]) and [f["name"] for f in d["files"]] == ["a.wav"]
