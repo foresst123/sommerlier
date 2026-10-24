@@ -221,7 +221,13 @@ def conda_prelude(cfg):
 
 def launch_argv(cfg, argv_tail, variants_path, out_dir):
     cmd = [cfg.python, str(TOOLS / "run_variants.py"), "--variants", str(variants_path), "--out-root", str(out_dir), *argv_tail]
-    script = conda_prelude(cfg) + f"cd {shlex.quote(str(PIPELINE))} || exit 98\nexec {shlex.join(cmd)}\n"
+    # stdout goes to a file, where Python would otherwise buffer it and the log stays empty while the job runs
+    py = shlex.quote(cfg.python)
+    diag = ('echo "[lab] host=$(hostname) job=${SLURM_JOB_ID-?} step=${SLURM_STEP_ID-?} CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES-<unset>}"\n'
+            'nvidia-smi -L 2>&1 | head -8\n'
+            f'{py} -c "import torch; print(\'[lab] torch\', torch.__version__, \'cuda_available=\', torch.cuda.is_available(), \'devices=\', torch.cuda.device_count())" 2>&1 | tail -2\n')
+    script = (conda_prelude(cfg) + "export PYTHONUNBUFFERED=1\n" + diag
+              + f"cd {shlex.quote(str(PIPELINE))} || exit 98\nexec {shlex.join(cmd)}\n")
     return (shlex.split(cfg.launcher.format(jobid=cfg.jobid)) if cfg.launcher else []) + ["bash", "-lc", script], cmd
 
 
@@ -237,9 +243,28 @@ def write_status(run_dir, **fields):
     os.replace(tmp, p)
 
 
+def manifest_variants(run_dir):
+    try:
+        data = json.loads((run_dir / "out" / "variants_manifest.json").read_text())
+    except (OSError, ValueError):
+        return []
+    return [{"id": v.get("id"), "status": v.get("status"), "reason": v.get("reason")}
+            for v in data.get("variants", []) if isinstance(v, dict)]
+
+
+def manifest_problem(run_dir, vid):
+    """run_variants exits 0 for a skipped or degraded variant (no GPU work happened): say so instead of 'finished'."""
+    for v in manifest_variants(run_dir):
+        if v["id"] == vid and v["status"] != "ok":
+            return f"variant {vid}: {v['status']}" + (f" - {v['reason']}" if v.get("reason") else "")
+    return None
+
+
 def reap(proc, run_dir):
     rc = proc.wait()
-    write_status(run_dir, state="finished" if rc == 0 else "failed", returncode=rc,
+    vid = read_status(run_dir).get("id")
+    problem = manifest_problem(run_dir, vid) if rc == 0 and vid else None
+    write_status(run_dir, state="failed" if rc or problem else "finished", returncode=rc, problem=problem,
                  finishedAt=datetime.now().isoformat(timespec="seconds"), finishedEpoch=time.time())
 
 
@@ -290,6 +315,14 @@ def tail(path, n=LOG_TAIL):
         return ""
 
 
+def tail_head(path, n=4000):
+    try:
+        with open(path, "rb") as f:
+            return f.read(n).decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
 def read_status(run_dir):
     try:
         st = json.loads((run_dir / "status.json").read_text())
@@ -323,6 +356,11 @@ def run_status(cfg, rid):
     st["logTail"] = tail(run_dir / "run.log")
     # the pipeline's own progress lives in out/logs/<variant>.log, not in the runner's log
     logs = sorted((run_dir / "out" / "logs").glob("*.log"), key=lambda p: p.stat().st_mtime) if (run_dir / "out" / "logs").is_dir() else []
+    head = tail_head(run_dir / "run.log")
+    cuda = re.search(r"cuda_available=\s*(True|False)", head)
+    st["cuda"] = None if not cuda else cuda.group(1) == "True"
+    st["gpuInfo"] = [ln.strip() for ln in head.splitlines() if ln.startswith(("[lab]", "GPU "))][:6]
+    st["variants"] = manifest_variants(run_dir)
     st["pipelineLog"] = logs[-1].name if logs else ""
     st["pipelineLogTail"] = tail(logs[-1]) if logs else ""
     st["outputs"] = sorted(str(p) for p in (run_dir / "out").glob("*/*/01b_denoise/after_denoise.wav"))[:200]

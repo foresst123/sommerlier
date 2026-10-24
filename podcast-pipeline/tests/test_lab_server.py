@@ -90,6 +90,7 @@ def test_launch_script_activates_conda_before_running(cfg):
     assert full[:4] == ["srun", "--jobid=17405", "--overlap", "bash"] and full[4] == "-lc"
     script = full[-1]
     assert script.index("conda activate som") < script.index("exec python")
+    assert "export PYTHONUNBUFFERED=1" in script and script.index("PYTHONUNBUFFERED") < script.index("exec python")
     assert "run_variants.py" in plain[1]
 
 
@@ -146,3 +147,47 @@ def test_list_runs_is_newest_first_and_capped(cfg):
     runs = ls.list_runs(cfg, 2)["runs"]
     assert [r["runId"] for r in runs] == ["c1", "b1"]
     assert ls.list_runs(ls.Config([cfg.audio_roots[0]], cfg.out_root / "none", "1", "", "som", "", "python", True))["runs"] == []
+
+
+class _Done:
+    def __init__(self, rc):
+        self.rc = rc
+
+    def wait(self):
+        return self.rc
+
+
+def _finished_run(cfg, variant_status, rc=0, reason=None):
+    run_dir = Path(ls.start_run(cfg, payload(cfg))["runDir"])
+    (run_dir / "out").mkdir()
+    entries = [{"id": "none", "status": "ok"}, {"id": "t1", "status": variant_status, "reason": reason}]
+    (run_dir / "out" / "variants_manifest.json").write_text(json.dumps({"variants": entries}))
+    ls.reap(_Done(rc), run_dir)
+    return ls.run_status(cfg, "r1")
+
+
+def test_a_skipped_variant_is_a_failure_even_when_the_process_exits_zero(cfg):
+    st = _finished_run(cfg, "skipped", reason="dfn3: missing python package(s): df")
+    assert st["state"] == "failed" and st["returncode"] == 0
+    assert "skipped" in st["problem"] and "missing python package" in st["problem"]
+    assert [v["status"] for v in st["variants"]] == ["ok", "skipped"]
+
+
+def test_an_ok_variant_finishes_cleanly(cfg):
+    st = _finished_run(cfg, "ok")
+    assert st["state"] == "finished" and st["problem"] is None
+
+
+def test_a_nonzero_exit_is_a_failure(cfg):
+    assert _finished_run(cfg, "ok", rc=3)["state"] == "failed"
+
+
+def test_job_log_starts_with_gpu_facts_and_status_parses_them(cfg):
+    script = ls.launch_argv(cfg, [], Path("/x/v.json"), Path("/x/out"))[0][-1]
+    assert "nvidia-smi -L" in script and "cuda_available=" in script
+    run_dir = Path(ls.start_run(cfg, payload(cfg))["runDir"])
+    (run_dir / "run.log").write_text("[lab] host=n1 job=17405 CUDA_VISIBLE_DEVICES=0\nGPU 0: A100\n[lab] torch 2.8 cuda_available= False devices= 0\n")
+    st = ls.run_status(cfg, "r1")
+    assert st["cuda"] is False and st["gpuInfo"][1] == "GPU 0: A100"
+    (run_dir / "run.log").write_text("no diagnostics yet\n")
+    assert ls.run_status(cfg, "r1")["cuda"] is None
