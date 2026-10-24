@@ -32,23 +32,32 @@ def _conda_envs(home: Path = HOME, environ=os.environ) -> List[Path]:
 def default_candidates(home: Path = HOME, environ=os.environ) -> Dict[str, list]:
     envs = _conda_envs(home, environ)
     py = lambda name: [e / name / "bin" / "python" for e in envs]
+    # a clone / download is looked for in the usual parents: ~, ~/sommerlier, ~/models, ~/data, ~/data/models
+    parents = [home, home / "sommerlier", home / "models", home / "data", home / "data" / "models"]
+    under = lambda *names: [d / n for n in names for d in parents]
     return {
         # RE-USE (re_use, re_use_laughter): own env with mamba_ssm + the downloaded Hugging Face folder (model.safetensors)
         "REUSE_PYTHON": py("reuse"),
-        "REUSE_DIR": [home / "NemotronLabs_REUSE", home / "data" / "NemotronLabs_REUSE", home / "models" / "NemotronLabs_REUSE"],
-        "REUSE_LAUGHTER_DIR": [home / "NemotronLabs_REUSE_laughter", home / "data" / "NemotronLabs_REUSE_laughter"],
+        "REUSE_DIR": under("NemotronLabs_REUSE"),
+        "REUSE_LAUGHTER_DIR": under("NemotronLabs_REUSE_laughter"),
         # audio-separator checkpoints (rf_denoise, rf_denoise_aggr, rf_vocals_*, rf_dereverb, uvr_deecho, rf_crowd):
         # the folder with the .ckpt + .yaml + download_checks.json. The BS-RoFormer folder the pipeline already uses is reused.
-        "AUDIO_SEPARATOR_MODEL_DIR": ["$BS_ROFORMER_MODEL_DIR", home / "audio_separator_models", home / "models" / "audio_separator",
-                                      home / "data" / "audio_separator_models"],
+        "AUDIO_SEPARATOR_MODEL_DIR": ["$BS_ROFORMER_MODEL_DIR"] + under("audio_separator_models", "audio_separator"),
         # MambAttention: own env + a clone of the repo
         "MAMBATTENTION_PYTHON": py("mambattention"),
-        "MAMBATTENTION_DIR": [home / "MambAttention", home / "sommerlier" / "MambAttention", home / "models" / "MambAttention"],
-        # other backends that need a clone / checkpoint (leave out when you do not use them)
-        "URGENT26_DIR": [home / "urgent2026_challenge_track1"],
-        "URGENT26_BSRNN_CKPT": [home / "urgent2026_challenge_track1" / "bsrnn.ckpt"],
-        "DBS_TIGER_DIR": [home / "Dynamic-Band-Splitting"],
-        "DFN_MODEL_DIR": [],
+        "MAMBATTENTION_DIR": under("MambAttention"),
+        # MP-SENet (mpsenet, mpsenet_dns): a clone of yxlu-0102/MP-SENet (best_ckpt/g_best_vb and g_best_dns ship in it)
+        "MPSENET_DIR": under("MP-SENet", "MPSENet"),
+        "MPSENET_CKPT": [],            # optional: an explicit checkpoint instead of the clone's best_ckpt
+        # MossFormer2 SE 48k weights (folder holding last_best_checkpoint); the default lives under SOMMELIER_DENOISE_DIR
+        "MF2SE48_DIR": [home / ".cache" / "sommelier" / "denoise" / "MossFormer2_SE_48K"] + under("MossFormer2_SE_48K"),
+        "SOMMELIER_DENOISE_DIR": [],   # optional: default ~/.cache/sommelier/denoise
+        # BSRNN (urgent2026 track 1), DBS-Tiger: clones + checkpoint
+        "URGENT26_DIR": under("urgent2026_challenge_track1"),
+        "URGENT26_BSRNN_CKPT": [home / "urgent26_ckpt" / "bsrnn.ckpt"] + [d / "bsrnn.ckpt" for d in under("urgent2026_challenge_track1")] + under("bsrnn.ckpt"),
+        "DBS_TIGER_DIR": under("Dynamic-Band-Splitting"),
+        "DBS_TIGER_CKPT": [],          # optional: a local model.safetensors
+        "DFN_MODEL_DIR": [],           # optional: DeepFilterNet3 folder (default: the df package cache)
     }
 
 

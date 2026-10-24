@@ -1052,7 +1052,7 @@ PAGE = PAGE.replace(
     mpsenet:[['chunk_s','Chunk (giây)','select',['5','10','15']],['overlap_s','Overlap (giây)','number','1']],
     mpsenet_dns:[['chunk_s','Chunk (giây)','select',['5','10','15']],['overlap_s','Overlap (giây)','number','1']],
     bsrnn26:[['chunk_s','Chunk (giây)','select',['10','20','30']],['overlap_s','Overlap (giây)','number','2']],
-    dbs_tiger:[['window_s','Window (giây)','number','6'],['hop_s','Hop (giây)','number','3']],
+    dbs_tiger:[['window_s','Window (giây)','number','6'],['hop_s','Hop (giây)','number','3'],['auto_download','Tự tải checkpoint nếu thiếu (cần mạng)','select',['false','true']]],
     mambattention:[['chunk_s','Chunk (giây)','number','4'],['overlap_s','Overlap (giây)','number','0.5']],
     re_use:[['chunk_s','Chunk (giây)','number','5'],['hop_portion','Hop portion','number','0.5']],
     re_use_laughter:[['chunk_s','Chunk (giây)','number','5'],['hop_portion','Hop portion','number','0.5']],
@@ -1897,7 +1897,7 @@ PAGE = PAGE.replace(
   // ---- lane stack: A = source, then one lane per run (B, C, D, ...) with its recipe, to listen to and compare ----
   const lsCss = document.createElement('style');
   lsCss.textContent = '#canvasWrap .wave,#canvasWrap .track-labels,#canvasWrap .ruler,#canvasWrap .selection,#canvasWrap .playhead{display:none!important}#abCompare{display:none!important}'
-    + '#laneStack{--ls-lbl:clamp(150px,22vw,240px);position:absolute;left:8px;right:8px;top:6px;bottom:46px;display:none;flex-direction:column;min-height:0}#canvasWrap[data-ls=on] #laneStack{display:flex}#canvasWrap[data-ls=on] #emptyWaveState{display:none!important}'
+    + '#laneStack{--ls-lbl:clamp(196px,24vw,264px);position:absolute;left:8px;right:8px;top:6px;bottom:46px;display:none;flex-direction:column;min-height:0}#canvasWrap[data-ls=on] #laneStack{display:flex}#canvasWrap[data-ls=on] #emptyWaveState{display:none!important}'
     + '.ls-scroll{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;border:1px solid #1f2c35;border-radius:8px;background:#0a1016;scrollbar-width:thin}'
     + '.ls-head{position:sticky;top:0;z-index:3;display:grid;grid-template-columns:var(--ls-lbl,240px) minmax(0,1fr);background:#0c141b;border-bottom:1px solid #1f2c35;font:10px ui-monospace,monospace;color:#617480}'
     + '.ls-loop{margin-left:10px;text-transform:none;letter-spacing:0;font-weight:500;cursor:pointer;white-space:nowrap}.ls-loop input{accent-color:var(--cyan);vertical-align:-2px}'
@@ -1906,7 +1906,8 @@ PAGE = PAGE.replace(
     + '.ls-label{display:flex;align-items:center;gap:8px;padding:6px 8px;min-width:0;cursor:pointer}.ls-label:hover{background:#101b23}.ls-row.on .ls-label:hover{background:#12303a}'
     + '.ls-letter{flex:0 0 auto;width:26px;height:26px;border-radius:7px;display:grid;place-items:center;font:800 13px ui-monospace,monospace;color:#071113}'
     + '.ls-txt{min-width:0;flex:1}.ls-txt strong{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;font-size:12px;line-height:1.25;overflow:hidden;word-break:break-word}.ls-txt small{display:block;color:var(--muted);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}'
-    + '.ls-play{flex:0 0 auto;padding:4px 8px}.ls-wave{position:relative;min-width:0}.ls-wave canvas{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair}'
+    + '.ls-play{flex:0 0 auto;padding:4px 8px}.ls-del{flex:0 0 auto;padding:5px 6px;color:var(--muted);line-height:0}.ls-del:hover:not([disabled]){color:var(--red);border-color:var(--red)}.ls-del[disabled]{opacity:.3;cursor:not-allowed}.ls-del svg{width:14px;height:14px}'
+    + '.ls-wave{position:relative;min-width:0}.ls-wave canvas{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair}'
     + '.ls-note{position:absolute;inset:0;display:grid;place-items:center;color:#617480;font-size:11px;pointer-events:none}'
     + '.ls-over{position:absolute;top:0;bottom:0;left:var(--ls-lbl,240px);right:0;pointer-events:none;z-index:2}.ls-sel{position:absolute;top:0;bottom:0;background:#f4b66022;border-left:1px solid var(--amber);border-right:1px solid var(--amber)}'
     + '.ls-ph{position:absolute;top:0;bottom:0;width:0;border-left:1px solid #fff;box-shadow:0 0 6px #fff8}';
@@ -1990,8 +1991,9 @@ PAGE = PAGE.replace(
       LS.sig = sig;
       rows.innerHTML = model.map(m => {
         const on = m.key === LS.listening, btn = m.loading ? '<span class="ls-play btn" aria-busy="true">…</span>' : m.playable ? `<button class="btn ls-play" type="button" data-play="${esc(m.key)}" aria-label="Nghe kênh ${esc(m.letter)}">${on && playing() ? '❚❚' : '▶'}</button>` : '';
+        const trash = !m.run ? '' : `<button class="btn ls-del" type="button" data-del="${esc(m.key)}" aria-label="Xóa kênh ${esc(m.letter)}" title="${/đang chạy/.test(m.sub) ? 'Đang chạy, chưa xóa được' : 'Xóa khỏi danh sách (file trên server vẫn còn, có thể hoàn tác)'}"${/đang chạy/.test(m.sub) ? ' disabled' : ''}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 10v6M14 10v6"/></svg></button>`;
         const note = m.peaks ? '' : `<div class="ls-note">${m.loading ? 'đang nạp audio…' : m.failed ? 'không nạp được output' : m.key === 'A' ? 'chọn audio đầu vào' : m.playable ? 'bấm ▶ để nạp và nghe' : (m.run && /đang chạy/.test(m.sub) ? 'đang chạy…' : 'chưa có output')}</div>`;
-        return `<div class="ls-row${on ? ' on' : ''}" data-key="${esc(m.key)}" title="${esc(m.tip)}"><div class="ls-label"><span class="ls-letter" style="background:${m.color}">${esc(m.letter)}</span><div class="ls-txt"><strong>${esc(m.title)}</strong><small>${esc(m.sub)}</small></div>${btn}</div><div class="ls-wave"><canvas></canvas>${note}</div></div>`;
+        return `<div class="ls-row${on ? ' on' : ''}" data-key="${esc(m.key)}" title="${esc(m.tip)}"><div class="ls-label"><span class="ls-letter" style="background:${m.color}">${esc(m.letter)}</span><div class="ls-txt"><strong>${esc(m.title)}</strong><small>${esc(m.sub)}</small></div>${btn}${trash}</div><div class="ls-wave"><canvas></canvas>${note}</div></div>`;
       }).join('') + '<div class="ls-over" id="lsOver"><div class="ls-sel"></div><div class="ls-ph"></div></div>';
       rows.querySelectorAll('.ls-row').forEach((row, i) => drawRow(row, model[i]));
       if (model.length > LS.counted && LS.counted) rows.lastElementChild.previousElementSibling?.scrollIntoView({block: 'nearest'});
@@ -2057,9 +2059,25 @@ PAGE = PAGE.replace(
     refresh(true);
   };
 
+  // ---- delete a lane: hides the run from the list (the files on the server stay), with the page's own undo ----
+  const deleteLane = key => {
+    const all = allRuns(), run = all.find(x => x.r.id === key); if (!run) return;
+    const {v, r} = run, letter = letterOf(all.indexOf(run));
+    if (r.status === 'running' || r.status === 'submitting') return;
+    undoSnapshot = {type: 'run', index: variants.indexOf(v), run: r, metrics: {dns: v.dns, wer: v.wer, der: v.der, ecapa: v.ecapa, art: v.art, status: v.status, activeRunId: v.activeRunId}};
+    const wasListening = LS.listening === key;
+    v.runs.splice(v.runs.indexOf(r), 1); if (v.activeRunId === key) v.activeRunId = v.runs.at(-1)?.id || null;
+    const a = runAudio[key]; if (a) { try { URL.revokeObjectURL(a.url); } catch (_) {} delete runAudio[key]; }
+    LS.peaks.delete(key); LS.failed.delete(key); LS.recent = LS.recent.filter(x => x !== key);
+    if (wasListening) { LS.listening = 'A'; const p = $('player'); if (audioUrl.A) { const keep = current; selectLane('A'); seekTo(keep); } else { p.pause(); p.removeAttribute('src'); } }
+    if (!v.runs.length) { v.status = 'draft'; v.dns = v.wer = v.der = v.ecapa = '—'; v.art = 'pending'; }
+    window.renderVariants?.(); window.dirty?.(); showUndo(`Đã xóa kênh ${letter} khỏi danh sách`);
+  };
+
   // ---- pointer: click seeks, drag selects a stretch to loop, Ctrl/Alt+wheel zooms, Shift+wheel pans ----
   const timeAt = (e, el) => { const r = el.getBoundingClientRect(); return Math.max(0, Math.min(duration, viewStart + (e.clientX - r.left) / Math.max(1, r.width) * viewSpan)); };
   stack.addEventListener('click', e => {
+    const del = e.target.closest('[data-del]'); if (del) { if (!del.disabled) deleteLane(del.dataset.del); return; }
     const btn = e.target.closest('[data-play]'); if (btn) { const k = btn.dataset.play; if (k === LS.listening && playing()) { $('player').pause(); $('play').textContent = '▶'; refresh(true); } else listen(k, true); return; }
     const lab = e.target.closest('.ls-label'); if (lab) listen(lab.parentElement.dataset.key, false);
   });

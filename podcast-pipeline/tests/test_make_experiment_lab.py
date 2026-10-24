@@ -336,3 +336,14 @@ def test_audio_separator_models_offer_an_auto_download_switch():
     # rf_denoise & co are skipped when no model folder is set; the dialog lets a run fetch the checkpoint (needs network)
     assert page.count("['auto_download','Tự tải checkpoint nếu thiếu (cần mạng)','select',['false','true']]") >= 8
     assert "rf_denoise:[['auto_download'" in page and "rf_crowd:[['auto_download'" in page
+
+
+def test_each_run_lane_has_a_trash_button_that_only_hides_it_and_can_be_undone():
+    page = lab.PAGE
+    assert 'data-del="${esc(m.key)}"' in page and "const deleteLane = key =>" in page
+    # same undo record as the page's own deleteRun, so the toast's "Hoàn tác" restores the lane
+    assert "undoSnapshot = {type: 'run', index: variants.indexOf(v), run: r" in page and "showUndo(`Đã xóa kênh ${letter} khỏi danh sách`)" in page
+    # a running lane cannot be deleted, and the title says the server files stay
+    assert "if (r.status === 'running' || r.status === 'submitting') return;" in page and "file trên server vẫn còn" in page
+    # the source lane has no trash button (only run rows build one)
+    assert "const trash = !m.run ? ''" in page

@@ -69,3 +69,27 @@ def test_lab_server_exports_what_lab_env_resolved(tmp_path):
     cfg = ls.Config([tmp_path], tmp_path / "out", "1", "srun --jobid={jobid} --overlap", "som", "", "python", True, resolved)
     script = ls.launch_argv(cfg, [], Path("/x/v.json"), Path("/x/out"))[0][-1]
     assert f"export REUSE_DIR={home / 'NemotronLabs_REUSE'}" in script and script.index("export REUSE_DIR") < script.index("exec python")
+
+
+def test_every_variable_the_denoise_backends_read_is_covered():
+    """lab_env must know each env var the backends consult, so none of them silently skips a variant."""
+    import re
+    names = set()
+    for f in (Path(__file__).resolve().parents[1] / "models" / "denoise").glob("*.py"):
+        names |= set(re.findall(r"""(?:environ\.get\(|getenv\(|dir_env\s*=\s*|ckpt_env\s*=\s*)\s*["']([A-Z][A-Z0-9_]{3,})["']""", f.read_text(encoding="utf-8")))
+    known = set(le.default_candidates(Path("/nonexistent"), {}))
+    assert names - known - {"BS_ROFORMER_MODEL_DIR"} == set(), sorted(names - known)
+
+
+def test_repo_clones_are_found_in_the_usual_parent_folders(tmp_path):
+    home = make(tmp_path, "sommerlier/MP-SENet", "data/models/Dynamic-Band-Splitting", "models/NemotronLabs_REUSE")
+    out, _ = le.resolve(environ={}, home=home)
+    assert out["MPSENET_DIR"] == str(home / "sommerlier/MP-SENet")
+    assert out["DBS_TIGER_DIR"] == str(home / "data/models/Dynamic-Band-Splitting")
+    assert out["REUSE_DIR"] == str(home / "models/NemotronLabs_REUSE")
+
+
+def test_the_documented_bsrnn_checkpoint_location_is_found(tmp_path):
+    home = make(tmp_path, "urgent26_ckpt/bsrnn.ckpt")
+    out, _ = le.resolve(environ={}, home=home)
+    assert out["URGENT26_BSRNN_CKPT"] == str(home / "urgent26_ckpt/bsrnn.ckpt")   # scripts/denoise_bsrnn_urgent.md
