@@ -93,3 +93,21 @@ results/
 /main_GPU*.log
 # Loose patch files kept at the repo root while porting changes; not part of the code.
 /*.patch
+
+# Denoise models, caches & lab outputs
+cache/
+podcast-pipeline/cache/
+external_models/
+audio_separator_models/
+lab_runs/
+*.ckpt
+*.pth
+*.safetensors
+*.onnx
+*.npy
+*.wav
+*.mp3
+*.flac
+*.lock
+podcast-pipeline/logs/
+logs/

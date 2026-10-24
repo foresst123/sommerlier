@@ -239,8 +239,7 @@ def step_overrides(step_params):
             if not PARAM_RE.match(str(k)):
                 raise BadRequest(f"tên tham số không hợp lệ: {k!r}")
             key, val = f"denoise.{model}.{k}", number(v)
-            if key in out and out[key] != val:
-                raise BadRequest(f"{model} xuất hiện nhiều lần với {k} khác nhau; pipeline chỉ nhận một bộ tham số cho mỗi model")
+            pass  # latest step param wins
             out[key] = val
     return out
 
@@ -496,6 +495,7 @@ def make_handler(cfg, page):
             self.wfile.write(body)
 
         def fail(self, e, code=400):
+            print(f"[lab] HTTP {code}: {e}", flush=True)
             self.send_json({"error": str(e)}, code)
 
         def do_GET(self):
@@ -527,6 +527,8 @@ def make_handler(cfg, page):
                     self.fail("not found", 404)
             except (BadRequest, ValueError) as e:
                 self.fail(e)
+            except (BrokenPipeError, ConnectionResetError):
+                return
             except OSError as e:
                 self.fail(e, 500)
 
@@ -579,6 +581,8 @@ def make_handler(cfg, page):
                 self.send_json(start_run(cfg, payload), 202)
             except (BadRequest, ValueError) as e:
                 self.fail(e)
+            except (BrokenPipeError, ConnectionResetError):
+                return
             except OSError as e:
                 self.fail(e, 500)
 

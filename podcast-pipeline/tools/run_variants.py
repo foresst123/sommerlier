@@ -179,7 +179,8 @@ def load_variants(path):
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
     entries = list(data.get("variants") or [])
-    entries.insert(0, {"chain": data.get("baseline", "none")})
+    if not (entries and all(isinstance(e, dict) and e.get("group") == "lab" for e in entries)):
+        entries.insert(0, {"chain": data.get("baseline", "none")})
     out, by_id, dups = [], {}, []
     for entry in entries:
         if isinstance(entry, str):
@@ -210,7 +211,7 @@ def load_variants(path):
     if dups:
         raise SystemExit(f"duplicate variant id(s) with different settings: {sorted(set(dups))}; "
                          "give each variant a unique 'id'")
-    if out[0]["id"] != "none":
+    if out[0]["id"] != "none" and not all(v.get("group") == "lab" for v in out):
         out.insert(0, {"id": "none", "chain": [], "label": "none", "spec": "", "group": None,
                        "note": None, "tag": None, "set": {}, "music_separator": None,
                        "extra_args": []})

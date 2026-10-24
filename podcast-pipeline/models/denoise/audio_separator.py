@@ -202,7 +202,7 @@ class AudioSeparatorBackend(DenoiseBackend):
         wanted = {
             "output_dir": work,
             "output_format": "WAV",
-            "use_autocast": False,
+            "use_autocast": bool(self.cfg.get("use_autocast", True)) and gpu and not (self.native_fp16 and gpu),
             "use_native_fp16": self.native_fp16 and gpu,
             "log_level": 40,
             "normalization_threshold": self.norm_threshold,
@@ -211,7 +211,7 @@ class AudioSeparatorBackend(DenoiseBackend):
             wanted["model_file_dir"] = folder
         if self.chunk_duration is not None:
             wanted["chunk_duration"] = float(self.chunk_duration)
-        mdxc = {}
+        mdxc = {"overlap": int(self.cfg.get("overlap", 2)), "batch_size": int(self.cfg.get("batch_size", 4))}
         for key, cast in (("segment_size", int), ("overlap", int), ("batch_size", int)):
             if self.cfg.get(key) is not None:
                 mdxc[key] = cast(self.cfg[key])
@@ -378,5 +378,29 @@ class RFCrowdBackend(AudioSeparatorBackend):
     stem_keep = ("other",)
 
 
-ALIASES = (RFVocals3005Backend, RFVocalsKimBackend, RFDenoiseBackend, RFDenoiseAggrBackend,
-           RFDereverbBackend, UVRDeEchoBackend, RFCrowdBackend)
+class RFVocalsResurrectionBackend(AudioSeparatorBackend):
+    """unwa BS-Roformer Vocals Resurrection; 'vocals' stem."""
+    name = "rf_vocals_resurrection"
+    checkpoint = "bs_roformer_vocals_resurrection_unwa.ckpt"
+    config_file = "config_bs_roformer_vocals_resurrection_unwa.yaml"
+    stem_keep = ("vocals", "other")
+
+
+class RFDereverbAnvuewBackend(AudioSeparatorBackend):
+    """anvuew Mel-Band Roformer de-reverb (SDR 19.1729); 'noreverb' stem."""
+    name = "rf_dereverb_anvuew"
+    checkpoint = "dereverb_mel_band_roformer_anvuew_sdr_19.1729.ckpt"
+    config_file = "dereverb_mel_band_roformer_anvuew.yaml"
+    stem_keep = ("noreverb",)
+
+
+class RFDeEchoV2Backend(AudioSeparatorBackend):
+    """Sucial Mel-Band Roformer de-reverb-echo V2 (SDR 13.4843); 'noreverb' stem."""
+    name = "rf_deecho_v2"
+    checkpoint = "dereverb-echo_mel_band_roformer_sdr_13.4843_v2.ckpt"
+    config_file = "config_dereverb-echo_mel_band_roformer_sdr_13.4843_v2.yaml"
+    stem_keep = ("noreverb", "no reverb", "dry")
+
+
+ALIASES = (RFVocals3005Backend, RFVocalsResurrectionBackend, RFVocalsKimBackend, RFDenoiseBackend, RFDenoiseAggrBackend,
+           RFDereverbBackend, RFDereverbAnvuewBackend, RFDeEchoV2Backend, UVRDeEchoBackend, RFCrowdBackend)
