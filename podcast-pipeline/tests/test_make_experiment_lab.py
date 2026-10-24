@@ -243,7 +243,8 @@ def test_pinned_ab_has_playback_only_loudness_match():
     assert "Cần đủ 2 audio" in page and "Chọn một đoạn" in page
     # The control is deliberately limited to the player element; it must not
     # write variant settings, recipes, or export artifacts.
-    assert "v.settings" not in page[page.index('id=\"abLoudnessMatch\"'):page.index('</style></body></html>', page.index('id=\"abLoudnessMatch\"'))]
+    start = page.index('id=\"abLoudnessMatch\"')
+    assert "v.settings" not in page[start:page.index('</script>', start)]
 
 
 NODE = shutil.which("node")

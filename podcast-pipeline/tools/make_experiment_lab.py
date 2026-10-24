@@ -376,7 +376,7 @@ PAGE = PAGE.replace(
 # The model editor is modal-only; never reserve a permanent right sidebar.
 PAGE = PAGE.replace(
     "</body></html>",
-    """<style>.inspector{display:none!important}@media (min-width:1401px){.workspace{grid-template-columns:240px minmax(0,1fr)!important}}</style></body></html>""",
+    """<style>.inspector{display:none!important}</style></body></html>""",
 )
 
 # Hard-wire the Models button to the editor modal. This intentionally does not
@@ -469,6 +469,7 @@ PAGE = PAGE.replace(
     host.querySelectorAll('[data-edit-model]').forEach(btn=>btn.onclick=e=>{e.stopPropagation();window.__openModelEditor?.(Number(btn.dataset.editModel));});
   };
   const render = () => { labels(); renderCurrentModels(); };
+  window.__renderCurrentModels = renderCurrentModels;
   render();
   render();
 })();
@@ -531,7 +532,7 @@ PAGE = PAGE.replace(
   plan.innerHTML = '<div class="run-plan-title"><strong>Chạy thí nghiệm</strong><span id="runScope">chỉ hậu xử lý</span></div>' +
     '<p id="runReason">Đang dùng lại kết quả model gần nhất.</p>' +
     '<div class="run-plan-actions"><button class="btn primary" id="runNow">Chạy</button><button class="btn" id="runModel">Chạy lại model</button></div>';
-  editor.insertBefore(plan, actions || editor.firstChild);
+  (actions?.parentNode || editor).insertBefore(plan, actions || null);
   const css = document.createElement('style');
   css.textContent = '.run-plan{border:1px solid #31545b;border-radius:8px;padding:9px;background:#10252a;margin:9px 0}.run-plan-title{display:flex;justify-content:space-between;gap:8px;align-items:center}.run-plan-title strong{font-size:12px}.run-plan-title span{font-size:10px;color:var(--cyan);white-space:nowrap}.run-plan p{margin:5px 0;color:#aab8c3;font-size:10px}.run-plan-actions{display:flex;gap:6px}.run-plan-actions .btn{flex:1;font-size:11px;padding:6px 7px}.run-plan.needs-model{border-color:#765d2b;background:#292217}.run-plan.needs-model .run-plan-title span{color:var(--amber)}.compact-copy{font-size:10px!important}.inspector-card .warning{font-size:9px}.lab-hidden{display:none!important}';
   document.head.appendChild(css);
@@ -598,7 +599,7 @@ PAGE = PAGE.replace(
       fetch('/api/experiment/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)}).then(res => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json().catch(() => ({}));
-      }).then(() => { r.status='accepted'; delete r.error; delete r.errorMessage; if (typeof renderVariants === 'function') renderVariants(); text('runReason', 'Backend đã nhận công thức.'); if (typeof showNotice === 'function') showNotice('Backend đã nhận công thức.'); updatePlan(); })
+      }).then(resp => { r.serverRun = {runId: resp.runId, runDir: resp.runDir, out: resp.out}; r.status='accepted'; delete r.error; delete r.errorMessage; if (typeof renderVariants === 'function') renderVariants(); text('runReason', 'Backend đã nhận công thức.'); if (typeof showNotice === 'function') showNotice('Backend đã nhận công thức.'); window.__pollRun?.(r, v); updatePlan(); })
         .catch(error => { r.status=runFailureStatus(error); r.error=String(error?.message || error); r.errorMessage=runErrorMessage(error); if (typeof renderVariants === 'function') renderVariants(); text('runReason', r.errorMessage); if (typeof showNotice === 'function') showNotice(r.errorMessage); updatePlan(); });
     }
     forceModel = false;
@@ -1030,9 +1031,13 @@ PAGE = PAGE.replace(
     rf_denoise_aggr:['RoFormer Aggressive','Khử mạnh'], rf_dereverb:['RF Dereverb','Giảm vang'],
     uvr_deecho:['UVR DeEcho','Giảm vọng'], rf_crowd:['RF Crowd','Giảm tiếng đám đông'],
     audio_separator:['Audio Separator','Tách audio tổng quát'], re_use:['RE-USE','Khôi phục giọng'],
-    re_use_laughter:['RE-USE Laughter','Giữ tiếng cười']
+    re_use_laughter:['RE-USE Laughter','Giữ tiếng cười'],
+    blend:['Blend (blendN)','Trộn N% audio gốc của cả chuỗi vào kết quả hiện tại'],
+    dry:['Dry (dryN)','Trộn N% đầu vào của model liền trước vào kết quả hiện tại']
   };
   const fields = {
+    blend:[['percent','Phần trăm audio gốc (0-100)','number','50']],
+    dry:[['percent','Phần trăm đầu vào bước trước (0-100)','number','25']],
     dfn3:[['chunk_s','Chunk (giây)','select',['15','30','45','60']],['overlap_s','Overlap (giây)','number','2']],
     mf2se48:[['chunk_s','Chunk (giây)','select',['8','12','15']],['overlap_s','Overlap (giây)','number','1']],
     mpsenet:[['chunk_s','Chunk (giây)','select',['5','10','15']],['overlap_s','Overlap (giây)','number','1']],
@@ -1067,7 +1072,7 @@ PAGE = PAGE.replace(
       modal.querySelector('#finalAddTitle').textContent=`Thêm ${catalog[chosen][0]}`;
       modal.querySelector('#finalModelSearch').oninput=e=>drawCards(e.target.value);
       modal.querySelector('#finalAddClose').onclick=close;modal.querySelector('#finalAddCancel').onclick=close;
-      modal.querySelector('#finalAddSave').onclick=()=>{const v=typeof window.selectedVariant==='function'?window.selectedVariant():null;if(!v)return;v.chain=Array.isArray(v.chain)?v.chain:[];v.stepParams=Array.isArray(v.stepParams)?v.stepParams:[];const step={model:chosen};params.querySelectorAll('[data-param]').forEach(input=>step[input.dataset.param]=input.type==='number'?Number(input.value):input.value);v.chain.push(chosen);v.stepParams.push(step);v.model=chosen;v.status='draft';v.draftChanged=true;if(typeof window.renderVariants==='function')window.renderVariants();if(typeof window.dirty==='function')window.dirty();close();};
+      modal.querySelector('#finalAddSave').onclick=()=>{const v=typeof window.selectedVariant==='function'?window.selectedVariant():null;if(!v)return;v.chain=Array.isArray(v.chain)?v.chain:[];v.stepParams=Array.isArray(v.stepParams)?v.stepParams:[];const step={model:chosen};params.querySelectorAll('[data-param]').forEach(input=>step[input.dataset.param]=input.type==='number'?Number(input.value):input.value);const token=(chosen==='blend'||chosen==='dry')?chosen+Math.min(100,Math.max(0,Math.round(Number(step.percent)||0))):chosen;v.chain.push(token);v.stepParams.push(step);v.model=token;v.status='draft';v.draftChanged=true;if(typeof window.renderVariants==='function')window.renderVariants();window.__renderCurrentModels?.();if(typeof window.dirty==='function')window.dirty();close();};
     };
     window.__finalAddModelOwner = event => { event?.preventDefault?.(); event?.stopImmediatePropagation?.(); render(); modal.classList.add('open'); modal.style.display='flex'; modal.style.visibility='visible'; modal.querySelector('#finalModelSearch').focus(); };
     button.onclick=window.__finalAddModelOwner;
@@ -1437,6 +1442,8 @@ PAGE = PAGE.replace(
       ? [root, ...root.querySelectorAll('*')]
       : [...root.querySelectorAll('*')];
     nodes.forEach(node => {
+      // Never translate inside <style>/<script>: a key like 'low' turns "overflow" into "overfthấp" and silently drops the declaration.
+      if (/^(STYLE|SCRIPT)$/.test(node.tagName) || node.closest?.('[data-raw]')) return;
       if (node.children.length === 0 && node.textContent) {
         let value = node.textContent;
         Object.entries(copy).forEach(([from,to]) => { value = value.split(from).join(to); });
@@ -1550,6 +1557,172 @@ PAGE = PAGE.replace(
 </script><style>
 .ab-compare{display:flex;align-items:center;gap:3px;min-width:0;max-width:55%;overflow:hidden}.ab-compare button{border:1px solid var(--line);background:#141e27;color:var(--muted);padding:4px 7px;border-radius:5px;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ab-compare button.active{background:var(--cyan);color:#071113;border-color:var(--cyan)}.ab-compare button:disabled{opacity:.42;cursor:not-allowed}.ab-compare #abState{color:var(--muted);font-size:9px;white-space:nowrap}.ab-compare #abClear{margin-left:2px}@media(max-width:620px){.ab-compare{max-width:62%;}.ab-compare #abState,.ab-compare #abClear{display:none}}
 </style></body></html>''',
+)
+
+
+# Server-side workflow (needs tools/lab_server.py): input audio is picked on the server, "Chạy" starts the real
+# job there, and blendN/dryN steps are edited in place. Without the backend everything falls back to the old
+# static behaviour (native file picker, no polling).
+PAGE = PAGE.replace(
+    "</body></html>",
+    r'''<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const api = async (url, opts) => {
+    const res = await fetch(url, opts), body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    return body;
+  };
+  const PSEUDO = /^(blend|dry)(\d{1,3})$/;
+  const PREVIEW_LIMIT = 150 * 1048576;
+  let cfg = null, inputFile = null;
+
+  const style = document.createElement('style');
+  style.textContent = '.srv-backdrop{position:fixed;inset:0;background:#0009;display:none;align-items:center;justify-content:center;z-index:40}.srv-backdrop.open{display:flex}'
+    + '.srv-box{width:min(640px,calc(100vw - 24px));max-height:min(640px,calc(100vh - 24px));display:flex;flex-direction:column;background:#101a22;border:1px solid #38515d;border-radius:10px;box-shadow:0 24px 80px #000b}'
+    + '.srv-box header{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid #26333e}.srv-path{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font:12px ui-monospace,monospace;color:#b8c4cc}'
+    + '.srv-list{overflow:auto;padding:6px;min-height:120px}.srv-item{display:flex;justify-content:space-between;gap:10px;width:100%;text-align:left;padding:8px 10px;border:1px solid transparent;border-radius:6px;background:none}'
+    + '.srv-item:hover{background:#17252c;border-color:#30434f}.srv-item small{color:var(--muted)}.srv-box footer{padding:10px 14px;border-top:1px solid #26333e;color:var(--muted);font-size:11px;min-height:34px}'
+    + '.srv-body{padding:14px;display:grid;gap:10px}.srv-body label{display:grid;gap:4px;font-size:12px;color:var(--muted)}.srv-body input{border:1px solid var(--line);background:#0b1117;color:var(--text);border-radius:6px;padding:7px 8px}'
+    + '.srv-actions{display:flex;gap:8px;justify-content:flex-end;padding:0 14px 14px}';
+  document.head.appendChild(style);
+
+  const makeDialog = (id, label) => {
+    const el = document.createElement('div');
+    el.className = 'srv-backdrop'; el.id = id;
+    el.innerHTML = `<div class="srv-box" role="dialog" aria-modal="true" aria-label="${label}"></div>`;
+    el.addEventListener('mousedown', e => { if (e.target === el) el.classList.remove('open'); });
+    document.body.appendChild(el);
+    return el;
+  };
+
+  // ---- pick the input audio on the server ----
+  let picker = null, current = null;
+  const fmtSize = n => n > 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
+  const note = text => { const n = $('srvNote'); if (n) n.textContent = text; };
+  const browse = async path => {
+    try {
+      const d = await api('/api/files?path=' + encodeURIComponent(path || ''));
+      current = d;
+      $('srvPath').textContent = d.roots ? 'Thư mục gốc được phép' : d.path;
+      $('srvUp').disabled = d.roots;
+      const base = d.roots ? '' : d.path + '/';
+      $('srvList').innerHTML = d.dirs.map(n => `<button type="button" class="srv-item" data-dir="${esc(base + n)}"><span>📁 ${esc(d.roots ? n : n)}</span></button>`).join('')
+        + d.files.map(f => `<button type="button" class="srv-item" data-file="${esc(base + f.name)}" data-name="${esc(f.name)}" data-size="${f.size}"><span>${esc(f.name)}</span><small>${fmtSize(f.size)}</small></button>`).join('')
+        || '<div style="padding:14px;color:var(--muted)">Thư mục trống</div>';
+      note(d.roots ? 'Chọn thư mục chứa audio.' : `${d.files.length} file audio · bấm một file để dùng làm audio đầu vào`);
+    } catch (e) { note('Lỗi: ' + e.message); }
+  };
+  const choose = async (full, name, size) => {
+    try {
+      if (size > PREVIEW_LIMIT) {
+        note(`File ${fmtSize(size)} quá lớn để xem waveform; vẫn dùng làm đầu vào.`);
+        $('sourceName').textContent = `${name} · ${fmtSize(size)} (không xem trước)`;
+      } else {
+        note('Đang tải audio từ server…');
+        const res = await fetch('/api/audio?path=' + encodeURIComponent(full));
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const blob = await res.blob();
+        await window.loadAudio(new File([blob], name, {type: blob.type}), 'A');
+      }
+      inputFile = full;
+      const dir = full.slice(0, full.lastIndexOf('/'));
+      if ($('audioDir')) { $('audioDir').value = dir; $('audioDir').dispatchEvent(new Event('input', {bubbles: true})); }
+      picker.classList.remove('open');
+      if (typeof window.dirty === 'function') window.dirty();
+    } catch (e) { note('Không tải được: ' + e.message); }
+  };
+  const openPicker = () => {
+    if (!picker) {
+      picker = makeDialog('serverPicker', 'Chọn audio trên server');
+      picker.firstChild.innerHTML = '<header><strong>Audio trên server</strong><span class="srv-path" id="srvPath"></span><button class="btn" type="button" id="srvUp">Lên</button><button class="btn" type="button" id="srvClose">Đóng</button></header><div class="srv-list" id="srvList"></div><footer id="srvNote"></footer>';
+      $('srvClose').onclick = () => picker.classList.remove('open');
+      $('srvUp').onclick = () => browse(current && !current.roots ? current.parent : '');
+      $('srvList').onclick = e => {
+        const b = e.target.closest('.srv-item'); if (!b) return;
+        if (b.dataset.dir) browse(b.dataset.dir); else choose(b.dataset.file, b.dataset.name, Number(b.dataset.size));
+      };
+      picker.addEventListener('keydown', e => { if (e.key === 'Escape') picker.classList.remove('open'); });
+    }
+    picker.classList.add('open');
+    browse(current && !current.roots ? current.path : (cfg.audioRoots.length === 1 ? cfg.audioRoots[0] : ''));
+    $('srvClose').focus();
+  };
+
+  // ---- edit a blendN / dryN step ----
+  let pctDialog = null, pctIndex = -1;
+  const openPct = index => {
+    const v = window.selectedVariant?.(), m = PSEUDO.exec(v?.chain?.[index] || ''); if (!m) return;
+    if (!pctDialog) {
+      pctDialog = makeDialog('pctDialog', 'Sửa bước trộn');
+      pctDialog.firstChild.innerHTML = '<header><strong id="pctTitle"></strong></header><div class="srv-body"><label><span id="pctHelp"></span><input id="pctValue" type="number" min="0" max="100" step="1"></label></div><div class="srv-actions"><button class="btn danger" type="button" id="pctDelete">Xóa bước</button><button class="btn" type="button" id="pctCancel">Hủy</button><button class="btn primary" type="button" id="pctSave">Lưu</button></div>';
+      $('pctCancel').onclick = () => pctDialog.classList.remove('open');
+      const finish = () => { pctDialog.classList.remove('open'); v2().status = 'draft'; v2().draftChanged = true; window.renderVariants?.(); window.dirty?.(); };
+      const v2 = () => window.selectedVariant();
+      $('pctSave').onclick = () => {
+        const n = Math.min(100, Math.max(0, Math.round(Number($('pctValue').value) || 0))), kind = PSEUDO.exec(v2().chain[pctIndex])[1];
+        v2().chain[pctIndex] = kind + n;
+        v2().model = v2().chain[v2().chain.length - 1];
+        finish();
+      };
+      $('pctDelete').onclick = () => { if (v2().chain.length > 1) { v2().chain.splice(pctIndex, 1); v2().model = v2().chain[v2().chain.length - 1]; finish(); } };
+      pctDialog.addEventListener('keydown', e => { if (e.key === 'Escape') pctDialog.classList.remove('open'); if (e.key === 'Enter') $('pctSave').click(); });
+    }
+    pctIndex = index;
+    $('pctTitle').textContent = `Sửa ${m[1]}${m[2]}`;
+    $('pctHelp').textContent = m[1] === 'blend' ? 'Phần trăm audio gốc của cả chuỗi trộn vào kết quả (0-100)' : 'Phần trăm đầu vào của model liền trước trộn vào kết quả (0-100)';
+    $('pctValue').value = m[2];
+    $('pctDelete').disabled = v.chain.length <= 1;
+    pctDialog.classList.add('open');
+    $('pctValue').focus(); $('pctValue').select();
+  };
+  // window capture runs before the older document-level row handlers, so a pseudo row never reaches the model editor
+  window.addEventListener('click', e => {
+    const b = e.target.closest?.('[data-edit-model],[data-current-model]'); if (!b) return;
+    const i = Number(b.dataset.editModel ?? b.dataset.currentModel);
+    if (PSEUDO.test(window.selectedVariant?.()?.chain?.[i] || '')) { e.preventDefault(); e.stopImmediatePropagation(); openPct(i); }
+  }, true);
+
+  // ---- follow a started run ----
+  window.__pollRun = (r, v) => {
+    const sid = r.serverRun?.runId; if (!sid) return;
+    // runReason shows paths and log lines verbatim: data-raw keeps the locale pass from rewriting them
+    const say = (text, notice = text) => { const n = $('runReason'); if (n) { n.setAttribute('data-raw', ''); n.textContent = text; } if (typeof showNotice === 'function') showNotice(notice); };
+    const tick = async () => {
+      let again = false;
+      try {
+        const st = await api('/api/experiment/status?runId=' + encodeURIComponent(sid));
+        const last = (st.logTail || '').trim().split('\n').filter(Boolean).pop() || '';
+        if (st.state === 'running') { r.status = 'running'; again = true; say('Đang chạy trên GPU · ' + last.slice(0, 140), 'Đang chạy trên GPU'); }
+        else if (st.state === 'finished') { r.status = 'accepted'; say(`Hoàn tất · ${st.outputs?.length || 0} file denoise · ${st.out}`, 'Hoàn tất'); }
+        else if (st.state === 'dry-run') { r.status = 'accepted'; say('Dry-run: đã ghi ' + st.runDir + ', chưa chạy', 'Dry-run: chưa chạy'); }
+        else { r.status = 'failed'; r.errorMessage = `Lỗi (${st.state}, mã ${st.returncode ?? '?'}) · ${last.slice(0, 160)}`; say(r.errorMessage, 'Lỗi khi chạy'); }
+      } catch (e) { again = true; }
+      window.renderVariants?.(); window.dirty?.();
+      if (again) setTimeout(tick, 5000);
+    };
+    setTimeout(tick, 1500);
+  };
+
+  // renderVariants clears the chain list; always rebuild it afterwards
+  const baseRender = window.renderVariants;
+  if (typeof baseRender === 'function') window.renderVariants = function () { const out = baseRender.apply(this, arguments); window.__renderCurrentModels?.(); return out; };
+  // the chosen server file travels with the recipe
+  const baseRecipe = window.recipe;
+  if (typeof baseRecipe === 'function') window.recipe = function () { const r = baseRecipe.apply(this, arguments); if (inputFile) r.settings.input_files = [inputFile]; return r; };
+
+  api('/api/config').then(c => {
+    cfg = c;
+    const fa = $('fileA');
+    if (fa) fa.click = () => openPicker();
+    if ($('audioDir') && c.audioRoots.length) { $('audioDir').value = c.audioRoots[0]; }
+    const info = `Backend · ${c.jobid ? 'srun --jobid=' + c.jobid : 'chạy cục bộ'} · conda ${c.condaEnv}${c.dryRun ? ' · DRY-RUN' : ''}`;
+    const bar = $('command'); if (bar) { bar.dataset.backend = info; }
+    const lane = $('laneState'); if (lane) lane.title = info;
+  }).catch(() => { cfg = null; });
+})();
+</script></body></html>''',
 )
 
 
