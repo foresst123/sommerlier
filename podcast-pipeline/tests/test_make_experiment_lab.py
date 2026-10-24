@@ -273,3 +273,14 @@ def test_add_step_is_a_two_step_dialog_with_blend_and_dry():
 def test_locale_pass_never_rewrites_style_script_or_raw_text():
     page = lab.PAGE
     assert "/^(STYLE|SCRIPT)$/.test(node.tagName) || node.closest?.('[data-raw]')" in page
+
+
+def test_dry_run_log_message_does_not_pretend_a_job_was_started():
+    page = lab.PAGE
+    assert "T.state === 'dry-run' ? 'DRY-RUN:" in page and "KHÔNG có cờ --dry-run" in page
+
+
+def test_status_dialog_warns_early_about_a_skipped_variant_and_does_not_flag_pending_baseline():
+    page = lab.PAGE
+    assert "'CẢNH BÁO: ' + st.warning" in page and "' · cảnh báo'" in page
+    assert "(st.state !== 'running' && v.status !== 'ok')" in page  # 'missing' while running is not an error

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Backend for the Denoise Lab: serves the page, browses audio on this server and runs real jobs.
 
-    python tools/lab_server.py --audio-root /home/lamkd2/data --out-root /home/lamkd2/data/denoise_lab --jobid 17405
+    python tools/lab_server.py --audio-root /home/lamkd2/data --out-root /home/lamkd2/data/denoise_lab --jobid 17405 \
+        --set-env REUSE_PYTHON=~/miniforge3/envs/reuse/bin/python --set-env REUSE_DIR=~/NemotronLabs_REUSE
     # on your laptop:  ssh -L 8000:localhost:8000 <dgx>   then open http://localhost:8000
 
 The page's "Chạy" button posts the recipe to /api/experiment/run. The server turns the selected trial into a
@@ -38,6 +39,7 @@ TOKEN_RE = re.compile(r"^[a-z0-9_]+$")
 PSEUDO_RE = re.compile(r"^(blend|dry)(\d{1,3})$")
 PARAM_RE = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
 WORD_RE = re.compile(r"^[A-Za-z0-9_.-]{1,40}$")
+ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,60}$")
 MAX_BODY = 1 << 20
 MAX_LIST = 2000
 LOG_TAIL = 6000
@@ -51,12 +53,13 @@ class BadRequest(Exception):
 
 
 class Config:
-    def __init__(self, audio_roots, out_root, jobid, launcher, conda_env, conda_sh, python, dry_run):
+    def __init__(self, audio_roots, out_root, jobid, launcher, conda_env, conda_sh, python, dry_run, extra_env=None):
         # --audio-root must be a folder; given a file, browse the folder that holds it
         self.audio_roots = [(r.parent if r.is_file() else r) for r in (Path(p).expanduser().resolve() for p in audio_roots)]
         self.out_root = Path(out_root).expanduser().resolve()
         self.jobid, self.launcher = str(jobid or ""), launcher
         self.conda_env, self.conda_sh, self.python, self.dry_run = conda_env, conda_sh, python, dry_run
+        self.extra_env = dict(extra_env or {})  # exported inside the job: REUSE_PYTHON, REUSE_DIR, ...
         self.runs = {}  # run id -> run dir
 
     @property
@@ -226,7 +229,10 @@ def launch_argv(cfg, argv_tail, variants_path, out_dir):
     diag = ('echo "[lab] host=$(hostname) job=${SLURM_JOB_ID-?} step=${SLURM_STEP_ID-?} CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES-<unset>}"\n'
             'nvidia-smi -L 2>&1 | head -8\n'
             f'{py} -c "import torch; print(\'[lab] torch\', torch.__version__, \'cuda_available=\', torch.cuda.is_available(), \'devices=\', torch.cuda.device_count())" 2>&1 | tail -2\n')
-    script = (conda_prelude(cfg) + "export PYTHONUNBUFFERED=1\n" + diag
+    exports = "".join(f"export {k}={shlex.quote(v)}\n" for k, v in cfg.extra_env.items())
+    if cfg.extra_env:  # names only: a value may be a token
+        diag += f'echo "[lab] env set: {" ".join(cfg.extra_env)}"\n'
+    script = (conda_prelude(cfg) + "export PYTHONUNBUFFERED=1\n" + exports + diag
               + f"cd {shlex.quote(str(PIPELINE))} || exit 98\nexec {shlex.join(cmd)}\n")
     return (shlex.split(cfg.launcher.format(jobid=cfg.jobid)) if cfg.launcher else []) + ["bash", "-lc", script], cmd
 
@@ -361,6 +367,12 @@ def run_status(cfg, rid):
     st["cuda"] = None if not cuda else cuda.group(1) == "True"
     st["gpuInfo"] = [ln.strip() for ln in head.splitlines() if ln.startswith(("[lab]", "GPU "))][:6]
     st["variants"] = manifest_variants(run_dir)
+    # while running, a lab variant that is already skipped/failed/degraded will never use the GPU: warn now, not at the end
+    st["warning"] = None
+    if st.get("state") == "running" and st.get("id"):
+        bad = next((v for v in st["variants"] if v["id"] == st["id"] and v["status"] in ("skipped", "failed", "degraded")), None)
+        if bad:
+            st["warning"] = f"variant {bad['id']}: {bad['status']}" + (f" - {bad['reason']}" if bad.get("reason") else "")
     st["pipelineLog"] = logs[-1].name if logs else ""
     st["pipelineLogTail"] = tail(logs[-1]) if logs else ""
     st["outputs"] = sorted(str(p) for p in (run_dir / "out").glob("*/*/01b_denoise/after_denoise.wav"))[:200]
@@ -480,13 +492,21 @@ def main(argv=None):
     ap.add_argument("--conda-env", default="som")
     ap.add_argument("--conda-sh", default="", help="path to conda.sh if it is not under ~/miniconda3 etc.")
     ap.add_argument("--python", default="python", help="interpreter name/path inside the conda env")
+    ap.add_argument("--set-env", action="append", default=[], metavar="KEY=VALUE",
+                    help="export this variable inside the job (repeatable), e.g. REUSE_PYTHON=~/miniforge3/envs/reuse/bin/python")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--dry-run", action="store_true", help="write the run directory and show the command, but start nothing")
     a = ap.parse_args(argv)
     if "{jobid}" in a.launcher and not a.jobid:
         ap.error("--jobid is required by the default --launcher (or pass --launcher '')")
-    cfg = Config(a.audio_root, a.out_root, a.jobid, a.launcher, a.conda_env, a.conda_sh, a.python, a.dry_run)
+    extra = {}
+    for item in a.set_env:
+        key, sep, val = item.partition("=")
+        if not sep or not ENV_RE.match(key) or "\0" in val or "\n" in val:
+            ap.error(f"--set-env expects KEY=VALUE with KEY like REUSE_PYTHON, got {item!r}")
+        extra[key] = os.path.expanduser(val)
+    cfg = Config(a.audio_root, a.out_root, a.jobid, a.launcher, a.conda_env, a.conda_sh, a.python, a.dry_run, extra)
     for r in cfg.audio_roots:  # resolve() accepts paths that do not exist, so say so here instead of failing in the browser
         if not r.is_dir():
             ap.error(f"--audio-root không phải thư mục tồn tại: {r}"

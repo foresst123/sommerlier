@@ -1715,7 +1715,7 @@ PAGE = PAGE.replace(
   const paint = () => {
     const [text, tone] = LABEL[T.state] || ['Chưa chạy', 'idle'];
     const showTime = T.st && T.state && !['dry-run', 'unknown'].includes(T.state);
-    const line = text + (showTime ? ' · ' + fmtDur(elapsedNow()) : '');
+    const line = text + (showTime ? ' · ' + fmtDur(elapsedNow()) : '') + (T.state === 'running' && T.st?.warning ? ' · cảnh báo' : '');
     chip.dataset.state = tone; $('runChipText').textContent = line;
     document.title = T.state === 'running' ? `● ${line} · ${baseTitle}` : (T.state === 'finished' ? `✓ Hoàn tất · ${baseTitle}` : (T.state === 'failed' ? `✕ Lỗi · ${baseTitle}` : baseTitle));
     // a one-second tick only while a job is live (no standing interval): it re-arms itself from here
@@ -1726,14 +1726,15 @@ PAGE = PAGE.replace(
     $('rdState').textContent = line; $('rdChain').textContent = st.chain || '—'; $('rdDir').textContent = st.runDir || '—';
     $('rdOut').textContent = st.state === 'finished' ? `${st.outputs?.length || 0} file denoise · ${st.out || ''}` : (st.state === 'running' ? 'đang xử lý…' : (st.returncode != null ? `mã thoát ${st.returncode}` : '—'));
     const setRow = (id, text, bad) => { const n = $(id); n.parentNode.hidden = !text; n.textContent = text || ''; n.style.color = bad ? 'var(--red)' : ''; };
-    setRow('rdProblem', st.problem || '', true);
+    setRow('rdProblem', st.problem || (st.warning ? 'CẢNH BÁO: ' + st.warning + '\nVariant này sẽ KHÔNG chạy; hiện chỉ baseline đang chạy.' : ''), true);
     setRow('rdGpu', st.cuda === false ? 'KHÔNG thấy GPU trong step srun. Thử chạy lab_server với --launcher "srun --jobid={jobid} --overlap --gres=gpu:1"'
       : (st.cuda === true ? 'thấy GPU' : '') + ((st.gpuInfo || []).length ? (st.cuda === true ? ' · ' : '') + st.gpuInfo.join('\n') : ''), st.cuda === false);
-    setRow('rdVariants', (st.variants || []).map(v => `${v.id}: ${v.status}${v.reason ? ' - ' + v.reason : ''}`).join('\n'), (st.variants || []).some(v => v.status !== 'ok'));
-    chip.title = st.problem ? 'Có vấn đề: ' + st.problem : 'Trạng thái chạy trên backend (bấm để xem log)';
+    setRow('rdVariants', (st.variants || []).map(v => `${v.id}: ${v.status}${v.reason ? ' - ' + v.reason : ''}`).join('\n'), (st.variants || []).some(v => ['skipped', 'failed', 'degraded'].includes(v.status) || (st.state !== 'running' && v.status !== 'ok')));
+    chip.title = st.problem ? 'Có vấn đề: ' + st.problem : (st.warning ? 'Cảnh báo: ' + st.warning : 'Trạng thái chạy trên backend (bấm để xem log)');
     const log = $('rdLog'), stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 40;
     const body = [(st.logTail || '').trimEnd(), st.pipelineLog ? `\n──── ${st.pipelineLog} ────\n` + (st.pipelineLogTail || '').trimEnd() : ''].join('\n').trim();
     const text2 = body || (T.state === 'sending' ? 'Đang gửi yêu cầu tới backend…'
+      : T.state === 'dry-run' ? 'DRY-RUN: lab_server đang chạy với --dry-run nên chưa có job nào được khởi động (không có run.log).\nTắt server (Ctrl+C) rồi chạy lại KHÔNG có cờ --dry-run, sau đó bấm Chạy.'
       : 'Job đã được gửi nhưng chưa in ra dòng nào (' + fmtDur(elapsedNow()) + ').\nXem trực tiếp trên server:  tail -f ' + (st.log || '<thư mục chạy>/run.log') + '\nKiểm tra tiến trình:  ps -fp ' + (st.pid || '<pid>'));
     if (log.textContent !== text2) { log.textContent = text2; if (stick) log.scrollTop = log.scrollHeight; }
   };

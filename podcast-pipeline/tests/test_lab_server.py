@@ -191,3 +191,34 @@ def test_job_log_starts_with_gpu_facts_and_status_parses_them(cfg):
     assert st["cuda"] is False and st["gpuInfo"][1] == "GPU 0: A100"
     (run_dir / "run.log").write_text("no diagnostics yet\n")
     assert ls.run_status(cfg, "r1")["cuda"] is None
+
+
+def test_a_skipped_variant_is_flagged_while_the_job_is_still_running(cfg):
+    run_dir = Path(ls.start_run(cfg, payload(cfg))["runDir"])
+    (run_dir / "out").mkdir()
+    (run_dir / "out" / "variants_manifest.json").write_text(json.dumps({"variants": [
+        {"id": "none", "status": "missing"}, {"id": "t1", "status": "skipped", "reason": "re_use: REUSE_PYTHON is not set"}]}))
+    ls.write_status(run_dir, state="running", pid=None)
+    st = ls.run_status(cfg, "r1")
+    assert st["state"] == "running" and "REUSE_PYTHON" in st["warning"] and st["problem"] is None if "problem" in st else True
+    ls.write_status(run_dir, state="running")
+    (run_dir / "out" / "variants_manifest.json").write_text(json.dumps({"variants": [{"id": "none", "status": "missing"}, {"id": "t1", "status": "missing"}]}))
+    assert ls.run_status(cfg, "r1")["warning"] is None  # nothing wrong yet: still waiting for results
+
+
+def test_set_env_is_exported_inside_the_job_and_only_names_are_logged(tmp_path):
+    c = ls.Config([tmp_path], tmp_path / "out", "1", "srun --jobid={jobid} --overlap", "som", "", "python", True,
+                  {"REUSE_PYTHON": "/envs/reuse/bin/python", "HF_TOKEN": "s3cr3t value"})
+    script = ls.launch_argv(c, [], Path("/x/v.json"), Path("/x/out"))[0][-1]
+    assert "export REUSE_PYTHON=/envs/reuse/bin/python" in script
+    assert "export HF_TOKEN='s3cr3t value'" in script  # quoted, never interpreted by the shell
+    assert script.index("export REUSE_PYTHON") < script.index("exec python")
+    assert "[lab] env set: REUSE_PYTHON HF_TOKEN" in script and 'echo "[lab] env set: REUSE_PYTHON HF_TOKEN"' in script
+    assert script.count("s3cr3t") == 1  # the value appears once (the export), not in the log line
+
+
+def test_a_bad_set_env_key_stops_the_server(tmp_path):
+    with pytest.raises(SystemExit):
+        ls.main(["--audio-root", str(tmp_path), "--out-root", str(tmp_path / "o"), "--launcher", "", "--set-env", "no-equals-sign"])
+    with pytest.raises(SystemExit):
+        ls.main(["--audio-root", str(tmp_path), "--out-root", str(tmp_path / "o"), "--launcher", "", "--set-env", "BAD KEY=1"])
