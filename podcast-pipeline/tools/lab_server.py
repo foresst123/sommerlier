@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Backend for the Denoise Lab: serves the page, browses audio on this server and runs real jobs.
 
-    python tools/lab_server.py --audio-root /home/lamkd2/data --out-root /home/lamkd2/data/denoise_lab --jobid 17405 \
-        --set-env REUSE_PYTHON=~/miniforge3/envs/reuse/bin/python --set-env REUSE_DIR=~/NemotronLabs_REUSE
+    python tools/lab_server.py --audio-root /home/lamkd2/data --out-root /home/lamkd2/data/denoise_lab --jobid 17405
+    # per-backend env vars (REUSE_PYTHON, AUDIO_SEPARATOR_MODEL_DIR, ...) are resolved from tools/lab_env.py, --set-env overrides
     # on your laptop:  ssh -L 8000:localhost:8000 <dgx>   then open http://localhost:8000
 
 The page's "Chạy" button posts the recipe to /api/experiment/run. The server turns the selected trial into a
@@ -499,7 +499,8 @@ def main(argv=None):
     ap.add_argument("--conda-sh", default="", help="path to conda.sh if it is not under ~/miniconda3 etc.")
     ap.add_argument("--python", default="python", help="interpreter name/path inside the conda env")
     ap.add_argument("--set-env", action="append", default=[], metavar="KEY=VALUE",
-                    help="export this variable inside the job (repeatable), e.g. REUSE_PYTHON=~/miniforge3/envs/reuse/bin/python")
+                    help="export this variable inside the job (repeatable); beats tools/lab_env.py and the shell")
+    ap.add_argument("--no-lab-env", action="store_true", help="do not read tools/lab_env.py (export only --set-env)")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--dry-run", action="store_true", help="write the run directory and show the command, but start nothing")
@@ -512,6 +513,11 @@ def main(argv=None):
         if not sep or not ENV_RE.match(key) or "\0" in val or "\n" in val:
             ap.error(f"--set-env expects KEY=VALUE with KEY like REUSE_PYTHON, got {item!r}")
         extra[key] = os.path.expanduser(val)
+    report = []
+    if not a.no_lab_env:  # tools/lab_env.py: where each backend's env/weights live on this machine
+        sys.path.insert(0, str(TOOLS))
+        import lab_env
+        extra, report = lab_env.resolve(extra)
     cfg = Config(a.audio_root, a.out_root, a.jobid, a.launcher, a.conda_env, a.conda_sh, a.python, a.dry_run, extra)
     for r in cfg.audio_roots:  # resolve() accepts paths that do not exist, so say so here instead of failing in the browser
         if not r.is_dir():
@@ -521,6 +527,8 @@ def main(argv=None):
     srv = ThreadingHTTPServer((a.host, a.port), make_handler(cfg, load_page()))
     print(f"[lab] http://{a.host}:{a.port}  audio={[str(r) for r in cfg.audio_roots]}  out={cfg.out_root}  "
           f"launcher={a.launcher.format(jobid=a.jobid) or '(local)'}  env={a.conda_env}{'  DRY-RUN' if a.dry_run else ''}", flush=True)
+    for line in report:
+        print(f"[lab] env {line}", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
