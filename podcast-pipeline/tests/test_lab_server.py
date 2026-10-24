@@ -1,5 +1,6 @@
 import json
 import sys
+import wave
 from pathlib import Path
 
 import pytest
@@ -121,6 +122,18 @@ def test_file_audio_root_falls_back_to_its_folder(tmp_path):
 def test_listing_a_file_path_lists_its_folder(cfg):
     d = ls.list_dir(cfg, str(cfg.audio_roots[0] / "a.wav"))
     assert d["path"] == str(cfg.audio_roots[0]) and [f["name"] for f in d["files"]] == ["a.wav"]
+
+
+def test_wave_metadata_falls_back_to_wav_header_without_ffprobe(tmp_path, monkeypatch):
+    path = tmp_path / "short.wav"
+    with wave.open(str(path), "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(8000)
+        out.writeframes(b"\0\0" * 8000)
+    monkeypatch.setattr(ls.subprocess, "check_output", lambda *a, **k: (_ for _ in ()).throw(OSError("no ffprobe")))
+    duration, rate = ls._ffprobe(path)
+    assert duration == 1 and rate == 8000 and ls.WAVEFORM_BINS == 4096
 
 
 def test_status_reports_elapsed_and_the_pipeline_log(cfg):

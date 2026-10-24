@@ -325,6 +325,15 @@ def test_a_new_source_does_not_leave_the_default_five_second_loop_on():
     assert "inputFile = full; try { sel = [0, duration]; } catch (_) {}" in lab.PAGE
 
 
+def test_large_server_audio_uses_summary_and_streaming_not_browser_pcm_decode():
+    page = lab.PAGE
+    assert "const PREVIEW_LIMIT = 150 * 1048576" in page
+    assert "await api('/api/audio/summary?path=' + encodeURIComponent(full))" in page
+    assert "window.__serverSourcePeaks = serverPeaks(summary)" in page
+    assert "audioUrl.A = '/api/audio?path=' + encodeURIComponent(full)" in page
+    assert "stream từ server" in page
+
+
 def test_aBtn_and_bBtn_are_hidden_not_removed():
     page = lab.PAGE
     assert "document.getElementById('aBtn')?.remove()" not in page and "document.getElementById('bBtn')?.remove()" not in page

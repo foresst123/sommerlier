@@ -17,6 +17,7 @@ It binds to 127.0.0.1 by default and starts jobs on your behalf: there is no log
 network you trust. File access is limited to --audio-root (and --out-root, read-only for playback).
 """
 import argparse
+import array
 import json
 import mimetypes
 import os
@@ -26,6 +27,7 @@ import subprocess
 import sys
 import threading
 import time
+import wave
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -43,6 +45,7 @@ ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,60}$")
 MAX_BODY = 1 << 20
 MAX_LIST = 2000
 LOG_TAIL = 6000
+WAVEFORM_BINS = 4096
 CONDA_SH = ('"$HOME/miniconda3/etc/profile.d/conda.sh" "$HOME/anaconda3/etc/profile.d/conda.sh" '
             '"$HOME/miniforge3/etc/profile.d/conda.sh" "$HOME/mambaforge/etc/profile.d/conda.sh" '
             '/opt/conda/etc/profile.d/conda.sh')
@@ -50,6 +53,85 @@ CONDA_SH = ('"$HOME/miniconda3/etc/profile.d/conda.sh" "$HOME/anaconda3/etc/prof
 
 class BadRequest(Exception):
     pass
+
+
+def _ffprobe(path):
+    """Return duration/sample-rate without sending the audio through the browser."""
+    try:
+        out = subprocess.check_output(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration:stream=sample_rate",
+             "-of", "json", str(path)], stderr=subprocess.DEVNULL, text=True, timeout=30)
+        data = json.loads(out)
+        duration = float((data.get("format") or {}).get("duration") or 0)
+        stream = next((s for s in data.get("streams", []) if s.get("sample_rate")), {})
+        rate = int(stream.get("sample_rate") or 0)
+        if duration > 0:
+            return duration, rate or 48000
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    if path.suffix.lower() == ".wav":
+        try:
+            with wave.open(str(path), "rb") as src:
+                return src.getnframes() / max(1, src.getframerate()), src.getframerate()
+        except (OSError, wave.Error):
+            pass
+    raise BadRequest("không đọc được metadata audio (cần ffprobe cho định dạng này)")
+
+
+def audio_summary(cfg, path):
+    """Build/cache compact waveform peaks server-side, never allocating decoded PCM."""
+    p = safe_path(path, cfg.read_roots)
+    if not p.is_file() or p.suffix.lower() not in AUDIO_EXT:
+        raise BadRequest("không phải file audio")
+    stat = p.stat()
+    key = f"{p}:{stat.st_size}:{stat.st_mtime_ns}"
+    import hashlib
+    cache = cfg.out_root / ".lab_waveforms" / (hashlib.sha256(key.encode()).hexdigest() + ".json")
+    try:
+        cached = json.loads(cache.read_text())
+        if cached.get("version") == 1:
+            return cached
+    except (OSError, ValueError):
+        pass
+    duration, rate = _ffprobe(p)
+    total = max(1, int(duration * rate))
+    peaks = [0.0] * WAVEFORM_BINS
+    try:
+        proc = subprocess.Popen(["ffmpeg", "-v", "error", "-i", str(p), "-ac", "1", "-f", "f32le", "-"],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as exc:
+        raise BadRequest("không tạo được waveform (cần ffmpeg trên server)") from exc
+    pos = 0
+    assert proc.stdout is not None
+    try:
+        while chunk := proc.stdout.read(1 << 20):
+            usable = len(chunk) - len(chunk) % 4
+            values = array.array("f")
+            values.frombytes(chunk[:usable])
+            if sys.byteorder != "little":
+                values.byteswap()
+            for value in values:
+                bucket = min(WAVEFORM_BINS - 1, pos * WAVEFORM_BINS // total)
+                amp = abs(value)
+                if amp > peaks[bucket]:
+                    peaks[bucket] = amp
+                pos += 1
+        _, err = proc.communicate(timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        proc.kill()
+        raise BadRequest("ffmpeg không đọc được audio để tạo waveform")
+    if proc.returncode:
+        raise BadRequest("ffmpeg không đọc được audio để tạo waveform")
+    result = {"version": 1, "duration": duration, "sampleRate": rate, "bins": WAVEFORM_BINS,
+              "peaks": peaks, "name": p.name, "size": stat.st_size}
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache.with_suffix(".tmp")
+        tmp.write_text(json.dumps(result, separators=(",", ":")))
+        os.replace(tmp, cache)
+    except OSError:
+        pass
+    return result
 
 
 class Config:
@@ -435,6 +517,8 @@ def make_handler(cfg, page):
                     self.send_json(list_dir(cfg, q.get("path", "")))
                 elif u.path == "/api/audio":
                     self.send_audio(safe_path(q.get("path"), cfg.read_roots))
+                elif u.path == "/api/audio/summary":
+                    self.send_json(audio_summary(cfg, q.get("path")))
                 elif u.path == "/api/experiment/runs":
                     self.send_json(list_runs(cfg, int(q.get("limit", 10) or 10)))
                 elif u.path == "/api/experiment/status":
@@ -450,13 +534,32 @@ def make_handler(cfg, page):
             if not p.is_file() or p.suffix.lower() not in AUDIO_EXT:
                 raise BadRequest("không phải file audio")
             size = p.stat().st_size
-            self.send_response(200)
+            start, end, code = 0, size - 1, 200
+            raw_range = self.headers.get("Range")
+            if raw_range:
+                match = re.fullmatch(r"bytes=(\d*)-(\d*)", raw_range.strip())
+                if not match:
+                    self.send_error(416)
+                    return
+                start = int(match.group(1) or 0)
+                end = int(match.group(2) or size - 1)
+                if start >= size or start > end:
+                    self.send_error(416)
+                    return
+                end, code = min(end, size - 1), 206
+            self.send_response(code)
             self.send_header("Content-Type", mimetypes.guess_type(p.name)[0] or "application/octet-stream")
-            self.send_header("Content-Length", str(size))
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(end - start + 1))
+            if code == 206:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
             self.end_headers()
             with open(p, "rb") as f:
-                while chunk := f.read(1 << 20):
+                f.seek(start)
+                remaining = end - start + 1
+                while remaining and (chunk := f.read(min(1 << 20, remaining))):
                     self.wfile.write(chunk)
+                    remaining -= len(chunk)
 
         def do_POST(self):
             if urlparse(self.path).path != "/api/experiment/run":

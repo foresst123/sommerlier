@@ -1613,6 +1613,22 @@ PAGE = PAGE.replace(
   let picker = null, current = null;
   const fmtSize = n => n > 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
   const note = text => { const n = $('srvNote'); if (n) n.textContent = text; };
+  const serverPeaks = summary => {
+    const data = new Float32Array(summary.peaks || []), bins = Number(summary.bins) || data.length;
+    const top = data.reduce((m, x) => Math.max(m, x), 0) || 1;
+    return {levels: [{bins, data}], top, server: true};
+  };
+  const useStreamedSource = (full, name, size, summary) => {
+    inputFile = full;
+    window.__serverSourcePeaks = serverPeaks(summary);
+    if (typeof samples !== 'undefined') samples.A = null;
+    if (typeof peakCache !== 'undefined') peakCache.A = null;
+    audioUrl.A = '/api/audio?path=' + encodeURIComponent(full);
+    audioDuration.A = Number(summary.duration) || 0;
+    duration = audioDuration.A || duration || 30; viewStart = 0; viewSpan = duration; current = 0; sel = [0, duration];
+    $('sourceName').textContent = `${name} · ${fmtSize(size)} · stream từ server`;
+    selectLane('A'); window.__lanes?.refresh(true); window.refreshEvidenceState?.(); window.draw?.();
+  };
   const browse = async path => {
     try {
       const d = await api('/api/files?path=' + encodeURIComponent(path || ''));
@@ -1629,8 +1645,10 @@ PAGE = PAGE.replace(
   const choose = async (full, name, size) => {
     try {
       if (size > PREVIEW_LIMIT) {
-        note(`File ${fmtSize(size)} quá lớn để xem waveform; vẫn dùng làm đầu vào.`);
-        $('sourceName').textContent = `${name} · ${fmtSize(size)} (không xem trước)`;
+        note(`Đang tạo waveform nhẹ trên server cho ${fmtSize(size)}…`);
+        const summary = await api('/api/audio/summary?path=' + encodeURIComponent(full));
+        useStreamedSource(full, name, size, summary);
+        note(`Đã sẵn sàng · ${fmt(Math.round(summary.duration || 0))} · waveform/âm thanh stream từ server`);
       } else {
         note('Đang tải audio từ server…');
         const res = await fetch('/api/audio?path=' + encodeURIComponent(full));
@@ -1921,7 +1939,7 @@ PAGE = PAGE.replace(
   stack.id = 'laneStack'; stack.setAttribute('data-raw', '');
   stack.innerHTML = '<div class="ls-scroll" id="lsScroll"><div class="ls-top"><div class="ls-bar"><div class="ls-tools"><button class="btn" type="button" id="lsZoomOut" title="Thu nhỏ" aria-label="Thu nhỏ">−</button><button class="btn" type="button" id="lsZoomIn" title="Phóng to" aria-label="Phóng to">+</button><button class="btn" type="button" id="lsFit" title="Xem toàn bộ audio">Toàn bộ</button><span class="ls-view" id="lsView"></span><label class="ls-follow" title="Khi phát, cửa sổ xem chạy theo vạch phát"><input type="checkbox" id="lsFollow" checked> bám theo</label></div><div class="ls-map" id="lsMap" title="Kéo khung để dịch cửa sổ xem, bấm để nhảy tới"><div class="ls-win" id="lsWin"></div></div></div><div class="ls-head"><span class="ls-hl" title="Mọi kênh dùng chung một thang biên độ">Kênh · bấm để nghe <label class="ls-loop" title="Phát lặp lại vùng đã kéo chọn"><input type="checkbox" id="loop" checked> lặp vùng chọn</label></span><div class="ls-ticks" id="lsTicks"></div></div></div><div class="ls-rows" id="lsRows"></div></div>';
   if (wrap) wrap.insertBefore(stack, wrap.firstChild);
-  const LS = {listening: 'A', peaks: new Map(), loading: new Map(), failed: new Set(), recent: [], sig: '', drag: null, counted: 0, ctx: null};
+  const LS = {listening: 'A', peaks: new Map(), loading: new Map(), failed: new Set(), recent: [], sig: '', drag: null, counted: 0, ctx: null, lag: new Map(), lagBusy: false};
   const MAX_LOADED = 4, AUTOLOAD = 3, LEVELS = [2400, 19200, 153600], MIN_SPAN = 0.25;
   const palette = () => (typeof COLORS !== 'undefined' && COLORS.length ? COLORS : ['#57d3d0', '#f4b660', '#68d391', '#c58cff', '#6ba7ff', '#f27979']);
   const mmss = t => { t = Math.max(0, Math.floor(t)); return String(Math.floor(t / 60)).padStart(2, '0') + ':' + String(t % 60).padStart(2, '0'); };
@@ -1932,7 +1950,59 @@ PAGE = PAGE.replace(
     const levels = LEVELS.map(bins => { if (bins === fine) return {bins, data: fd}; const g = fine / bins, d = new Float32Array(bins); for (let b = 0; b < bins; b++) { let m = 0; for (let k = b * g; k < (b + 1) * g; k++) if (fd[k] > m) m = fd[k]; d[b] = m; } return {bins, data: d}; });
     return {levels, top: fd.reduce((x, y) => y > x ? y : x, 0) || 1};
   };
-  const sourcePeaks = () => { if (typeof samples === 'undefined' || !samples.A) return null; if (LS.srcPcm !== samples.A) { LS.srcPcm = samples.A; LS.srcPeaks = peaksOf(samples.A); } return LS.srcPeaks; };
+  const sourcePeaks = () => {
+    if (window.__serverSourcePeaks) return window.__serverSourcePeaks;
+    if (typeof samples === 'undefined' || !samples.A) return null;
+    if (LS.srcPcm !== samples.A) { LS.srcPcm = samples.A; LS.srcPeaks = peaksOf(samples.A); LS.lag.clear(); }
+    return LS.srcPeaks;
+  };
+  // ---- how far each output is shifted against the source: cross-correlation of a loud 8 s stretch at 2 kHz ----
+  // positive = the output is DELAYED (its content shows up later than in the source); needs both audios in memory
+  const LAGRATE = 2000, LAGWIN = 8, LAGMAX = 1;
+  const down = (pcm, sr, t0, t1) => {
+    const n = Math.max(0, Math.floor((t1 - t0) * LAGRATE)), out = new Float32Array(n), step = sr / LAGRATE;
+    for (let i = 0; i < n; i++) {
+      const lo = Math.max(0, Math.floor((t0 * LAGRATE + i) * step)), hi = Math.min(pcm.length, Math.max(lo + 1, Math.floor((t0 * LAGRATE + i + 1) * step)));
+      let m = 0; for (let k = lo; k < hi; k++) m += pcm[k]; out[i] = hi > lo ? m / (hi - lo) : 0;
+    }
+    return out;
+  };
+  const centre = x => { let m = 0; for (let i = 0; i < x.length; i++) m += x[i]; m /= x.length || 1; for (let i = 0; i < x.length; i++) x[i] -= m; return x; };
+  const measureLag = async (src, srcSr, out, outSr, total) => {
+    const W = Math.min(LAGWIN, total - 2 * LAGMAX - .5); if (W < 2) return null;
+    let best = null;
+    for (const f of [.5, .3, .7, .2, .85]) {
+      const t0 = Math.max(LAGMAX, Math.min(total - W - LAGMAX, total * f - W / 2)), a = down(src, srcSr, t0, t0 + W); let e = 0; for (let i = 0; i < a.length; i++) e += a[i] * a[i];
+      if (!best || e > best.e) best = {t0, a, e};
+    }
+    if (!best || best.e < 1e-8) return null;
+    const a = centre(best.a), n = a.length, R = Math.round(LAGMAX * LAGRATE), b = centre(down(out, outSr, best.t0 - LAGMAX, best.t0 + W + LAGMAX));
+    let ea = 0; for (let i = 0; i < n; i++) ea += a[i] * a[i];
+    const pre = new Float64Array(b.length + 1); for (let i = 0; i < b.length; i++) pre[i + 1] = pre[i] + b[i] * b[i];
+    const sc = new Float64Array(2 * R + 1); let bi = 0;
+    for (let L = 0; L <= 2 * R; L++) {
+      let d = 0; for (let i = 0; i < n; i++) d += a[i] * b[i + L];
+      sc[L] = d / Math.sqrt(ea * (pre[n + L] - pre[L]) + 1e-12); if (sc[L] > sc[bi]) bi = L;
+      if (L % 250 === 249) await new Promise(r => setTimeout(r));   // keep the page responsive
+    }
+    let frac = 0; if (bi > 0 && bi < 2 * R) { const y0 = sc[bi - 1], y1 = sc[bi], y2 = sc[bi + 1], den = y0 - 2 * y1 + y2; if (den) frac = .5 * (y0 - y2) / den; }
+    return {ms: (bi + frac - R) / LAGRATE * 1000, conf: sc[bi]};
+  };
+  const lagSec = key => { const l = key === 'A' ? null : LS.lag.get(key); return l && l.conf >= .5 && Math.abs(l.ms) <= LAGMAX * 1000 ? l.ms / 1000 : 0; };
+  const lagText = id => { const l = LS.lag.get(id); return !l ? '' : l.conf < .5 ? 'lệch: chưa đo được' : Math.abs(l.ms) < 1 ? 'khớp thời gian nguồn' : `lệch ${l.ms > 0 ? '+' : ''}${l.ms.toFixed(1)} ms`; };
+  const measureLags = async model => {
+    if (LS.lagBusy || typeof samples === 'undefined' || !samples.A || !audioDuration.A) return;
+    const todo = model.filter(m => m.run && m.loaded && !LS.lag.has(m.key) && typeof runAudio !== 'undefined' && runAudio[m.key]);
+    if (!todo.length) return;
+    LS.lagBusy = true;
+    try {
+      for (const m of todo) {
+        const a = runAudio[m.key]; if (!a) continue;
+        const r = await measureLag(samples.A, samples.A.length / audioDuration.A, a.samples, a.samples.length / a.duration, Math.min(audioDuration.A, a.duration)).catch(() => null);
+        LS.lag.set(m.key, r || {ms: 0, conf: 0}); refresh(true);
+      }
+    } finally { LS.lagBusy = false; }
+  };
   const allRuns = () => {
     const out = []; if (typeof variants === 'undefined') return out;
     variants.forEach(v => (v.runs || []).forEach((r, i) => out.push({v, r, order: String(r.created || '') + String(i).padStart(4, '0')})));
@@ -1946,8 +2016,8 @@ PAGE = PAGE.replace(
     const {r} = run, snap = r.configSnapshot || {}, chain = (snap.chain && snap.chain.length ? snap.chain : [snap.model || '?']).join(' › ');
     const info = r.runInfo || {}, when = r.created ? new Date(r.created).toLocaleTimeString('vi-VN', {hour: '2-digit', minute: '2-digit'}) : '';
     const bits = [stepsText(snap), snap.threshold != null ? `gate ${Number(snap.threshold).toFixed(2)}` : '', info.stop ? `dừng sau ${info.stop}` : '',
-                  info.music === false ? 'tắt tách nhạc' : (info.music === true ? 'bật tách nhạc' : ''), when, stateOf(run)].filter(Boolean);
-    const tip = [`${letter} · ${chain}`, ...(snap.stepParams || []).filter(s => s?.model).map(s => '  ' + JSON.stringify(s)), `gate DNSMOS ${snap.threshold ?? '—'}`,
+                  info.music === false ? 'tắt tách nhạc' : (info.music === true ? 'bật tách nhạc' : ''), lagText(r.id), when, stateOf(run)].filter(Boolean);
+    const tip = [`${letter} · ${chain}`, ...(snap.stepParams || []).filter(s => s?.model).map(s => '  ' + JSON.stringify(s)), `gate DNSMOS ${snap.threshold ?? '—'}`, lagText(r.id) ? `so với nguồn: ${lagText(r.id)}` : '',
                  info.stop ? `dừng sau: ${info.stop}` : '', info.music != null ? `tách nhạc: ${info.music ? 'bật' : 'tắt'}` : '', r.serverRun?.runDir ? `thư mục: ${r.serverRun.runDir}` : '', `trạng thái: ${stateOf(run)}`].filter(Boolean).join('\n');
     return {title: chain, sub: bits.join(' · '), tip};
   };
@@ -1973,10 +2043,10 @@ PAGE = PAGE.replace(
     if (!model.peaks) return;
     const top = model.scaleTop || model.peaks.top, dur = (typeof duration !== 'undefined' && duration) || 1, vs = typeof viewStart !== 'undefined' ? viewStart : 0, span = (typeof viewSpan !== 'undefined' && viewSpan) || dur;
     const need = w / span * dur, lv = model.peaks.levels.find(l => l.bins >= need) || model.peaks.levels[model.peaks.levels.length - 1];
-    const raw = model.pcm && need > lv.bins * 1.5, sr = raw ? model.pcm.length / dur : 0;
+    const raw = model.pcm && need > lv.bins * 1.5, sr = raw ? model.pcm.length / dur : 0, shift = lagSec(model.key);   // content-aligned: a delayed output is drawn earlier by its lag
     x.strokeStyle = model.color; x.beginPath();
     for (let px = 0; px < w; px++) {
-      const t0 = vs + px / w * span, t1 = vs + (px + 1) / w * span; let m = 0;
+      const t0 = vs + px / w * span - shift, t1 = vs + (px + 1) / w * span - shift; let m = 0;
       if (raw) { const s0 = Math.max(0, Math.floor(t0 * sr)), s1 = Math.min(model.pcm.length, Math.max(s0 + 1, Math.ceil(t1 * sr))); for (let i = s0; i < s1; i++) { const v = model.pcm[i] < 0 ? -model.pcm[i] : model.pcm[i]; if (v > m) m = v; } }
       else { const lo = Math.floor(Math.max(0, Math.min(.999, t0 / dur)) * lv.bins), hi = Math.max(lo + 1, Math.ceil(Math.max(0, Math.min(1, t1 / dur)) * lv.bins)); for (let k = lo; k < Math.min(lv.bins, hi); k++) if (lv.data[k] > m) m = lv.data[k]; }
       const yy = Math.min(1, m / top) * h * .44 + .5; x.moveTo(px + .5, h / 2 - yy); x.lineTo(px + .5, h / 2 + yy);
@@ -2010,7 +2080,7 @@ PAGE = PAGE.replace(
     if (sig !== LS.sig || force) {
       LS.sig = sig;
       rows.innerHTML = model.map(m => {
-        const on = m.key === LS.listening, btn = m.loading ? '<span class="ls-play btn" aria-busy="true">…</span>' : m.playable ? `<button class="btn ls-play" type="button" data-play="${esc(m.key)}" aria-label="Nghe kênh ${esc(m.letter)}">${on && playing() ? '❚❚' : '▶'}</button>` : '';
+        const on = m.key === LS.listening, btn = m.key === 'A' && !m.playable ? '<button class="btn primary ls-play" type="button" data-pick="1">Chọn…</button>' : m.loading ? '<span class="ls-play btn" aria-busy="true">…</span>' : m.playable ? `<button class="btn ls-play" type="button" data-play="${esc(m.key)}" aria-label="Nghe kênh ${esc(m.letter)}">${on && playing() ? '❚❚' : '▶'}</button>` : '';
         const trash = !m.run ? '' : `<button class="btn ls-del" type="button" data-del="${esc(m.key)}" aria-label="Xóa kênh ${esc(m.letter)}" title="${/đang chạy/.test(m.sub) ? 'Đang chạy, chưa xóa được' : 'Xóa khỏi danh sách (file trên server vẫn còn, có thể hoàn tác)'}"${/đang chạy/.test(m.sub) ? ' disabled' : ''}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 10v6M14 10v6"/></svg></button>`;
         const note = m.peaks ? '' : `<div class="ls-note">${m.loading ? 'đang nạp audio…' : m.failed ? 'không nạp được output' : m.key === 'A' ? 'chọn audio đầu vào' : m.playable ? 'bấm ▶ để nạp và nghe' : (m.run && /đang chạy/.test(m.sub) ? 'đang chạy…' : 'chưa có output')}</div>`;
         return `<div class="ls-row${on ? ' on' : ''}" data-key="${esc(m.key)}" title="${esc(m.tip)}"><div class="ls-label"><span class="ls-letter" style="background:${m.color}">${esc(m.letter)}</span><div class="ls-txt"><strong>${esc(m.title)}</strong><small>${esc(m.sub)}</small></div>${btn}${trash}</div><div class="ls-wave"><canvas></canvas>${note}</div></div>`;
@@ -2019,7 +2089,7 @@ PAGE = PAGE.replace(
       if (model.length > LS.counted && LS.counted) rows.lastElementChild.previousElementSibling?.scrollIntoView({block: 'nearest'});
       LS.counted = model.length;
     }
-    renderRuler(); positionLS(); autoload(model);
+    renderRuler(); positionLS(); autoload(model); measureLags(model);
   };
   const redraw = () => { const rows = $('lsRows'); if (!rows) return; const model = LS.model || rowsModel(); rows.querySelectorAll('.ls-row').forEach((row, i) => model[i] && drawRow(row, model[i])); renderRuler(); positionLS(); };
 
@@ -2059,23 +2129,39 @@ PAGE = PAGE.replace(
 
   // the player ignores currentTime until its metadata is loaded (a fresh src) and the next timeupdate would then reset `current` to 0
   const seekTo = t => {
-    current = t; const p = $('player'), u = audioUrl[activeLane]; if (u && p.src !== u) p.src = u;
-    if (p.readyState >= 1) { try { p.currentTime = t; } catch (_) {} } else p.addEventListener('loadedmetadata', () => { try { p.currentTime = t; } catch (_) {} }, {once: true});
+    current = t; const p = $('player'), u = audioUrl[activeLane], pt = t + lagSec(LS.listening); if (u && p.src !== u) p.src = u;
+    if (p.readyState >= 1) { try { p.currentTime = pt; } catch (_) {} } else p.addEventListener('loadedmetadata', () => { try { p.currentTime = pt; } catch (_) {} }, {once: true});
     positionLS();
+  };
+  // After a src change the player is empty until its metadata arrives (tens to hundreds of ms) and a currentTime set before that
+  // is ignored. Resume at `pos` plus the time that passed since the switch began, so the two lanes stay in step while playing.
+  const resumeAt = (pos, t0, play) => {
+    const p = $('player');
+    const apply = () => {
+      const lost = play ? (performance.now() - t0) / 1000 * (p.playbackRate || 1) : 0;
+      const t = Math.max(0, Math.min(pos + lost, (p.duration || Infinity) - .05));
+      try { p.currentTime = t; } catch (_) {} current = t - lagSec(LS.listening); positionLS();
+      if (play) { p.play().catch(() => {}); const pb = $('play'); if (pb) pb.textContent = '❚❚'; }
+    };
+    if (p.readyState >= 1 && p.src === audioUrl[activeLane]) apply(); else p.addEventListener('loadedmetadata', apply, {once: true});
   };
   // ---- listening: switch the audible lane without moving the playhead ----
   const listen = async (key, startPlaying) => {
-    const p = $('player'), was = playing(), keep = current;
-    if (key === 'A') { if (!audioUrl.A) return; LS.listening = 'A'; selectLane('A'); }
+    const p = $('player');
+    let run = null;
+    if (key === 'A') { if (!audioUrl.A) return; }
     else {
-      const run = allRuns().find(x => x.r.id === key); if (!run) return;
-      const a = await ensureAudio(run); if (!a) return;
+      run = allRuns().find(x => x.r.id === key); if (!run) return;
+      const a = await ensureAudio(run); if (!a) return;   // a first switch can wait seconds on the download: the old lane keeps playing meanwhile
       audioUrl.B = a.url; samples.B = a.samples; audioDuration.B = a.duration;
       if (!audioDuration.A) { duration = a.duration; viewStart = 0; viewSpan = a.duration; sel = [0, a.duration]; }
-      run.v.activeRunId = run.r.id; LS.listening = key; touch(key); selectLane('B');
     }
-    seekTo(keep);
-    if (startPlaying || was) { p.play().catch(() => {}); const pb = $('play'); if (pb) pb.textContent = '❚❚'; }
+    // read the position only now: one captured before the await would be as stale as the download was long
+    // the player's own time differs from the timeline by the lane's lag: carry the CONTENT position over, not the raw number
+    const prev = LS.listening, was = playing(), t0 = performance.now(), here = was ? (p.currentTime || 0) - lagSec(prev) : current, pos = here + lagSec(key);
+    if (key === 'A') { LS.listening = 'A'; selectLane('A'); }
+    else { run.v.activeRunId = run.r.id; LS.listening = key; touch(key); selectLane('B'); }
+    resumeAt(pos, t0, startPlaying || was);
     refresh(true);
   };
 
@@ -2097,9 +2183,10 @@ PAGE = PAGE.replace(
   // ---- pointer: click seeks, drag selects a stretch to loop, wheel zooms, Shift+wheel pans ----
   const timeAt = (e, el) => { const r = el.getBoundingClientRect(); return Math.max(0, Math.min(duration, viewStart + (e.clientX - r.left) / Math.max(1, r.width) * viewSpan)); };
   stack.addEventListener('click', e => {
+    if (e.target.closest('[data-pick]')) { $('fileA')?.click(); return; }
     const del = e.target.closest('[data-del]'); if (del) { if (!del.disabled) deleteLane(del.dataset.del); return; }
     const btn = e.target.closest('[data-play]'); if (btn) { const k = btn.dataset.play; if (k === LS.listening && playing()) { $('player').pause(); $('play').textContent = '▶'; refresh(true); } else listen(k, true); return; }
-    const lab = e.target.closest('.ls-label'); if (lab) listen(lab.parentElement.dataset.key, false);
+    const lab = e.target.closest('.ls-label'); if (lab) { if (lab.parentElement.dataset.key === 'A' && !audioUrl.A) $('fileA')?.click(); else listen(lab.parentElement.dataset.key, false); }
   });
   stack.addEventListener('pointerdown', e => { const w = e.target.closest('.ls-wave'); if (!w || e.button) return; LS.drag = {w, t0: timeAt(e, w), moved: false}; w.setPointerCapture?.(e.pointerId); });
   stack.addEventListener('pointermove', e => { const d = LS.drag; if (!d) return; const t = timeAt(e, d.w); if (Math.abs(t - d.t0) > .15) d.moved = true; if (d.moved) { sel = [Math.min(d.t0, t), Math.max(d.t0, t)]; current = sel[0]; positionLS(); } });
@@ -2131,7 +2218,7 @@ PAGE = PAGE.replace(
   const frame = ts => {
     raf = null; if (!playing()) return;
     if (ts - lastFrame >= 33) {
-      lastFrame = ts; const t = $('player').currentTime; if (t >= 0) current = t;
+      lastFrame = ts; const t = $('player').currentTime; if (t >= 0) current = t - lagSec(LS.listening);
       const follow = $('lsFollow')?.checked && Date.now() > (LS.manualUntil || 0) && viewSpan < duration * .999;
       if (follow && (current > viewStart + viewSpan * .3 || current < viewStart)) { viewStart = Math.max(0, Math.min(duration - viewSpan, current - viewSpan * .3)); redraw(); }
       else positionLS();
@@ -2139,12 +2226,16 @@ PAGE = PAGE.replace(
     raf = requestAnimationFrame(frame);
   };
   $('player')?.addEventListener('play', () => { if (!raf) raf = requestAnimationFrame(frame); });
+  // the page's own handler sets current = player time; turn it back into source time for a lagged lane
+  $('player')?.addEventListener('timeupdate', () => { const l = lagSec(LS.listening); if (l) { current = $('player').currentTime - l; positionLS(); } });
+  const baseSync = window.syncPlayer;
+  if (typeof baseSync === 'function') window.syncPlayer = function () { const out = baseSync.apply(this, arguments); const l = lagSec(LS.listening); if (l) { const p = $('player'); try { p.currentTime = Math.max(0, Math.min(current + l, p.duration || Infinity)); } catch (_) {} } return out; };
   if (typeof ResizeObserver === 'function') new ResizeObserver(() => requestAnimationFrame(redraw)).observe(stack);
   const baseOverlays = window.positionOverlays;
   if (typeof baseOverlays === 'function') window.positionOverlays = function () { const out = baseOverlays.apply(this, arguments); positionLS(); return out; };
   ['play', 'pause', 'ended'].forEach(ev => $('player')?.addEventListener(ev, () => refresh(true)));
   window.addEventListener('lab:audio-state', () => refresh(true));
-  window.__lanes = {refresh, listen, redraw};
+  window.__lanes = {refresh, listen, redraw, lagSec, state: LS};
 
   // renderVariants clears the chain list; always rebuild it afterwards, then refresh the lane stack
   const baseRender = window.renderVariants;
