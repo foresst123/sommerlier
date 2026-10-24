@@ -131,6 +131,14 @@ def test_model_catalog_splits_current_chain_and_quick_add():
         assert model in page
 
 
+def test_uploaded_experimental_model_names_are_visible_but_not_falsely_runnable():
+    page = lab.PAGE
+    for model in ("rf_vocals_resurrection", "rf_dereverb_anvuew", "rf_deecho_v2"):
+        assert model in page
+    assert "const unavailable = new Set(['rf_vocals_resurrection','rf_dereverb_anvuew','rf_deecho_v2'])" in page
+    assert "Chưa có checkpoint/backend được xác minh trong bản này" in page
+
+
 def test_model_modal_has_one_authoritative_add_controller():
     page = lab.PAGE
     assert "dataset.authoritativeModal" in page

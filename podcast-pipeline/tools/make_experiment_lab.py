@@ -1036,14 +1036,21 @@ PAGE = PAGE.replace(
     mpsenet:['MP-SENet','Khử nhiễu phổ'], mpsenet_dns:['MP-SENet DNS','Checkpoint DNS'],
     dbs_tiger:['DBS Tiger','Khử nhiễu phổ'], mambattention:['MambaAttention','Attention tuần tự'],
     bsrnn26:['BSRNN26','Chất lượng cao'], rf_vocals_3005:['RF Vocals 3005','Tách vocal'],
+    rf_vocals_resurrection:['RF Vocals Resurrection','Tách vocal · cần cấu hình checkpoint'],
     rf_vocals_kim:['RF Vocals Kim','Tách vocal'], rf_denoise:['RoFormer','Khử nhiễu attention'],
     rf_denoise_aggr:['RoFormer Aggressive','Khử mạnh'], rf_dereverb:['RF Dereverb','Giảm vang'],
+    rf_dereverb_anvuew:['RF Dereverb Anvuew','Giảm vang · cần cấu hình checkpoint'],
+    rf_deecho_v2:['RF DeEcho V2','Giảm vang/vọng · cần cấu hình checkpoint'],
     uvr_deecho:['UVR DeEcho','Giảm vọng'], rf_crowd:['RF Crowd','Giảm tiếng đám đông'],
     audio_separator:['Audio Separator','Tách audio tổng quát'], re_use:['RE-USE','Khôi phục giọng'],
     re_use_laughter:['RE-USE Laughter','Giữ tiếng cười'],
     blend:['Blend (blendN)','Trộn N% audio gốc của cả chuỗi vào kết quả hiện tại'],
     dry:['Dry (dryN)','Trộn N% đầu vào của model liền trước vào kết quả hiện tại']
   };
+  // These names came from the comparison sheet, but this checkout does not
+  // yet contain a verified checkpoint/stem mapping for them.  Show them
+  // honestly instead of allowing a chain that the backend cannot execute.
+  const unavailable = new Set(['rf_vocals_resurrection','rf_dereverb_anvuew','rf_deecho_v2']);
   const fields = {
     blend:[['percent','Phần trăm audio gốc (0-100)','number','50']],
     dry:[['percent','Phần trăm đầu vào bước trước (0-100)','number','25']],
@@ -1079,7 +1086,7 @@ PAGE = PAGE.replace(
       const drawParams=()=>{params.innerHTML=(fields[chosen]||[]).map(([id,label,type,options])=>type==='select'
         ? `<label class="field">${label}<select data-param="${id}">${options.map(v=>`<option value="${v}">${v}</option>`).join('')}</select></label>`
         : `<label class="field">${label}<input data-param="${id}" type="number" min="0" step="0.01" value="${options}"></label>`).join('');};
-      const drawCards=(term='')=>{cards.innerHTML=Object.entries(catalog).filter(([,value])=>value.join(' ').toLowerCase().includes(term.toLowerCase())).map(([id,[name,desc]])=>`<button type="button" class="model-card ${id===chosen?'selected':''}" data-model="${id}"><strong>${name}</strong><small>${desc}</small></button>`).join('');cards.querySelectorAll('[data-model]').forEach(card=>card.onclick=()=>{chosen=card.dataset.model;drawCards(modal.querySelector('#finalModelSearch').value);drawParams();modal.querySelector('#finalAddTitle').textContent=`Thêm ${catalog[chosen][0]}`;});};
+      const drawCards=(term='')=>{cards.innerHTML=Object.entries(catalog).filter(([,value])=>value.join(' ').toLowerCase().includes(term.toLowerCase())).map(([id,[name,desc]])=>`<button type="button" class="model-card ${id===chosen?'selected':''}" data-model="${id}"${unavailable.has(id)?' disabled title="Chưa có checkpoint/backend được xác minh trong bản này"':''}><strong>${name}</strong><small>${desc}</small></button>`).join('');cards.querySelectorAll('[data-model]').forEach(card=>card.onclick=()=>{if(card.disabled)return;chosen=card.dataset.model;drawCards(modal.querySelector('#finalModelSearch').value);drawParams();modal.querySelector('#finalAddTitle').textContent=`Thêm ${catalog[chosen][0]}`;});};
       drawCards();drawParams();
       modal.querySelector('#finalAddTitle').textContent=`Thêm ${catalog[chosen][0]}`;
       modal.querySelector('#finalModelSearch').oninput=e=>drawCards(e.target.value);

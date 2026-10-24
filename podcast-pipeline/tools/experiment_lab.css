@@ -221,6 +221,17 @@ body {
   .metric:nth-child(n+4) { display: none; }
 }
 
+.final-add-modal .model-card:disabled {
+  cursor: not-allowed;
+  opacity: .48;
+  border-style: dashed;
+}
+
+.final-add-modal .model-card:disabled:hover {
+  border-color: #30434f;
+  background: #111d25;
+}
+
 @media (max-width: 760px) {
   .app { grid-template-rows: 46px minmax(0, 1fr) 22px !important; }
   .topbar { padding-inline: 7px !important; gap: 5px !important; }
