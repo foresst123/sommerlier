@@ -923,20 +923,21 @@ PAGE = PAGE.replace(
     ensure();
     const toggle = q('abLoudnessMatch'), status = q('abLoudnessState'), player = q('player');
     if (!toggle || !status || !player) return;
+    const setStatus = value => { if (status.textContent !== value) status.textContent = value; };
     const compareActive = q('abReference')?.classList.contains('active') || q('abCandidate')?.classList.contains('active');
     const available = Boolean(window.audioUrl?.A && window.audioUrl?.B && window.samples?.A && window.samples?.B);
     toggle.disabled = !compareActive || !available;
-    if (!compareActive) { toggle.checked = false; player.volume = 1; status.textContent = 'Chỉ reference/candidate'; return; }
-    if (!available) { toggle.checked = false; player.volume = 1; status.textContent = 'Cần đủ 2 audio'; return; }
+    if (!compareActive) { toggle.checked = false; player.volume = 1; setStatus('Chỉ reference/candidate'); return; }
+    if (!available) { toggle.checked = false; player.volume = 1; setStatus('Cần đủ 2 audio'); return; }
     const selection = typeof window.__labSelection === 'function' ? window.__labSelection() : null;
-    if (!selection || !(Number(selection[1]) > Number(selection[0]))) { toggle.checked = false; player.volume = 1; status.textContent = 'Chọn một đoạn'; return; }
+    if (!selection || !(Number(selection[1]) > Number(selection[0]))) { toggle.checked = false; player.volume = 1; setStatus('Chọn một đoạn'); return; }
     const a = rms(window.samples.A, window.audioDuration?.A, selection), b = rms(window.samples.B, window.audioDuration?.B, selection);
-    if (!(a > 1e-7) || !(b > 1e-7)) { toggle.checked = false; player.volume = 1; status.textContent = !(a > 1e-7) ? 'Reference im lặng' : 'Ứng viên im lặng'; return; }
+    if (!(a > 1e-7) || !(b > 1e-7)) { toggle.checked = false; player.volume = 1; setStatus(!(a > 1e-7) ? 'Reference im lặng' : 'Ứng viên im lặng'); return; }
     if (toggle.checked) {
       const db = clamp(20 * Math.log10(a / b), -12, 12);
       player.volume = clamp(Math.pow(10, db / 20), 0, 1);
-      status.textContent = `${db >= 0 ? '+' : ''}${db.toFixed(1)} dB · phát thử`;
-    } else { player.volume = 1; status.textContent = 'Sẵn sàng'; }
+      setStatus(`${db >= 0 ? '+' : ''}${db.toFixed(1)} dB · phát thử`);
+    } else { player.volume = 1; setStatus('Sẵn sàng'); }
   };
   document.addEventListener('change', event => { if (event.target?.id === 'abLoudnessMatch') update(); });
   document.addEventListener('click', event => { if (event.target.closest('#abSource,#abReference,#abCandidate,#abClear,#aBtn,#bBtn,#rewind')) setTimeout(update, 0); }, true);
@@ -980,7 +981,7 @@ PAGE = PAGE.replace(
   };
   window.refreshEvidenceState = refreshEvidenceState;
   const labels = () => {
-    const set = (id, value, title=value) => { const node=q(id); if(node){node.textContent=value;node.title=title;} };
+    const set = (id, value, title=value) => { const node=q(id); if(node){if(node.textContent!==value)node.textContent=value;if(node.title!==title)node.title=title;} };
     set('runMain','Chạy','Chạy công thức trên backend');
     set('inputMain','Âm thanh','Chọn audio đầu vào');
     set('historyBtn','Lịch sử','Xem lịch sử');
@@ -992,7 +993,7 @@ PAGE = PAGE.replace(
     const search=q('modelSearch'); if(search){search.placeholder='Tìm model';search.setAttribute('aria-label','Tìm model');}
     const empty=document.querySelector('.empty-history'); if(empty)empty.textContent='Chưa có lịch sử. Hãy chạy công thức để lưu một lượt.';
     const state=q('labState'); if(state&&!window.audioUrl?.A&&!window.audioUrl?.B)state.textContent='● Chưa có audio';
-    const lane=q('laneState'); if(lane&&!window.audioUrl?.A&&!window.audioUrl?.B)lane.textContent='Chưa có audio';
+    const lane=q('laneState'); if(lane&&!window.audioUrl?.A&&!window.audioUrl?.B&&lane.textContent!=='Chưa có audio')lane.textContent='Chưa có audio';
   };
   const openAdd = () => {
     const modal=q('modelModal'), picker=modal?.querySelector('.model-picker');
