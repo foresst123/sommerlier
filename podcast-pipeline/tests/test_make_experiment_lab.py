@@ -259,3 +259,17 @@ def test_inline_javascript_parses(tmp_path):
     js.write_text(script, encoding="utf-8")
     result = subprocess.run([NODE, "--check", str(js)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
+
+
+def test_add_step_is_a_two_step_dialog_with_blend_and_dry():
+    page = lab.PAGE
+    # model list first, parameters second; blend/dry live in the same catalog
+    assert "makeDialog('addDialog'" in page and "const showModelList" in page and "const showParams" in page
+    assert "window.__labCatalog = catalog" in page and "blend:['Blend (blendN)'" in page and "dry:['Dry (dryN)'" in page
+    # opened from a window-level capture handler, so it never depends on a timer winning a race with the legacy popups
+    assert "window.addEventListener('click', e => {\n    if (!e.target.closest?.('#addModelControl,#variantsBtn')) return;" in page
+
+
+def test_locale_pass_never_rewrites_style_script_or_raw_text():
+    page = lab.PAGE
+    assert "/^(STYLE|SCRIPT)$/.test(node.tagName) || node.closest?.('[data-raw]')" in page

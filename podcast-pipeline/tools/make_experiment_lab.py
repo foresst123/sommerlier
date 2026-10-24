@@ -1049,6 +1049,7 @@ PAGE = PAGE.replace(
     re_use_laughter:[['chunk_s','Chunk (giây)','number','5'],['hop_portion','Hop portion','number','0.5']],
     audio_separator:[['segment_size','Segment size','number','256'],['overlap','Overlap','number','0.25']]
   };
+  window.__labCatalog = catalog; window.__labFields = fields;
   const install = () => {
     const trigger=document.getElementById('addModelControl');
     const modal=document.getElementById('modelModal');
@@ -1704,6 +1705,74 @@ PAGE = PAGE.replace(
     };
     setTimeout(tick, 1500);
   };
+
+  // ---- add a step: 1) pick a model or blend/dry from the list, 2) set its parameters ----
+  const addCss = document.createElement('style');
+  addCss.textContent = '.add-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;padding:10px 14px 14px;overflow:auto}'
+    + '.add-group{grid-column:1/-1;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.11em;font-weight:800;margin-top:6px}'
+    + '.add-card{display:flex;flex-direction:column;align-items:flex-start;gap:3px;padding:9px;border:1px solid #30434f;border-radius:7px;background:#111d25;color:var(--text);text-align:left}'
+    + '.add-card[hidden]{display:none}.add-card:hover,.add-card:focus-visible{border-color:var(--cyan);background:#143039;outline:0}.add-card strong{font-size:12px}.add-card small{font-size:10px;color:var(--muted)}'
+    + '.add-card.mix{border-color:#5b4a2a;background:#241f14}.add-card.mix:hover{border-color:var(--amber);background:#2d2616}.add-note{margin:0;color:var(--muted);font-size:12px}'
+    + '.add-token{font:700 12px ui-monospace,monospace;color:var(--amber)}.srv-body select{border:1px solid var(--line);background:#0b1117;color:var(--text);border-radius:6px;padding:7px 8px}';
+  document.head.appendChild(addCss);
+  let addDialog = null, addBox = null, addChosen = null;
+  const isMix = id => id === 'blend' || id === 'dry';
+  const catalogOf = () => window.__labCatalog || {}, fieldsOf = () => window.__labFields || {};
+  const closeAdd = () => addDialog.classList.remove('open');
+  const showModelList = () => {
+    const entries = Object.entries(catalogOf());
+    const card = ([id, [name, desc]]) => `<button type="button" class="add-card${isMix(id) ? ' mix' : ''}" data-model="${esc(id)}"><strong>${esc(name)}</strong><small>${esc(desc)}</small></button>`;
+    addBox.innerHTML = '<header><strong style="flex:1">Thêm vào chuỗi · chọn model</strong><button class="btn" type="button" data-act="close">Đóng</button></header>'
+      + '<div class="srv-body" style="padding-bottom:0"><input id="addSearch" type="search" placeholder="Tìm model hoặc blend/dry" aria-label="Tìm model"></div>'
+      + `<div class="add-cards"><div class="add-group">Bước trộn</div>${entries.filter(([id]) => isMix(id)).map(card).join('')}<div class="add-group">Model khử nhiễu</div>${entries.filter(([id]) => !isMix(id)).map(card).join('')}</div>`;
+    const search = addBox.querySelector('#addSearch');
+    search.oninput = () => { const t = search.value.trim().toLowerCase(); addBox.querySelectorAll('.add-card').forEach(c => { c.hidden = Boolean(t && !(c.dataset.model + ' ' + c.textContent).toLowerCase().includes(t)); }); };
+    search.focus();
+  };
+  const showParams = id => {
+    addChosen = id;
+    const [name, desc] = catalogOf()[id], list = fieldsOf()[id] || [], mix = isMix(id);
+    const inputs = list.map(([key, label, type, opt]) => type === 'select'
+      ? `<label>${esc(label)}<select data-param="${esc(key)}">${opt.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('')}</select></label>`
+      : `<label>${esc(label)}<input data-param="${esc(key)}" type="number" step="${mix ? 1 : 0.01}" min="0"${mix ? ' max="100"' : ''} value="${esc(opt)}"></label>`).join('');
+    addBox.innerHTML = `<header><strong style="flex:1">${esc(name)}</strong><button class="btn" type="button" data-act="close">Đóng</button></header>`
+      + `<div class="srv-body"><p class="add-note">${esc(desc)}</p>${inputs || '<p class="add-note">Model này dùng tham số mặc định, không có gì để chỉnh.</p>'}`
+      + (mix ? `<p class="add-note">Bước trong chuỗi: <span class="add-token" id="addToken"></span></p>` : '') + '</div>'
+      + '<div class="srv-actions"><button class="btn" type="button" data-act="back">Chọn model khác</button><button class="btn primary" type="button" data-act="save">Thêm vào chuỗi</button></div>';
+    const token = () => { const p = addBox.querySelector('[data-param="percent"]'); return id + Math.min(100, Math.max(0, Math.round(Number(p?.value) || 0))); };
+    if (mix) { const t = addBox.querySelector('#addToken'), p = addBox.querySelector('[data-param="percent"]'); t.textContent = token(); p.oninput = () => { t.textContent = token(); }; }
+    (addBox.querySelector('input,select') || addBox.querySelector('[data-act="save"]')).focus();
+  };
+  const saveAdd = () => {
+    const v = window.selectedVariant?.(); if (!v || !addChosen) return;
+    const step = {model: addChosen};
+    addBox.querySelectorAll('[data-param]').forEach(el => { if (el.value !== '') step[el.dataset.param] = el.type === 'number' ? Number(el.value) : el.value; });
+    const token = isMix(addChosen) ? addChosen + Math.min(100, Math.max(0, Math.round(Number(step.percent) || 0))) : addChosen;
+    v.chain = Array.isArray(v.chain) ? v.chain : []; v.stepParams = Array.isArray(v.stepParams) ? v.stepParams : [];
+    v.chain.push(token); v.stepParams.push(step); v.model = token; v.status = 'draft'; v.draftChanged = true;
+    closeAdd(); window.renderVariants?.(); window.dirty?.();
+  };
+  const openAdd = () => {
+    if (!addDialog) {
+      addDialog = makeDialog('addDialog', 'Thêm model vào chuỗi');
+      addDialog.setAttribute('data-raw', '');  // model names stay as written ("high-pass" must not become "cao-pass")
+      addBox = addDialog.firstChild;
+      addBox.onclick = e => {
+        const act = e.target.closest('[data-act]')?.dataset.act, card = e.target.closest('.add-card');
+        if (card) showParams(card.dataset.model); else if (act === 'close') closeAdd(); else if (act === 'back') showModelList(); else if (act === 'save') saveAdd();
+      };
+      addDialog.addEventListener('keydown', e => {
+        if (e.key === 'Escape') closeAdd();
+        else if (e.key === 'Enter' && e.target.matches?.('[data-param]')) { e.preventDefault(); saveAdd(); }
+      });
+    }
+    showModelList(); addDialog.classList.add('open');
+  };
+  // window capture runs before every older handler, so the add button never reaches the legacy popups (no timing dependence)
+  window.addEventListener('click', e => {
+    if (!e.target.closest?.('#addModelControl,#variantsBtn')) return;
+    e.preventDefault(); e.stopImmediatePropagation(); openAdd();
+  }, true);
 
   // renderVariants clears the chain list; always rebuild it afterwards
   const baseRender = window.renderVariants;
