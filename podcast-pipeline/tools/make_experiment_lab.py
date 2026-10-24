@@ -1899,7 +1899,11 @@ PAGE = PAGE.replace(
   lsCss.textContent = '#canvasWrap .wave,#canvasWrap .track-labels,#canvasWrap .ruler,#canvasWrap .selection,#canvasWrap .playhead{display:none!important}#abCompare{display:none!important}'
     + '#laneStack{--ls-lbl:clamp(196px,24vw,264px);position:absolute;left:8px;right:8px;top:6px;bottom:46px;display:none;flex-direction:column;min-height:0}#canvasWrap[data-ls=on] #laneStack{display:flex}#canvasWrap[data-ls=on] #emptyWaveState{display:none!important}'
     + '.ls-scroll{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;border:1px solid #1f2c35;border-radius:8px;background:#0a1016;scrollbar-width:thin}'
-    + '.ls-head{position:sticky;top:0;z-index:3;display:grid;grid-template-columns:var(--ls-lbl,240px) minmax(0,1fr);background:#0c141b;border-bottom:1px solid #1f2c35;font:10px ui-monospace,monospace;color:#617480}'
+    + '.ls-top{position:sticky;top:0;z-index:3;background:#0c141b;border-bottom:1px solid #1f2c35}.ls-head{display:grid;grid-template-columns:var(--ls-lbl,240px) minmax(0,1fr);font:10px ui-monospace,monospace;color:#617480}'
+    + '.ls-bar{display:grid;grid-template-columns:var(--ls-lbl,240px) minmax(0,1fr);align-items:center;border-bottom:1px solid #16212a;font-size:11px;color:var(--muted)}.ls-tools{display:flex;flex-wrap:wrap;gap:3px 5px;align-items:center;padding:5px 8px;min-width:0}.ls-follow{white-space:nowrap;cursor:pointer;font-size:11px}.ls-follow input{accent-color:var(--cyan);vertical-align:-2px}.ls-tools .btn{padding:2px 9px;line-height:1.3;white-space:nowrap}'
+    + '.ls-view{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font:10px ui-monospace,monospace}.ls-map{position:relative;height:16px;margin:4px 8px 4px 0;background:#0a1016;border:1px solid #1f2c35;border-radius:5px;cursor:pointer;touch-action:none}'
+    + '.ls-win{position:absolute;top:0;bottom:0;background:#57d3d044;border:1px solid var(--cyan);border-radius:4px;cursor:grab;min-width:6px}.ls-win:active{cursor:grabbing}'
+    + '.ls-hint{padding:3px 10px;color:#617480;font:10px ui-monospace,monospace}'
     + '.ls-loop{margin-left:10px;text-transform:none;letter-spacing:0;font-weight:500;cursor:pointer;white-space:nowrap}.ls-loop input{accent-color:var(--cyan);vertical-align:-2px}'
     + '.ls-head .ls-ticks{display:flex;justify-content:space-between;padding:4px 6px}.ls-head .ls-hl{padding:4px 10px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:700}'
     + '.ls-rows{position:relative}.ls-row{display:grid;grid-template-columns:var(--ls-lbl,240px) minmax(0,1fr);height:62px;border-bottom:1px solid #16212a}.ls-row.on{background:#10252a}.ls-row.on .ls-letter{box-shadow:0 0 0 2px #fff8}'
@@ -1915,16 +1919,18 @@ PAGE = PAGE.replace(
   const wrap = $('canvasWrap');
   const stack = document.createElement('div');
   stack.id = 'laneStack'; stack.setAttribute('data-raw', '');
-  stack.innerHTML = '<div class="ls-scroll" id="lsScroll"><div class="ls-head"><span class="ls-hl" title="Mọi kênh dùng chung một thang biên độ">Kênh · bấm để nghe <label class="ls-loop" title="Phát lặp lại vùng đã kéo chọn"><input type="checkbox" id="loop" checked> lặp vùng chọn</label></span><div class="ls-ticks" id="lsTicks"></div></div><div class="ls-rows" id="lsRows"></div></div>';
+  stack.innerHTML = '<div class="ls-scroll" id="lsScroll"><div class="ls-top"><div class="ls-bar"><div class="ls-tools"><button class="btn" type="button" id="lsZoomOut" title="Thu nhỏ" aria-label="Thu nhỏ">−</button><button class="btn" type="button" id="lsZoomIn" title="Phóng to" aria-label="Phóng to">+</button><button class="btn" type="button" id="lsFit" title="Xem toàn bộ audio">Toàn bộ</button><span class="ls-view" id="lsView"></span><label class="ls-follow" title="Khi phát, cửa sổ xem chạy theo vạch phát"><input type="checkbox" id="lsFollow" checked> bám theo</label></div><div class="ls-map" id="lsMap" title="Kéo khung để dịch cửa sổ xem, bấm để nhảy tới"><div class="ls-win" id="lsWin"></div></div></div><div class="ls-head"><span class="ls-hl" title="Mọi kênh dùng chung một thang biên độ">Kênh · bấm để nghe <label class="ls-loop" title="Phát lặp lại vùng đã kéo chọn"><input type="checkbox" id="loop" checked> lặp vùng chọn</label></span><div class="ls-ticks" id="lsTicks"></div></div></div><div class="ls-rows" id="lsRows"></div></div>';
   if (wrap) wrap.insertBefore(stack, wrap.firstChild);
   const LS = {listening: 'A', peaks: new Map(), loading: new Map(), failed: new Set(), recent: [], sig: '', drag: null, counted: 0, ctx: null};
-  const MAX_LOADED = 4, AUTOLOAD = 3, BINS = 2400;
+  const MAX_LOADED = 4, AUTOLOAD = 3, LEVELS = [2400, 19200, 153600], MIN_SPAN = 0.25;
   const palette = () => (typeof COLORS !== 'undefined' && COLORS.length ? COLORS : ['#57d3d0', '#f4b660', '#68d391', '#c58cff', '#6ba7ff', '#f27979']);
   const mmss = t => { t = Math.max(0, Math.floor(t)); return String(Math.floor(t / 60)).padStart(2, '0') + ':' + String(t % 60).padStart(2, '0'); };
+  // peak summaries at three detail levels (a level is picked per zoom); past the finest one the visible samples are read directly
   const peaksOf = pcm => {
-    const n = pcm.length, step = Math.max(1, Math.floor(n / BINS / 8)), out = new Float32Array(BINS);
-    for (let b = 0; b < BINS; b++) { const lo = Math.floor(b * n / BINS), hi = Math.min(n, Math.floor((b + 1) * n / BINS)); let m = 0; for (let i = lo; i < hi; i += step) { const v = Math.abs(pcm[i]); if (v > m) m = v; } out[b] = m; }
-    const top = out.reduce((x, y) => Math.max(x, y), 0) || 1; return {peaks: out, top};
+    const n = pcm.length, fine = LEVELS[LEVELS.length - 1], fd = new Float32Array(fine);
+    for (let b = 0; b < fine; b++) { const lo = Math.floor(b * n / fine), hi = Math.floor((b + 1) * n / fine); let m = 0; for (let i = lo; i < hi; i++) { const v = pcm[i] < 0 ? -pcm[i] : pcm[i]; if (v > m) m = v; } fd[b] = m; }
+    const levels = LEVELS.map(bins => { if (bins === fine) return {bins, data: fd}; const g = fine / bins, d = new Float32Array(bins); for (let b = 0; b < bins; b++) { let m = 0; for (let k = b * g; k < (b + 1) * g; k++) if (fd[k] > m) m = fd[k]; d[b] = m; } return {bins, data: d}; });
+    return {levels, top: fd.reduce((x, y) => y > x ? y : x, 0) || 1};
   };
   const sourcePeaks = () => { if (typeof samples === 'undefined' || !samples.A) return null; if (LS.srcPcm !== samples.A) { LS.srcPcm = samples.A; LS.srcPeaks = peaksOf(samples.A); } return LS.srcPeaks; };
   const allRuns = () => {
@@ -1948,11 +1954,11 @@ PAGE = PAGE.replace(
   const rowsModel = () => {
     const list = [], src = $('sourceName')?.textContent || '';
     list.push({key: 'A', letter: 'A', title: 'Nguồn · audio gốc', sub: (typeof audioDuration !== 'undefined' && audioDuration.A ? mmss(audioDuration.A) + ' · ' : '') + (src && !/Chưa/.test(src) ? src.split(' · ')[0] : 'chưa nạp'),
-               tip: 'A = audio gốc đưa vào pipeline', playable: !!(typeof audioUrl !== 'undefined' && audioUrl.A), peaks: sourcePeaks(), color: palette()[0]});
+               tip: 'A = audio gốc đưa vào pipeline', playable: !!(typeof audioUrl !== 'undefined' && audioUrl.A), peaks: sourcePeaks(), color: palette()[0], pcm: (typeof samples !== 'undefined' && samples.A) || null});
     allRuns().forEach((run, i) => {
       const d = describe(run, letterOf(i)), id = run.r.id, loaded = typeof runAudio !== 'undefined' && !!runAudio[id];
       list.push({key: id, run, letter: letterOf(i), title: d.title, sub: d.sub, tip: d.tip, loaded, loading: LS.loading.has(id), failed: LS.failed.has(id),
-                 playable: loaded || (!!run.r.serverRun?.output && !LS.failed.has(id)), peaks: LS.peaks.get(id) || null, color: palette()[(i + 1) % palette().length]});
+                 playable: loaded || (!!run.r.serverRun?.output && !LS.failed.has(id)), peaks: LS.peaks.get(id) || null, color: palette()[(i + 1) % palette().length], pcm: loaded ? runAudio[id].samples : null});
     });
     const scaleTop = list.reduce((m, x) => Math.max(m, x.peaks?.top || 0), 0) || 1; list.forEach(x => { x.scaleTop = scaleTop; });
     return list;
@@ -1965,26 +1971,40 @@ PAGE = PAGE.replace(
     const x = cv.getContext('2d'); x.clearRect(0, 0, w, h);
     x.strokeStyle = '#1b2832'; x.lineWidth = 1; for (let i = 1; i < 8; i++) { x.beginPath(); x.moveTo(Math.round(i * w / 8) + .5, 0); x.lineTo(Math.round(i * w / 8) + .5, h); x.stroke(); }
     if (!model.peaks) return;
-    const {peaks} = model.peaks, top = model.scaleTop || model.peaks.top, dur = (typeof duration !== 'undefined' && duration) || 1, vs = typeof viewStart !== 'undefined' ? viewStart : 0, span = (typeof viewSpan !== 'undefined' && viewSpan) || dur;
+    const top = model.scaleTop || model.peaks.top, dur = (typeof duration !== 'undefined' && duration) || 1, vs = typeof viewStart !== 'undefined' ? viewStart : 0, span = (typeof viewSpan !== 'undefined' && viewSpan) || dur;
+    const need = w / span * dur, lv = model.peaks.levels.find(l => l.bins >= need) || model.peaks.levels[model.peaks.levels.length - 1];
+    const raw = model.pcm && need > lv.bins * 1.5, sr = raw ? model.pcm.length / dur : 0;
     x.strokeStyle = model.color; x.beginPath();
     for (let px = 0; px < w; px++) {
-      const t0 = vs + px / w * span, t1 = vs + (px + 1) / w * span;
-      const lo = Math.floor(Math.max(0, Math.min(.999, t0 / dur)) * BINS), hi = Math.max(lo + 1, Math.ceil(Math.max(0, Math.min(1, t1 / dur)) * BINS));
-      let m = 0; for (let k = lo; k < Math.min(BINS, hi); k++) if (peaks[k] > m) m = peaks[k];
+      const t0 = vs + px / w * span, t1 = vs + (px + 1) / w * span; let m = 0;
+      if (raw) { const s0 = Math.max(0, Math.floor(t0 * sr)), s1 = Math.min(model.pcm.length, Math.max(s0 + 1, Math.ceil(t1 * sr))); for (let i = s0; i < s1; i++) { const v = model.pcm[i] < 0 ? -model.pcm[i] : model.pcm[i]; if (v > m) m = v; } }
+      else { const lo = Math.floor(Math.max(0, Math.min(.999, t0 / dur)) * lv.bins), hi = Math.max(lo + 1, Math.ceil(Math.max(0, Math.min(1, t1 / dur)) * lv.bins)); for (let k = lo; k < Math.min(lv.bins, hi); k++) if (lv.data[k] > m) m = lv.data[k]; }
       const yy = Math.min(1, m / top) * h * .44 + .5; x.moveTo(px + .5, h / 2 - yy); x.lineTo(px + .5, h / 2 + yy);
     }
     x.stroke();
   };
   const positionLS = () => {
     const over = $('lsOver'); if (!over || typeof current === 'undefined') return;
+    // while playing, turn the page when the playhead leaves the zoomed window
+    if (playing() && $('lsFollow')?.checked && viewSpan < duration * .999 && (current > viewStart + viewSpan || current < viewStart) && !LS.following) {
+      LS.following = true; viewStart = Math.max(0, Math.min(duration - viewSpan, current - viewSpan * .1)); redraw(); LS.following = false; return;
+    }
+    renderMap();
     const pct = t => (t - viewStart) / viewSpan, ph = over.querySelector('.ls-ph'), se = over.querySelector('.ls-sel');
     const c = pct(current); ph.style.display = c < 0 || c > 1 ? 'none' : ''; ph.style.left = (c * 100) + '%';
     const a = Math.max(0, pct(sel[0])), b = Math.min(1, pct(sel[1])); se.style.display = b > a && (sel[1] - sel[0]) < duration * .999 ? '' : 'none'; se.style.left = (a * 100) + '%'; se.style.width = ((b - a) * 100) + '%';
   };
-  const renderRuler = () => { const t = $('lsTicks'); if (!t || typeof viewStart === 'undefined') return; t.innerHTML = Array.from({length: 6}, (_, k) => `<span>${mmss(viewStart + k / 5 * viewSpan)}</span>`).join(''); };
+  const stamp = t => mmss(t) + (viewSpan < 30 ? '.' + Math.floor(t % 1 * 10) : '');
+  const renderRuler = () => { const t = $('lsTicks'); if (!t || typeof viewStart === 'undefined') return; t.innerHTML = Array.from({length: 6}, (_, k) => `<span>${stamp(viewStart + k / 5 * viewSpan)}</span>`).join(''); };
+  const renderMap = () => {
+    const win = $('lsWin'), info = $('lsView'); if (!win || !duration) return;
+    win.style.left = (viewStart / duration * 100) + '%'; win.style.width = Math.max(.6, viewSpan / duration * 100) + '%';
+    const z = duration / viewSpan; if (info) { info.textContent = `×${z >= 10 ? Math.round(z) : z.toFixed(1)}`; info.title = `Đang xem ${stamp(viewStart)} – ${stamp(viewStart + viewSpan)} (${stamp(viewSpan)})`; }
+    const hint = document.querySelector('.stage-head .topmeta'); if (hint && hint.dataset.lsHint !== '1') { hint.dataset.lsHint = '1'; hint.setAttribute('data-raw', ''); hint.textContent = 'Kéo để chọn vùng · bấm để tua · cuộn để phóng to · Shift+cuộn để dịch'; }
+  };
   const refresh = (force) => {
     const rows = $('lsRows'); if (!rows || !wrap) return;
-    const model = rowsModel(), hasAudio = model[0].playable || model.some(m => m.run && m.peaks);
+    const model = LS.model = rowsModel(), hasAudio = model[0].playable || model.some(m => m.run && m.peaks);
     wrap.dataset.ls = hasAudio || model.length > 1 ? 'on' : 'off';
     const sig = JSON.stringify(model.map(m => [m.key, m.title, m.sub, m.loaded, m.loading, m.failed, m.playable, !!m.peaks, m.key === LS.listening, m.key === LS.listening && playing()]));
     if (sig !== LS.sig || force) {
@@ -2001,7 +2021,7 @@ PAGE = PAGE.replace(
     }
     renderRuler(); positionLS(); autoload(model);
   };
-  const redraw = () => { const rows = $('lsRows'); if (!rows) return; const model = rowsModel(); rows.querySelectorAll('.ls-row').forEach((row, i) => model[i] && drawRow(row, model[i])); renderRuler(); positionLS(); };
+  const redraw = () => { const rows = $('lsRows'); if (!rows) return; const model = LS.model || rowsModel(); rows.querySelectorAll('.ls-row').forEach((row, i) => model[i] && drawRow(row, model[i])); renderRuler(); positionLS(); };
 
   // ---- load a run's denoised audio on demand (kept to the last few; the waveform thumbnail outlives the audio) ----
   const touch = id => { LS.recent = LS.recent.filter(x => x !== id); LS.recent.push(id); };
@@ -2074,7 +2094,7 @@ PAGE = PAGE.replace(
     window.renderVariants?.(); window.dirty?.(); showUndo(`Đã xóa kênh ${letter} khỏi danh sách`);
   };
 
-  // ---- pointer: click seeks, drag selects a stretch to loop, Ctrl/Alt+wheel zooms, Shift+wheel pans ----
+  // ---- pointer: click seeks, drag selects a stretch to loop, wheel zooms, Shift+wheel pans ----
   const timeAt = (e, el) => { const r = el.getBoundingClientRect(); return Math.max(0, Math.min(duration, viewStart + (e.clientX - r.left) / Math.max(1, r.width) * viewSpan)); };
   stack.addEventListener('click', e => {
     const del = e.target.closest('[data-del]'); if (del) { if (!del.disabled) deleteLane(del.dataset.del); return; }
@@ -2084,12 +2104,41 @@ PAGE = PAGE.replace(
   stack.addEventListener('pointerdown', e => { const w = e.target.closest('.ls-wave'); if (!w || e.button) return; LS.drag = {w, t0: timeAt(e, w), moved: false}; w.setPointerCapture?.(e.pointerId); });
   stack.addEventListener('pointermove', e => { const d = LS.drag; if (!d) return; const t = timeAt(e, d.w); if (Math.abs(t - d.t0) > .15) d.moved = true; if (d.moved) { sel = [Math.min(d.t0, t), Math.max(d.t0, t)]; current = sel[0]; positionLS(); } });
   stack.addEventListener('pointerup', e => { const d = LS.drag; LS.drag = null; if (!d) return; seekTo(d.moved ? sel[0] : timeAt(e, d.w)); window.positionOverlays?.(); });
+  let redrawQueued = false;
+  const manual = () => { LS.manualUntil = Date.now() + 4000; };
+  const schedRedraw = () => { if (redrawQueued) return; redrawQueued = true; requestAnimationFrame(() => { redrawQueued = false; redraw(); }); };
+  const clampView = () => { viewSpan = Math.max(Math.min(MIN_SPAN, duration), Math.min(duration, viewSpan)); viewStart = Math.max(0, Math.min(duration - viewSpan, viewStart)); };
+  const zoomAt = (k, t) => { const frac = (t - viewStart) / viewSpan; viewSpan = Math.max(Math.min(MIN_SPAN, duration), Math.min(duration, viewSpan * k)); viewStart = t - frac * viewSpan; clampView(); schedRedraw(); };
+  const zoomCenter = k => zoomAt(k, current >= viewStart && current <= viewStart + viewSpan ? current : viewStart + viewSpan / 2);
   stack.addEventListener('wheel', e => {
-    const w = e.target.closest('.ls-wave'); if (!w || !(e.shiftKey || e.ctrlKey || e.metaKey || e.altKey)) return; e.preventDefault();
-    if (e.shiftKey && !(e.ctrlKey || e.metaKey || e.altKey)) viewStart = Math.max(0, Math.min(duration - viewSpan, viewStart + e.deltaY / Math.max(1, w.clientWidth) * viewSpan));
-    else { const f = timeAt(e, w), k = e.deltaY > 0 ? 1.25 : .8, span = Math.max(1, Math.min(duration, viewSpan * k)), frac = (f - viewStart) / viewSpan; viewSpan = span; viewStart = Math.max(0, Math.min(duration - span, f - frac * span)); }
-    redraw();
+    const w = e.target.closest('.ls-wave, .ls-ticks'); if (!w) return;   // over the name column the wheel still scrolls the lanes
+    e.preventDefault(); manual();
+    const sideways = Math.abs(e.deltaX) > Math.abs(e.deltaY);
+    if (e.shiftKey || sideways) { viewStart += (sideways ? e.deltaX : e.deltaY) / Math.max(1, w.clientWidth) * viewSpan; clampView(); schedRedraw(); }
+    else zoomAt(Math.exp(Math.max(-240, Math.min(240, e.deltaY)) * 0.0022), timeAt(e, w));   // wheel up = zoom in, down = zoom out
   }, {passive: false});
+  $('lsZoomIn').onclick = () => { manual(); zoomCenter(.5); }; $('lsZoomOut').onclick = () => { manual(); zoomCenter(2); };
+  $('lsFit').onclick = () => { manual(); viewStart = 0; viewSpan = duration; schedRedraw(); };
+  // the minimap: drag the window to pan, click elsewhere to jump
+  const mapEl = $('lsMap'); let mapDrag = null;
+  const mapTime = e => { const r = mapEl.getBoundingClientRect(); return Math.max(0, Math.min(1, (e.clientX - r.left) / Math.max(1, r.width))) * duration; };
+  mapEl.addEventListener('pointerdown', e => { manual(); const onWin = e.target.id === 'lsWin', t = mapTime(e); mapDrag = {off: onWin ? t - viewStart : viewSpan / 2}; if (!onWin) { viewStart = t - viewSpan / 2; clampView(); schedRedraw(); } mapEl.setPointerCapture?.(e.pointerId); e.preventDefault(); });
+  mapEl.addEventListener('pointermove', e => { if (!mapDrag) return; viewStart = mapTime(e) - mapDrag.off; clampView(); schedRedraw(); });
+  mapEl.addEventListener('pointerup', () => { mapDrag = null; });
+  // while playing: move the playhead every frame (timeupdate only fires about 4x a second) and, when zoomed in,
+  // keep it at ~30% of the window by scrolling the view; the user's own pan/zoom pauses this for a moment
+  let raf = null, lastFrame = 0;
+  const frame = ts => {
+    raf = null; if (!playing()) return;
+    if (ts - lastFrame >= 33) {
+      lastFrame = ts; const t = $('player').currentTime; if (t >= 0) current = t;
+      const follow = $('lsFollow')?.checked && Date.now() > (LS.manualUntil || 0) && viewSpan < duration * .999;
+      if (follow && (current > viewStart + viewSpan * .3 || current < viewStart)) { viewStart = Math.max(0, Math.min(duration - viewSpan, current - viewSpan * .3)); redraw(); }
+      else positionLS();
+    }
+    raf = requestAnimationFrame(frame);
+  };
+  $('player')?.addEventListener('play', () => { if (!raf) raf = requestAnimationFrame(frame); });
   if (typeof ResizeObserver === 'function') new ResizeObserver(() => requestAnimationFrame(redraw)).observe(stack);
   const baseOverlays = window.positionOverlays;
   if (typeof baseOverlays === 'function') window.positionOverlays = function () { const out = baseOverlays.apply(this, arguments); positionLS(); return out; };

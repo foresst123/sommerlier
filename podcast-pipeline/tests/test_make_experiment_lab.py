@@ -347,3 +347,30 @@ def test_each_run_lane_has_a_trash_button_that_only_hides_it_and_can_be_undone()
     assert "if (r.status === 'running' || r.status === 'submitting') return;" in page and "file trên server vẫn còn" in page
     # the source lane has no trash button (only run rows build one)
     assert "const trash = !m.run ? ''" in page
+
+
+def test_scroll_zoom_mode_is_added_and_drag_select_is_kept():
+    page = lab.PAGE
+    # wheel over the waveform zooms around the cursor; Shift+wheel or a sideways swipe pans; buttons + minimap
+    assert "zoomAt(Math.exp(Math.max(-240, Math.min(240, e.deltaY)) * 0.0022), timeAt(e, w))" in page
+    assert "const sideways = Math.abs(e.deltaX) > Math.abs(e.deltaY);" in page
+    assert 'id="lsZoomIn"' in page and 'id="lsZoomOut"' in page and 'id="lsFit"' in page and 'id="lsMap"' in page and "MIN_SPAN = 0.25" in page
+    # the name column keeps scrolling the lanes: only the waveform and ruler capture the wheel
+    assert "e.target.closest('.ls-wave, .ls-ticks')" in page
+    # deep zoom stays sharp: three summary levels, then the samples of the visible stretch
+    assert "LEVELS = [2400, 19200, 153600]" in page and "const raw = model.pcm && need > lv.bins * 1.5" in page
+    # drag-to-select and the loop toggle are still there
+    assert "stack.addEventListener('pointermove'" in page and 'id="loop" checked' in page and "class=\"ls-sel\"" in page
+    # the playhead is followed while playing at a zoom, and the hint describes the new gestures
+    assert "turn the page when the playhead leaves the zoomed window" in page and "cuộn để phóng to · Shift+cuộn để dịch" in page
+
+
+def test_playhead_runs_smoothly_and_the_zoomed_view_follows_it_unless_the_user_takes_over():
+    page = lab.PAGE
+    assert 'id="lsFollow" checked' in page and "bám theo" in page
+    # one frame loop only while playing; timeupdate alone would move the playhead 4x a second
+    assert "$('player')?.addEventListener('play', () => { if (!raf) raf = requestAnimationFrame(frame); });" in page
+    assert "const follow = $('lsFollow')?.checked && Date.now() > (LS.manualUntil || 0) && viewSpan < duration * .999;" in page
+    assert "current - viewSpan * .3" in page
+    # the user's own pan/zoom/minimap gesture pauses the follow for a few seconds
+    assert page.count("manual();") >= 4 and "LS.manualUntil = Date.now() + 4000" in page
