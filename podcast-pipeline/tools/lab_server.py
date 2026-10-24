@@ -44,6 +44,16 @@ WORD_RE = re.compile(r"^[A-Za-z0-9_.-]{1,40}$")
 ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,60}$")
 MAX_BODY = 1 << 20
 MAX_LIST = 2000
+MAX_MANIFEST_BYTES = 2 << 20
+MAX_ASR_BYTES = 8 << 20
+MAX_ASR_SEGMENTS = 5000
+MAX_CONVERSATION_BYTES = 2 << 20
+MAX_CONVERSATIONS = 500
+MAX_TURNS = 1000
+CONVERSATION_TRACKS = {"mixture", "assistant", "user", "stereo_2ch"}
+DEFAULT_PAGE_LIMIT = 50
+MAX_PAGE_LIMIT = 100
+MAX_QUERY_LENGTH = 120
 LOG_TAIL = 6000
 WAVEFORM_BINS = 4096
 CONDA_SH = ('"$HOME/miniconda3/etc/profile.d/conda.sh" "$HOME/anaconda3/etc/profile.d/conda.sh" '
@@ -53,6 +63,53 @@ CONDA_SH = ('"$HOME/miniconda3/etc/profile.d/conda.sh" "$HOME/anaconda3/etc/prof
 
 class BadRequest(Exception):
     pass
+
+
+class ASRArtifactError(BadRequest):
+    """An output artifact exists but cannot be safely decoded."""
+
+    code = 422
+
+
+def _page_args(limit=None, cursor=None, search=None, review=None):
+    """Validate bounded list controls shared by the ASR/conversation APIs."""
+    if limit in (None, ""):
+        page_limit = DEFAULT_PAGE_LIMIT
+    else:
+        try:
+            page_limit = int(limit)
+        except (TypeError, ValueError) as exc:
+            raise BadRequest("limit không hợp lệ") from exc
+        if str(page_limit) != str(limit).strip():
+            raise BadRequest("limit không hợp lệ")
+    if not 1 <= page_limit <= MAX_PAGE_LIMIT:
+        raise BadRequest("limit phải trong 1..100")
+    if cursor in (None, ""):
+        offset = 0
+    else:
+        try:
+            offset = int(cursor)
+        except (TypeError, ValueError) as exc:
+            raise BadRequest("cursor không hợp lệ") from exc
+        if str(offset) != str(cursor).strip() or offset < 0:
+            raise BadRequest("cursor không hợp lệ")
+    term = "" if search is None else str(search)
+    if len(term) > MAX_QUERY_LENGTH:
+        raise BadRequest("search quá dài")
+    if review not in (None, "", "all", "flagged"):
+        raise BadRequest("review không hợp lệ")
+    return page_limit, offset, term.casefold(), review or "all"
+
+
+def _page(items, limit, offset):
+    """Return a bounded page plus stable integer cursors (never artifact paths)."""
+    total = len(items)
+    offset = min(offset, total)
+    rows = items[offset:offset + limit]
+    return rows, {"resultCount": total, "limit": limit,
+                  "cursor": str(offset) if offset else None,
+                  "prevCursor": str(max(0, offset - limit)) if offset else None,
+                  "nextCursor": str(offset + limit) if offset + limit < total else None}
 
 
 def _ffprobe(path):
@@ -399,6 +456,300 @@ def find_run_dir(cfg, rid):
     return found[-1] if found else None
 
 
+def _run_out(cfg, run_id):
+    """Resolve a server-owned run output directory, never a client path."""
+    run_dir = find_run_dir(cfg, run_id)
+    if run_dir is None or run_dir.is_symlink() or not run_dir.is_dir():
+        raise BadRequest("không tìm thấy lượt chạy")
+    root = (cfg.out_root / "lab_runs").resolve()
+    resolved = run_dir.resolve()
+    if not inside(resolved, [root]):
+        raise BadRequest("lượt chạy không hợp lệ")
+    out = run_dir / "out"
+    if out.is_symlink() or not out.is_dir() or out.resolve() != out:
+        raise BadRequest("thư mục output không hợp lệ")
+    return run_dir, out
+
+
+def _safe_manifest_file(out, raw):
+    """Allow only a regular, non-symlink file physically below run/out."""
+    if not isinstance(raw, str) or not raw or "\0" in raw:
+        raise ASRArtifactError("đường dẫn artifact không hợp lệ")
+    out = out.resolve()
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = out / candidate
+    try:
+        rel = candidate.resolve(strict=False).relative_to(out)
+    except ValueError as exc:
+        raise ASRArtifactError("artifact nằm ngoài output của lượt chạy") from exc
+    # Reject symlink components, including a symlinked file whose resolved path
+    # happens to land back inside out.
+    cur = out
+    for part in rel.parts:
+        cur = cur / part
+        try:
+            if cur.is_symlink():
+                raise ASRArtifactError("artifact symlink không được phép")
+        except OSError as exc:
+            raise ASRArtifactError("không thể kiểm tra artifact") from exc
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise ASRArtifactError("artifact không tồn tại") from exc
+    if not inside(resolved, [out]) or not resolved.is_dir():
+        raise ASRArtifactError("artifact nằm ngoài output của lượt chạy")
+    return resolved
+
+
+def _safe_artifact_file(out, raw, label="artifact"):
+    """Resolve a regular local artifact below run/out; reject symlink components."""
+    if not isinstance(raw, str) or not raw or "\0" in raw:
+        raise ASRArtifactError(f"{label} không hợp lệ")
+    root = out.resolve()
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        rel = candidate.resolve(strict=False).relative_to(root)
+    except ValueError as exc:
+        raise ASRArtifactError(f"{label} nằm ngoài output") from exc
+    cur = root
+    for part in rel.parts:
+        cur /= part
+        if cur.is_symlink():
+            raise ASRArtifactError(f"{label} symlink không được phép")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise ASRArtifactError(f"{label} không tồn tại") from exc
+    if not inside(resolved, [root]) or not resolved.is_file():
+        raise ASRArtifactError(f"{label} không hợp lệ")
+    return resolved
+
+
+def _safe_manifest_probe(out, raw):
+    """Resolve a known output path for readiness checks, allowing it to be absent."""
+    root = out.resolve()
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        rel = candidate.resolve(strict=False).relative_to(root)
+    except ValueError as exc:
+        raise ASRArtifactError("artifact nằm ngoài output") from exc
+    cur = root
+    for part in rel.parts:
+        cur /= part
+        try:
+            if cur.is_symlink():
+                raise ASRArtifactError("artifact symlink không được phép")
+        except OSError as exc:
+            raise ASRArtifactError("không thể kiểm tra artifact") from exc
+    return candidate
+
+
+def _read_json_limited(path, limit, label):
+    try:
+        if path.stat().st_size > limit:
+            raise ASRArtifactError(f"{label} quá lớn")
+        return json.loads(path.read_text(encoding="utf-8"))
+    except ASRArtifactError:
+        raise
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ASRArtifactError(f"{label} bị hỏng") from exc
+
+
+def workspace_asr(cfg, run_id, variant_id=None, recording=None, limit=None, cursor=None, search=None):
+    """Read one ASR recording selected solely from its run-owned manifest."""
+    run_dir, out = _run_out(cfg, run_id)
+    manifest_path = out / "variants_manifest.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        return {"runId": str(run_id), "status": "pending", "variants": []}
+    data = _read_json_limited(manifest_path, MAX_MANIFEST_BYTES, "manifest")
+    variants = data.get("variants") if isinstance(data, dict) else None
+    if not isinstance(variants, list):
+        raise ASRArtifactError("manifest không hợp lệ")
+    safe_variants = [v for v in variants if isinstance(v, dict) and isinstance(v.get("id"), str)]
+    if variant_id is None:
+        return {"runId": str(run_id), "status": "ready", "variants": [
+            {"id": v["id"], "label": v.get("label") or v["id"], "status": v.get("status", "unknown"),
+             "recordings": sorted((v.get("files") or {}).keys()) if isinstance(v.get("files"), dict) else []}
+            for v in safe_variants]}
+    selected = next((v for v in safe_variants if v["id"] == str(variant_id)), None)
+    if selected is None:
+        raise BadRequest("không tìm thấy variant")
+    files = selected.get("files")
+    if not isinstance(files, dict):
+        return {"runId": str(run_id), "variantId": str(variant_id), "status": "pending", "recordings": []}
+    names = sorted(str(k) for k in files if isinstance(k, str) and ID_RE.match(k))
+    if recording is None:
+        return {"runId": str(run_id), "variantId": str(variant_id), "status": "ready", "recordings": names}
+    if recording not in files or recording not in names:
+        raise BadRequest("không tìm thấy recording")
+    page_limit, offset, term, _review = _page_args(limit, cursor, search)
+    base = _safe_manifest_file(out, files[recording])
+    asr_path = base / "05_asr" / "transcripts.json"
+    # Check every output component again: a manifest may point at a legitimate
+    # directory while a later stage swaps in a symlink.
+    _safe_manifest_file(out, str(asr_path.parent))
+    if asr_path.is_symlink() or not asr_path.is_file():
+        return {"runId": str(run_id), "variantId": str(variant_id), "recording": recording,
+                "status": "pending", "segments": []}
+    transcript = _read_json_limited(asr_path, MAX_ASR_BYTES, "ASR artifact")
+    if not isinstance(transcript, list):
+        raise ASRArtifactError("ASR artifact không phải danh sách")
+    if len(transcript) > MAX_ASR_SEGMENTS:
+        raise ASRArtifactError("ASR artifact có quá nhiều đoạn")
+    segments = [x for x in transcript if isinstance(x, dict)]
+    if term:
+        segments = [x for x in segments if term in json.dumps(x, ensure_ascii=False).casefold()]
+    segments, paging = _page(segments, page_limit, offset)
+    return {"runId": str(run_id), "variantId": str(variant_id), "recording": recording,
+            "status": "empty" if not segments else "ready", "segments": segments, **paging}
+
+
+def workspace_conversations(cfg, run_id, variant_id=None, recording=None, conversation_id=None,
+                            limit=None, cursor=None, search=None, review=None):
+    """Read conversation exports selected through the same run manifest as ASR."""
+    _run_dir, out = _run_out(cfg, run_id)
+    manifest_path = out / "variants_manifest.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        return {"runId": str(run_id), "status": "pending", "variants": []}
+    data = _read_json_limited(manifest_path, MAX_MANIFEST_BYTES, "manifest")
+    variants = data.get("variants") if isinstance(data, dict) else None
+    if not isinstance(variants, list):
+        raise ASRArtifactError("manifest không hợp lệ")
+    safe_variants = [v for v in variants if isinstance(v, dict) and isinstance(v.get("id"), str)]
+    if variant_id is None:
+        return {"runId": str(run_id), "status": "ready", "variants": [
+            {"id": v["id"], "label": v.get("label") or v["id"], "status": v.get("status", "unknown"),
+             "recordings": sorted((v.get("files") or {}).keys()) if isinstance(v.get("files"), dict) else []}
+            for v in safe_variants]}
+    selected = next((v for v in safe_variants if v["id"] == str(variant_id)), None)
+    if selected is None:
+        raise BadRequest("không tìm thấy variant")
+    files = selected.get("files")
+    if not isinstance(files, dict):
+        return {"runId": str(run_id), "variantId": str(variant_id), "status": "pending", "recordings": []}
+    names = sorted(str(k) for k in files if isinstance(k, str) and ID_RE.match(k))
+    if recording is None:
+        return {"runId": str(run_id), "variantId": str(variant_id), "status": "ready", "recordings": names}
+    if recording not in files or recording not in names:
+        raise BadRequest("không tìm thấy recording")
+    page_limit, offset, term, review_mode = _page_args(limit, cursor, search, review)
+    base = _safe_manifest_file(out, files[recording])
+    export_dir = base / "09_conversation_exports"
+    _safe_manifest_file(out, str(export_dir))
+    exports_path = export_dir / "exports.json"
+    if exports_path.is_symlink() or not exports_path.is_file():
+        return {"runId": str(run_id), "variantId": str(variant_id), "recording": recording,
+                "status": "pending", "conversations": []}
+    exports = _read_json_limited(exports_path, MAX_CONVERSATION_BYTES, "conversation exports")
+    if not isinstance(exports, list):
+        raise ASRArtifactError("conversation exports không phải danh sách")
+    if len(exports) > MAX_CONVERSATIONS:
+        raise ASRArtifactError("quá nhiều conversation")
+    rows = [x for x in exports if isinstance(x, dict) and isinstance(x.get("id"), str)]
+    if conversation_id is None:
+        if review_mode == "flagged":
+            # Canonical review state is deliberately narrow: only the export
+            # row's boolean quarantine/verification fields can flag an item.
+            rows = [x for x in rows if x.get("quarantined") is True or x.get("verified") is False]
+        if term:
+            rows = [x for x in rows if term in json.dumps(x, ensure_ascii=False).casefold()]
+        rows, paging = _page(rows, page_limit, offset)
+        return {"runId": str(run_id), "variantId": str(variant_id), "recording": recording,
+                "status": "empty" if not rows else "ready", "conversations": [
+                    {k: x.get(k) for k in ("id", "category", "quarantined", "verified", "duration", "topic", "summary", "score")}
+                    for x in rows], **paging}
+    row = next((x for x in rows if x["id"] == str(conversation_id)), None)
+    if row is None:
+        raise BadRequest("không tìm thấy conversation")
+    folder = row.get("folder")
+    item = _safe_manifest_file(out, str(export_dir / folder)) if isinstance(folder, str) else None
+    if item is None:
+        raise ASRArtifactError("conversation folder không hợp lệ")
+    meta_path = item / "conversation.json"
+    meta = _read_json_limited(meta_path, MAX_CONVERSATION_BYTES, "conversation")
+    if not isinstance(meta, dict):
+        raise ASRArtifactError("conversation không hợp lệ")
+    turns = meta.get("conversation") if isinstance(meta.get("conversation"), list) else []
+    if len(turns) > MAX_TURNS:
+        raise ASRArtifactError("quá nhiều lượt thoại")
+    files_meta = meta.get("files") if isinstance(meta.get("files"), dict) else {}
+    tracks = {k: v for k, v in files_meta.items() if k in CONVERSATION_TRACKS and isinstance(v, str)}
+    audio = {track: "ready" for track, rel in tracks.items() if _safe_artifact_file(item, rel, "audio").suffix.lower() in AUDIO_EXT}
+    return {"runId": str(run_id), "variantId": str(variant_id), "recording": recording,
+            "conversationId": str(conversation_id), "status": "ready", "row": row,
+            "meta": {k: meta.get(k) for k in ("id", "category", "intended_category", "tags", "events", "quality", "verification", "topic", "summary", "duration", "role", "overlap_quality")},
+            "turns": turns, "audio": audio, "warnings": [w for w in (
+                "Quarantine item: review before use" if row.get("quarantined") or meta.get("category") == "_quarantine" else None,
+                "Verification failed; audio is not trusted" if row.get("verified") is False or (meta.get("verification") or {}).get("ok") is False else None,
+            ) if w]}
+
+
+def workspace_observe(cfg, run_id):
+    """Return cheap run/artifact readiness without reading artifact contents.
+
+    The observer intentionally only reads status.json and the run-owned manifest,
+    then checks the two known output paths for each manifest entry.  It never
+    walks an output tree or decodes ASR/conversation JSON.
+    """
+    run_dir, out = _run_out(cfg, run_id)
+    state = read_status(run_dir).get("state", "unknown")
+    result = {"runId": str(run_id), "status": state,
+              "asr": {"available": False, "status": "pending"},
+              "conversations": {"available": False, "status": "pending"}}
+    manifest_path = out / "variants_manifest.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        return result
+    data = _read_json_limited(manifest_path, MAX_MANIFEST_BYTES, "manifest")
+    variants = data.get("variants") if isinstance(data, dict) else None
+    if not isinstance(variants, list):
+        raise ASRArtifactError("manifest không hợp lệ")
+    for variant in variants:
+        if not isinstance(variant, dict) or not isinstance(variant.get("files"), dict):
+            continue
+        for raw_base in variant["files"].values():
+            if not isinstance(raw_base, str):
+                continue
+            base = _safe_manifest_probe(out, raw_base)
+            asr_path = base / "05_asr" / "transcripts.json"
+            conv_path = base / "09_conversation_exports" / "exports.json"
+            # Validate parent paths without opening or enumerating artifacts.
+            _safe_manifest_probe(out, str(asr_path.parent))
+            _safe_manifest_probe(out, str(conv_path.parent))
+            if asr_path.is_file() and not asr_path.is_symlink():
+                result["asr"] = {"available": True, "status": "ready"}
+            if conv_path.is_file() and not conv_path.is_symlink():
+                result["conversations"] = {"available": True, "status": "ready"}
+            if result["asr"]["available"] and result["conversations"]["available"]:
+                return result
+    return result
+
+
+def conversation_audio(cfg, run_id, variant_id, recording, conversation_id, track):
+    if track not in CONVERSATION_TRACKS:
+        raise BadRequest("track không được phép")
+    detail = workspace_conversations(cfg, run_id, variant_id, recording, conversation_id)
+    if detail.get("status") != "ready":
+        raise BadRequest("conversation chưa sẵn sàng")
+    _run_dir, out = _run_out(cfg, run_id)
+    data = json.loads((out / "variants_manifest.json").read_text(encoding="utf-8"))
+    selected = next(v for v in data["variants"] if v.get("id") == str(variant_id))
+    base = _safe_manifest_file(out, selected["files"][recording])
+    export_dir = base / "09_conversation_exports"
+    exports = json.loads((export_dir / "exports.json").read_text(encoding="utf-8"))
+    row = next(x for x in exports if x.get("id") == str(conversation_id))
+    item = _safe_manifest_file(out, str(export_dir / row["folder"]))
+    meta = _read_json_limited(item / "conversation.json", MAX_CONVERSATION_BYTES, "conversation")
+    rel = (meta.get("files") or {}).get(track)
+    if not isinstance(rel, str):
+        raise BadRequest("audio track không khả dụng")
+    return _safe_artifact_file(item, rel, "audio")
+
+
 def tail(path, n=LOG_TAIL):
     try:
         with open(path, "rb") as f:
@@ -478,6 +829,37 @@ def list_runs(cfg, limit=10):
     return {"runs": out}
 
 
+def list_workspace_runs(cfg, limit=50):
+    """Return cheap, read-only run metadata from the server-owned lab_runs root.
+
+    This endpoint deliberately does not accept a path and never walks output
+    artifacts.  Routine workspace polling therefore only reads each run's
+    small status manifest and ignores symlinks/non-directories.
+    """
+    root = (cfg.out_root / "lab_runs").resolve()
+    if not root.is_dir():
+        return {"runs": []}
+    try:
+        candidates = [d for d in root.iterdir() if d.is_dir() and not d.is_symlink()]
+    except OSError:
+        return {"runs": []}
+    candidates.sort(key=lambda d: d.name, reverse=True)
+    out = []
+    for d in candidates[:max(1, min(int(limit or 50), 100))]:
+        st = read_status(d)
+        run_id = d.name.split("_", 1)[-1] if "_" in d.name else d.name
+        out.append({
+            "runId": run_id,
+            "state": st.get("state", "unknown"),
+            "startedEpoch": st.get("startedEpoch"),
+            "finishedEpoch": st.get("finishedEpoch"),
+            "chain": st.get("chain") or [],
+            "source": st.get("source"),
+            "variantId": st.get("id"),
+        })
+    return {"runs": out}
+
+
 def make_handler(cfg, page):
     class H(BaseHTTPRequestHandler):
         server_version = "DenoiseLab/1"
@@ -488,12 +870,15 @@ def make_handler(cfg, page):
 
         def send_json(self, obj, code=200):
             body = json.dumps(obj, ensure_ascii=False).encode()
-            self.send_response(code)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                return
 
         def fail(self, e, code=400):
             self.send_json({"error": str(e)}, code)
@@ -521,12 +906,31 @@ def make_handler(cfg, page):
                     self.send_json(audio_summary(cfg, q.get("path")))
                 elif u.path == "/api/experiment/runs":
                     self.send_json(list_runs(cfg, int(q.get("limit", 10) or 10)))
+                elif u.path == "/api/workspace/runs":
+                    self.send_json(list_workspace_runs(cfg, int(q.get("limit", 50) or 50)))
+                elif u.path == "/api/workspace/observe":
+                    self.send_json(workspace_observe(cfg, q.get("runId")))
+                elif u.path == "/api/workspace/asr":
+                    self.send_json(workspace_asr(cfg, q.get("runId"), q.get("variantId"), q.get("recording"),
+                                                 q.get("limit"), q.get("cursor"), q.get("search")))
+                elif u.path == "/api/workspace/conversations":
+                    self.send_json(workspace_conversations(cfg, q.get("runId"), q.get("variantId"), q.get("recording"),
+                                                          q.get("conversationId"), q.get("limit"), q.get("cursor"),
+                                                          q.get("search"), q.get("review")))
+                elif u.path == "/api/workspace/conversation-audio":
+                    self.send_audio(conversation_audio(cfg, q.get("runId"), q.get("variantId"), q.get("recording"), q.get("conversationId"), q.get("track")))
                 elif u.path == "/api/experiment/status":
                     self.send_json(run_status(cfg, q.get("runId")))
                 else:
                     self.fail("not found", 404)
+            except ASRArtifactError as e:
+                self.fail(e, e.code)
             except (BadRequest, ValueError) as e:
                 self.fail(e)
+            except (BrokenPipeError, ConnectionResetError):
+                # A browser cancelling a range request is normal; the response
+                # is already gone, so never attempt to write a second error.
+                return
             except OSError as e:
                 self.fail(e, 500)
 
@@ -558,7 +962,10 @@ def make_handler(cfg, page):
                 f.seek(start)
                 remaining = end - start + 1
                 while remaining and (chunk := f.read(min(1 << 20, remaining))):
-                    self.wfile.write(chunk)
+                    try:
+                        self.wfile.write(chunk)
+                    except (BrokenPipeError, ConnectionResetError):
+                        return
                     remaining -= len(chunk)
 
         def do_POST(self):

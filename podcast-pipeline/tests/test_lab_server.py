@@ -162,6 +162,149 @@ def test_list_runs_is_newest_first_and_capped(cfg):
     assert ls.list_runs(ls.Config([cfg.audio_roots[0]], cfg.out_root / "none", "1", "", "som", "", "python", True))["runs"] == []
 
 
+def test_workspace_runs_is_read_only_metadata_from_lab_runs_only(cfg):
+    out = ls.start_run(cfg, payload(cfg))
+    run_dir = Path(out["runDir"])
+    # Status is the only manifest read by the workspace listing; no artifact
+    # walk or client-supplied path is involved.
+    meta = ls.list_workspace_runs(cfg)
+    assert meta["runs"][0]["runId"] == "r1"
+    assert meta["runs"][0]["state"] == "dry-run"
+    assert "runDir" not in meta["runs"][0]
+    outside = cfg.out_root / "outside"
+    outside.mkdir()
+    (cfg.out_root / "lab_runs" / "link-out").symlink_to(outside, target_is_directory=True)
+    assert all(item["runId"] != "link-out" for item in ls.list_workspace_runs(cfg)["runs"])
+
+
+def _asr_workspace_fixture(cfg, payload_text='[{"start": 0, "end": 1, "whisper": "xin chao"}]'):
+    run_dir = Path(ls.start_run(cfg, payload(cfg))["runDir"])
+    out = run_dir / "out"
+    variant_dir = out / "variant-output"
+    (variant_dir / "05_asr").mkdir(parents=True)
+    (variant_dir / "05_asr" / "transcripts.json").write_text(payload_text)
+    (out / "variants_manifest.json").write_text(json.dumps({"variants": [
+        {"id": "t1", "files": {"clip": str(variant_dir)}}]}))
+    return run_dir
+
+
+def test_workspace_asr_is_selected_from_manifest_and_reports_timeline(cfg):
+    _asr_workspace_fixture(cfg)
+    assert ls.workspace_asr(cfg, "r1", "t1")["recordings"] == ["clip"]
+    result = ls.workspace_asr(cfg, "r1", "t1", "clip")
+    assert result["status"] == "ready" and result["segments"][0]["whisper"] == "xin chao"
+
+
+def test_workspace_asr_missing_artifact_is_pending_and_empty_is_empty(cfg):
+    run_dir = _asr_workspace_fixture(cfg, "[]")
+    assert ls.workspace_asr(cfg, "r1", "t1", "clip")["status"] == "empty"
+    (run_dir / "out" / "variant-output" / "05_asr" / "transcripts.json").unlink()
+    assert ls.workspace_asr(cfg, "r1", "t1", "clip")["status"] == "pending"
+
+
+def test_workspace_asr_paging_search_and_strict_controls(cfg):
+    payload_text = json.dumps([{"start": i, "end": i + 1, "text": "hello" if i % 2 else "target"} for i in range(3)])
+    _asr_workspace_fixture(cfg, payload_text)
+    first = ls.workspace_asr(cfg, "r1", "t1", "clip", limit="1")
+    assert len(first["segments"]) == 1 and first["resultCount"] == 3
+    assert first["nextCursor"] == "1"
+    second = ls.workspace_asr(cfg, "r1", "t1", "clip", limit="1", cursor="1")
+    assert second["cursor"] == "1" and second["prevCursor"] == "0"
+    found = ls.workspace_asr(cfg, "r1", "t1", "clip", search="target")
+    assert found["resultCount"] == 2
+    with pytest.raises(ls.BadRequest):
+        ls.workspace_asr(cfg, "r1", "t1", "clip", limit="101")
+    with pytest.raises(ls.BadRequest):
+        ls.workspace_asr(cfg, "r1", "t1", "clip", search="x" * 121)
+
+
+def test_workspace_observe_is_bounded_and_reports_only_readiness(cfg):
+    run_dir = _asr_workspace_fixture(cfg)
+    observed = ls.workspace_observe(cfg, "r1")
+    assert observed["status"] == "dry-run"
+    assert observed["asr"] == {"available": True, "status": "ready"}
+    assert observed["conversations"] == {"available": False, "status": "pending"}
+    # The observer must not decode a malformed artifact or enumerate its contents.
+    (run_dir / "out" / "variant-output" / "05_asr" / "transcripts.json").write_text("not json")
+    observed = ls.workspace_observe(cfg, "r1")
+    assert observed["asr"] == {"available": True, "status": "ready"}
+
+
+def test_workspace_asr_rejects_manifest_path_escape_and_symlink(cfg, tmp_path):
+    run_dir = _asr_workspace_fixture(cfg)
+    manifest = run_dir / "out" / "variants_manifest.json"
+    manifest.write_text(json.dumps({"variants": [{"id": "t1", "files": {"clip": "/etc"}}]}))
+    with pytest.raises(ls.ASRArtifactError):
+        ls.workspace_asr(cfg, "r1", "t1", "clip")
+    safe = run_dir / "out" / "safe"
+    safe.mkdir()
+    (safe / "05_asr").symlink_to("/etc", target_is_directory=True)
+    manifest.write_text(json.dumps({"variants": [{"id": "t1", "files": {"clip": str(safe)}}]}))
+    with pytest.raises(ls.ASRArtifactError):
+        ls.workspace_asr(cfg, "r1", "t1", "clip")
+
+
+def _conversation_workspace_fixture(cfg, *, folder="turn_by_turn/c1", verified=True):
+    run_dir = Path(ls.start_run(cfg, payload(cfg))["runDir"])
+    out = run_dir / "out"
+    base = out / "variant-output"
+    export = base / "09_conversation_exports" / folder
+    export.mkdir(parents=True)
+    (export / "mixture.wav").write_bytes(b"RIFF")
+    (export / "conversation.json").write_text(json.dumps({
+        "id": "c1", "folder": folder, "category": "_quarantine" if not verified else "turn_by_turn",
+        "files": {"mixture": "mixture.wav"}, "verification": {"ok": verified},
+        "conversation": [{"role": "user", "text": "xin chao", "start": 0, "end": 1}],
+    }))
+    (base / "09_conversation_exports" / "exports.json").write_text(json.dumps([{
+        "id": "c1", "folder": folder, "category": "_quarantine" if not verified else "turn_by_turn",
+        "quarantined": not verified, "verified": verified, "duration": 1.0,
+    }]))
+    (out / "variants_manifest.json").write_text(json.dumps({"variants": [
+        {"id": "t1", "files": {"clip": str(base)}}]}))
+    return run_dir
+
+
+def test_workspace_conversations_uses_manifest_and_returns_bounded_detail(cfg):
+    _conversation_workspace_fixture(cfg, verified=False)
+    listing = ls.workspace_conversations(cfg, "r1", "t1", "clip")
+    assert listing["status"] == "ready" and listing["conversations"][0]["quarantined"]
+    detail = ls.workspace_conversations(cfg, "r1", "t1", "clip", "c1")
+    assert detail["turns"][0]["text"] == "xin chao"
+    assert detail["warnings"] and detail["audio"] == {"mixture": "ready"}
+
+
+def test_workspace_conversations_review_search_and_paging_use_canonical_fields(cfg):
+    _conversation_workspace_fixture(cfg, verified=False)
+    run_dir = Path(ls.find_run_dir(cfg, "r1"))
+    export = run_dir / "out" / "variant-output" / "09_conversation_exports"
+    rows = [{"id": "c1", "folder": "turn_by_turn/c1", "quarantined": True, "verified": False, "topic": "target"},
+            {"id": "c2", "folder": "turn_by_turn/c1", "quarantined": False, "verified": True, "topic": "target"}]
+    (export / "exports.json").write_text(json.dumps(rows))
+    flagged = ls.workspace_conversations(cfg, "r1", "t1", "clip", limit=1, review="flagged")
+    assert flagged["resultCount"] == 1 and flagged["conversations"][0]["id"] == "c1"
+    found = ls.workspace_conversations(cfg, "r1", "t1", "clip", search="target")
+    assert found["resultCount"] == 2
+    with pytest.raises(ls.BadRequest):
+        ls.workspace_conversations(cfg, "r1", "t1", "clip", review="other")
+
+
+def test_workspace_conversations_rejects_external_folder_and_audio_track(cfg):
+    _conversation_workspace_fixture(cfg)
+    out = Path(ls.find_run_dir(cfg, "r1")) / "out"
+    export = out / "variant-output" / "09_conversation_exports"
+    (export / "exports.json").write_text(json.dumps([{"id": "c1", "folder": "/etc"}]))
+    with pytest.raises(ls.ASRArtifactError):
+        ls.workspace_conversations(cfg, "r1", "t1", "clip", "c1")
+    with pytest.raises(ls.BadRequest):
+        ls.conversation_audio(cfg, "r1", "t1", "clip", "c1", "raw_path")
+
+
+def test_conversation_audio_preserves_server_owned_mixture_track(cfg):
+    _conversation_workspace_fixture(cfg)
+    path = ls.conversation_audio(cfg, "r1", "t1", "clip", "c1", "mixture")
+    assert path.name == "mixture.wav"
+    assert path.is_file()
 class _Done:
     def __init__(self, rc):
         self.rc = rc

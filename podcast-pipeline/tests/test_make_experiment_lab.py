@@ -26,6 +26,54 @@ def test_single_screen_audio_workbench_contract():
     assert "@media(max-width:760px)" not in page
 
 
+def test_generated_page_preserves_workspace_and_audition_contract(tmp_path):
+    """The checked-in page must exercise the same final generator output."""
+    output = tmp_path / "experiment.html"
+    subprocess.run(
+        [sys.executable, str(TOOLS / "make_experiment_lab.py"), "-o", str(output)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    page = output.read_text(encoding="utf-8")
+    assert page.count("</body>") == 1
+    assert page.count("</html>") == 1
+    for tab in ('data-workspace="experiment"', 'data-workspace="asr"', 'data-workspace="conversations"'):
+        assert tab in page
+    assert "/api/workspace/runs" in page
+    assert "/api/workspace/conversation-audio" in page
+    assert 'data-conversation-audio' in page
+    assert 'class="conv-turn-play"' in page
+    assert 'maxlength="120"' in page
+    assert 'data-page="prev"' in page and 'data-page="next"' in page
+    assert 'pageCursor=null;loadSelection()' in page
+    assert "reviewSel.value" in page and "resultCount" in page
+
+
+def test_workspace_initial_load_has_one_shared_run_barrier_and_cascades():
+    """The generated browse shell must not query dependent selects pre-load."""
+    page = lab.PAGE
+    assert "runsLoadPromise=null" in page
+    assert "if(runsLoadPromise)return runsLoadPromise" in page
+    assert "runsLoadPromise=(async()=>" in page
+    assert "const loadVariants=async()=>{await load();" in page
+    assert "if(variantSel.value)await loadRecordings()" in page
+    assert "if(recordingSel.value)await loadSelection()" in page
+    assert "if(runSel.value)loadVariants();load();" not in page
+
+
+def test_conversation_turn_audition_uses_secure_mixture_control():
+    page = lab.PAGE
+    assert 'data-conversation-audio' in page
+    assert 'data-turn-start' in page and 'data-turn-end' in page
+    assert 'class="conv-turn-play"' in page
+    assert "Number.isFinite(start)&&Number.isFinite(end)&&start>=0&&end>start" in page
+    assert "Number.isFinite(audio.duration)&&audio.duration<=0" in page
+    assert "audio.currentTime=start" in page and "audio.pause()" in page
+    assert "Promise.resolve(audio.play()).catch(()=>clearActive())" in page
+    assert "track=mixture" in page
+
+
 def test_variant_selection_updates_center_metrics():
     page = lab.PAGE
     for metric in ("metricDns", "metricWer", "metricDer", "metricEcapa", "metricArtifacts"):
@@ -111,7 +159,9 @@ def test_backend_run_failure_is_truthful_persistent_and_retryable():
     page = lab.PAGE
     assert "runFailureStatus" in page
     assert "r.status=runFailureStatus(error)" in page
-    assert "HTTP ${http[1]} — server rejected the run." in page
+    assert "Lỗi server (${error.status}): ${error.message}" in page
+    assert "window.__labReadJson" in page
+    assert "terminal = e?.http" in page
     assert "Network error — backend unavailable; request was not sent." in page
     assert "r.errorMessage=runErrorMessage(error)" in page
     assert "const retry = $l('runNow')" in page
