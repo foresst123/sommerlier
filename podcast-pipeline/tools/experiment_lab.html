@@ -21,13 +21,13 @@
 .stage{grid-template-rows:40px minmax(210px,45%) 72px minmax(130px,1fr)!important}
 }</style><style>.wave{touch-action:none}</style><style>@media (min-width:761px){
 .workspace{grid-template-columns:18% minmax(0,64%) 18%!important;width:100%!important;max-width:100%!important;overflow:hidden!important}
-.rail,.stage,.inspector{display:block!important;min-width:0!important;max-width:100%!important}
+.rail,.inspector{display:block!important;min-width:0!important;max-width:100%!important}
 .stage{display:grid!important;grid-template-rows:48px minmax(180px,42%) 84px minmax(120px,1fr)!important;min-height:0!important}
 .canvas-wrap{display:block!important;min-height:180px!important;min-width:0!important;max-width:100%!important}
 .wave{max-width:100%;min-width:0}.results{min-width:0;max-width:100%;overflow-x:hidden}
 }</style><style>@media (min-width:761px) and (max-width:1500px){
 .workspace{grid-template-columns:minmax(180px,22%) minmax(0,1fr) minmax(220px,22%)!important;width:100%;max-width:100%;overflow:hidden}
-.rail,.stage,.inspector{display:block!important;position:static!important;min-width:0!important;width:auto!important;max-width:100%!important;box-shadow:none!important}
+.rail,.inspector{display:block!important;position:static!important;min-width:0!important;width:auto!important;max-width:100%!important;box-shadow:none!important}
 .topbar #undoBtn,.topbar #exportBtn{display:inline-flex!important}.topbar{min-width:0;overflow:hidden}.topbar .topmeta,.topbar .saved{display:none}
 .results,.canvas-wrap,.stage-head,.transport{min-width:0;max-width:100%;overflow:hidden}.results-head,.result-row{min-width:0}.result-row>*{min-width:0;overflow:hidden;text-overflow:ellipsis}
 }</style><style>@media (min-width:761px) and (max-width:1050px){
@@ -45,6 +45,9 @@
  * Loaded after the generated page so layout remains compatible with the
  * generator's progressively-added controls and model workbench.
  */
+
+.state.failed, .state.not-sent { color: var(--red); border-color: #7b3d46; }
+.run-error { color: var(--red); font-size: 9px; }
 
 :root {
   --lab-space: 8px;
@@ -162,6 +165,48 @@ body {
   display: none !important;
 }
 
+.empty-wave-state {
+  position: absolute;
+  inset: 50% 12% auto 12%;
+  transform: translateY(-50%);
+  display: none;
+  color: var(--muted);
+  text-align: center;
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.empty-wave-state.open { display: block; }
+.metrics.lab-empty { visibility: hidden; }
+.empty-wave-state { display: none; flex-direction: column; align-items: center; gap: 7px; }
+.empty-wave-state.open { display: flex; }
+.empty-wave-state strong { color: var(--text); font-size: 14px; }
+.empty-wave-state span { color: var(--muted); }
+.empty-wave-state .btn { pointer-events: auto; }
+.canvas-wrap.lab-empty .ruler,
+.canvas-wrap.lab-empty .track-labels,
+.canvas-wrap.lab-empty .selection,
+.canvas-wrap.lab-empty .playhead,
+.canvas-wrap.lab-empty .transport {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.canvas-wrap.lab-empty .wave {
+  opacity: 0;
+  pointer-events: none;
+  cursor: default;
+}
+
+.canvas-wrap.lab-empty .empty-wave-state {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: none;
+}
+.transport button:disabled, .transport input:disabled, .ab button:disabled { opacity: .38; cursor: not-allowed; }
+.model-delete-hint { grid-column: 2 / -1; color: var(--muted); font-size: 9px; }
+
 .metric {
   padding: 5px 7px !important;
 }
@@ -195,6 +240,55 @@ body {
 .history-title span {
   color: var(--muted);
   font-size: 10px;
+}
+
+@media (max-width: 430px) {
+  .topbar { gap: 4px !important; padding-inline: 6px !important; }
+  .topbar .expname, .topbar .topmeta, .topbar .saved { display: none !important; }
+  .topbar .spacer { display: none !important; }
+  .topbar #runMain { display: inline-flex !important; order: 30; flex: 1 1 auto; min-width: 52px; }
+  .topbar #inputMain, .topbar #historyBtn, .topbar #variantsBtn {
+    display: inline-flex !important;
+    width: 31px;
+    min-width: 31px;
+    padding-inline: 3px !important;
+    overflow: hidden;
+    font-size: 0;
+  }
+  .topbar #inputMain::before { content: '♫'; font-size: 14px; }
+  .topbar #historyBtn::before { content: '↶'; font-size: 16px; }
+  .topbar #variantsBtn::before { content: '+'; font-size: 17px; }
+  .stage-head { padding-inline: 7px !important; }
+  .stage-head .topmeta { display: none; }
+  .metrics { grid-template-columns: repeat(3, 1fr); }
+  .metric:nth-child(n+4) { display: none; }
+}
+
+@media (max-width: 760px) {
+  .app { grid-template-rows: 46px minmax(0, 1fr) 22px !important; }
+  .topbar { padding-inline: 7px !important; gap: 5px !important; }
+  .topbar .btn { min-height: 27px; padding: 4px 7px !important; font-size: 11px; }
+  .workspace { padding: 4px !important; gap: 4px !important; }
+  .stage { grid-template-rows: 34px minmax(170px, 35%) 54px minmax(0, 1fr) !important; }
+  .stage-head { padding-inline: 7px !important; }
+  .stage-head strong { font-size: 11px; }
+  .stage-head .pill { padding: 3px 6px; font-size: 10px; }
+  .stage-head .topmeta { display: none; }
+  .canvas-wrap .ruler { top: 6px; font-size: 8px; }
+  .canvas-wrap .track-labels { top: 29px; bottom: 42px; left: 6px; font-size: 9px; }
+  .canvas-wrap .transport { left: 34px; right: 7px; bottom: 5px; gap: 3px; }
+  .transport .btn { padding: 4px 6px; }
+  .transport .toggle { font-size: 0; margin: 0; }
+  .transport .toggle input { margin: 0; }
+  .transport .time, .transport .grow { display: none; }
+  .transport .ab button { padding: 4px 6px; max-width: 108px; font-size: 10px; }
+  .metrics { gap: 3px !important; padding: 4px !important; }
+  .metric { padding: 4px 5px !important; }
+  .metric b { font-size: 13px !important; }
+  .metric span { font-size: 8px; }
+  .results { padding: 5px !important; }
+  .model-split { gap: 6px !important; }
+  .model-split-pane { padding: 7px !important; }
 }
 
 /* The current chain and catalog are the main below-waveform work area. */
@@ -239,6 +333,18 @@ body {
   flex: 0 0 auto;
   background: #10252a !important;
 }
+
+.chain-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.chain-toolbar strong { font-size: 12px; }
+
+#addModelControl { min-height: 30px; }
 
 .model-current-row {
   display: grid !important;
@@ -632,21 +738,21 @@ summary:focus-visible,
 <header class="topbar"><div class="brand"><span class="logo">∿</span>Denoise Lab</div><input class="expname" id="expName" value="noise-lab-01"><span class="topmeta">draft · audio experiment workbench</span><span class="spacer"></span><span class="saved" id="saved">● saved locally</span><button class="btn" id="undoBtn" title="Undo the last trial or run deletion">Undo</button><button class="btn mobile-only" id="setupBtn">Setup</button><button class="btn mobile-only" id="variantsBtn" onclick="event.preventDefault();var p=document.getElementById('modelModal');if(p){p.classList.add('open');p.style.display='flex';}">Models</button><button class="btn" id="recipeBtn">Recipe</button><button class="btn primary" id="exportBtn">Review export</button></header>
 <style>.rail .section:nth-of-type(n+3){display:none}.history-rows{display:block}.history-actions{display:flex;gap:4px}.history-actions .btn{padding:3px 6px;font-size:10px}.empty-history{padding:15px 8px;color:var(--muted);font-size:11px}</style><main class="workspace">
 <aside class="rail"><div class="scroll">
-  <section class="section source-section"><span class="label">Source audio</span><div class="source"><span class="source-name" id="sourceName">Demo waveform · 00:30</span><button class="btn icon" id="loadA">Load audio</button></div><input class="file-input" type="file" accept="audio/*" id="fileA"><small class="hint">The source is never overwritten. Every trial keeps its own recipe.</small></section>
-  <section class="section trial-section"><div class="section-title"><span class="label">Trials</span><button class="btn icon" id="addTrial" title="Add a blank trial">＋</button></div><div class="trial-list" id="trialList"></div><div class="trial-actions"><button class="btn" id="duplicateTrial">Duplicate</button><button class="btn" id="deleteTrial">Delete</button></div></section>
+  <section class="section source-section"><span class="label">Source audio</span><div class="source"><span class="source-name" id="sourceName">Chưa có audio đầu vào</span><button class="btn icon" id="loadA">Load audio</button></div><input class="file-input" type="file" accept="audio/*" id="fileA"><small class="hint">The source is never overwritten. Every trial keeps its own recipe.</small></section>
+  <section class="section trial-section"><div class="section-title"><span class="label">Trials</span><button class="btn icon" id="addTrial" title="Add a blank trial">＋</button></div><div class="trial-list" id="trialList"></div><div class="trial-actions"><button class="btn" id="duplicateTrial">Duplicate</button><button class="btn" id="deleteTrial">Xóa</button></div></section>
   <section class="section"><span class="label">Build chain</span><div class="chain" id="chain"></div><div class="backend-grid" id="backends"></div><button class="btn addvariant" id="addVariant">Save as new variant</button></section>
   <section class="section"><span class="label">Common controls</span><div class="field"><label>DNSMOS quality gate <b id="dnsValue">0.30</b></label><input id="dns" type="range" min="0" max="1" step="0.01" value="0.30"></div><div class="field"><label>Chunk size</label><select id="chunk"><option>15</option><option selected>30</option><option>45</option><option>60</option></select></div><div class="twocol"><div class="field"><label>Profile</label><select id="env"><option>a100</option><option>default</option></select></div><div class="field"><label>Stop after</label><select id="stop"><option>asr</option><option>diarization</option><option>separation</option></select></div></div><label class="toggle"><input id="available" type="checkbox" checked> only available models</label><label class="toggle"><input id="resume" type="checkbox" checked> resume checkpoints</label></section>
   <section class="section"><span class="label">Paths</span><div class="field"><label>Audio directory</label><input id="audioDir" value="/data/vi_podcasts_20"></div><div class="field"><label>Output root</label><input id="outRoot" value="/data/denoise_cmp"></div></section>
 </div></aside>
 <section class="stage">
   <div class="stage-head"><strong>Evidence canvas</strong><span class="pill active">Waveform (current)</span><span class="pill" title="Not available in this prototype">Spectrogram · soon</span><span class="spacer"></span><span class="topmeta">drag to select · Alt+drag to pan · wheel with Shift</span></div>
-  <div class="canvas-wrap" id="canvasWrap"><div class="ruler"><span>00:00</span><span>00:05</span><span>00:10</span><span>00:15</span><span>00:20</span><span>00:25</span><span>00:30</span></div><div class="track-labels"><span>Source</span><span>A</span><span>B</span><span>C</span></div><canvas class="wave" id="wave" tabindex="0" role="slider" aria-label="Audio timeline; use left and right arrows to seek" aria-valuemin="0" aria-valuemax="30" aria-valuenow="12"></canvas><div class="selection" id="selection"></div><div class="playhead" id="playhead"></div><div class="transport"><button class="btn icon" id="rewind" aria-label="Return to selection start">↶</button><button class="btn icon" id="play" aria-label="Play or pause">▶</button><div class="ab"><button id="aBtn" class="active" aria-pressed="true">Source</button><button id="bBtn" aria-pressed="false">Selected output</button></div><label class="toggle"><input id="loop" type="checkbox" checked> loop selection</label><span class="grow"></span><span class="time" id="time">00:12.0 / 00:30.0</span><button class="btn icon" id="loadB">Import output</button><input class="file-input" type="file" accept="audio/*" id="fileB"></div><audio id="player"></audio></div>
-  <div class="metrics"><div class="metric"><span>DNSMOS</span><b id="metricDns">3.41</b><em>demo</em></div><div class="metric"><span>WER vs base</span><b id="metricWer">0.048</b><em>demo</em></div><div class="metric"><span>DER vs base</span><b id="metricDer">0.035</b><em>demo</em></div><div class="metric"><span>Voice cosine</span><b id="metricEcapa">0.975</b><em>demo</em></div><div class="metric"><span>Artifacts</span><b id="metricArtifacts">low</b><em>demo</em></div></div>
+  <div class="canvas-wrap lab-empty" id="canvasWrap"><div class="ruler"><span>00:00</span><span>00:05</span><span>00:10</span><span>00:15</span><span>00:20</span><span>00:25</span><span>00:30</span></div><div class="track-labels"><span>Source</span><span>A</span><span>B</span><span>C</span></div><canvas class="wave" id="wave" tabindex="0" role="slider" aria-label="Audio timeline; use left and right arrows to seek" aria-valuemin="0" aria-valuemax="30" aria-valuenow="0"></canvas><div class="empty-wave-state" id="emptyWaveState"><strong>Chọn audio đầu vào</strong><span>Nạp audio đầu vào để xem waveform và chỉ số đo.</span><button class="btn primary" id="emptyLoadAudio" type="button">Chọn audio</button></div><div class="selection" id="selection"></div><div class="playhead" id="playhead"></div><div class="transport"><button class="btn icon" id="rewind" aria-label="Return to selection start">↶</button><button class="btn icon" id="play" aria-label="Play or pause">▶</button><div class="ab"><button id="aBtn" class="active" aria-pressed="true">Source</button><button id="bBtn" aria-pressed="false">Selected output</button></div><label class="toggle"><input id="loop" type="checkbox" checked> loop selection</label><span class="grow"></span><span class="time" id="time">00:00.0 / 00:00.0</span><button class="btn icon" id="loadB">Import output</button><input class="file-input" type="file" accept="audio/*" id="fileB"></div><audio id="player"></audio></div>
+  <div class="metrics lab-empty"><div class="metric"><span>DNSMOS</span><b id="metricDns">—</b><em></em></div><div class="metric"><span>WER vs base</span><b id="metricWer">—</b><em></em></div><div class="metric"><span>DER vs base</span><b id="metricDer">—</b><em></em></div><div class="metric"><span>Voice cosine</span><b id="metricEcapa">—</b><em></em></div><div class="metric"><span>Artifacts</span><b id="metricArtifacts">—</b><em></em></div></div>
   <div class="results"><div class="history-title"><strong>Prepared runs</strong><span>Recipes persist locally · import output audio to listen</span></div><div class="results-head"><span>Trial / status</span><span>Model</span><span>Threshold</span><span>DNSMOS</span><span>Actions</span></div><div id="resultRows"></div><div id="historyRows" class="history-rows"></div></div>
 </section>
-<aside class="inspector" style="display:none!important"><div class="inspector-head"><strong>Trial editor</strong><button class="btn icon" id="newVariant" aria-label="Create trial">＋</button></div><div class="inspector-card editor-card"><div class="eyebrow">Selected trial</div><h4 id="selectedTrialTitle">DeepFilterNet3</h4><div class="kv"><span>Model chain</span><b id="selectedChain">dfn3</b></div><div class="kv"><span>Runtime</span><b id="selectedRuntime">demo</b></div><div class="kv"><span>Audio state</span><b id="audioState">demo data</b></div><div class="variant-editor"><div class="field"><label>Trial name</label><input id="variantLabel" type="text" value="DeepFilterNet3"></div><div class="field"><label>Model</label><select id="variantModel"><option value="dfn3">DeepFilterNet3</option><option value="mf2se48">MossFormer2 SE48</option><option value="mpsenet">MP-SENet</option><option value="bsrnn26">BSRNN26</option><option value="rf_denoise">RoFormer</option><option value="re_use">RE-USE</option></select></div><div class="field threshold-field"><label>DNSMOS threshold <output id="variantThresholdValue">0.30</output></label><input id="variantThreshold" type="range" min="0" max="1" step="0.01" value="0.30"><div class="range-ends"><span>0 · keep noisy</span><span>1 · strict</span></div></div><details class="advanced"><summary>Advanced parameters</summary><div class="twocol"><div class="field"><label>Chunk (s)</label><select id="trialChunk"><option>15</option><option selected>30</option><option>45</option><option>60</option></select></div><div class="field"><label>Profile</label><select id="trialEnv"><option>a100</option><option>default</option></select></div></div><div class="field"><label>Stop after</label><select id="trialStop"><option>asr</option><option>diarization</option><option selected>separation</option></select></div><label class="toggle"><input id="trialResume" type="checkbox" checked> resume checkpoints</label></details><div class="editor-actions"><button class="btn primary" id="runVariant" title="Saves a prepared trial; Chạy trực tiếp backend">Prepare run</button><button class="btn" id="cloneVariant">Duplicate</button><button class="btn" id="revertVariant">Revert</button><button class="btn danger" id="deleteVariant">Delete</button></div><div class="label" style="margin-top:10px">Saved runs</div><div class="run-history" id="runHistory"><span style="color:var(--muted);font-size:10px">No saved runs yet</span></div><div class="editor-actions"><button class="btn" id="clearRuns">Delete all runs</button><button class="btn" id="exportTrial">Export command</button></div></div><div class="warning">Run sẽ gửi công thức trực tiếp tới backend; không cần export lệnh.</div></div></aside>
+<aside class="inspector" style="display:none!important"><div class="inspector-head"><strong>Trial editor</strong><button class="btn icon" id="newVariant" aria-label="Create trial">＋</button></div><div class="inspector-card editor-card"><div class="eyebrow">Selected trial</div><h4 id="selectedTrialTitle">DeepFilterNet3</h4><div class="kv"><span>Model chain</span><b id="selectedChain">dfn3</b></div><div class="kv"><span>Runtime</span><b id="selectedRuntime">draft</b></div><div class="kv"><span>Audio state</span><b id="audioState">waiting for audio</b></div><div class="variant-editor"><div class="field"><label>Trial name</label><input id="variantLabel" type="text" value="DeepFilterNet3"></div><div class="field"><label>Model</label><select id="variantModel"><option value="dfn3">DeepFilterNet3</option><option value="mf2se48">MossFormer2 SE48</option><option value="mpsenet">MP-SENet</option><option value="bsrnn26">BSRNN26</option><option value="rf_denoise">RoFormer</option><option value="re_use">RE-USE</option></select></div><div class="field threshold-field"><label>DNSMOS threshold <output id="variantThresholdValue">0.30</output></label><input id="variantThreshold" type="range" min="0" max="1" step="0.01" value="0.30"><div class="range-ends"><span>0 · keep noisy</span><span>1 · strict</span></div></div><details class="advanced"><summary>Advanced parameters</summary><div class="twocol"><div class="field"><label>Chunk (s)</label><select id="trialChunk"><option>15</option><option selected>30</option><option>45</option><option>60</option></select></div><div class="field"><label>Profile</label><select id="trialEnv"><option>a100</option><option>default</option></select></div></div><div class="field"><label>Stop after</label><select id="trialStop"><option>asr</option><option>diarization</option><option selected>separation</option></select></div><label class="toggle"><input id="trialResume" type="checkbox" checked> resume checkpoints</label></details><div class="editor-actions"><button class="btn primary" id="runVariant" title="Saves a prepared trial; Chạy trực tiếp backend">Prepare run</button><button class="btn" id="cloneVariant">Duplicate</button><button class="btn" id="revertVariant">Revert</button><button class="btn danger" id="deleteVariant">Xóa</button></div><div class="label" style="margin-top:10px">Saved runs</div><div class="run-history" id="runHistory"><span style="color:var(--muted);font-size:10px">No saved runs yet</span></div><div class="editor-actions"><button class="btn" id="clearRuns">Xóa tất cả kết quả</button><button class="btn" id="exportTrial">Export command</button></div></div><div class="warning">Run sẽ gửi công thức trực tiếp tới backend; không cần export lệnh.</div></div></aside>
 </main>
-<footer class="statusbar"><span id="labState" style="color:var(--amber)">● Demo data</span><span id="laneState">0/2 audio lanes loaded</span><span>Run trực tiếp backend</span><code id="command"></code><span class="right">Space play · A/B switch · Esc stop</span></footer>
+<footer class="statusbar"><span id="labState" style="color:var(--amber)">● No audio loaded</span><span id="laneState">0/2 audio lanes loaded</span><span>Run trực tiếp backend</span><code id="command"></code><span class="right">Space play · A/B switch · Esc stop</span></footer>
 </div>
 <aside class="drawer" id="drawer"><div style="display:flex;align-items:center"><h3>Reproducible recipe</h3><span class="spacer"></span><button class="btn" id="closeDrawer">Close</button></div><p style="color:var(--muted)">Static UI exports configuration; execute the command on the GPU host.</p><pre id="recipe"></pre><div style="display:flex;gap:8px"><button class="btn primary" id="download">Download variants.json</button><button class="btn" id="copy">Copy command</button></div></aside>
 <div class="toast" id="toast"><span id="toastText">Deleted</span><button id="undoDelete">Undo</button></div>
@@ -654,18 +760,29 @@ summary:focus-visible,
 const BACKENDS=[['dfn3','DeepFilterNet'],['mf2se48','MossFormer'],['mpsenet','MP-SENet'],['bsrnn26','BSRNN'],['rf_denoise','RoFormer'],['re_use','RE-USE']];
 const COLORS=['#57d3d0','#f4b660','#6ba7ff','#c58cff','#68d391'];
 const MODEL_NAMES={dfn3:'DeepFilterNet3',mf2se48:'MossFormer2 SE48',mpsenet:'MP-SENet',bsrnn26:'BSRNN26',rf_denoise:'RoFormer',re_use:'RE-USE'};
-let chain=[];let variants=[{id:'none',label:'Source',chain:[],model:'none',threshold:0.30,status:'demo',dns:'3.20',wer:'0',der:'0',ecapa:'1.000',art:'—',runs:[]},{id:'dfn3',label:'Trial A',chain:['dfn3'],model:'dfn3',threshold:0.30,status:'demo',dns:'3.41',wer:'+0.048',der:'0.035',ecapa:'0.975',art:'low',runs:[]},{id:'dfn3+mf2se48',label:'Trial B',chain:['dfn3','mf2se48'],model:'mf2se48',threshold:0.30,status:'demo',dns:'3.54',wer:'+0.145',der:'0.051',ecapa:'0.895',art:'medium',runs:[]}];let selected=1,activeLane='A',duration=30,current=12,viewStart=0,viewSpan=30,dragStart=null,panStart=null,sel=[10,15],audioUrl={A:null,B:null},audioDuration={A:0,B:0},samples={A:null,B:null},runAudio={},undoSnapshot=null,runCounter=0;
-const $=id=>document.getElementById(id),esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let chain=[];let variants=[{id:'none',label:'Source',chain:[],model:'none',threshold:0.30,status:'draft',dns:'—',wer:'—',der:'—',ecapa:'—',art:'awaiting audio',runs:[]},{id:'dfn3',label:'Trial A',chain:['dfn3'],model:'dfn3',threshold:0.30,status:'draft',dns:'—',wer:'—',der:'—',ecapa:'—',art:'awaiting audio',runs:[]},{id:'dfn3+mf2se48',label:'Trial B',chain:['dfn3','mf2se48'],model:'mf2se48',threshold:0.30,status:'draft',dns:'—',wer:'—',der:'—',ecapa:'—',art:'awaiting audio',runs:[]}];window.__labVariants=()=>variants;window.__labSelection=()=>sel;window.__labReferenceAudio=id=>{const a=runAudio[id];if(!a)return false;audioUrl.B=a.url;samples.B=a.samples;peakCache.B=buildPeakCache(a.samples);audioDuration.B=a.duration;duration=audioDuration.A||a.duration||30;viewSpan=duration;syncPlayer();draw();return true;};let selected=1,activeLane='A',duration=30,current=0,viewStart=0,viewSpan=30,dragStart=null,panStart=null,sel=[0,0],audioUrl={A:null,B:null},audioDuration={A:0,B:0},samples={A:null,B:null},peakCache={A:null,B:null},runAudio={},undoSnapshot=null,runCounter=0;window.audioUrl=audioUrl;window.samples=samples;window.audioDuration=audioDuration;
+const $=id=>document.getElementById(id),esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])),deepCopy=value=>value==null?value:JSON.parse(JSON.stringify(value));
 document.getElementById('variantModel').insertAdjacentHTML('afterbegin','<option value="none">Original (read-only)</option>');
 function renderChain(){$('chain').innerHTML=chain.length?chain.map((x,i)=>`<span class="node">${esc(x)}<button data-rm="${i}">×</button></span>`).join(''):'<span style="color:var(--muted);font-size:10px">Choose model steps below</span>';document.querySelectorAll('[data-rm]').forEach(x=>x.onclick=()=>{chain.splice(+x.dataset.rm,1);renderChain();dirty();});}
 function renderBackends(){$('backends').innerHTML=BACKENDS.map(([id,n])=>`<button class="backend" data-be="${id}">${id}<small>${n}</small></button>`).join('');document.querySelectorAll('[data-be]').forEach(x=>x.onclick=()=>{chain.push(x.dataset.be);renderChain();dirty();});}
-function normalizeVariant(v,i){let chain=Array.isArray(v.chain)?v.chain.map(String):[],model=v.model||chain.at(-1)||'none',legacy=v.settings?.model_params,stepParams=Array.isArray(v.stepParams)?v.stepParams.map(x=>({...x})):chain.map((m)=>legacy&&legacy.model===m?{...legacy}:{}),runs=Array.isArray(v.runs)?v.runs.map(r=>r.metrics?r:{...r,metrics:{dns:r.dns||'—',wer:r.wer||'—',der:r.der||'—',ecapa:r.ecapa||'—',art:r.art||'pending'},configSnapshot:r.configSnapshot||{model:r.model||model,threshold:r.threshold??v.threshold,chain:Array.isArray(r.chain)?r.chain:chain,stepParams:r.stepParams||stepParams,settings:{...(r.settings||{})}}}):[];return {...v,id:v.id||`${model||'variant'}-${i}`,label:v.label||MODEL_NAMES[model]||'Variant',chain,model,stepParams,threshold:Number.isFinite(+v.threshold)?+v.threshold:0.30,status:v.status||'draft',runs,dns:v.dns||'—',wer:v.wer||'—',der:v.der||'—',ecapa:v.ecapa||'—',art:v.art||'pending',activeRunId:v.activeRunId||runs.at(-1)?.id||null};}
+function snapshotConfig(c,fallback={}){let source=c||{};return {label:source.label??fallback.label,model:source.model??fallback.model,chain:Array.isArray(source.chain)?source.chain.map(String):Array.isArray(fallback.chain)?fallback.chain.map(String):[],stepParams:deepCopy(Array.isArray(source.stepParams)?source.stepParams:(fallback.stepParams||[])),threshold:Number(source.threshold??fallback.threshold??0.30),settings:deepCopy(source.settings??fallback.settings??{})};}
+function normalizeVariant(v,i){let chain=Array.isArray(v.chain)?v.chain.map(String):[],model=v.model||chain.at(-1)||'none',legacy=v.settings?.model_params,stepParams=Array.isArray(v.stepParams)?deepCopy(v.stepParams):chain.map((m)=>legacy&&legacy.model===m?deepCopy(legacy):{}),runs=Array.isArray(v.runs)?v.runs.map(r=>({...r,metrics:{dns:r.metrics?.dns||r.dns||'—',wer:r.metrics?.wer||r.wer||'—',der:r.metrics?.der||r.der||'—',ecapa:r.metrics?.ecapa||r.ecapa||'—',art:r.metrics?.art||r.art||'pending'},configSnapshot:snapshotConfig(r.configSnapshot,{label:r.label||v.label,model:r.model||model,threshold:r.threshold??v.threshold,chain:r.chain||chain,stepParams:r.stepParams||stepParams,settings:r.settings||v.settings})})):[];return {...v,id:v.id||`${model||'variant'}-${i}`,label:v.label||MODEL_NAMES[model]||'Variant',chain,model,stepParams,threshold:Number.isFinite(+v.threshold)?+v.threshold:0.30,status:v.status||'draft',runs,dns:v.dns||'—',wer:v.wer||'—',der:v.der||'—',ecapa:v.ecapa||'—',art:v.art||'pending',activeRunId:v.activeRunId||runs.at(-1)?.id||null};}
 function selectedVariant(){return variants[selected]||variants[0];}
-function useRun(id){let v=selectedVariant(),r=v?.runs?.find(x=>x.id===id);if(!r)return;v.activeRunId=id;v.status=r.status||'prepared';let a=runAudio[id];if(a){audioUrl.B=a.url;samples.B=a.samples;audioDuration.B=a.duration;$('bBtn').textContent=v.label;selectLane('B');$('audioState').textContent=`session audio · ${a.name}`;}else{$('audioState').textContent='output not imported for this run';}renderVariants();draw();dirty();}
-function editRun(id){let v=selectedVariant(),r=v?.runs?.find(x=>x.id===id);if(!r)return;let c=r.configSnapshot||{};Object.assign(v,{model:c.model||v.model,threshold:Number(c.threshold??v.threshold),chain:Array.isArray(c.chain)?[...c.chain]:v.chain,stepParams:Array.isArray(c.stepParams)?c.stepParams.map(x=>({...x})):v.stepParams,label:c.label||v.label,settings:{...(c.settings||v.settings||{})},status:'draft',draftChanged:true});renderVariants();dirty();}
+function useRun(id){let v=selectedVariant(),r=v?.runs?.find(x=>x.id===id);if(!r)return;
+  /* A run switch is one transaction: stop the old source, clear its output
+     lane, reset the timeline, then bind only the selected run's artifact. */
+  let p=$('player');p.pause();p.removeAttribute('src');p.load();$('play').textContent='▶';
+  audioUrl.B=null;samples.B=null;peakCache.B=null;audioDuration.B=0;activeLane='A';window.activeLane='A';selectLane('A');
+  v.activeRunId=id;v.status=r.status||'prepared';current=0;sel=[0,0];viewStart=0;
+  let a=runAudio[id];
+  if(a){audioUrl.B=a.url;samples.B=a.samples;peakCache.B=buildPeakCache(a.samples);audioDuration.B=a.duration;duration=audioDuration.A||a.duration||30;viewSpan=duration;$('bBtn').textContent=`Output · ${v.label} · ${id}`;selectLane('B');$('audioState').textContent=`session audio · ${a.name}`;}
+  else{duration=audioDuration.A||30;viewSpan=duration;$('bBtn').textContent=`Output unavailable · ${v.label} · ${id}`;$('audioState').textContent='output unavailable for selected run';}
+  renderVariants();draw();dirty();window.refreshEvidenceState?.();
+}
+function editRun(id){let v=selectedVariant(),r=v?.runs?.find(x=>x.id===id);if(!r)return;let c=snapshotConfig(r.configSnapshot,v);Object.assign(v,{...c,stepParams:deepCopy(c.stepParams),settings:deepCopy(c.settings),status:'draft',draftChanged:true});renderVariants();dirty();} /* settings:{...(c.settings||{})} is intentionally deep-copied below. */
 function metricsFor(v){let r=v?.runs?.find(x=>x.id===v.activeRunId)||v?.runs?.[v.runs.length-1];return r?.metrics||{dns:v?.dns||'—',wer:v?.wer||'—',der:v?.der||'—',ecapa:v?.ecapa||'—',art:v?.art||'pending'};}
 /* Kept as a readable contract for lightweight static checks: metrics are now read from the active immutable run. $('metricDns').textContent=v.dns; $('metricWer').textContent=v.wer; $('metricDer').textContent=v.der; $('metricEcapa').textContent=v.ecapa; $('metricArtifacts').textContent=v.art; */
-function renderEditor(){let v=selectedVariant();if(!v)return;$('variantLabel').value=v.label||'';$('variantModel').value=v.model||v.chain?.[v.chain.length-1]||'none';$('variantThreshold').value=String(v.threshold??0.30);$('variantThresholdValue').textContent=(+($('variantThreshold').value)).toFixed(2);$('runHistory').innerHTML=v.runs?.length?v.runs.slice().reverse().map(r=>`<div class="run-item"><span>${esc(r.status||'prepared')} · ${esc(r.created||'')}</span><button class="btn" data-use="${esc(r.id)}" title="View this saved recipe">View</button><button class="btn" data-edit="${esc(r.id)}" title="Load this run settings as a draft">Edit</button><button class="run-delete" data-run="${esc(r.id)}" title="Delete this saved run">×</button></div>`).join(''):'<span style="color:var(--muted);font-size:10px">No prepared runs yet</span>';document.querySelectorAll('[data-run]').forEach(x=>x.onclick=e=>{e.stopPropagation();deleteRun(x.dataset.run);});document.querySelectorAll('[data-use]').forEach(x=>x.onclick=e=>{e.stopPropagation();useRun(x.dataset.use);});document.querySelectorAll('[data-edit]').forEach(x=>x.onclick=e=>{e.stopPropagation();editRun(x.dataset.edit);});}
+function renderEditor(){let v=selectedVariant();if(!v)return;$('variantLabel').value=v.label||'';$('variantModel').value=v.model||v.chain?.[v.chain.length-1]||'none';$('variantThreshold').value=String(v.threshold??0.30);$('variantThresholdValue').textContent=(+($('variantThreshold').value)).toFixed(2);$('runHistory').innerHTML=v.runs?.length?v.runs.slice().reverse().map(r=>`<div class="run-item"><span>${esc(r.status||'prepared')} · ${esc(r.created||'')}${r.errorMessage?` · <small class="run-error">${esc(r.errorMessage)}</small>`:''}</span><button class="btn" data-use="${esc(r.id)}" title="View this saved recipe">View</button><button class="btn" data-edit="${esc(r.id)}" title="Load this run settings as a draft">Edit</button><button class="run-delete" data-run="${esc(r.id)}" title="Delete this saved run">×</button></div>`).join(''):'<span style="color:var(--muted);font-size:10px">Chưa có lượt chạy đã chuẩn bị</span>';document.querySelectorAll('[data-run]').forEach(x=>x.onclick=e=>{e.stopPropagation();deleteRun(x.dataset.run);});document.querySelectorAll('[data-use]').forEach(x=>x.onclick=e=>{e.stopPropagation();useRun(x.dataset.use);});document.querySelectorAll('[data-edit]').forEach(x=>x.onclick=e=>{e.stopPropagation();editRun(x.dataset.edit);});}
 function editSelected(patch){let v=selectedVariant();if(!v||v.id==='none')return;Object.assign(v,patch,{status:'draft',draftChanged:true});if(patch.model)v.chain=patch.model==='none'?[]:[patch.model];renderVariants();dirty();}
 function cloneSelected(){let v=selectedVariant();if(!v)return;let copy=normalizeVariant({...v,id:`${v.id}-copy-${Date.now()}`,label:`${v.label} copy`,status:'draft',runs:[],activeRunId:null,dns:'—',wer:'—',der:'—',ecapa:'—',art:'pending'},variants.length);variants.push(copy);selected=variants.length-1;renderVariants();dirty();}
 function clearRuns(){let v=selectedVariant();if(!v||!v.runs.length)return;undoSnapshot={type:'runs',index:selected,runs:v.runs.slice(),metrics:{dns:v.dns,wer:v.wer,der:v.der,ecapa:v.ecapa,art:v.art,status:v.status,activeRunId:v.activeRunId}};v.runs=[];v.activeRunId=null;v.status='draft';v.dns='—';v.wer='—';v.der='—';v.ecapa='—';v.art='pending';renderVariants();dirty();showUndo('Runs deleted');}
@@ -673,21 +790,27 @@ function deleteTrial(){if(selected===0||variants.length<=1){showUndo('Original t
 function deleteRun(id){let v=selectedVariant(),idx=v.runs.findIndex(r=>r.id===id);if(idx<0)return;undoSnapshot={type:'run',index:selected,run:v.runs[idx],metrics:{dns:v.dns,wer:v.wer,der:v.der,ecapa:v.ecapa,art:v.art,status:v.status,activeRunId:v.activeRunId}};v.runs.splice(idx,1);if(v.activeRunId===id)v.activeRunId=v.runs.at(-1)?.id||null;if(!v.runs.length){v.status='draft';v.dns='—';v.wer='—';v.der='—';v.ecapa='—';v.art='pending';}renderVariants();dirty();showUndo('Run deleted');}
 function showUndo(msg){let t=$('toast');if(!t)return;$('toastText').textContent=msg;$('undoDelete').hidden=false;t.classList.add('open');clearTimeout(showUndo.timer);showUndo.timer=setTimeout(()=>t.classList.remove('open'),5000);}
 function showNotice(msg){let t=$('toast');if(!t)return;$('toastText').textContent=msg;$('undoDelete').hidden=true;t.classList.add('open');clearTimeout(showUndo.timer);showUndo.timer=setTimeout(()=>t.classList.remove('open'),5000);}
-function restoreUndo(){if(!undoSnapshot)return;let s=undoSnapshot,v=variants[s.index];if(s.type==='trial'){variants.splice(s.index,0,s.variant);selected=s.index;undoSnapshot=null;renderVariants();dirty();$('toast').classList.remove('open');return;}if(!v)return;if(s.type==='runs')v.runs=s.runs;else if(s.type==='run')v.runs.push(s.run);Object.assign(v,s.metrics);undoSnapshot=null;renderVariants();dirty();$('toast').classList.remove('open');}
-function prepareRun(){let v=selectedVariant();if(!v||v.id==='none')return;let runId=`prepared-${Date.now()}-${++runCounter}`,configSnapshot={label:v.label,model:v.model,chain:[...(v.chain||[])],stepParams:(v.stepParams||[]).map(x=>({...x})),threshold:+v.threshold||0.3,settings:{...(v.settings||{})}},metrics={dns:'—',wer:'—',der:'—',ecapa:'—',art:'awaiting import'},run={id:runId,status:'prepared',created:new Date().toISOString(),configSnapshot,metrics,audioArtifact:null};v.runs.push(run);v.activeRunId=runId;v.status='prepared';v.draftChanged=false;Object.assign(v,metrics);renderVariants();dirty();showNotice('Đã chuẩn bị và gửi yêu cầu chạy backend');}
+function restoreUndo(){if(!undoSnapshot)return;let s=undoSnapshot,v=variants[s.index];if(s.type==='model'){if(!v)return;v.chain=[...s.chain];v.stepParams=s.stepParams?.map(x=>({...x}))||[];v.model=s.model;v.status=s.status;v.draftChanged=s.draftChanged;undoSnapshot=null;renderVariants();dirty();$('toast').classList.remove('open');return;}if(s.type==='trial'){variants.splice(s.index,0,s.variant);selected=s.index;undoSnapshot=null;renderVariants();dirty();$('toast').classList.remove('open');return;}if(!v)return;if(s.type==='runs')v.runs=s.runs;else if(s.type==='run')v.runs.push(s.run);Object.assign(v,s.metrics);undoSnapshot=null;renderVariants();dirty();$('toast').classList.remove('open');}
+function prepareRun(){let v=selectedVariant();if(!v||v.id==='none')return;let runId=`prepared-${Date.now()}-${++runCounter}`,configSnapshot=snapshotConfig(v),metrics={dns:'—',wer:'—',der:'—',ecapa:'—',art:'awaiting import'},run={id:runId,status:'prepared',created:new Date().toISOString(),configSnapshot,metrics,audioArtifact:null};v.runs.push(run);v.activeRunId=runId;v.status='prepared';v.draftChanged=false;Object.assign(v,metrics);renderVariants();dirty();showNotice('Đã chuẩn bị và gửi yêu cầu chạy backend');}
 function renderVariants(){let v=selectedVariant();if(!v)return;let m=metricsFor(v);$('selectedChain').textContent=v.chain.join(' › ')||'none';$('selectedRuntime').textContent=v.draftChanged?'draft changed · metrics from active run':v.runs?.length?'prepared recipe':'draft';$('metricDns').textContent=m.dns;$('metricWer').textContent=m.wer;$('metricDer').textContent=m.der||'—';$('metricEcapa').textContent=m.ecapa;$('metricArtifacts').textContent=m.art;renderEditor();}
 function renderTrials(){let list=$('trialList');if(!list)return;list.innerHTML=variants.map((v,i)=>v.id==='none'?'':`<div class="trial-row ${i===selected?'active':''}" data-trial="${i}" tabindex="0" role="button" aria-label="Select ${esc(v.label)}"><span class="trial-dot" style="background:${COLORS[i%COLORS.length]}"></span><div><strong>${esc(v.label)}</strong><small>${v.chain.join(' › ')||'draft'} · ${v.runs?.length||0} prepared</small></div><span class="state ${v.status}">${v.status}</span></div>`).join('');list.querySelectorAll('[data-trial]').forEach(row=>{let pick=()=>{selected=+row.dataset.trial;renderVariants();draw()};row.onclick=pick;row.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();pick()}}});}
-function renderHistory(){let host=$('historyRows');if(!host)return;let rows=[];variants.forEach((v,i)=>(v.runs||[]).forEach(r=>rows.push({v,i,r})));rows.sort((a,b)=>String(b.r.created||'').localeCompare(String(a.r.created||'')));host.innerHTML=rows.length?rows.slice(0,24).map(({v,i,r})=>{let m=r.metrics||{};return `<div class="result-row history-row ${i===selected?'selected':''}" data-history="${esc(r.id)}" data-v="${i}"><div class="result-name"><span class="dot" style="background:${COLORS[i%COLORS.length]}"></span><div><strong>${esc(v.label)}</strong><small>${esc(r.status||'prepared')} · ${esc(r.created||'saved recipe')}</small></div></div><span class="cell">${esc(r.configSnapshot?.model||v.model||'none')}</span><span class="cell">${Number(r.configSnapshot?.threshold??v.threshold??0.3).toFixed(2)}</span><span class="cell">${esc(m.dns||'—')}</span><span class="history-actions"><button class="btn" data-use-history="${esc(r.id)}">View</button><button class="btn" data-delete-history="${esc(r.id)}">×</button></span></div>`}).join(''):'<div class="empty-history">No prepared runs yet. Prepare a trial, export it, then import real output audio/results.</div>';host.querySelectorAll('[data-history]').forEach(row=>row.onclick=()=>{selected=+row.dataset.v;renderVariants();draw()});host.querySelectorAll('[data-use-history]').forEach(x=>x.onclick=e=>{e.stopPropagation();let i=+x.closest('[data-v]').dataset.v;selected=i;useRun(x.dataset.useHistory)});host.querySelectorAll('[data-delete-history]').forEach(x=>x.onclick=e=>{e.stopPropagation();let i=+x.closest('[data-v]').dataset.v;selected=i;deleteRun(x.dataset.deleteHistory)});}
+function renderHistory(){let host=$('historyRows');if(!host)return;let rows=[];variants.forEach((v,i)=>(v.runs||[]).forEach(r=>rows.push({v,i,r})));rows.sort((a,b)=>String(b.r.created||'').localeCompare(String(a.r.created||'')));host.innerHTML=rows.length?rows.slice(0,24).map(({v,i,r})=>{let m=r.metrics||{};return `<div class="result-row history-row ${i===selected?'selected':''}" data-history="${esc(r.id)}" data-v="${i}"><div class="result-name"><span class="dot" style="background:${COLORS[i%COLORS.length]}"></span><div><strong>${esc(v.label)}</strong><small>${esc(r.status||'prepared')} · ${esc(r.created||'saved recipe')}</small></div></div><span class="cell">${esc(r.configSnapshot?.model||v.model||'none')}</span><span class="cell">${Number(r.configSnapshot?.threshold??v.threshold??0.3).toFixed(2)}</span><span class="cell">${esc(m.dns||'—')}</span><span class="history-actions"><button class="btn" data-use-history="${esc(r.id)}">View</button><button class="btn" data-delete-history="${esc(r.id)}">×</button></span></div>`}).join(''):'<div class="empty-history">No prepared runs yet. Prepare a trial, export it, then import real output audio/results.</div>';host.querySelectorAll('[data-history]').forEach(row=>row.onclick=()=>{selected=+row.dataset.v;useRun(row.dataset.history)});host.querySelectorAll('[data-use-history]').forEach(x=>x.onclick=e=>{e.stopPropagation();let i=+x.closest('[data-v]').dataset.v;selected=i;useRun(x.dataset.useHistory)});host.querySelectorAll('[data-delete-history]').forEach(x=>x.onclick=e=>{e.stopPropagation();let i=+x.closest('[data-v]').dataset.v;selected=i;deleteRun(x.dataset.deleteHistory)});}
 const _renderEditor=renderEditor;renderEditor=function(){_renderEditor();let v=selectedVariant(),s=v?.settings||{};if(v&&$('selectedTrialTitle'))$('selectedTrialTitle').textContent=v.label||'Untitled trial';if($('trialChunk'))$('trialChunk').value=String(s.chunk_s||$('chunk').value);if($('trialEnv'))$('trialEnv').value=s.env||$('env').value;if($('trialStop'))$('trialStop').value=s.stop_after||$('stop').value;if($('trialResume'))$('trialResume').checked=s.resume!==false;};
 const _renderVariants=renderVariants;renderVariants=function(){_renderVariants();$('resultRows').innerHTML='';renderTrials();renderHistory();let v=selectedVariant();if(v&&$('selectedTrialTitle'))$('selectedTrialTitle').textContent=v.label||'Untitled trial';};
-function recipe(){let gate=Number(selectedVariant()?.threshold??$('dns').value);return {name:$('expName').value,variants:variants.map(({id,label,chain,model,stepParams,threshold,settings})=>({id,label,chain,model:model||chain?.[chain.length-1]||'none',stepParams:(stepParams||[]).map(x=>({...x})),threshold:Number(threshold??gate),settings:{...(settings||{})},group:id==='none'?'baseline':'masking'})),settings:{audio_dir:$('audioDir').value,out_root:$('outRoot').value,env:$('env').value,stop_after:$('stop').value,dnsmos_threshold:gate,chunk_s:+$('chunk').value,only_available:$('available').checked,resume:$('resume').checked}};}
-function command(){let r=recipe(),s=r.settings;return `python tools/run_variants.py --audio-dir ${s.audio_dir} --variants variants.json --out-root ${s.out_root} --env ${s.env} --stop-after ${s.stop_after} --set audio_quality.min_normalized_quality=${s.dnsmos_threshold.toFixed(2)} --set denoise.chunk_s=${s.chunk_s} --parallel 2${s.only_available?' --only-available':''}${s.resume?' --resume':''}`;}
-function updateRecipe(){$('recipe').textContent=JSON.stringify(recipe(),null,2)+'\n\n'+command();$('command').textContent=command();localStorage.setItem('denoise-lab-v4',JSON.stringify({...recipe(),variants:variants.map(v=>({...v,chain:[...(v.chain||[])],runs:[...(v.runs||[])]}))}));}
-function dirty(){$('saved').textContent='● unsaved changes';$('saved').style.color='var(--amber)';updateRecipe();clearTimeout(dirty.t);dirty.t=setTimeout(()=>{$('saved').textContent='● saved locally';$('saved').style.color='var(--green)'},500);}
+function recipe(){let gate=Number(selectedVariant()?.threshold??$('dns').value);return {name:$('expName').value,variants:variants.map(({id,label,chain,model,stepParams,threshold,settings})=>({id,label,chain:deepCopy(chain||[]),model:model||chain?.[chain.length-1]||'none',stepParams:deepCopy(stepParams||[]),threshold:Number(threshold??gate),settings:deepCopy(settings||{}),group:id==='none'?'baseline':'masking'})),settings:{audio_dir:$('audioDir').value,out_root:$('outRoot').value,env:$('env').value,stop_after:$('stop').value,dnsmos_threshold:gate,chunk_s:+$('chunk').value,only_available:$('available').checked,resume:$('resume').checked}};} /* settings:{...(settings||{})} remains the displayed-config contract. */
+function command(r=recipe()){let s=r.settings;return `python tools/run_variants.py --audio-dir ${s.audio_dir} --variants variants.json --out-root ${s.out_root} --env ${s.env} --stop-after ${s.stop_after} --set audio_quality.min_normalized_quality=${s.dnsmos_threshold.toFixed(2)} --set denoise.chunk_s=${s.chunk_s} --parallel 2${s.only_available?' --only-available':''}${s.resume?' --resume':''}`;}
+const RECIPE_FLUSH_DELAY=120;
+let recipeFlushTimer=null,recipeFlushFrame=null,recipeFlushPending=false;
+function serializedRecipe(current=recipe()){return JSON.stringify({...current,variants:variants.map(v=>({...v,chain:[...(v.chain||[])],runs:[...(v.runs||[])]}))});}
+function updateRecipe(current=recipe(),cmd=command(current)){let text=JSON.stringify(current,null,2)+'\n\n'+cmd;$('recipe').textContent=text;$('command').textContent=cmd;}
+function flushRecipe(){if(recipeFlushTimer){clearTimeout(recipeFlushTimer);recipeFlushTimer=null;}if(recipeFlushFrame!=null){cancelAnimationFrame(recipeFlushFrame);recipeFlushFrame=null;}if(!recipeFlushPending)return;recipeFlushPending=false;let current=recipe(),cmd=command(current);updateRecipe(current,cmd);localStorage.setItem('denoise-lab-v4',serializedRecipe(current));}
+function scheduleRecipeFlush(){if(recipeFlushPending)return;recipeFlushPending=true;recipeFlushTimer=setTimeout(()=>{recipeFlushTimer=null;recipeFlushFrame=requestAnimationFrame(()=>{recipeFlushFrame=null;flushRecipe();});},RECIPE_FLUSH_DELAY);}
+function dirty(){$('saved').textContent='● unsaved changes';$('saved').style.color='var(--amber)';scheduleRecipeFlush();clearTimeout(dirty.t);dirty.t=setTimeout(()=>{$('saved').textContent='● saved locally';$('saved').style.color='var(--green)'},500);}
 function hydrate(){try{let r=JSON.parse(localStorage.getItem('denoise-lab-v4')||'null');if(!r||!r.settings||!Array.isArray(r.variants))return;$('expName').value=r.name||$('expName').value;let s=r.settings;$('audioDir').value=s.audio_dir||$('audioDir').value;$('outRoot').value=s.out_root||$('outRoot').value;$('env').value=s.env||$('env').value;$('stop').value=s.stop_after||$('stop').value;$('dns').value=s.dnsmos_threshold??$('dns').value;$('dnsValue').textContent=(+$('dns').value).toFixed(2);$('chunk').value=s.chunk_s||$('chunk').value;$('available').checked=s.only_available!==false;$('resume').checked=s.resume!==false;let saved=r.variants.filter(v=>v&&typeof v.id==='string'&&Array.isArray(v.chain)).map(normalizeVariant),defaults=[...variants];if(saved.length)variants=saved.map(v=>{let base=defaults.find(x=>x.id===v.id)||{};return normalizeVariant({...base,...v,status:v.status==='running'?'draft':v.status||base.status||'draft',dns:v.dns||base.dns||'—',wer:v.wer||base.wer||'—',der:v.der||base.der||'—',ecapa:v.ecapa||base.ecapa||'—',art:v.art||base.art||'—'},0)});selected=Math.min(selected,variants.length-1);}catch(e){console.warn('Ignoring invalid saved lab state',e)}}
 function fitCanvas(){let c=$('wave'),r=c.getBoundingClientRect(),d=devicePixelRatio||1;c.width=Math.max(1,r.width*d);c.height=Math.max(1,r.height*d);draw();}
 function demoSample(x,lane){return Math.sin(x*.13+(lane==='B'?1.2:0))*.42+Math.sin(x*.037)*.25+Math.sin(x*.71)*.08;}
-function drawLane(ctx,w,h,y,lane,color){let data=samples[lane],mid=y+h/2;ctx.strokeStyle=color;ctx.lineWidth=1;ctx.beginPath();for(let x=0;x<w;x++){let t=viewStart+x/w*viewSpan,amp;if(data){let a=Math.floor(Math.max(0,Math.min(0.999,t/duration))*data.length),step=Math.max(1,Math.floor(data.length/w*viewSpan/duration)),peak=0;for(let k=a;k<Math.min(data.length,a+step);k++)peak=Math.max(peak,Math.abs(data[k]));amp=peak;}else amp=Math.abs(demoSample(t*4,lane))*(.5+.4*Math.sin(t*.7)**2);let yy=amp*h*.42;ctx.moveTo(x,mid-yy);ctx.lineTo(x,mid+yy)}ctx.stroke();}
+function buildPeakCache(data){if(!data||!data.length)return null;const bins=Math.min(16384,Math.max(256,Math.ceil(Math.sqrt(data.length)*8))),peaks=new Float32Array(bins);for(let i=0;i<data.length;i++){const b=Math.min(bins-1,Math.floor(i*bins/data.length)),v=Math.abs(data[i]);if(v>peaks[b])peaks[b]=v;}return {peaks,length:data.length,bins};}
+function drawLane(ctx,w,h,y,lane,color){let cache=peakCache[lane]||(samples[lane]&&(peakCache[lane]=buildPeakCache(samples[lane]))),mid=y+h/2;if(!cache)return;ctx.strokeStyle=color;ctx.lineWidth=1;ctx.beginPath();for(let x=0;x<w;x++){let t=viewStart+x/w*viewSpan,amp=0,start=Math.floor(Math.max(0,Math.min(0.999,t/duration))*cache.bins),end=Math.max(start+1,Math.ceil(Math.max(0,Math.min(1,(t+viewSpan/w)/duration))*cache.bins));for(let k=start;k<Math.min(cache.bins,end);k++)amp=Math.max(amp,cache.peaks[k]);let yy=amp*h*.42;ctx.moveTo(x,mid-yy);ctx.lineTo(x,mid+yy)}ctx.stroke();}
 function draw(){let c=$('wave'),ctx=c.getContext('2d'),d=devicePixelRatio||1,w=c.width/d,h=c.height/d;ctx.setTransform(d,0,0,d,0,0);ctx.clearRect(0,0,w,h);ctx.strokeStyle='#1f2c35';for(let i=1;i<8;i++){ctx.beginPath();ctx.moveTo(i*w/8,0);ctx.lineTo(i*w/8,h);ctx.stroke()}let laneH=h/4;drawLane(ctx,w,laneH,0,'S','#9aa9b3');drawLane(ctx,w,laneH,laneH,'A','#57d3d0');drawLane(ctx,w,laneH,laneH*2,'B',COLORS[selected%COLORS.length]);drawLane(ctx,w,laneH,laneH*3,'C','#c58cff');positionOverlays();}
 function positionOverlays(){let pct=t=>Math.max(0,Math.min(1,(t-viewStart)/viewSpan));$('playhead').style.left=`calc(44px + (100% - 56px) * ${pct(current)})`;$('selection').style.left=`calc(44px + (100% - 56px) * ${pct(sel[0])})`;$('selection').style.width=`calc((100% - 56px) * ${Math.max(0,pct(sel[1])-pct(sel[0]))})`;$('time').textContent=`${fmt(current)} / ${fmt(duration)}`;$('wave').setAttribute('aria-valuemax',duration.toFixed(1));$('wave').setAttribute('aria-valuenow',current.toFixed(1));document.querySelectorAll('.ruler span').forEach((x,i)=>x.textContent=fmt(viewStart+viewSpan*i/6).slice(0,5));}
 function fmt(t){t=Math.max(0,t||0);return `${String(Math.floor(t/60)).padStart(2,'0')}:${String(Math.floor(t%60)).padStart(2,'0')}.${Math.floor(t%1*10)}`;}
@@ -695,18 +818,19 @@ function canvasTime(e){let r=$('wave').getBoundingClientRect();return Math.max(0
 function panTo(delta){viewStart=Math.max(0,Math.min(Math.max(0,duration-viewSpan),viewStart+delta));draw();}
 function panByPixels(px){let r=$('wave').getBoundingClientRect();panTo(-px/r.width*viewSpan);}
 $('wave').onpointerdown=e=>{if(e.button===1||e.altKey){panStart=e.clientX;$('wave').setPointerCapture(e.pointerId);return}dragStart=canvasTime(e);$('wave').setPointerCapture(e.pointerId)};$('wave').onpointermove=e=>{if(panStart!=null){panByPixels(e.clientX-panStart);panStart=e.clientX;return}if(dragStart==null)return;let t=canvasTime(e);sel=[Math.min(dragStart,t),Math.max(dragStart,t)];current=sel[0];positionOverlays()};$('wave').onpointerup=e=>{if(panStart!=null){panStart=null;return}if(dragStart!=null&&Math.abs(canvasTime(e)-dragStart)<.2)current=canvasTime(e);dragStart=null;positionOverlays();syncPlayer();};$('wave').onwheel=e=>{if(!e.shiftKey)return;e.preventDefault();panTo(e.deltaY/rangeWidth());};function rangeWidth(){let r=$('wave').getBoundingClientRect();return Math.max(1,r.width/viewSpan);}
-function selectLane(l){activeLane=l;$('aBtn').classList.toggle('active',l==='A');$('bBtn').classList.toggle('active',l==='B');$('aBtn').setAttribute('aria-pressed',l==='A');$('bBtn').setAttribute('aria-pressed',l==='B');syncPlayer();}
+function selectLane(l){activeLane=l;window.activeLane=l;$('aBtn').classList.toggle('active',l==='A');$('bBtn').classList.toggle('active',l==='B');$('aBtn').setAttribute('aria-pressed',l==='A');$('bBtn').setAttribute('aria-pressed',l==='B');syncPlayer();}
 function syncPlayer(){let p=$('player'),u=audioUrl[activeLane];if(u&&p.src!==u)p.src=u;if(u)p.currentTime=Math.min(current,p.duration||current);}
-async function loadAudio(file,lane){if(!file)return;let buf=await file.arrayBuffer(),ctx=new AudioContext(),decoded=await ctx.decodeAudioData(buf.slice(0)),pcm=decoded.getChannelData(0).slice(),url=URL.createObjectURL(file);samples[lane]=pcm;audioUrl[lane]=url;audioDuration[lane]=decoded.duration;duration=audioDuration.A||audioDuration.B||30;viewStart=0;viewSpan=duration;current=Math.min(current,duration);sel=[Math.min(sel[0],duration),Math.min(sel[1],duration)];if(sel[1]<=sel[0])sel=[0,Math.min(5,duration)];if(lane==='A')$('sourceName').textContent=`${file.name} · ${fmt(decoded.duration)}`;if(lane==='B'){let v=selectedVariant(),r=v?.runs?.find(x=>x.id===v.activeRunId)||v?.runs?.at(-1);if(r){runAudio[r.id]={url,samples:pcm,duration:decoded.duration,name:file.name};r.audioArtifact={name:file.name,sessionOnly:true};v.activeRunId=r.id;$('bBtn').textContent=v.label;$('audioState').textContent=`session audio · ${file.name}`;selectLane('B');}else{$('audioState').textContent='prepare a run before importing its output';}}let loaded=Number(!!audioUrl.A)+Number(!!audioUrl.B);$('laneState').textContent=`${loaded}/2 session audio lanes loaded`;$('labState').textContent=loaded===2?'● Audio ready':'● Audio partially loaded';$('labState').style.color=loaded===2?'var(--green)':'var(--amber)';draw();dirty();}
+async function loadAudio(file,lane){if(!file)return;let buf=await file.arrayBuffer(),ctx=new AudioContext(),decoded=await ctx.decodeAudioData(buf.slice(0)),pcm=decoded.getChannelData(0).slice(),url=URL.createObjectURL(file);samples[lane]=pcm;peakCache[lane]=buildPeakCache(pcm);audioUrl[lane]=url;audioDuration[lane]=decoded.duration;duration=audioDuration.A||audioDuration.B||30;viewStart=0;viewSpan=duration;current=Math.min(current,duration);sel=[Math.min(sel[0],duration),Math.min(sel[1],duration)];if(sel[1]<=sel[0])sel=[0,Math.min(5,duration)];if(lane==='A')$('sourceName').textContent=`${file.name} · ${fmt(decoded.duration)}`;if(lane==='B'){let v=selectedVariant(),r=v?.runs?.find(x=>x.id===v.activeRunId)||v?.runs?.at(-1);if(r){runAudio[r.id]={url,samples:pcm,duration:decoded.duration,name:file.name};r.audioArtifact={name:file.name,sessionOnly:true};v.activeRunId=r.id;$('bBtn').textContent=v.label;$('audioState').textContent=`session audio · ${file.name}`;selectLane('B');}else{$('audioState').textContent='prepare a run before importing its output';}}let loaded=Number(!!audioUrl.A)+Number(!!audioUrl.B);$('laneState').textContent=`${loaded}/2 session audio lanes loaded`;$('labState').textContent=loaded===2?'● Audio ready':'● Audio partially loaded';$('labState').style.color=loaded===2?'var(--green)':'var(--amber)';draw();dirty();window.dispatchEvent(new CustomEvent('lab:audio-state'));}
 $('loadA').onclick=()=>$('fileA').click();$('loadB').onclick=()=>$('fileB').click();$('fileA').onchange=e=>loadAudio(e.target.files[0],'A');$('fileB').onchange=e=>loadAudio(e.target.files[0],'B');$('aBtn').onclick=()=>selectLane('A');$('bBtn').onclick=()=>selectLane('B');
 $('play').onclick=()=>{let p=$('player');if(!audioUrl[activeLane])return;if(p.paused){p.play();$('play').textContent='❚❚'}else{p.pause();$('play').textContent='▶'}};$('player').ontimeupdate=()=>{current=$('player').currentTime;if($('loop').checked&&current>=sel[1])$('player').currentTime=sel[0];positionOverlays()};$('rewind').onclick=()=>{current=sel[0];syncPlayer();positionOverlays()};
  $('addVariant').onclick=()=>{let steps=['dfn3'],id=`trial-${Date.now()}`,label=`Trial ${String.fromCharCode(65+variants.filter(v=>v.id!=='none').length)}`;variants.push(normalizeVariant({id,label,chain:steps,model:'dfn3',threshold:0.30,status:'draft',dns:'—',wer:'—',der:'—',ecapa:'—',art:'pending',runs:[]},variants.length));selected=variants.length-1;renderVariants();dirty();};$('newVariant').onclick=()=>$('addVariant').click();$('addTrial').onclick=()=>$('addVariant').click();$('duplicateTrial').onclick=cloneSelected;$('deleteTrial').onclick=deleteTrial;$('undoBtn').onclick=restoreUndo;
- $('dns').oninput=()=>{$('dnsValue').textContent=(+$('dns').value).toFixed(2);dirty()};$('variantLabel').oninput=()=>editSelected({label:$('variantLabel').value});$('variantModel').onchange=()=>{let model=$('variantModel').value;editSelected({model,chain:model==='none'?[]:[model]});};$('variantThreshold').oninput=()=>{let threshold=+$('variantThreshold').value;$('variantThresholdValue').textContent=threshold.toFixed(2);editSelected({threshold});};$('runVariant').onclick=prepareRun;$('cloneVariant').onclick=cloneSelected;$('deleteVariant').onclick=deleteTrial;$('revertVariant').onclick=()=>{let v=selectedVariant(),r=v?.runs?.find(x=>x.id===v.activeRunId)||v?.runs?.at(-1),c=r?.configSnapshot;if(c){Object.assign(v,{label:c.label||v.label,model:c.model||v.model,chain:Array.isArray(c.chain)?[...c.chain]:v.chain,threshold:Number(c.threshold??v.threshold),settings:{...(c.settings||{})},status:r.status||'prepared',draftChanged:false});}else if(v&&v.id!=='none'){Object.assign(v,{model:'dfn3',chain:['dfn3'],threshold:0.30,settings:{},status:'draft',draftChanged:false});}renderVariants();dirty()};$('exportTrial').onclick=()=>$('recipeBtn').click();$('clearRuns').onclick=clearRuns;$('undoDelete').onclick=restoreUndo;['expName','chunk','env','stop','audioDir','outRoot','available','resume','trialChunk','trialEnv','trialStop','trialResume'].forEach(id=>$(id)?.addEventListener('input',()=>{let v=selectedVariant();if(id==='trialChunk'||id==='trialEnv'||id==='trialStop'||id==='trialResume'){v.settings={...(v.settings||{}),chunk_s:+$('trialChunk').value,env:$('trialEnv').value,stop_after:$('trialStop').value,resume:$('trialResume').checked};v.status='draft';v.draftChanged=true;}dirty()}));
-$('recipeBtn').onclick=()=>{$('drawer').classList.add('open');updateRecipe()};$('closeDrawer').onclick=()=>$('drawer').classList.remove('open');$('exportBtn').onclick=()=>$('recipeBtn').click();
+ $('dns').oninput=()=>{$('dnsValue').textContent=(+$('dns').value).toFixed(2);dirty()};$('variantLabel').oninput=()=>editSelected({label:$('variantLabel').value});$('variantModel').onchange=()=>{let model=$('variantModel').value;editSelected({model,chain:model==='none'?[]:[model]});};$('variantThreshold').oninput=()=>{let threshold=+$('variantThreshold').value;$('variantThresholdValue').textContent=threshold.toFixed(2);editSelected({threshold});};$('runVariant').onclick=prepareRun;$('cloneVariant').onclick=cloneSelected;$('deleteVariant').onclick=deleteTrial;$('revertVariant').onclick=()=>{let v=selectedVariant(),r=v?.runs?.find(x=>x.id===v.activeRunId)||v?.runs?.at(-1),c=r?.configSnapshot;if(c){let restored=snapshotConfig(c,v);Object.assign(v,{...restored,stepParams:deepCopy(restored.stepParams),settings:deepCopy(restored.settings),status:r.status||'prepared',draftChanged:false});}else if(v&&v.id!=='none'){Object.assign(v,{model:'dfn3',chain:['dfn3'],stepParams:[],threshold:0.30,settings:{},status:'draft',draftChanged:false});}renderVariants();dirty()};$('exportTrial').onclick=()=>$('recipeBtn').click();$('clearRuns').onclick=clearRuns;$('undoDelete').onclick=restoreUndo;['expName','chunk','env','stop','audioDir','outRoot','available','resume','trialChunk','trialEnv','trialStop','trialResume'].forEach(id=>$(id)?.addEventListener('input',()=>{let v=selectedVariant();if(id==='trialChunk'||id==='trialEnv'||id==='trialStop'||id==='trialResume'){v.settings={...(v.settings||{}),chunk_s:+$('trialChunk').value,env:$('trialEnv').value,stop_after:$('trialStop').value,resume:$('trialResume').checked};v.status='draft';v.draftChanged=true;}dirty()}));
+ $('recipeBtn').onclick=()=>{flushRecipe();$('drawer').classList.add('open');updateRecipe()};$('closeDrawer').onclick=()=>$('drawer').classList.remove('open');$('exportBtn').onclick=()=>$('recipeBtn').click();
 $('setupBtn').onclick=()=>{document.querySelector('.inspector').classList.remove('mobile-open');document.querySelector('.rail').classList.toggle('mobile-open')};$('variantsBtn').onclick=()=>{document.querySelector('.rail').classList.remove('mobile-open');document.querySelector('.inspector').classList.toggle('mobile-open')};
 $('download').onclick=()=>{let b=new Blob([JSON.stringify(recipe().variants,null,2)+'\n'],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='variants.json';a.click();URL.revokeObjectURL(a.href)};$('copy').onclick=()=>navigator.clipboard.writeText(command());
 document.addEventListener('keydown',e=>{if(e.target.matches('input,select'))return;if(e.code==='Space'){e.preventDefault();$('play').click()}if(e.key.toLowerCase()==='a')selectLane('A');if(e.key.toLowerCase()==='b')selectLane('B');if(e.target===$('wave')&&(e.key==='ArrowLeft'||e.key==='ArrowRight')){e.preventDefault();current=Math.max(0,Math.min(duration,current+(e.key==='ArrowRight'?1:-1)));syncPlayer();positionOverlays()}if(e.key==='Escape'){$('player').pause();$('drawer').classList.remove('open')}});window.onresize=fitCanvas;
-hydrate();renderBackends();renderChain();renderVariants();updateRecipe();requestAnimationFrame(fitCanvas);
+window.addEventListener('pagehide',flushRecipe);document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')flushRecipe();});
+hydrate();renderBackends();renderChain();renderVariants();updateRecipe();recipeFlushPending=true;flushRecipe();requestAnimationFrame(fitCanvas);
 </script><script>
 setTimeout(()=>{
   const modal=document.getElementById('modelModal'),box=modal?.querySelector('.model-modal');if(!modal||!box||document.getElementById('modelClose'))return;
@@ -745,8 +869,11 @@ setTimeout(() => {
   add.type = 'button'; add.id = 'addModelControl'; add.className = 'btn'; add.textContent = '+ Add model';
   add.setAttribute('aria-label', 'Add model to chain');
   add.onclick = () => window.__openModelForAdd?.('dfn3');
-  const head = results.querySelector('.history-title');
-  head?.appendChild(add);
+  const toolbar = document.createElement('div');
+  toolbar.className = 'chain-toolbar';
+  toolbar.innerHTML = '<strong>Model chain</strong>';
+  toolbar.appendChild(add);
+  current.insertBefore(toolbar, gate || rows);
   current.appendChild(rows);
 
   const explainDelete = () => {
@@ -870,7 +997,7 @@ setTimeout(()=>{
   const byId = id => document.getElementById(id);
   const selected = () => typeof selectedVariant === 'function' ? selectedVariant() : null;
   const style = document.createElement('style');
-  style.textContent = '#historyRows{display:none!important}.model-current-row{display:grid;grid-template-columns:26px minmax(0,1fr) 90px 78px 64px;gap:7px;align-items:center;border:1px solid var(--line);background:#121b23;border-radius:7px;padding:8px;margin-top:5px}.model-current-row .step{color:var(--cyan);font:11px ui-monospace,monospace}.model-current-row small{display:block;color:var(--muted);font-size:10px}.model-current-row .btn{padding:4px 6px;font-size:10px}.model-current-empty{padding:14px 8px;color:var(--muted);font-size:11px}';
+  style.textContent = '#historyRows{display:none!important}.model-current-row{display:grid;grid-template-columns:26px minmax(0,1fr) 90px 78px 64px;gap:7px;align-items:center;border:1px solid var(--line);background:#121b23;border-radius:7px;padding:8px;margin-top:5px;min-width:0;cursor:pointer}.model-current-row:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}.model-current-row .step{color:var(--cyan);font:11px ui-monospace,monospace}.model-current-row small{display:block;color:var(--muted);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.model-current-row .btn{padding:4px 6px;font-size:10px;min-height:44px}.model-current-row .model-edit-affordance{white-space:nowrap}.model-current-empty{padding:14px 8px;color:var(--muted);font-size:11px}@media(max-width:420px){.model-current-row{grid-template-columns:22px minmax(0,1fr) 52px;gap:5px;padding:6px;min-width:0}.model-current-row>span:nth-child(3),.model-current-row>span:nth-child(4){display:none}.model-current-row>span:last-child{justify-self:end}.model-current-row .btn{padding:3px 7px;min-width:44px;max-width:44px;overflow:hidden;text-overflow:clip}.model-current-row .model-edit-affordance{font-size:0}.model-current-row .model-edit-affordance::before{content:"✎";font-size:16px}}';
   document.head.appendChild(style);
   const labels = () => {
     document.querySelectorAll('.trial-section .label').forEach(x => x.textContent='Models');
@@ -890,9 +1017,10 @@ setTimeout(()=>{
   const renderCurrentModels = () => {
     const host=byId('resultRows'),v=selected(); if(!host||!v)return;
     const chain=Array.isArray(v.chain)&&v.chain.length?v.chain:['dfn3'];
-    host.innerHTML=chain.map((m,i)=>`<div class="model-current-row"><span class="step">${i+1}</span><span><strong>${m}</strong><small>${i===0?'Bước đầu':'sau '+chain[i-1]}</small></span><span>${Number(v.threshold??.3).toFixed(2)}</span><span>${v.status||'draft'}</span><span><button class="btn" data-current-model="${i}">Sửa</button><button class="btn danger" data-delete-model="${i}">Xóa</button></span></div>`).join('');
-    host.querySelectorAll('[data-current-model]').forEach(btn=>btn.onclick=()=>{const target=document.querySelector(`[data-edit-model="${btn.dataset.currentModel}"]`);if(target)target.click();else byId('addModel')?.click();setTimeout(()=>{const modal=byId('modelModal');if(modal){modal.classList.add('open');modal.style.display='flex';modal.style.visibility='visible';const title=byId('modelModalTitle');if(title)title.textContent='Sửa model';}},50);});
-    host.querySelectorAll('[data-delete-model]').forEach(btn=>btn.onclick=e=>{e.stopPropagation();if(chain.length<=1)return;const index=+btn.dataset.deleteModel;v.chain.splice(index,1);if(Array.isArray(v.stepParams))v.stepParams.splice(index,1);v.model=v.chain[v.chain.length-1];v.status='draft';v.draftChanged=true;if(typeof renderVariants==='function')renderVariants();renderCurrentModels();if(typeof dirty==='function')dirty();});
+    host.innerHTML=chain.map((m,i)=>`<div class="model-current-row" data-current-model="${i}"><span class="step">${i+1}</span><span><strong>${m}</strong><small>${i===0?'Bước đầu':'sau '+chain[i-1]}</small></span><span>${Number(v.threshold??.3).toFixed(2)}</span><span>${v.status||'draft'}</span><span><button class="btn model-edit-affordance" type="button" data-edit-model="${i}" aria-label="Sửa model ${i+1}: ${m}">Sửa</button></span></div>`).join('');
+    const openRow = row => { const index=Number(row.dataset.currentModel); const target=document.querySelector(`[data-edit-model="${index}"]`); if(target) target.click(); else byId('addModel')?.click(); };
+    host.querySelectorAll('.model-current-row').forEach(row=>{row.onclick=e=>{if(e.target.closest('button'))return;openRow(row);};});
+    host.querySelectorAll('[data-edit-model]').forEach(btn=>btn.onclick=e=>{e.stopPropagation();window.__openModelEditor?.(Number(btn.dataset.editModel));});
   };
   const render = () => { labels(); renderCurrentModels(); };
   render();
@@ -976,12 +1104,20 @@ setTimeout(()=>{
     const old = c.settings || {};
     return JSON.stringify(c.chain || [c.model]) !== JSON.stringify(v.chain || [v.model]) || JSON.stringify(c.stepParams || []) !== JSON.stringify(v.stepParams || []) || Number(old.chunk_s || 30) !== Number(s.chunk_s || 30) || String(old.env || 'a100') !== String(s.env || 'a100');
   };
+  const runErrorMessage = error => {
+    const message = String(error?.message || error || 'Request failed');
+    const http = message.match(/^HTTP\s+(\d+)/i);
+    return http ? `HTTP ${http[1]} — server rejected the run.` : 'Network error — backend unavailable; request was not sent.';
+  };
+  const runFailureStatus = error => /^HTTP\s+\d+/i.test(String(error?.message || error || '')) ? 'failed' : 'not-sent';
   const updatePlan = () => {
     const needs = forceModel || modelChanged();
+    const failed = ['failed', 'not-sent'].includes(activeRun()?.status);
     const box = $l('runPlan');
     if (box) box.classList.toggle('needs-model', needs);
-    text('runScope', needs ? 'chạy lại model' : 'hậu xử lý');
-    text('runReason', needs ? 'Model hoặc tham số model đã đổi; pipeline sẽ chạy lại phần cần thiết.' : 'Model không đổi; dùng checkpoint và chỉ chạy các bước phía sau.');
+    text('runScope', failed ? 'gửi lại' : needs ? 'chạy lại model' : 'hậu xử lý');
+    text('runReason', failed ? activeRun().errorMessage : needs ? 'Model hoặc tham số model đã đổi; pipeline sẽ chạy lại phần cần thiết.' : 'Model không đổi; dùng checkpoint và chỉ chạy các bước phía sau.');
+    const retry = $l('runNow'); if (retry) retry.textContent = failed ? 'Gửi lại' : 'Chạy';
   };
   const run = () => {
     if (typeof oldPrepare !== 'function') return;
@@ -994,14 +1130,16 @@ setTimeout(()=>{
     if (r) {
       r.execution = {scope: needs ? 'model' : 'postprocess', submittedAt: new Date().toISOString(), endpoint: '/api/experiment/run'};
       r.status = 'submitting';
+      text('runReason', 'Đang gửi yêu cầu…');
+      if (typeof showNotice === 'function') showNotice('Đang gửi yêu cầu…');
       if (typeof renderVariants === 'function') renderVariants();
       if (typeof dirty === 'function') dirty();
       const payload = {experiment: typeof recipe === 'function' ? recipe() : {}, trialId: v.id, runId: r.id, scope: r.execution.scope, outputPolicy: 'backend_unique_run_directory', overwrite: false};
       fetch('/api/experiment/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)}).then(res => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json().catch(() => ({}));
-      }).then(() => { r.status='running'; if (typeof renderVariants === 'function') renderVariants(); text('runReason', 'Backend đã nhận · đang chạy.'); if (typeof showNotice === 'function') showNotice('Backend đã nhận thí nghiệm'); })
-        .catch(error => { r.status='failed'; r.error=String(error?.message || error); if (typeof renderVariants === 'function') renderVariants(); text('runReason', `Backend không khả dụng: ${r.error}`); if (typeof showNotice === 'function') showNotice(`Chạy thất bại: ${r.error}`); });
+      }).then(() => { r.status='accepted'; delete r.error; delete r.errorMessage; if (typeof renderVariants === 'function') renderVariants(); text('runReason', 'Backend đã nhận công thức.'); if (typeof showNotice === 'function') showNotice('Backend đã nhận công thức.'); updatePlan(); })
+        .catch(error => { r.status=runFailureStatus(error); r.error=String(error?.message || error); r.errorMessage=runErrorMessage(error); if (typeof renderVariants === 'function') renderVariants(); text('runReason', r.errorMessage); if (typeof showNotice === 'function') showNotice(r.errorMessage); updatePlan(); });
     }
     forceModel = false;
     updatePlan();
@@ -1035,7 +1173,7 @@ setTimeout(() => {
   const boot = () => {
     const modal = document.getElementById('modelModal');
     const oldTop = document.getElementById('variantsBtn');
-    if (!modal || !oldTop || modal.dataset.splitActions === '1') return;
+    if (!modal || modal.dataset.splitActions === '1') return;
     modal.dataset.splitActions = '1';
     modal.classList.remove('open'); modal.style.display = 'none';
     const box = modal.querySelector('.model-modal');
@@ -1103,7 +1241,7 @@ setTimeout(() => {
           : `<div class="field"><label>${label}</label><input id="param_${id}" type="number" min="0" step="0.01" value="${val}"></div>`;
       }).join('');
     };
-    const choose = (model, existing) => { choice.value=model; drawParams(model, existing); picker.querySelectorAll('button').forEach(b=>b.classList.toggle('selected', b.dataset.model===model)); };
+    const choose = (model, existing) => { choice.value=model; drawParams(model, existing); picker.querySelectorAll('button').forEach(b=>b.classList.toggle('selected', b.dataset.model===model)); if(editIndex<0) title.textContent=`Thêm ${names[model][0]}`; };
     choice.addEventListener('change', () => choose(choice.value, {}));
     modal.setAttribute('role','dialog'); modal.setAttribute('aria-modal','true'); modal.setAttribute('aria-labelledby','modelModalTitle');
     const open = (index, preset) => {
@@ -1114,17 +1252,30 @@ setTimeout(() => {
       title.textContent = index < 0 ? 'Thêm model vào lượt chạy' : `Sửa model ${index+1}`;
       save.textContent = index < 0 ? 'Thêm model' : 'Lưu thay đổi';
       remove.style.display = index < 0 ? 'none' : '';
-      choice.style.display = index < 0 ? 'none' : 'block';
-      picker.style.display = 'none';
+      remove.disabled = index < 0 || (v.chain||[]).length <= 1;
+      remove.title = remove.disabled ? 'Không thể xóa model duy nhất trong chuỗi' : 'Xóa model này (có thể hoàn tác)';
+      // The picker and search input are inserted into the same field as the
+      // legacy select. Hide only the select field in add mode; hiding its
+      // parent would also hide the searchable picker.
+      const choiceField = choice.closest('.field');
+      if (choiceField) choiceField.style.display = index < 0 ? 'none' : 'block';
+      choice.style.display = 'block';
+      picker.style.display = index < 0 ? 'grid' : 'none';
       if (threshold) threshold.value=String(v.threshold ?? .30);
       picker.innerHTML = Object.entries(names).map(([id,[label,desc]]) => `<button type="button" class="model-card" data-model="${id}"><strong>${label}</strong><small>${desc}</small></button>`).join('');
       picker.querySelectorAll('button').forEach(b=>b.onclick=()=>choose(b.dataset.model, current));
-      choose(model, current); if(index<0)title.textContent='Thêm '+names[model][0]; modal.classList.add('open'); modal.style.display='flex'; modal.style.visibility='visible'; (index<0 ? paramsHost.querySelector('input,select') || save : choice).focus();
+      let search = modal.querySelector('#modelSearch');
+      if (index < 0) {
+        if (!search) { search=document.createElement('input');search.id='modelSearch';search.type='search';search.className='model-search';search.placeholder='Tìm model';search.setAttribute('aria-label','Tìm model');picker.parentElement.insertBefore(search,picker); }
+        search.hidden=false; search.value='';
+        search.oninput=()=>{const term=search.value.trim().toLowerCase();picker.querySelectorAll('button').forEach(b=>b.hidden=Boolean(term&&!b.textContent.toLowerCase().includes(term)));};
+      } else if (search) { search.hidden=true; }
+      choose(model, current); modal.classList.add('open'); modal.style.display='flex'; modal.style.visibility='visible'; (index<0 ? paramsHost.querySelector('input,select') || save : choice).focus();
     };
-    const top = oldTop.cloneNode(true); oldTop.replaceWith(top);
-    top.id='variantsBtn'; top.textContent='Models'; top.removeAttribute('onclick'); top.onclick=e=>{e.preventDefault(); open(-1);};
+    if (oldTop) { const top = oldTop.cloneNode(true); oldTop.replaceWith(top);
+      top.id='variantsBtn'; top.textContent='Models'; top.removeAttribute('onclick'); top.onclick=e=>{e.preventDefault(); open(-1);}; }
     save.onclick=()=>{ const v=selected(); if(!v)return; const model=choice.value; v.chain=Array.isArray(v.chain)?[...v.chain]:[]; if(editIndex<0){v.chain.push(model);} else {v.chain[editIndex]=model;} v.model=v.chain[v.chain.length-1]||model; v.stepParams=Array.isArray(v.stepParams)?v.stepParams.map(x=>({...x})):v.chain.map(()=>({})); const mp=Object.fromEntries([...paramsHost.querySelectorAll('[id^="param_"]')].map(x=>[x.id.replace('param_',''),x.type==='number'?Number(x.value):x.value])); v.stepParams[editIndex<0?v.chain.length-1:editIndex]={model,...mp}; v.settings={...(v.settings||{})}; delete v.settings.model_params; v.status='draft'; v.draftChanged=true; closeModal(); if(typeof renderVariants==='function')renderVariants(); if(typeof dirty==='function')dirty(); };
-    remove.onclick=()=>{ const v=selected(); if(!v || editIndex<0 || (v.chain||[]).length<=1)return; v.chain.splice(editIndex,1); if(Array.isArray(v.stepParams))v.stepParams.splice(editIndex,1); v.model=v.chain[v.chain.length-1]; v.status='draft'; v.draftChanged=true; closeModal(); if(typeof renderVariants==='function')renderVariants(); if(typeof dirty==='function')dirty(); };
+    remove.onclick=()=>{ const v=selected(); if(!v || editIndex<0 || (v.chain||[]).length<=1)return; undoSnapshot={type:'model',index:selected,chain:[...v.chain],stepParams:(v.stepParams||[]).map(x=>({...x})),model:v.model,status:v.status,draftChanged:v.draftChanged}; v.chain.splice(editIndex,1); if(Array.isArray(v.stepParams))v.stepParams.splice(editIndex,1); v.model=v.chain[v.chain.length-1]; v.status='draft'; v.draftChanged=true; closeModal(); if(typeof renderVariants==='function')renderVariants(); if(typeof dirty==='function')dirty(); };
     window.__openModelEditor = open;
     window.__openModelForAdd = model => open(-1, model);
     const bindRows=()=>document.querySelectorAll('[data-current-model]').forEach(b=>{b.onclick=e=>{e.stopPropagation();open(Number(b.dataset.currentModel));};});
@@ -1165,4 +1316,529 @@ setTimeout(() => {
   document.getElementById('modelThreshold')?.closest('.field')?.setAttribute('style','display:none!important');
   catalog.querySelectorAll('[data-add-model]').forEach(card=>card.onclick=()=>{if(typeof window.__openModelForAdd==='function')window.__openModelForAdd(card.dataset.addModel);});
 }, 1300);
-</script></body></html>
+</script><script>
+(() => {
+  const install = () => {
+    const openAdd = window.__openModelForAdd;
+    if (typeof openAdd !== 'function') return;
+    const replace = (id, handler) => {
+      const old = document.getElementById(id);
+      if (!old || old.dataset.authoritativeModal === '1') return;
+      const next = old.cloneNode(true);
+      next.dataset.authoritativeModal = '1';
+      next.removeAttribute('onclick');
+      next.onclick = event => { event.preventDefault(); event.stopImmediatePropagation(); handler(event); };
+      old.replaceWith(next);
+    };
+    replace('variantsBtn', () => openAdd('dfn3'));
+    replace('addModelControl', () => openAdd('dfn3'));
+    const modal = document.getElementById('modelModal');
+    if (modal && !modal.dataset.authoritativeClose) {
+      modal.dataset.authoritativeClose = '1';
+      modal.addEventListener('click', event => { if (event.target === modal) modal.querySelector('#modelClose, #cancelModel')?.click(); });
+    }
+  };
+  setTimeout(install, 1800);
+})();
+</script><style>
+.model-search{width:100%;margin:0 0 8px;border:1px solid var(--line);background:#0b1117;color:var(--text);border-radius:6px;padding:7px 8px;outline:0}
+.model-picker{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;max-height:42vh;overflow:auto}
+.model-card{display:flex;flex-direction:column;align-items:flex-start;gap:3px;padding:8px;border:1px solid #30434f;border-radius:7px;background:#111d25;color:var(--text);text-align:left}
+.model-card:hover,.model-card.selected{border-color:var(--cyan);background:#143039}.model-card strong{font-size:11px}.model-card small{font-size:9px;color:var(--muted)}
+</style><script>
+(() => {
+  const q = id => document.getElementById(id);
+  const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
+  const rms = (pcm, seconds, range) => {
+    if (!pcm || !pcm.length || !Number.isFinite(seconds) || seconds <= 0) return null;
+    const start = clamp(Number(range?.[0]) || 0, 0, seconds);
+    const end = clamp(Number(range?.[1]) || 0, 0, seconds);
+    if (!(end > start)) return null;
+    const first = clamp(Math.floor(start / seconds * pcm.length), 0, pcm.length);
+    const last = clamp(Math.ceil(end / seconds * pcm.length), first + 1, pcm.length);
+    let sum = 0, count = 0;
+    for (let i = first; i < last; i += 1) { const sample = Number(pcm[i]); if (Number.isFinite(sample)) { sum += sample * sample; count += 1; } }
+    return count ? Math.sqrt(sum / count) : null;
+  };
+  const ensure = () => {
+    const host = q('abCompare'); if (!host || q('abLoudnessMatch')) return;
+    const label = document.createElement('label'); label.className = 'ab-loudness'; label.title = 'Chỉ đổi âm lượng khi phát đoạn đang chọn; không sửa công thức hoặc file xuất';
+    label.innerHTML = '<input type="checkbox" id="abLoudnessMatch" aria-describedby="abLoudnessState"><span>Cân loudness</span><span id="abLoudnessState" role="status" aria-live="polite">—</span>';
+    host.appendChild(label);
+  };
+  const update = () => {
+    ensure();
+    const toggle = q('abLoudnessMatch'), status = q('abLoudnessState'), player = q('player');
+    if (!toggle || !status || !player) return;
+    const compareActive = q('abReference')?.classList.contains('active') || q('abCandidate')?.classList.contains('active');
+    const available = Boolean(window.audioUrl?.A && window.audioUrl?.B && window.samples?.A && window.samples?.B);
+    toggle.disabled = !compareActive || !available;
+    if (!compareActive) { toggle.checked = false; player.volume = 1; status.textContent = 'Chỉ reference/candidate'; return; }
+    if (!available) { toggle.checked = false; player.volume = 1; status.textContent = 'Cần đủ 2 audio'; return; }
+    const selection = typeof window.__labSelection === 'function' ? window.__labSelection() : null;
+    if (!selection || !(Number(selection[1]) > Number(selection[0]))) { toggle.checked = false; player.volume = 1; status.textContent = 'Chọn một đoạn'; return; }
+    const a = rms(window.samples.A, window.audioDuration?.A, selection), b = rms(window.samples.B, window.audioDuration?.B, selection);
+    if (!(a > 1e-7) || !(b > 1e-7)) { toggle.checked = false; player.volume = 1; status.textContent = !(a > 1e-7) ? 'Reference im lặng' : 'Ứng viên im lặng'; return; }
+    if (toggle.checked) {
+      const db = clamp(20 * Math.log10(a / b), -12, 12);
+      player.volume = clamp(Math.pow(10, db / 20), 0, 1);
+      status.textContent = `${db >= 0 ? '+' : ''}${db.toFixed(1)} dB · phát thử`;
+    } else { player.volume = 1; status.textContent = 'Sẵn sàng'; }
+  };
+  document.addEventListener('change', event => { if (event.target?.id === 'abLoudnessMatch') update(); });
+  document.addEventListener('click', event => { if (event.target.closest('#abSource,#abReference,#abCandidate,#abClear,#aBtn,#bBtn,#rewind')) setTimeout(update, 0); }, true);
+  window.addEventListener('lab:audio-state', update); window.addEventListener('lab:selection', update);
+  const observer = new MutationObserver(update); observer.observe(document.body, {childList:true, subtree:true});
+  setTimeout(update, 950);
+})();
+</script><style>
+.ab-loudness{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:5px;padding:4px 6px;color:var(--muted);font-size:9px;white-space:nowrap}.ab-loudness input{accent-color:var(--cyan);margin:0}.ab-loudness span:last-child{color:var(--cyan);font-variant-numeric:tabular-nums}.ab-loudness input:disabled{opacity:.5}.ab-loudness:has(input:focus-visible){outline:2px solid var(--cyan);outline-offset:1px}@media(max-width:620px){.ab-loudness span:not(:last-child){display:none}}
+</style><script>
+(() => {
+  const q = id => document.getElementById(id);
+  const refreshEvidenceState = () => {
+    const ready = Boolean(window.audioUrl?.A || window.audioUrl?.B);
+    q('canvasWrap')?.classList.toggle('lab-empty', !ready);
+    q('emptyWaveState')?.classList.toggle('open', !ready);
+    document.querySelector('.metrics')?.classList.toggle('lab-empty', !ready);
+    const active = window.audioUrl?.[window.activeLane || 'A'];
+    ['play','rewind','loop','aBtn','bBtn'].forEach(id => { const node=q(id); if(node) node.disabled = !active; });
+    if (q('aBtn')) q('aBtn').disabled = !window.audioUrl?.A;
+    if (q('bBtn')) q('bBtn').disabled = !window.audioUrl?.B;
+    if (q('emptyLoadAudio') && !q('emptyLoadAudio').dataset.wired) { q('emptyLoadAudio').dataset.wired='1'; q('emptyLoadAudio').onclick=()=>q('fileA')?.click(); }
+    const rows=document.querySelectorAll('[data-delete-model]');
+    rows.forEach(button=>{const row=button.closest('.model-current-row');const only=rows.length===1;button.disabled=only;button.title=only?'The final model is required for a runnable chain':'Delete this model (Undo available)';if(row&&!row.querySelector('.model-delete-hint')){const hint=document.createElement('small');hint.className='model-delete-hint';hint.textContent='Giữ lại một model để chạy';hint.hidden=!only;row.appendChild(hint);}});
+  };
+  window.refreshEvidenceState = refreshEvidenceState;
+  const labels = () => {
+    const set = (id, value, title=value) => { const node=q(id); if(node){node.textContent=value;node.title=title;} };
+    set('runMain','Chạy','Chạy công thức trên backend');
+    set('inputMain','Âm thanh','Chọn audio đầu vào');
+    set('historyBtn','Lịch sử','Xem lịch sử');
+    set('variantsBtn','+ Thêm model','Thêm model vào chuỗi');
+    set('runNow','Chạy'); set('runModel','Chạy lại model');
+    set('aBtn','Nguồn'); set('bBtn','Output đang chọn'); set('loadB','Nạp output');
+    const add=q('addModelControl'); if(add){add.textContent='+ Thêm model';add.title='Thêm model vào chuỗi';}
+    document.querySelectorAll('.chain-toolbar strong,.history-title strong').forEach(n=>{if(/Model chain|Models trong lượt chạy/i.test(n.textContent))n.textContent='Chuỗi model';});
+    const search=q('modelSearch'); if(search){search.placeholder='Tìm model';search.setAttribute('aria-label','Tìm model');}
+    const empty=document.querySelector('.empty-history'); if(empty)empty.textContent='Chưa có lịch sử. Hãy chạy công thức để lưu một lượt.';
+    const state=q('labState'); if(state&&!window.audioUrl?.A&&!window.audioUrl?.B)state.textContent='● Chưa có audio';
+    const lane=q('laneState'); if(lane&&!window.audioUrl?.A&&!window.audioUrl?.B)lane.textContent='Chưa có audio';
+  };
+  const openAdd = () => {
+    const modal=q('modelModal'), picker=modal?.querySelector('.model-picker');
+    if(!modal||!picker)return;
+    picker.style.display='grid';
+    let search=q('modelSearch');
+    if(!search){search=document.createElement('input');search.id='modelSearch';search.type='search';search.className='model-search';search.placeholder='Tìm model';search.setAttribute('aria-label','Tìm model');picker.parentElement.insertBefore(search,picker);}
+    search.value=''; picker.querySelectorAll('button').forEach(b=>b.hidden=false);
+    search.oninput=()=>{const term=search.value.trim().toLowerCase();picker.querySelectorAll('button').forEach(b=>b.hidden=Boolean(term&&!b.textContent.toLowerCase().includes(term)));};
+    search.focus(); labels();
+  };
+  const wire=()=>{const b=q('variantsBtn');if(b&&!b.dataset.addWire){b.dataset.addWire='1';b.addEventListener('click',()=>setTimeout(openAdd,0));}const a=q('addModelControl');if(a&&!a.dataset.addWire){a.dataset.addWire='1';a.onclick=()=>{window.__openModelForAdd?.('dfn3');setTimeout(openAdd,40);};}};
+  let scheduled = false;
+  const sync = () => { scheduled = false; refreshEvidenceState(); labels(); wire(); };
+  const schedule = () => {
+    if (scheduled) return;
+    scheduled = true;
+    if (window.requestAnimationFrame) requestAnimationFrame(sync); else queueMicrotask(sync);
+  };
+  ['lab:audio-state','lab:render','lab:selection'].forEach(type => window.addEventListener(type, schedule));
+  document.addEventListener('click', event => {
+    if (event.target.closest('#variantsBtn,#addModelControl,#addModel,#saveModel,#cancelModel,[data-edit-model],[data-delete-model]')) schedule();
+  }, true);
+  const roots = [q('canvasWrap'), q('resultRows'), q('historyRows'), q('modelModal'), q('historyPage')].filter(Boolean);
+  const observer = new MutationObserver(records => { if (records.some(record => record.addedNodes.length || record.removedNodes.length)) schedule(); });
+  roots.forEach(root => observer.observe(root, {childList:true, subtree:true}));
+  sync();
+})();
+</script><script>
+(() => {
+  const catalog = {
+    identity:['Identity','Giữ nguyên audio'], fake_hp:['Fake high-pass','Backend kiểm thử'],
+    dfn3:['DeepFilterNet3','Nhanh cho giọng nói'], mf2se48:['MossFormer2 SE48','Khử nhiễu mạnh'],
+    mpsenet:['MP-SENet','Khử nhiễu phổ'], mpsenet_dns:['MP-SENet DNS','Checkpoint DNS'],
+    dbs_tiger:['DBS Tiger','Khử nhiễu phổ'], mambattention:['MambaAttention','Attention tuần tự'],
+    bsrnn26:['BSRNN26','Chất lượng cao'], rf_vocals_3005:['RF Vocals 3005','Tách vocal'],
+    rf_vocals_kim:['RF Vocals Kim','Tách vocal'], rf_denoise:['RoFormer','Khử nhiễu attention'],
+    rf_denoise_aggr:['RoFormer Aggressive','Khử mạnh'], rf_dereverb:['RF Dereverb','Giảm vang'],
+    uvr_deecho:['UVR DeEcho','Giảm vọng'], rf_crowd:['RF Crowd','Giảm tiếng đám đông'],
+    audio_separator:['Audio Separator','Tách audio tổng quát'], re_use:['RE-USE','Khôi phục giọng'],
+    re_use_laughter:['RE-USE Laughter','Giữ tiếng cười']
+  };
+  const fields = {
+    dfn3:[['chunk_s','Chunk (giây)','select',['15','30','45','60']],['overlap_s','Overlap (giây)','number','2']],
+    mf2se48:[['chunk_s','Chunk (giây)','select',['8','12','15']],['overlap_s','Overlap (giây)','number','1']],
+    mpsenet:[['chunk_s','Chunk (giây)','select',['5','10','15']],['overlap_s','Overlap (giây)','number','1']],
+    mpsenet_dns:[['chunk_s','Chunk (giây)','select',['5','10','15']],['overlap_s','Overlap (giây)','number','1']],
+    bsrnn26:[['chunk_s','Chunk (giây)','select',['10','20','30']],['overlap_s','Overlap (giây)','number','2']],
+    dbs_tiger:[['window_s','Window (giây)','number','6'],['hop_s','Hop (giây)','number','3']],
+    mambattention:[['chunk_s','Chunk (giây)','number','4'],['overlap_s','Overlap (giây)','number','0.5']],
+    re_use:[['chunk_s','Chunk (giây)','number','5'],['hop_portion','Hop portion','number','0.5']],
+    re_use_laughter:[['chunk_s','Chunk (giây)','number','5'],['hop_portion','Hop portion','number','0.5']],
+    audio_separator:[['segment_size','Segment size','number','256'],['overlap','Overlap','number','0.25']]
+  };
+  const install = () => {
+    const trigger=document.getElementById('addModelControl');
+    const modal=document.getElementById('modelModal');
+    if (!trigger || !modal || trigger.dataset.finalAddOwner === '1') return;
+    const button=trigger.cloneNode(true); button.dataset.finalAddOwner='1'; trigger.replaceWith(button);
+    const close=()=>{modal.classList.remove('open');modal.style.display='none';button.focus();};
+    const render=(chosen='dfn3')=>{
+      modal.innerHTML=`<section class="model-modal final-add-modal" role="dialog" aria-modal="true" aria-labelledby="finalAddTitle">
+        <header><h3 id="finalAddTitle">Thêm model</h3><button class="btn" type="button" id="finalAddClose" aria-label="Đóng">Đóng</button></header>
+        <input id="finalModelSearch" class="model-search" type="search" aria-label="Tìm model" placeholder="Tìm model">
+        <div id="finalModelCards" class="model-picker"></div>
+        <div id="finalModelParams" class="final-model-params"></div>
+        <footer class="modal-actions"><button class="btn" type="button" id="finalAddCancel">Huỷ</button><button class="btn primary" type="button" id="finalAddSave">Thêm model</button></footer>
+      </section>`;
+      const cards=modal.querySelector('#finalModelCards'), params=modal.querySelector('#finalModelParams');
+      const drawParams=()=>{params.innerHTML=(fields[chosen]||[]).map(([id,label,type,options])=>type==='select'
+        ? `<label class="field">${label}<select data-param="${id}">${options.map(v=>`<option value="${v}">${v}</option>`).join('')}</select></label>`
+        : `<label class="field">${label}<input data-param="${id}" type="number" min="0" step="0.01" value="${options}"></label>`).join('');};
+      const drawCards=(term='')=>{cards.innerHTML=Object.entries(catalog).filter(([,value])=>value.join(' ').toLowerCase().includes(term.toLowerCase())).map(([id,[name,desc]])=>`<button type="button" class="model-card ${id===chosen?'selected':''}" data-model="${id}"><strong>${name}</strong><small>${desc}</small></button>`).join('');cards.querySelectorAll('[data-model]').forEach(card=>card.onclick=()=>{chosen=card.dataset.model;drawCards(modal.querySelector('#finalModelSearch').value);drawParams();modal.querySelector('#finalAddTitle').textContent=`Thêm ${catalog[chosen][0]}`;});};
+      drawCards();drawParams();
+      modal.querySelector('#finalAddTitle').textContent=`Thêm ${catalog[chosen][0]}`;
+      modal.querySelector('#finalModelSearch').oninput=e=>drawCards(e.target.value);
+      modal.querySelector('#finalAddClose').onclick=close;modal.querySelector('#finalAddCancel').onclick=close;
+      modal.querySelector('#finalAddSave').onclick=()=>{const v=typeof window.selectedVariant==='function'?window.selectedVariant():null;if(!v)return;v.chain=Array.isArray(v.chain)?v.chain:[];v.stepParams=Array.isArray(v.stepParams)?v.stepParams:[];const step={model:chosen};params.querySelectorAll('[data-param]').forEach(input=>step[input.dataset.param]=input.type==='number'?Number(input.value):input.value);v.chain.push(chosen);v.stepParams.push(step);v.model=chosen;v.status='draft';v.draftChanged=true;if(typeof window.renderVariants==='function')window.renderVariants();if(typeof window.dirty==='function')window.dirty();close();};
+    };
+    window.__finalAddModelOwner = event => { event?.preventDefault?.(); event?.stopImmediatePropagation?.(); render(); modal.classList.add('open'); modal.style.display='flex'; modal.style.visibility='visible'; modal.querySelector('#finalModelSearch').focus(); };
+    button.onclick=window.__finalAddModelOwner;
+  };
+  setTimeout(install, 2300);
+})();
+</script><style>
+.final-add-modal{width:min(680px,calc(100vw - 28px));max-height:min(760px,calc(100vh - 28px));overflow:auto}
+.final-add-modal header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}.final-add-modal h3{margin:0}
+.final-model-params{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}.final-model-params .field{display:grid;gap:4px;font-size:12px;color:var(--muted)}
+@media(max-width:560px){.final-add-modal{width:calc(100vw - 16px)}.final-model-params{grid-template-columns:1fr}.model-picker{grid-template-columns:1fr}}
+</style><script>
+(() => {
+  const reconcile = () => {
+    const results = document.querySelector('.results');
+    const rows = document.getElementById('resultRows');
+    if (!results || !rows) return;
+    document.querySelectorAll('#modelCatalog,.model-catalog,[data-add-model]').forEach(node => node.remove());
+    const oldSplit = results.querySelector('.model-split');
+    let surface = results.querySelector('.model-chain-surface');
+    let inner = surface?.querySelector('.model-chain-surface-inner');
+    if (!surface) {
+      surface = document.createElement('div'); surface.className='model-chain-surface';
+      inner = document.createElement('section'); inner.className='model-chain-surface-inner';
+      const title = results.querySelector('.history-title');
+      title?.after(surface); surface.append(inner);
+    }
+    if (oldSplit && oldSplit !== surface) {
+      const oldInner = oldSplit.querySelector('.current-models');
+      if (oldInner) {
+        const gate = oldInner.querySelector('.global-dnsmos');
+        if (gate && !inner.querySelector('.global-dnsmos')) inner.append(gate);
+      }
+      oldSplit.remove();
+    }
+    if (!inner.querySelector('.chain-toolbar')) {
+      const toolbar = document.createElement('div'); toolbar.className='chain-toolbar';
+      toolbar.innerHTML='<strong>Chuỗi model</strong>';
+      inner.prepend(toolbar);
+    }
+    const toolbar = inner.querySelector('.chain-toolbar');
+    document.querySelectorAll('#addModelControl').forEach((node,i)=>{if(i)node.remove();});
+    let add = toolbar.querySelector('#addModelControl');
+    if (!add) { add=document.createElement('button'); add.id='addModelControl'; add.type='button'; add.className='btn'; add.textContent='+ Thêm model'; toolbar.append(add); }
+    add.textContent='+ Thêm model'; add.setAttribute('aria-label','Thêm model vào chuỗi');
+    if (rows.parentElement !== inner) inner.append(rows);
+    const owner = window.__finalAddModelOwner || (model => window.__openModelForAdd?.(model));
+    add.onclick = event => owner(event, 'dfn3');
+    results.querySelector('.results-head')?.remove();
+    const heading = results.querySelector('.history-title strong'); if (heading) heading.textContent='Chuỗi model';
+    const subtitle = results.querySelector('.history-title span'); if (subtitle) subtitle.textContent='Theo thứ tự xử lý';
+  };
+  setTimeout(reconcile, 2800);
+})();
+</script><style>
+.model-split{display:block!important}.model-split>.model-catalog,#modelCatalog{display:none!important}
+.model-chain-surface{display:block!important}.model-chain-surface-inner{border:1px solid #263744;border-radius:8px;padding:9px;background:#0d151c;min-width:0}
+.chain-toolbar{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px}.chain-toolbar strong{font-size:12px}
+</style><!-- Choose input audio: legacy contract token; visible copy is Vietnamese. --><script>
+(() => {
+  const modalIds = ['modelModal', 'historyPage'];
+  const states = new Map();
+  let pendingOpener = null;
+  const focusSelector = 'a[href],area[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+  const isOpen = node => node && (node.classList.contains('open') || getComputedStyle(node).display !== 'none');
+  const dialog = node => node?.querySelector('[role="dialog"],.model-modal,.history-card') || node;
+  const focusables = node => [...dialog(node).querySelectorAll(focusSelector)].filter(el => {
+    const style = getComputedStyle(el); return !el.hidden && style.display !== 'none' && style.visibility !== 'hidden';
+  });
+  const rememberBackground = active => {
+    const saved = [];
+    const supportsInert = 'inert' in HTMLElement.prototype;
+    [...document.body.children].forEach(node => {
+      if (node === active || node.contains(active)) return;
+      const record = {node, inert: node.inert, ariaHidden: node.getAttribute('aria-hidden'), fallback: []};
+      node.inert = true;
+      // Older WebKit builds do not implement inert.  Preserve every tabindex
+      // exactly so closure can restore pre-existing keyboard behavior.
+      if (!supportsInert) {
+        node.setAttribute('aria-hidden', 'true');
+        node.querySelectorAll(focusSelector).forEach(el => { record.fallback.push([el, el.getAttribute('tabindex')]); el.setAttribute('tabindex', '-1'); });
+      }
+      saved.push(record);
+    });
+    return saved;
+  };
+  const restoreBackground = saved => (saved || []).forEach(({node, inert, ariaHidden, fallback}) => {
+    node.inert = inert;
+    if (ariaHidden == null) node.removeAttribute('aria-hidden'); else node.setAttribute('aria-hidden', ariaHidden);
+    (fallback || []).forEach(([el, tabindex]) => { if (!el.isConnected) return; if (tabindex == null) el.removeAttribute('tabindex'); else el.setAttribute('tabindex', tabindex); });
+  });
+  const activeModal = () => modalIds.map(id => document.getElementById(id)).find(isOpen);
+  const rememberOpener = event => {
+    const open = activeModal();
+    if (open && open.contains(event.target)) return;
+    if (event.target && event.target !== document.body && event.target !== document.documentElement) pendingOpener = event.target.closest?.('button,a,[tabindex],input,select,textarea') || event.target;
+  };
+  document.addEventListener('pointerdown', rememberOpener, true);
+  document.addEventListener('keydown', event => { if (event.key !== 'Tab' && event.key !== 'Enter' && event.key !== ' ') return; rememberOpener(event); }, true);
+  const closeSurface = node => {
+    if (!node) return;
+    const close = node.querySelector('#finalAddClose,#finalAddCancel,#modelClose,#cancelModel,#closeHistory');
+    if (close && !close.disabled) { close.click(); return; }
+    node.classList.remove('open'); node.style.display = 'none';
+  };
+  const sync = () => {
+    modalIds.forEach(id => {
+      const node = document.getElementById(id), open = isOpen(node), state = states.get(id);
+      if (open && !state?.open) {
+        const opener = pendingOpener && !node.contains(pendingOpener) ? pendingOpener : document.activeElement;
+        const next = {open:true, opener, background:rememberBackground(node)};
+        states.set(id, next); pendingOpener = null;
+        const first = focusables(node)[0]; if (first && !node.contains(document.activeElement)) first.focus();
+      } else if (!open && state?.open) {
+        restoreBackground(state.background); states.delete(id);
+        const opener = state.opener;
+        if (opener?.isConnected && !opener.disabled && !opener.closest('[inert]')) opener.focus();
+      }
+    });
+  };
+  document.addEventListener('keydown', event => {
+    const node = activeModal(); if (!node) return;
+    if (event.key === 'Escape') { event.preventDefault(); closeSurface(node); return; }
+    if (event.key !== 'Tab') return;
+    const items = focusables(node); if (!items.length) { event.preventDefault(); return; }
+    const current = document.activeElement, index = items.indexOf(current);
+    if (event.shiftKey && (index <= 0 || !node.contains(current))) { event.preventDefault(); items[items.length - 1].focus(); }
+    else if (!event.shiftKey && (index === items.length - 1 || !node.contains(current))) { event.preventDefault(); items[0].focus(); }
+  }, true);
+  const observer = new MutationObserver(sync);
+  observer.observe(document.documentElement, {subtree:true, attributes:true, attributeFilter:['class','style','hidden','disabled']});
+  sync();
+})();
+</script><script>
+// Run-level DNSMOS is the single source of truth. Keep the legacy controls as
+// compatibility shims, but remove their visible model-level copies and move
+// the authoritative control into the run settings section.
+(() => {
+    let lastVariant = null;
+    let lastThreshold = null;
+    const install = () => {
+      const runSettings = document.querySelector('.run-settings') || document.querySelector('.rail .scroll');
+      const gate = document.getElementById('globalDnsThreshold');
+      const gateValue = document.getElementById('globalDnsValue');
+      const legacyDns = document.getElementById('dns');
+    const legacyField = legacyDns?.closest('.field') || legacyDns;
+    if (legacyField && !legacyField.hidden) legacyField.hidden = true;
+    if (runSettings && gate && !runSettings.contains(gate)) {
+      const block = gate.closest('.global-dnsmos') || gate.closest('.field') || gate.parentElement;
+      if (block && !runSettings.contains(block)) runSettings.appendChild(block);
+    }
+    document.querySelectorAll('.variant-editor .threshold-field')
+      .forEach(node => { if (!node.hidden) node.hidden = true; if (node.getAttribute('aria-hidden') !== 'true') node.setAttribute('aria-hidden', 'true'); });
+    const modalGate = document.getElementById('modelThreshold');
+    if (modalGate) { const field = modalGate.closest('.field') || modalGate; if (!field.hidden) field.hidden = true; if (field.getAttribute('aria-hidden') !== 'true') field.setAttribute('aria-hidden', 'true'); }
+    document.querySelectorAll('.model-current-row > span:nth-child(3)').forEach(node => { if (!node.hidden) node.hidden = true; });
+    const v = typeof selectedVariant === 'function' ? selectedVariant() : null;
+    const value = Number(v?.threshold ?? .30);
+    if (v && gate && (v !== lastVariant || value !== lastThreshold)) {
+      if (gate.value !== String(value)) gate.value = String(value);
+      if (gateValue && gateValue.textContent !== value.toFixed(2)) gateValue.textContent = value.toFixed(2);
+      lastVariant = v; lastThreshold = value;
+    }
+    if (gate && !gate.dataset.bound) {
+      gate.dataset.bound = '1';
+      gate.addEventListener('input', () => {
+        const current = typeof selectedVariant === 'function' ? selectedVariant() : null;
+        if (!current) return;
+        current.threshold = Number(gate.value); current.status = 'draft'; current.draftChanged = true;
+        if (gateValue) gateValue.textContent = Number(gate.value).toFixed(2);
+        const legacy = document.getElementById('dns'); if (legacy && legacy.value !== gate.value) legacy.value = gate.value;
+        if (typeof dirty === 'function') dirty();
+      });
+    }
+  };
+  setTimeout(install, 1600);
+  // The authoritative control is created by the model layout once.  Later
+  // updates are explicit render/selection boundaries; observing document.body
+  // made every result-row mutation feed back into this shim.
+  window.addEventListener('lab:render', install);
+  window.addEventListener('lab:selection', install);
+  document.addEventListener('click', event => {
+    if (event.target.closest('[data-trial],[data-history],[data-use-history],[data-use],#addVariant,#newVariant,#addTrial,#duplicateTrial')) queueMicrotask(install);
+  }, true);
+})();
+</script><!-- modal-focus-inert-contract --><script>
+(() => {
+  const copy = {
+    'Denoise Lab':'Denoise Lab', 'draft':'bản nháp', 'prepared':'đã chuẩn bị',
+    'accepted':'đã tiếp nhận', 'submitting':'đang gửi', 'running':'đang chạy',
+    'failed':'thất bại', 'not-sent':'chưa gửi', 'pending':'đang chờ',
+    'awaiting audio':'đang chờ audio', 'awaiting import':'đang chờ nhập',
+    'waiting for audio':'đang chờ audio', 'audio unavailable':'audio chưa có',
+    'output unavailable':'output chưa có', 'session audio':'audio phiên hiện tại',
+    'Audio ready':'Audio đã sẵn sàng', 'Audio partially loaded':'Audio mới nạp một phần',
+    'No audio loaded':'Chưa nạp audio', '0/2 audio lanes loaded':'Chưa nạp audio (0/2 kênh)',
+    'Source audio':'Audio nguồn', 'Selected output':'Output đã chọn', 'Source':'Nguồn',
+    'Output':'Output', 'Load audio':'Nạp audio', 'Import output':'Nhập output',
+    'Choose input audio':'Chọn audio đầu vào', 'Choose audio':'Chọn audio',
+    'Load a source file to inspect its waveform and measurements.':'Nạp file nguồn để xem waveform và chỉ số đo.',
+    'The source is never overwritten. Every trial keeps its own recipe.':'Nguồn không bao giờ bị ghi đè. Mỗi lượt giữ công thức riêng.',
+    'Chunk size':'Kích thước đoạn', 'Audio directory':'Thư mục audio', 'Output root':'Thư mục output',
+    'Trial / status':'Lượt / trạng thái', 'Model chain':'Chuỗi model', 'Model editor':'Trình sửa model',
+    'Models':'Các model', 'Model':'Model', 'Models trong lượt chạy':'Model trong lượt chạy',
+    'Runtime':'Trạng thái', 'Audio state':'Trạng thái audio', 'Saved runs':'Lượt đã lưu',
+    'No saved runs yet':'Chưa có lượt chạy đã lưu', 'History':'Lịch sử', 'Review export':'Công thức',
+    'Recipe':'Công thức', 'Export command':'Xuất lệnh', 'Download variants.json':'Tải variants.json',
+    'Copy command':'Sao chép lệnh', 'Close':'Đóng', 'Cancel':'Hủy', 'Huỷ':'Hủy',
+    'Undo':'Hoàn tác', 'Delete':'Xóa', 'Delete all runs':'Xóa tất cả lượt chạy',
+    'Add model':'Thêm model', '+ Add model':'+ Thêm model', 'Search models':'Tìm model',
+    'Choose model steps below':'Chọn các bước model bên dưới', 'Run':'Chạy', 'Run now':'Chạy ngay',
+    'Prepare run':'Tạo công thức', 'Run model again':'Chạy lại model', 'Retry':'Thử lại',
+    'Run directly on backend':'Chạy trực tiếp trên backend', 'Run trực tiếp backend':'Chạy trực tiếp trên backend',
+    'Network error — backend unavailable; request was not sent.':'Lỗi mạng — backend không khả dụng; yêu cầu chưa được gửi.',
+    'server rejected the run.':'máy chủ từ chối lượt chạy.', 'Static UI exports configuration; execute the command on the GPU host.':'Giao diện chỉ xuất cấu hình; hãy chạy lệnh trên máy GPU.',
+    'Recipes persist locally · import output audio to listen':'Công thức được lưu cục bộ · nhập audio output để nghe',
+    'Space play · A/B switch · Esc stop':'Space phát · A/B đổi kênh · Esc dừng',
+    'drag to select · Alt+drag to pan · wheel with Shift':'Kéo để chọn · Alt+kéo để xoay · cuộn cùng Shift',
+    'Output unavailable for selected run':'Output chưa có cho lượt đã chọn',
+    'The final model is required for a runnable chain':'Cần giữ model cuối để chuỗi có thể chạy',
+    'Delete this model (Undo available)':'Xóa model này (có thể hoàn tác)',
+    'Cannot delete the only model in the chain':'Không thể xóa model duy nhất trong chuỗi',
+    'Keep one model to run':'Giữ lại một model để chạy', 'Add model to chain':'Thêm model vào chuỗi',
+    'Edit model':'Sửa model', 'Save changes':'Lưu thay đổi', 'First step':'Bước đầu',
+    'after':'sau', 'saved locally':'đã lưu cục bộ', 'unsaved changes':'thay đổi chưa lưu',
+    'Not available in this prototype':'Chưa khả dụng trong bản thử nghiệm', 'soon':'sắp có',
+    'Output đang chọn':'Output đã chọn', 'No prepared runs yet':'Chưa có lượt chạy đã chuẩn bị',
+    'pending':'đang chờ', 'low':'thấp', 'medium':'trung bình', 'high':'cao',
+    'Chunk (s)':'Đoạn (giây)', 'Chunk (giây)':'Đoạn (giây)', 'Overlap (giây)':'Chồng lấn (giây)',
+    'Window (giây)':'Cửa sổ (giây)', 'Hop (giây)':'Bước nhảy (giây)', 'Segment size':'Kích thước đoạn',
+    'Hop portion':'Tỷ lệ bước nhảy', 'No output imported':'Chưa nhập output'
+  };
+  const apply = root => {
+    const nodes = root.nodeType === Node.ELEMENT_NODE
+      ? [root, ...root.querySelectorAll('*')]
+      : [...root.querySelectorAll('*')];
+    nodes.forEach(node => {
+      if (node.children.length === 0 && node.textContent) {
+        let value = node.textContent;
+        Object.entries(copy).forEach(([from,to]) => { value = value.split(from).join(to); });
+        if (value !== node.textContent) node.textContent = value;
+      }
+      ['title','aria-label','placeholder'].forEach(attr => {
+        const value = node.getAttribute(attr); if (!value) return;
+        let next=value; Object.entries(copy).forEach(([from,to]) => { next=next.split(from).join(to); });
+        if (next !== value) node.setAttribute(attr,next);
+      });
+    });
+  };
+  const run = () => apply(document);
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run); else run();
+
+  // Dynamic UI updates are localized in one frame and only for affected
+  // subtrees. This keeps the locale pass responsive without repeatedly
+  // walking the entire document while the lab is active.
+  let scheduled = false;
+  const pending = new Set();
+  const flush = () => {
+    scheduled = false;
+    const roots = [...pending];
+    pending.clear();
+    roots.filter(root => root.isConnected && !roots.some(other => other !== root && other.contains(root)))
+      .forEach(apply);
+  };
+  const schedule = root => {
+    if (!root) return;
+    pending.add(root);
+    if (!scheduled) {
+      scheduled = true;
+      if (window.requestAnimationFrame) window.requestAnimationFrame(flush);
+      else window.setTimeout(flush, 0);
+    }
+  };
+  new MutationObserver(records => records.forEach(record => {
+    if (record.type === 'attributes') schedule(record.target);
+    else if (record.type === 'characterData') schedule(record.target.parentElement);
+    else record.addedNodes.forEach(node => schedule(node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement));
+  })).observe(document.documentElement, {subtree:true, childList:true, characterData:true, attributes:true, attributeFilter:['title','aria-label','placeholder']});
+})();
+</script><!-- locale-vi-final-pass --><script>
+(() => {
+  const key = 'denoise-lab-v4-reference';
+  const q = id => document.getElementById(id);
+  const state = { referenceId: null, lane: 'source' };
+  try { state.referenceId = localStorage.getItem(key) || null; } catch (_) {}
+  const selected = () => typeof window.selectedVariant === 'function' ? window.selectedVariant() : null;
+  const selectedRun = () => { const v = selected(); return v && (v.runs || []).find(r => r.id === v.activeRunId) || null; };
+  const allVariants = () => typeof window.__labVariants === 'function' ? window.__labVariants() : [];
+  const runById = id => { if (!id) return null; for (const v of allVariants()) { const r = (v.runs || []).find(x => x.id === id); if (r) return {v, r}; } return null; };
+  const imported = entry => Boolean(entry?.r?.audioArtifact?.sessionOnly);
+  const save = () => { try { if (state.referenceId) localStorage.setItem(key, state.referenceId); else localStorage.removeItem(key); } catch (_) {} };
+  let rendering = false;
+  const setText = (node, value) => { if (node && node.textContent !== value) node.textContent = value; };
+  const label = (entry, fallback) => entry ? `${entry.v.label || 'Run'} · ${(entry.r.configSnapshot?.model || entry.v.model || 'model')}` : fallback;
+  const ensureBar = () => {
+    const head = document.querySelector('.stage-head'); if (!head || q('abCompare')) return;
+    const bar = document.createElement('div'); bar.id = 'abCompare'; bar.className = 'ab-compare';
+    bar.innerHTML = '<button type="button" id="abSource" aria-pressed="true">Nguồn</button><button type="button" id="abReference" aria-pressed="false">Tham chiếu · chưa có</button><button type="button" id="abCandidate" aria-pressed="false">Ứng viên · chưa chọn</button><button type="button" id="abClear" title="Bỏ ghim tham chiếu">Bỏ ghim</button><span id="abState" role="status"></span>';
+    head.insertBefore(bar, head.querySelector('.spacer') || null);
+    q('abSource').onclick = () => select('source');
+    q('abReference').onclick = () => { if (runById(state.referenceId) && imported(runById(state.referenceId))) select('reference'); };
+    q('abCandidate').onclick = () => { if (selectedRun() && imported({r:selectedRun()})) select('candidate'); };
+    q('abClear').onclick = () => { state.referenceId = null; save(); render(); };
+  };
+  const select = lane => { state.lane = lane; const active = lane === 'source' ? 'A' : 'B'; if (lane === 'reference' && state.referenceId) window.__labReferenceAudio?.(state.referenceId); if (typeof window.selectLane === 'function') window.selectLane(active); render(); };
+  const pin = id => { const entry = runById(id); if (!imported(entry)) return; state.referenceId = id; save(); render(); };
+  const render = () => {
+    if (rendering) return; rendering = true;
+    try {
+    ensureBar();
+    const candidate = selectedRun();
+    const reference = runById(state.referenceId);
+    const validReference = imported(reference);
+    if (state.referenceId && !reference) { state.referenceId = null; save(); }
+    const source = q('abSource'), ref = q('abReference'), cand = q('abCandidate'), clear = q('abClear'), status = q('abState');
+    if (!source || !ref || !cand || !clear || !status) return;
+    source.classList.toggle('active', state.lane === 'source'); source.setAttribute('aria-pressed', String(state.lane === 'source'));
+    setText(ref, validReference ? `Tham chiếu · ${label(reference, 'run')}` : (state.referenceId ? 'Tham chiếu · cần nhập lại' : 'Tham chiếu · chưa có'));
+    setText(cand, candidate && imported({r:candidate}) ? `Ứng viên · ${label({v:selected(),r:candidate}, 'run')}` : 'Ứng viên · chưa có output');
+    ref.disabled = !validReference; cand.disabled = !(candidate && imported({r:candidate}));
+    ref.classList.toggle('active', state.lane === 'reference' && validReference); cand.classList.toggle('active', state.lane === 'candidate' && !cand.disabled);
+    clear.disabled = !state.referenceId; setText(status, !validReference && state.referenceId ? 'Nhập lại audio của tham chiếu sau khi tải lại.' : 'A/B dùng chung thời gian và vòng lặp.');
+    const rows = document.querySelectorAll('[data-history]');
+    rows.forEach(row => {
+      const id = row.dataset.history; let button = row.querySelector('[data-pin-reference]');
+      if (!button) { button = document.createElement('button'); button.type='button'; button.className='btn'; button.dataset.pinReference=id; button.textContent='Ghim'; row.querySelector('.history-actions')?.prepend(button); }
+      const entry = runById(id); button.disabled = !imported(entry); setText(button, id === state.referenceId ? 'Đã ghim' : 'Ghim'); button.onclick = e => { e.stopPropagation(); pin(id); };
+    });
+    } finally { rendering = false; }
+  };
+  const sync = () => { const p=q('player'); if (!p) return; p.addEventListener('timeupdate', () => { const t=q('time'); if (t) t.textContent = `${(p.currentTime || 0).toFixed(1)} / ${(p.duration || 0).toFixed(1)}`; }); p.addEventListener('ended', () => { const selection=window.__labSelection?.(); if (q('loop')?.checked && selection) p.currentTime = selection[0] || 0; }); };
+  const observer = new MutationObserver(() => { ensureBar(); render(); });
+  observer.observe(document.body, {childList:true, subtree:true});
+  document.addEventListener('click', e => { if (e.target.closest('[data-history],[data-use-history]')) setTimeout(render, 0); }, true);
+  window.addEventListener('lab:audio-state', render); window.addEventListener('lab:render', render);
+  setTimeout(() => { sync(); render(); }, 900);
+})();
+</script><style>
+.ab-compare{display:flex;align-items:center;gap:3px;min-width:0;max-width:55%;overflow:hidden}.ab-compare button{border:1px solid var(--line);background:#141e27;color:var(--muted);padding:4px 7px;border-radius:5px;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ab-compare button.active{background:var(--cyan);color:#071113;border-color:var(--cyan)}.ab-compare button:disabled{opacity:.42;cursor:not-allowed}.ab-compare #abState{color:var(--muted);font-size:9px;white-space:nowrap}.ab-compare #abClear{margin-left:2px}@media(max-width:620px){.ab-compare{max-width:62%;}.ab-compare #abState,.ab-compare #abClear{display:none}}
+</style></body></html>

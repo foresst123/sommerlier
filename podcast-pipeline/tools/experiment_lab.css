@@ -3,6 +3,9 @@
  * generator's progressively-added controls and model workbench.
  */
 
+.state.failed, .state.not-sent { color: var(--red); border-color: #7b3d46; }
+.run-error { color: var(--red); font-size: 9px; }
+
 :root {
   --lab-space: 8px;
   --lab-panel: #111a22;
@@ -121,7 +124,8 @@ body {
 
 .empty-wave-state {
   position: absolute;
-  inset: 38% 12% auto 12%;
+  inset: 50% 12% auto 12%;
+  transform: translateY(-50%);
   display: none;
   color: var(--muted);
   text-align: center;
@@ -136,6 +140,27 @@ body {
 .empty-wave-state strong { color: var(--text); font-size: 14px; }
 .empty-wave-state span { color: var(--muted); }
 .empty-wave-state .btn { pointer-events: auto; }
+.canvas-wrap.lab-empty .ruler,
+.canvas-wrap.lab-empty .track-labels,
+.canvas-wrap.lab-empty .selection,
+.canvas-wrap.lab-empty .playhead,
+.canvas-wrap.lab-empty .transport {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.canvas-wrap.lab-empty .wave {
+  opacity: 0;
+  pointer-events: none;
+  cursor: default;
+}
+
+.canvas-wrap.lab-empty .empty-wave-state {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: none;
+}
 .transport button:disabled, .transport input:disabled, .ab button:disabled { opacity: .38; cursor: not-allowed; }
 .model-delete-hint { grid-column: 2 / -1; color: var(--muted); font-size: 9px; }
 
