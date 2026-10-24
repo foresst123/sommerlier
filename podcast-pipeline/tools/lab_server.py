@@ -239,7 +239,8 @@ def write_status(run_dir, **fields):
 
 def reap(proc, run_dir):
     rc = proc.wait()
-    write_status(run_dir, state="finished" if rc == 0 else "failed", returncode=rc, finishedAt=datetime.now().isoformat(timespec="seconds"))
+    write_status(run_dir, state="finished" if rc == 0 else "failed", returncode=rc,
+                 finishedAt=datetime.now().isoformat(timespec="seconds"), finishedEpoch=time.time())
 
 
 def start_run(cfg, payload):
@@ -250,7 +251,7 @@ def start_run(cfg, payload):
     (run_dir / "variants.json").write_text(json.dumps(variants, ensure_ascii=False, indent=1))
     (run_dir / "payload.json").write_text(json.dumps(payload, ensure_ascii=False, indent=1))
     full, plain = launch_argv(cfg, tail, run_dir / "variants.json", run_dir / "out")
-    base = {"runId": rid, "runDir": str(run_dir), "log": str(run_dir / "run.log"), "out": str(run_dir / "out"),
+    base = {"runId": rid, "startedEpoch": time.time(), "runDir": str(run_dir), "log": str(run_dir / "run.log"), "out": str(run_dir / "out"),
             "command": shlex.join(plain), "launcher": full[:-1] if not cfg.dry_run else full[:-1], **info}
     cfg.runs[rid] = run_dir
     if cfg.dry_run:
@@ -279,10 +280,17 @@ def find_run_dir(cfg, rid):
     return found[-1] if found else None
 
 
-def run_status(cfg, rid):
-    run_dir = find_run_dir(cfg, rid)
-    if run_dir is None:
-        raise BadRequest("không tìm thấy lượt chạy")
+def tail(path, n=LOG_TAIL):
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - n))
+            return f.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def read_status(run_dir):
     try:
         st = json.loads((run_dir / "status.json").read_text())
     except (OSError, ValueError):
@@ -295,15 +303,41 @@ def run_status(cfg, rid):
             st["state"] = "ended"  # the lab server restarted while the job ran; exit code unknown
         except PermissionError:
             pass
-    try:
-        with open(run_dir / "run.log", "rb") as f:
-            f.seek(0, os.SEEK_END)
-            f.seek(max(0, f.tell() - LOG_TAIL))
-            st["logTail"] = f.read().decode("utf-8", "replace")
-    except OSError:
-        st["logTail"] = ""
+    return st
+
+
+def elapsed(st):
+    start = st.get("startedEpoch")
+    if not start:
+        return 0
+    end = st.get("finishedEpoch") or (time.time() if st.get("state") == "running" else start)
+    return max(0, round(end - start, 1))
+
+
+def run_status(cfg, rid):
+    run_dir = find_run_dir(cfg, rid)
+    if run_dir is None:
+        raise BadRequest("không tìm thấy lượt chạy")
+    st = read_status(run_dir)
+    st["elapsedSeconds"] = elapsed(st)
+    st["logTail"] = tail(run_dir / "run.log")
+    # the pipeline's own progress lives in out/logs/<variant>.log, not in the runner's log
+    logs = sorted((run_dir / "out" / "logs").glob("*.log"), key=lambda p: p.stat().st_mtime) if (run_dir / "out" / "logs").is_dir() else []
+    st["pipelineLog"] = logs[-1].name if logs else ""
+    st["pipelineLogTail"] = tail(logs[-1]) if logs else ""
     st["outputs"] = sorted(str(p) for p in (run_dir / "out").glob("*/*/01b_denoise/after_denoise.wav"))[:200]
     return st
+
+
+def list_runs(cfg, limit=10):
+    root = cfg.out_root / "lab_runs"
+    dirs = sorted((d for d in root.glob("*") if d.is_dir()), key=lambda d: d.name, reverse=True)[:max(1, min(limit, 50))] if root.is_dir() else []
+    out = []
+    for d in dirs:
+        st = read_status(d)
+        out.append({"runId": d.name.split("_", 1)[-1], "state": st.get("state"), "runDir": str(d), "chain": st.get("chain"),
+                    "source": st.get("source"), "elapsedSeconds": elapsed(st), "startedEpoch": st.get("startedEpoch")})
+    return {"runs": out}
 
 
 def make_handler(cfg, page):
@@ -345,11 +379,13 @@ def make_handler(cfg, page):
                     self.send_json(list_dir(cfg, q.get("path", "")))
                 elif u.path == "/api/audio":
                     self.send_audio(safe_path(q.get("path"), cfg.read_roots))
+                elif u.path == "/api/experiment/runs":
+                    self.send_json(list_runs(cfg, int(q.get("limit", 10) or 10)))
                 elif u.path == "/api/experiment/status":
                     self.send_json(run_status(cfg, q.get("runId")))
                 else:
                     self.fail("not found", 404)
-            except BadRequest as e:
+            except (BadRequest, ValueError) as e:
                 self.fail(e)
             except OSError as e:
                 self.fail(e, 500)

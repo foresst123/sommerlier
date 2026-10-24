@@ -1685,26 +1685,91 @@ PAGE = PAGE.replace(
     if (PSEUDO.test(window.selectedVariant?.()?.chain?.[i] || '')) { e.preventDefault(); e.stopImmediatePropagation(); openPct(i); }
   }, true);
 
-  // ---- follow a started run ----
-  window.__pollRun = (r, v) => {
-    const sid = r.serverRun?.runId; if (!sid) return;
-    // runReason shows paths and log lines verbatim: data-raw keeps the locale pass from rewriting them
-    const say = (text, notice = text) => { const n = $('runReason'); if (n) { n.setAttribute('data-raw', ''); n.textContent = text; } if (typeof showNotice === 'function') showNotice(notice); };
+  // ---- backend run status: an always-visible chip in the top bar, click for the live log ----
+  const runCss = document.createElement('style');
+  runCss.textContent = '.run-chip{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);background:var(--s2);padding:6px 11px;border-radius:99px;font-size:12px;white-space:nowrap;max-width:300px;overflow:hidden;text-overflow:ellipsis}'
+    + '.run-chip:hover{border-color:#527084}.run-chip .dot{width:8px;height:8px;border-radius:50%;background:#617480;flex:0 0 auto}'
+    + '.run-chip[data-state=running] .dot{background:var(--amber);animation:labpulse 1.1s ease-in-out infinite}.run-chip[data-state=running]{border-color:#765d2b}'
+    + '.run-chip[data-state=finished] .dot{background:var(--green)}.run-chip[data-state=finished]{border-color:#355045}'
+    + '.run-chip[data-state=failed] .dot,.run-chip[data-state=lost] .dot{background:var(--red)}.run-chip[data-state=failed]{border-color:#673d43}'
+    + '.run-chip[data-state=dry] .dot{background:var(--blue)}@keyframes labpulse{50%{opacity:.3}}@media(prefers-reduced-motion:reduce){.run-chip .dot{animation:none!important}}'
+    + '.run-kv{display:grid;grid-template-columns:110px minmax(0,1fr);gap:8px;font-size:12px;align-items:baseline}.run-kv span{color:var(--muted)}.run-kv code{word-break:break-all;font:11px ui-monospace,monospace;color:#c9e7e3}'
+    + '.run-log{margin:0;height:min(340px,38vh);overflow:auto;background:#080c10;border:1px solid var(--line);border-radius:7px;padding:10px;font:11px/1.45 ui-monospace,monospace;color:#c9d4dc;white-space:pre-wrap;word-break:break-all}'
+    + '.run-box{width:min(760px,calc(100vw - 24px))}';
+  document.head.appendChild(runCss);
+  const LABEL = {running: ['Đang chạy', 'running'], finished: ['Hoàn tất', 'finished'], failed: ['Lỗi', 'failed'], 'dry-run': ['Dry-run · chưa chạy', 'dry'],
+                 ended: ['Tiến trình đã dừng', 'failed'], unknown: ['Không rõ', 'idle'], sending: ['Đang gửi…', 'running'], lost: ['Mất kết nối server', 'lost']};
+  const fmtDur = s => { s = Math.max(0, Math.floor(s)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60, two = n => String(n).padStart(2, '0'); return (h ? h + ':' : '') + two(m) + ':' + two(x); };
+  const baseTitle = document.title;
+  const T = {runId: null, st: null, polledAt: 0, state: null, r: null, gen: 0, loop: null};
+
+  const chip = document.createElement('button');
+  chip.type = 'button'; chip.className = 'run-chip'; chip.id = 'runChip'; chip.setAttribute('data-raw', ''); chip.dataset.state = 'idle';
+  chip.innerHTML = '<span class="dot"></span><span id="runChipText">Chưa chạy</span>';
+  chip.title = 'Trạng thái chạy trên backend (bấm để xem log)';
+  const topbar = document.querySelector('.topbar');
+  if (topbar) topbar.insertBefore(chip, topbar.querySelector('.spacer')?.nextSibling || null);
+
+  let runDialog = null, paintTimer = null;
+  const elapsedNow = () => (T.st?.elapsedSeconds || 0) + (T.state === 'running' ? (Date.now() - T.polledAt) / 1000 : 0);
+  const paint = () => {
+    const [text, tone] = LABEL[T.state] || ['Chưa chạy', 'idle'];
+    const showTime = T.st && T.state && !['dry-run', 'unknown'].includes(T.state);
+    const line = text + (showTime ? ' · ' + fmtDur(elapsedNow()) : '');
+    chip.dataset.state = tone; $('runChipText').textContent = line;
+    document.title = T.state === 'running' ? `● ${line} · ${baseTitle}` : (T.state === 'finished' ? `✓ Hoàn tất · ${baseTitle}` : (T.state === 'failed' ? `✕ Lỗi · ${baseTitle}` : baseTitle));
+    // a one-second tick only while a job is live (no standing interval): it re-arms itself from here
+    clearTimeout(paintTimer);
+    if (['running', 'sending', 'lost'].includes(T.state)) paintTimer = setTimeout(paint, 1000);
+    if (!runDialog?.classList.contains('open')) return;
+    const st = T.st || {};
+    $('rdState').textContent = line; $('rdChain').textContent = st.chain || '—'; $('rdDir').textContent = st.runDir || '—';
+    $('rdOut').textContent = st.state === 'finished' ? `${st.outputs?.length || 0} file denoise · ${st.out || ''}` : (st.state === 'running' ? 'đang xử lý…' : (st.returncode != null ? `mã thoát ${st.returncode}` : '—'));
+    const log = $('rdLog'), stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 40;
+    const body = [(st.logTail || '').trimEnd(), st.pipelineLog ? `\n──── ${st.pipelineLog} ────\n` + (st.pipelineLogTail || '').trimEnd() : ''].join('\n').trim();
+    const text2 = body || (T.state === 'sending' ? 'Đang gửi yêu cầu tới backend…' : 'Chưa có log. Nếu srun đang chờ tài nguyên, log sẽ xuất hiện khi job bắt đầu.');
+    if (log.textContent !== text2) { log.textContent = text2; if (stick) log.scrollTop = log.scrollHeight; }
+  };
+  const openRunDialog = () => {
+    if (!runDialog) {
+      runDialog = makeDialog('runDialog', 'Trạng thái chạy');
+      runDialog.setAttribute('data-raw', ''); runDialog.firstChild.classList.add('run-box');
+      runDialog.firstChild.innerHTML = '<header><strong style="flex:1">Trạng thái chạy trên backend</strong><button class="btn" type="button" id="rdClose">Đóng</button></header>'
+        + '<div class="srv-body"><div class="run-kv"><span>Trạng thái</span><b id="rdState"></b></div><div class="run-kv"><span>Chuỗi</span><b id="rdChain"></b></div>'
+        + '<div class="run-kv"><span>Kết quả</span><b id="rdOut"></b></div><div class="run-kv"><span>Thư mục</span><code id="rdDir"></code></div><pre class="run-log" id="rdLog" tabindex="0" aria-label="Log"></pre></div>';
+      $('rdClose').onclick = () => runDialog.classList.remove('open');
+      runDialog.addEventListener('keydown', e => { if (e.key === 'Escape') runDialog.classList.remove('open'); });
+    }
+    runDialog.classList.add('open'); paint(); const log = $('rdLog'); log.scrollTop = log.scrollHeight; $('rdClose').focus();
+  };
+  chip.onclick = openRunDialog;
+
+  // one tracker at a time; a newer run (or a restored one) cancels the previous loop
+  const track = (runId, r) => {
+    const gen = ++T.gen; T.runId = runId; T.r = r || null; T.state = 'sending'; T.st = null; T.polledAt = Date.now(); paint();
+    const say = (text, notice = text) => { const n = $('runReason'); if (n) { n.setAttribute('data-raw', ''); n.textContent = text; } if (r && typeof showNotice === 'function') showNotice(notice); };
     const tick = async () => {
+      if (gen !== T.gen) return;
       let again = false;
       try {
-        const st = await api('/api/experiment/status?runId=' + encodeURIComponent(sid));
-        const last = (st.logTail || '').trim().split('\n').filter(Boolean).pop() || '';
-        if (st.state === 'running') { r.status = 'running'; again = true; say('Đang chạy trên GPU · ' + last.slice(0, 140), 'Đang chạy trên GPU'); }
-        else if (st.state === 'finished') { r.status = 'accepted'; say(`Hoàn tất · ${st.outputs?.length || 0} file denoise · ${st.out}`, 'Hoàn tất'); }
-        else if (st.state === 'dry-run') { r.status = 'accepted'; say('Dry-run: đã ghi ' + st.runDir + ', chưa chạy', 'Dry-run: chưa chạy'); }
-        else { r.status = 'failed'; r.errorMessage = `Lỗi (${st.state}, mã ${st.returncode ?? '?'}) · ${last.slice(0, 160)}`; say(r.errorMessage, 'Lỗi khi chạy'); }
-      } catch (e) { again = true; }
-      window.renderVariants?.(); window.dirty?.();
-      if (again) setTimeout(tick, 5000);
+        const st = await api('/api/experiment/status?runId=' + encodeURIComponent(runId));
+        if (gen !== T.gen) return;
+        T.st = st; T.state = st.state; T.polledAt = Date.now();
+        const last = (st.pipelineLogTail || st.logTail || '').trim().split('\n').filter(Boolean).pop() || '';
+        if (st.state === 'running') { again = true; if (r) { r.status = 'running'; say('Đang chạy trên GPU · ' + last.slice(0, 140), 'Đang chạy trên GPU'); } }
+        else if (st.state === 'finished') { if (r) { r.status = 'accepted'; say(`Hoàn tất · ${st.outputs?.length || 0} file denoise · ${st.out}`, 'Hoàn tất'); } }
+        else if (st.state === 'dry-run') { if (r) { r.status = 'accepted'; say('Dry-run: đã ghi ' + st.runDir + ', chưa chạy', 'Dry-run: chưa chạy'); } }
+        else if (r) { r.status = 'failed'; r.errorMessage = `Lỗi (${st.state}, mã ${st.returncode ?? '?'}) · ${last.slice(0, 160)}`; say(r.errorMessage, 'Lỗi khi chạy'); }
+      } catch (e) { again = true; T.state = 'lost'; }
+      paint();
+      if (r) { window.renderVariants?.(); window.dirty?.(); }
+      if (again) T.loop = setTimeout(tick, runDialog?.classList.contains('open') ? 1500 : 3000);
     };
-    setTimeout(tick, 1500);
+    clearTimeout(T.loop); T.loop = setTimeout(tick, 600);
   };
+  window.__pollRun = (r, v) => { if (r.serverRun?.runId) track(r.serverRun.runId, r); };
+  // after a page reload, pick the latest run back up so a job in progress is never invisible
+  window.__restoreRun = () => api('/api/experiment/runs?limit=1').then(l => { if (l.runs?.[0] && !T.runId) track(l.runs[0].runId, null); }).catch(() => {});
 
   // ---- add a step: 1) pick a model or blend/dry from the list, 2) set its parameters ----
   const addCss = document.createElement('style');
@@ -1789,6 +1854,7 @@ PAGE = PAGE.replace(
     const info = `Backend · ${c.jobid ? 'srun --jobid=' + c.jobid : 'chạy cục bộ'} · conda ${c.condaEnv}${c.dryRun ? ' · DRY-RUN' : ''}`;
     const bar = $('command'); if (bar) { bar.dataset.backend = info; }
     const lane = $('laneState'); if (lane) lane.title = info;
+    window.__restoreRun();
   }).catch(() => { cfg = null; });
 })();
 </script></body></html>''',

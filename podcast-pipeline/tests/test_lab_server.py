@@ -120,3 +120,29 @@ def test_file_audio_root_falls_back_to_its_folder(tmp_path):
 def test_listing_a_file_path_lists_its_folder(cfg):
     d = ls.list_dir(cfg, str(cfg.audio_roots[0] / "a.wav"))
     assert d["path"] == str(cfg.audio_roots[0]) and [f["name"] for f in d["files"]] == ["a.wav"]
+
+
+def test_status_reports_elapsed_and_the_pipeline_log(cfg):
+    out = ls.start_run(cfg, payload(cfg))
+    run_dir = Path(out["runDir"])
+    st = ls.run_status(cfg, "r1")
+    assert st["elapsedSeconds"] == 0 and st["pipelineLog"] == ""  # dry-run: nothing ran
+    (run_dir / "out" / "logs").mkdir(parents=True)
+    (run_dir / "out" / "logs" / "t1.log").write_text("step 1/6\nstep 2/6\n")
+    assert "step 2/6" in ls.run_status(cfg, "r1")["pipelineLogTail"]
+
+
+def test_elapsed_stops_at_the_finish_time_and_runs_while_running():
+    assert ls.elapsed({"state": "finished", "startedEpoch": 100.0, "finishedEpoch": 112.5}) == 12.5
+    assert ls.elapsed({"state": "running", "startedEpoch": ls.time.time() - 30}) >= 30
+    assert ls.elapsed({"state": "running"}) == 0
+
+
+def test_list_runs_is_newest_first_and_capped(cfg):
+    for rid in ("a1", "b1", "c1"):
+        p = payload(cfg)
+        p["runId"] = rid
+        ls.start_run(cfg, p)
+    runs = ls.list_runs(cfg, 2)["runs"]
+    assert [r["runId"] for r in runs] == ["c1", "b1"]
+    assert ls.list_runs(ls.Config([cfg.audio_roots[0]], cfg.out_root / "none", "1", "", "som", "", "python", True))["runs"] == []
