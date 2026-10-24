@@ -856,6 +856,36 @@ setTimeout(()=>{
   document.addEventListener('keydown',e=>{if(e.key==='Escape'&&modal.classList.contains('open'))close.click();});
   actions.querySelector('#saveModel')?.replaceWith(actions.querySelector('#saveModel').cloneNode(true));
 },400);
+</script><style>
+.workspace-switch{display:flex;gap:3px;border:1px solid var(--line);border-radius:7px;padding:2px;background:#101820}
+.workspace-switch button{border:0;background:transparent;color:var(--muted);padding:5px 8px;border-radius:5px;font-size:11px}
+.workspace-switch button.active{background:#123035;color:var(--cyan)}
+.browse-panel{position:absolute;inset:40px 0 0;background:var(--s1);z-index:4;padding:22px;overflow:auto}
+.browse-panel[hidden]{display:none}.browse-panel h2{margin:0 0 6px;font-size:18px}.browse-panel p{color:var(--muted);max-width:620px}
+.browse-controls{display:grid;grid-template-columns:repeat(3,minmax(150px,1fr));gap:8px;max-width:850px;margin:18px 0}
+.browse-empty{border:1px dashed #3a4b57;border-radius:8px;padding:18px;color:var(--muted);max-width:850px}.asr-timeline{display:grid;gap:6px;margin-top:12px;max-width:850px}.asr-segment{border:1px solid var(--line);border-radius:7px;background:#101820;padding:7px 9px}.asr-segment summary{cursor:pointer;color:#b9cbd3;font:11px ui-monospace,monospace}.asr-model{margin:7px 0 0;padding:6px;background:#0b1117;border-radius:5px;color:#d6e4e7;white-space:pre-wrap;font-size:12px}.conv-turn{display:flex;align-items:flex-start;gap:5px;margin:5px 0}.conv-turn-play{flex:0 0 auto;width:23px;height:22px;padding:0;border:1px solid #38505b;border-radius:5px;background:#15242b;color:var(--cyan);font-size:10px;cursor:pointer}.conv-turn-play:hover:not(:disabled),.conv-turn-play.is-active{border-color:var(--cyan);background:#12383e}.conv-turn-play:disabled{opacity:.35;cursor:not-allowed}.conv-turn-play:focus-visible{outline:2px solid var(--amber);outline-offset:1px}
+@media(max-width:620px){.workspace-switch button{padding:5px 6px}.workspace-switch{order:5}.browse-controls{grid-template-columns:1fr}}
+</style><script>
+(()=>{const top=document.querySelector('.topbar'),stage=document.querySelector('.stage');if(!top||!stage)return;
+ const anchor=top.querySelector('.spacer'),nav=document.createElement('nav');nav.className='workspace-switch';nav.setAttribute('aria-label','Workspace');
+ nav.innerHTML='<button type="button" data-workspace="experiment" class="active">Experiment</button><button type="button" data-workspace="asr">ASR</button><button type="button" data-workspace="conversations">Conversations</button>';top.insertBefore(nav,anchor||null);
+ const panel=document.createElement('section');panel.className='browse-panel';panel.hidden=true;panel.innerHTML='<h2></h2><p></p><div class="browse-controls"><label class="field"><span>Run</span><select data-browse="run"><option>Loading server runs...</option></select></label><label class="field"><span>Variant</span><select data-browse="variant" disabled><option>Select a run first</option></select></label><label class="field"><span>Recording</span><select data-browse="recording" disabled><option>Select a variant first</option></select></label><label class="field"><span>Search</span><input data-browse="search" maxlength="120" placeholder="Search results"></label><label class="field" data-review-wrap hidden><span>Review</span><select data-browse="review"><option value="all">All</option><option value="flagged">Flagged</option></select></label></div><div class="browse-meta"><span data-browse-count>0 results</span><span class="browse-pages"><button type="button" class="btn" data-page="prev" disabled>Prev</button><button type="button" class="btn" data-page="next" disabled>Next</button></span></div><div class="browse-empty"></div>';stage.style.position='relative';stage.appendChild(panel);
+ let runs=[],runsLoadPromise=null,pageCursor=null,pagePrev=null;const empty=panel.querySelector('.browse-empty'),runSel=panel.querySelector('[data-browse="run"]'),variantSel=panel.querySelector('[data-browse="variant"]'),recordingSel=panel.querySelector('[data-browse="recording"]'),searchSel=panel.querySelector('[data-browse="search"]'),reviewSel=panel.querySelector('[data-browse="review"]'),countEl=panel.querySelector('[data-browse-count]'),prevBtn=panel.querySelector('[data-page="prev"]'),nextBtn=panel.querySelector('[data-page="next"]');
+ const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+ const renderRuns=()=>{runSel.innerHTML=runs.length?runs.map(r=>'<option value="'+esc(r.runId)+'">'+esc(r.runId)+' · '+esc(r.state||'unknown')+'</option>').join(''):'<option>No runs available</option>';runSel.disabled=!runs.length;if(!runs.length)empty.textContent='No server runs are available yet.';};
+ // All dependent selection work awaits this single promise.  This prevents
+ // first-open races where a placeholder runId triggers an early duplicate
+ // request before /runs has populated the select.
+ const load=()=>{if(runsLoadPromise)return runsLoadPromise;runsLoadPromise=(async()=>{try{const response=await fetch('/api/workspace/runs');if(!response.ok)throw Error();const data=await response.json();runs=Array.isArray(data.runs)?data.runs:[];renderRuns();}catch(_){runs=[];renderRuns();empty.textContent='Workspace metadata unavailable; the experiment view is still available.';}return runs;})();return runsLoadPromise;};
+ let mode='asr';const modeText={asr:['ASR review','Select a run, variant, and recording to inspect model timelines.'],conversations:['Conversation review','Inspect local conversation exports; quarantined or unverified items are clearly marked.']};
+ const api=async u=>{const r=await fetch(u);const d=await r.json();if(!r.ok)throw Error(d.error||'Request failed');return d;};
+ const setOptions=(sel,items,placeholder)=>{sel.innerHTML=items.length?items.map(x=>'<option value="'+esc(x.id||x)+'">'+esc(x.label||x.id||x)+'</option>').join(''):'<option>'+placeholder+'</option>';sel.disabled=!items.length;};
+ const loadSelection=async()=>{if(!runSel.value||!variantSel.value||!recordingSel.value)return;empty.className='browse-empty';empty.textContent=mode==='asr'?'Loading ASR timeline…':'Loading conversations…';const params=new URLSearchParams({runId:runSel.value,variantId:variantSel.value,recording:recordingSel.value,limit:'50'});if(pageCursor)params.set('cursor',pageCursor);if(searchSel.value)params.set('search',searchSel.value);if(mode==='conversations')params.set('review',reviewSel.value);try{const d=await api('/api/workspace/'+(mode==='asr'?'asr':'conversations')+'?'+params);pageCursor=d.cursor||null;pagePrev=d.prevCursor||null;countEl.textContent=(d.resultCount??0)+' result'+((d.resultCount??0)===1?'':'s');prevBtn.disabled=!pagePrev;nextBtn.disabled=!d.nextCursor;nextBtn.dataset.cursor=d.nextCursor||'';if(d.status==='pending'){empty.textContent=mode==='asr'?'ASR is pending for this recording.':'Conversation exports are pending for this recording.';return;}if(d.status==='empty'){empty.textContent=mode==='asr'?'ASR completed with no segments.':'No conversations were exported for this recording.';return;}if(mode==='asr'){empty.className='asr-timeline';empty.innerHTML=(d.segments||[]).map((s,i)=>{const start=Number(s.start),end=Number(s.end),label=(Number.isFinite(start)?start.toFixed(2):'?')+'–'+(Number.isFinite(end)?end.toFixed(2):'?')+'s',models=Object.entries(s).filter(([k])=>!['start','end','index','speaker','text','words'].includes(k));return '<details class="asr-segment"><summary>'+esc(label)+' · '+esc(s.speaker||'segment '+(i+1))+'</summary>'+(models.length?models.map(([m,v])=>'<div class="asr-model"><b>'+esc(m)+'</b> '+esc(typeof v==='string'?v:JSON.stringify(v))+'</div>').join(''):'<div class="asr-model">'+esc(s.text||'No model output')+'</div>')+'</details>';}).join('')||'No ASR segments.';}else{empty.className='asr-timeline';empty.innerHTML=(d.conversations||[]).map(c=>'<button type="button" class="asr-segment conv-card" data-conv="'+esc(c.id)+'" style="text-align:left"><b>'+esc(c.id)+'</b> · '+esc(c.category||'unknown')+' · '+esc(c.duration||'?')+'s<br><small>'+esc(c.topic||c.summary||'')+(c.quarantined?' · QUARANTINE':'')+(c.verified===false?' · UNVERIFIED':'')+'</small></button>').join('')||'No conversations.';}}catch(e){empty.className='browse-empty';empty.innerHTML=esc(e.message)+' <button class="btn" data-retry>Retry</button>';}};
+ const loadVariants=async()=>{await load();variantSel.disabled=true;recordingSel.disabled=true;empty.className='browse-empty';empty.textContent='Loading variants…';try{const d=await api('/api/workspace/'+(mode==='asr'?'asr':'conversations')+'?runId='+encodeURIComponent(runSel.value));setOptions(variantSel,d.variants||[],'No variants available');recordingSel.innerHTML='<option>Select a variant first</option>';if(variantSel.value)await loadRecordings();}catch(e){empty.textContent=e.message;}};
+ const loadRecordings=async()=>{recordingSel.disabled=true;empty.className='browse-empty';try{const d=await api('/api/workspace/'+(mode==='asr'?'asr':'conversations')+'?runId='+encodeURIComponent(runSel.value)+'&variantId='+encodeURIComponent(variantSel.value));setOptions(recordingSel,d.recordings||[],'No recordings available');if(recordingSel.value)await loadSelection();}catch(e){empty.textContent=e.message;}};
+ nav.addEventListener('click',e=>{const b=e.target.closest('[data-workspace]');if(!b)return;const next=b.dataset.workspace;nav.querySelectorAll('button').forEach(x=>x.classList.toggle('active',x===b));if(next==='experiment'){panel.hidden=true;return;}mode=next;panel.hidden=false;panel.querySelector('h2').textContent=modeText[mode][0];panel.querySelector('p').textContent=modeText[mode][1];panel.querySelector('[data-review-wrap]').hidden=mode!=='conversations';pageCursor=null;loadVariants();});
+ runSel.addEventListener('change',()=>{pageCursor=null;loadVariants();});variantSel.addEventListener('change',()=>{pageCursor=null;loadRecordings();});recordingSel.addEventListener('change',()=>{pageCursor=null;loadSelection();});reviewSel.addEventListener('change',()=>{pageCursor=null;loadSelection();});let searchTimer=null;searchSel.addEventListener('input',()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>{pageCursor=null;loadSelection();},250);});nextBtn.addEventListener('click',()=>{pageCursor=nextBtn.dataset.cursor||null;loadSelection();});prevBtn.addEventListener('click',()=>{pageCursor=pagePrev||null;loadSelection();});empty.addEventListener('click',async e=>{if(e.target.matches('[data-retry]'))loadSelection();const card=e.target.closest('[data-conv]');if(card){try{const d=await api('/api/workspace/conversations?runId='+encodeURIComponent(runSel.value)+'&variantId='+encodeURIComponent(variantSel.value)+'&recording='+encodeURIComponent(recordingSel.value)+'&conversationId='+encodeURIComponent(card.dataset.conv));const turns=(d.turns||[]).map((t,i)=>{const start=Number(t.start),end=Number(t.end),valid=Number.isFinite(start)&&Number.isFinite(end)&&start>=0&&end>start;return '<p class="conv-turn"><button type="button" class="conv-turn-play" data-turn-start="'+(valid?String(start):'')+'" data-turn-end="'+(valid?String(end):'')+'"'+(valid?'':' disabled')+' aria-label="Nghe lượt '+(i+1)+(valid?' từ '+start.toFixed(2)+' đến '+end.toFixed(2)+' giây':' (mốc thời gian không hợp lệ)')+'">▶</button> <b>'+esc(t.role||'?')+'</b> '+esc(t.text||'')+'</p>';}).join('');const audioUrl=d.audio?.mixture?'/api/workspace/conversation-audio?runId='+encodeURIComponent(runSel.value)+'&variantId='+encodeURIComponent(variantSel.value)+'&recording='+encodeURIComponent(recordingSel.value)+'&conversationId='+encodeURIComponent(d.conversationId)+'&track=mixture':'';const article=document.createElement('article');article.className='asr-segment';article.innerHTML='<b>'+esc(d.conversationId)+'</b><p>'+esc((d.meta||{}).summary||'')+'</p>'+(d.warnings||[]).map(w=>'<div class="warning">'+esc(w)+'</div>').join('')+'<div class="conv-turns">'+turns+'</div>'+(audioUrl?'<audio controls preload="metadata" data-conversation-audio src="'+audioUrl+'"></audio>':'<small>Audio unavailable locally</small>');card.replaceWith(article);const audio=article.querySelector('[data-conversation-audio]'), buttons=[...article.querySelectorAll('.conv-turn-play:not([disabled])')];let active=null,stopAt=null;const clearActive=()=>{if(active)active.classList.remove('is-active');active=null;stopAt=null;};const stopTurn=()=>{if(!audio||stopAt==null)return;if(!Number.isFinite(audio.currentTime)||audio.currentTime<stopAt-0.02)return;audio.pause();audio.currentTime=stopAt;clearActive();};if(audio){audio.addEventListener('timeupdate',stopTurn);audio.addEventListener('ended',clearActive);}buttons.forEach(button=>button.addEventListener('click',()=>{if(!audio||!Number.isFinite(audio.duration)||audio.duration<=0){clearActive();return;}const start=Number(button.dataset.turnStart),rawEnd=Number(button.dataset.turnEnd),end=Math.min(rawEnd,audio.duration);if(!Number.isFinite(start)||!Number.isFinite(rawEnd)||start<0||end<=start||start>=audio.duration){clearActive();return;}if(!audio.paused)audio.pause();clearActive();active=button;active.classList.add('is-active');stopAt=end;audio.currentTime=start;Promise.resolve(audio.play()).catch(()=>clearActive());}));}catch(err){empty.insertAdjacentHTML('afterbegin','<div class="warning">'+esc(err.message)+'</div>');}}});
+})();
 </script><script>
 setTimeout(() => {
   const results = document.querySelector('.results');
@@ -945,9 +975,17 @@ setTimeout(()=>{
   document.getElementById('setupBtn')?.remove();document.getElementById('undoBtn')?.remove();
   const t=document.querySelector('.transport');if(!t||document.getElementById('waveBack5'))return;
   const mk=(id,label,delta)=>{const b=document.createElement('button');b.id=id;b.className='btn icon';b.textContent=label;b.title=`${delta<0?'Lùi':'Tiến'} 5 giây`;b.onclick=()=>{const w=document.getElementById('wave');if(!w)return;w.focus();w.dispatchEvent(new KeyboardEvent('keydown',{key:delta<0?'ArrowLeft':'ArrowRight',bubbles:true}));for(let i=1;i<5;i++)w.dispatchEvent(new KeyboardEvent('keydown',{key:delta<0?'ArrowLeft':'ArrowRight',bubbles:true}));};return b;};
-  t.insertBefore(mk('waveBack5','−5s',-5),t.firstChild);t.insertBefore(mk('waveForward5','+5s',5),t.children[1]||null);
+  const back=mk('waveBack5','−5s',-5),forward=mk('waveForward5','+5s',5),clock=document.createElement('output');
+  clock.id='waveClock';clock.className='wave-clock';clock.setAttribute('aria-live','off');clock.textContent='00:00.0 / --:--';
+  const fmt=seconds=>{if(!Number.isFinite(seconds)||seconds<0)return '--:--';const h=Math.floor(seconds/3600),m=Math.floor(seconds%3600/60),s=(seconds%60).toFixed(1).padStart(4,'0');return h?String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+':'+s:String(m).padStart(2,'0')+':'+s;};
+  const syncClock=()=>{const p=document.getElementById('player');if(p)clock.textContent=fmt(p.currentTime)+' / '+fmt(p.duration);};
+  const player=document.getElementById('player');player?.addEventListener('timeupdate',syncClock);player?.addEventListener('seeked',syncClock);player?.addEventListener('loadedmetadata',syncClock);player?.addEventListener('emptied',syncClock);
+  // Keep transport controls as one left-aligned group: the clock must travel
+  // with −5s / play / +5s rather than drifting into the flexible middle area.
+  const controls=document.createElement('span');controls.className='wave-transport-controls';
+  const play=document.getElementById('play');t.insertBefore(controls,t.firstChild);controls.append(back,play,forward,clock);syncClock();
 },500);
-</script><style>.trial-section{display:none!important}</style><script>
+</script><style>.wave-transport-controls{display:inline-flex;align-items:center;gap:6px;flex:0 0 auto}.wave-clock{min-width:106px;text-align:left;color:#d6e2e8;font:600 11px ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums;white-space:nowrap}@media(max-width:620px){.wave-transport-controls{gap:4px}.wave-clock{min-width:92px;font-size:10px}}</style><style>.trial-section{display:none!important}</style><script>
 setTimeout(()=>{
   const b=document.getElementById('variantsBtn'),m=document.getElementById('modelModal');
   if(!b||!m)return;
@@ -1117,11 +1155,10 @@ setTimeout(()=>{
     return JSON.stringify(c.chain || [c.model]) !== JSON.stringify(v.chain || [v.model]) || JSON.stringify(c.stepParams || []) !== JSON.stringify(v.stepParams || []) || Number(old.chunk_s || 30) !== Number(s.chunk_s || 30) || String(old.env || 'a100') !== String(s.env || 'a100');
   };
   const runErrorMessage = error => {
-    const message = String(error?.message || error || 'Request failed');
-    const http = message.match(/^HTTP\s+(\d+)/i);
-    return http ? `HTTP ${http[1]} — server rejected the run.` : 'Network error — backend unavailable; request was not sent.';
+    if (error?.http) return `Lỗi server (${error.status}): ${error.message}`;
+    return 'Network error — backend unavailable; request was not sent.';
   };
-  const runFailureStatus = error => /^HTTP\s+\d+/i.test(String(error?.message || error || '')) ? 'failed' : 'not-sent';
+  const runFailureStatus = error => error?.http ? 'failed' : 'not-sent';
   const updatePlan = () => {
     const needs = forceModel || modelChanged();
     const failed = ['failed', 'not-sent'].includes(activeRun()?.status);
@@ -1156,11 +1193,8 @@ setTimeout(()=>{
       if (typeof renderVariants === 'function') renderVariants();
       if (typeof dirty === 'function') dirty();
       const payload = {experiment: typeof recipe === 'function' ? recipe() : {}, trialId: v.id, runId: r.id, scope: r.execution.scope, outputPolicy: 'backend_unique_run_directory', overwrite: false};
-      fetch('/api/experiment/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)}).then(res => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json().catch(() => ({}));
-      }).then(resp => { r.serverRun = {runId: resp.runId, runDir: resp.runDir, out: resp.out}; r.status='accepted'; delete r.error; delete r.errorMessage; if (typeof renderVariants === 'function') renderVariants(); text('runReason', 'Backend đã nhận công thức.'); if (typeof showNotice === 'function') showNotice('Backend đã nhận công thức.'); window.__pollRun?.(r, v); updatePlan(); })
-        .catch(error => { r.status=runFailureStatus(error); r.error=String(error?.message || error); r.errorMessage=runErrorMessage(error); if (typeof renderVariants === 'function') renderVariants(); text('runReason', r.errorMessage); if (typeof showNotice === 'function') showNotice(r.errorMessage); updatePlan(); });
+      fetch('/api/experiment/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)}).then(window.__labReadJson || (res => res.json().then(body => { if (!res.ok) throw new Error(`HTTP ${res.status}`); return body; }))).then(resp => { r.serverRun = {runId: resp.runId, runDir: resp.runDir, out: resp.out}; r.status='accepted'; delete r.error; delete r.errorMessage; if (typeof renderVariants === 'function') renderVariants(); text('runReason', 'Backend đã nhận công thức.'); if (typeof showNotice === 'function') showNotice('Backend đã nhận công thức.'); window.__pollRun?.(r, v); updatePlan(); })
+        .catch(error => { r.status=runFailureStatus(error); r.errorMessage=runErrorMessage(error); r.error=r.errorMessage; if (typeof renderVariants === 'function') renderVariants(); text('runReason', r.errorMessage); if (typeof showNotice === 'function') showNotice(r.errorMessage); updatePlan(); });
     }
     forceModel = false;
     updatePlan();
@@ -1883,11 +1917,22 @@ setTimeout(() => {
 (() => {
   const $ = id => document.getElementById(id);
   const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-  const api = async (url, opts) => {
-    const res = await fetch(url, opts), body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
-    return body;
+  class LabHttpError extends Error {
+    constructor(message, status) { super(message); this.name = 'LabHttpError'; this.status = status; this.http = true; }
+  }
+  // Parse only the bounded, documented JSON error field; never expose raw
+  // response bodies (which may contain proxy/server internals) to the UI.
+  const readJson = async res => {
+    let body = null;
+    try { body = await res.json(); } catch (_) { body = null; }
+    if (!res.ok) {
+      const reason = body && typeof body.error === 'string' && body.error.trim() ? body.error.trim() : `HTTP ${res.status}`;
+      throw new LabHttpError(reason, res.status);
+    }
+    return body || {};
   };
+  window.__labReadJson = readJson;
+  const api = async (url, opts) => readJson(await fetch(url, opts));
   const PSEUDO = /^(blend|dry)(\d{1,3})$/;
   const PREVIEW_LIMIT = 150 * 1048576;
   let cfg = null, inputFile = null;
@@ -2129,7 +2174,17 @@ setTimeout(() => {
         } }
         else if (st.state === 'dry-run') { if (r) { r.status = 'accepted'; say('Dry-run: đã ghi ' + st.runDir + ', chưa chạy', 'Dry-run: chưa chạy'); } }
         else if (r) { r.status = 'failed'; r.errorMessage = st.problem ? 'Không chạy được: ' + st.problem : `Lỗi (${st.state}, mã ${st.returncode ?? '?'}) · ${last.slice(0, 160)}`; say(r.errorMessage, 'Lỗi khi chạy'); }
-      } catch (e) { again = true; T.state = 'lost'; }
+      } catch (e) {
+        // A deterministic client error (except throttling/timeout) will not
+        // improve by polling again. Keep transient/network failures retryable.
+        const terminal = e?.http && e.status >= 400 && e.status < 500 && ![408, 429].includes(e.status);
+        if (terminal) {
+          const reason = `Lỗi server (${e.status}): ${e.message}`;
+          T.st = {state: 'failed', problem: reason}; T.state = 'failed';
+          if (r) { r.status = 'failed'; r.errorMessage = reason; }
+          say(reason, reason);
+        } else { again = true; T.state = 'lost'; }
+      }
       paint();
       if (r) { window.renderVariants?.(); window.dirty?.(); }
       if (again) T.loop = setTimeout(tick, runDialog?.classList.contains('open') ? 1500 : 3000);
@@ -2557,5 +2612,70 @@ setTimeout(() => {
     const lane = $('laneState'); if (lane) lane.title = info;
     window.__restoreRun();
   }).catch(() => { cfg = null; });
+})();
+
+(()=>{
+  const panel=document.querySelector('.browse-panel'), nav=document.querySelector('.workspace-switch');
+  if(!panel||!nav)return;
+  const run=panel.querySelector('[data-browse="run"]'), variant=panel.querySelector('[data-browse="variant"]'), recording=panel.querySelector('[data-browse="recording"]');
+  let context={run:'',variant:'',recording:''}, timer=null, controller=null, visible=false, mode='asr';
+  const selection=()=>({run:run?.value||'',variant:variant?.value||'',recording:recording?.value||''});
+  const restore=()=>{for(const [key,el] of Object.entries({run,variant,recording})){if(context[key]&&el&&[...el.options].some(o=>o.value===context[key]))el.value=context[key];}};
+  const cancel=()=>{if(timer){clearTimeout(timer);timer=null;}if(controller){controller.abort();controller=null;}};
+  const schedule=(ms=3000)=>{if(visible&&!timer)timer=setTimeout(()=>{timer=null;observe();},ms);};
+  const observe=async()=>{
+    if(!visible||!run?.value){cancel();return;}
+    if(controller)controller.abort(); controller=new AbortController();
+    try{
+      const response=await fetch('/api/workspace/observe?runId='+encodeURIComponent(run.value),{signal:controller.signal,cache:'no-store'});
+      if(!response.ok)throw Error(); const data=await response.json();
+      if(!visible||run.value!==data.runId)return;
+      const artifact=data[mode==='asr'?'asr':'conversations']||{};
+      if(artifact.status==='pending'&&variant?.value&&recording?.value){
+        const changed=selection(); recording.dispatchEvent(new Event('change')); context=changed;
+      }
+      if(data.status==='running'||artifact.status==='pending')schedule(); else cancel();
+    }catch(error){if(error.name!=='AbortError'&&visible)schedule(5000);}
+  };
+  nav.addEventListener('click',event=>{
+    const button=event.target.closest('[data-workspace]'); if(!button)return;
+    context=selection(); mode=button.dataset.workspace; visible=mode!=='experiment';
+    if(!visible){cancel();return;}
+    setTimeout(()=>{restore();observe();},0);
+  },true);
+  panel.addEventListener('change',()=>{context=selection();if(visible)observe();});
+  window.addEventListener('beforeunload',cancel);
+})();
+// Canonical, shareable workspace links contain only server-owned selection IDs.
+// Keep this layer independent of the experiment workbench so static exports remain safe.
+(()=>{
+  const panel=document.querySelector('.browse-panel'),nav=document.querySelector('.workspace-switch');
+  if(!panel||!nav)return;
+  const run=panel.querySelector('[data-browse="run"]'),variant=panel.querySelector('[data-browse="variant"]'),recording=panel.querySelector('[data-browse="recording"]'),search=panel.querySelector('[data-browse="search"]');
+  const allowed=['workspace','runId','variantId','recording','conversationId','cursor'];
+  const wanted=Object.fromEntries(allowed.map(k=>[k,new URL(location.href).searchParams.get(k)||'']));
+  let restoring=true,conversationId=wanted.conversationId;
+  const current=()=>({workspace:nav.querySelector('[data-workspace].active')?.dataset.workspace||'',runId:run?.value||'',variantId:variant?.value||'',recording:recording?.value||'',conversationId:conversationId||'',cursor:''});
+  const canonical=()=>{const q=new URLSearchParams(),state=current();for(const k of allowed)if(state[k])q.set(k,state[k]);return location.pathname+(q.toString()?'?'+q.toString():'')+location.hash;};
+  const write=(replace=true)=>{const url=canonical();(replace?history.replaceState:history.pushState).call(history,null,'',url);};
+  const nonfatal=msg=>{let n=panel.querySelector('[data-link-message]');if(!n){n=document.createElement('div');n.dataset.linkMessage='';n.className='warning';panel.prepend(n);}n.textContent=msg;};
+  const valid=(el,value)=>!!value&&!!el&&[...el.options].some(o=>o.value===value);
+  const restoreChildren=()=>{
+    if(valid(run,wanted.runId)&&run.value!==wanted.runId){run.value=wanted.runId;run.dispatchEvent(new Event('change'));return true;}
+    if(valid(variant,wanted.variantId)&&variant.value!==wanted.variantId){variant.value=wanted.variantId;variant.dispatchEvent(new Event('change'));return true;}
+    if(valid(recording,wanted.recording)&&recording.value!==wanted.recording){recording.value=wanted.recording;recording.dispatchEvent(new Event('change'));return true;}
+    return false;
+  };
+  const announceStale=()=>{const missing=wanted.runId&&!valid(run,wanted.runId)||wanted.variantId&&!valid(variant,wanted.variantId)||wanted.recording&&!valid(recording,wanted.recording)||wanted.conversationId; if(missing&&!restoring)nonfatal('Link target is stale; showing the nearest available workspace selection.');};
+  const copy=async()=>{const text=location.origin+canonical();let ok=false;try{if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(text);ok=true;}}catch(_){}if(!ok){const ta=document.createElement('textarea');ta.value=text;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();try{ok=document.execCommand('copy');}catch(_){}ta.remove();}nonfatal(ok?'Share link copied.':'Copy is unavailable; select the URL from the address bar.');};
+  const copyButton=document.createElement('button');copyButton.type='button';copyButton.className='btn';copyButton.textContent='Copy link';copyButton.title='Copy a canonical link to this workspace selection';copyButton.addEventListener('click',copy);nav.parentElement.insertBefore(copyButton,nav.parentElement.querySelector('.spacer'));
+  const settle=()=>{if(!restoring)return;restoreChildren();if(run?.value&&variant?.value&&recording?.value){const stale=(wanted.runId&&!valid(run,wanted.runId))||(wanted.variantId&&!valid(variant,wanted.variantId))||(wanted.recording&&!valid(recording,wanted.recording));restoring=false;conversationId='';if(stale)nonfatal('Link target is stale; showing the nearest available workspace selection.');write();if(wanted.conversationId){const card=[...panel.querySelectorAll('[data-conv]')].find(x=>x.dataset.conv===wanted.conversationId);if(card){card.click();conversationId=wanted.conversationId;write();}else nonfatal('Conversation is stale; showing the selected recording.');}}};
+  [run,variant,recording].forEach(el=>el?.addEventListener('change',()=>{if(!restoring){if(el===run){conversationId='';}if(el===variant||el===recording){conversationId='';}write();}setTimeout(settle,0);}));
+  panel.addEventListener('click',event=>{const card=event.target.closest('[data-conv]');if(card&&!restoring){conversationId=card.dataset.conv;write();}});
+  nav.addEventListener('click',event=>{const b=event.target.closest('[data-workspace]');if(!b)return;conversationId='';if(b.dataset.workspace==='experiment'){restoring=false;write();return;}setTimeout(()=>{if(!restoring)write();settle();},80);});
+  const observer=new MutationObserver(()=>{settle();});observer.observe(panel,{childList:true,subtree:true});
+  const initialWorkspace=wanted.workspace==='conversations'||wanted.workspace==='asr'?wanted.workspace:'experiment';
+  const initial=nav.querySelector('[data-workspace="'+initialWorkspace+'"]');if(initial){initial.click();}else{restoring=false;write();}
+  setTimeout(()=>{if(restoring){restoring=false;announceStale();write();}},6000);
 })();
 </script></body></html>

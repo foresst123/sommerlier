@@ -289,6 +289,17 @@ def test_ab_transport_keeps_one_clock_and_loop_state():
     assert "p.currentTime = selection[0] || 0" in page
 
 
+def test_wave_transport_shows_the_current_playback_time_next_to_five_second_controls():
+    page = lab.PAGE
+    assert "id='waveBack5'" in page
+    assert "id='waveForward5'" in page
+    assert "id='waveClock'" in page
+    assert "const syncClock=" in page
+    assert "player?.addEventListener('timeupdate',syncClock)" in page
+    assert "className='wave-transport-controls'" in page
+    assert "controls.append(back,play,forward,clock)" in page
+
+
 def test_pinned_ab_has_playback_only_loudness_match():
     page = lab.PAGE
     assert 'id="abLoudnessMatch"' in page

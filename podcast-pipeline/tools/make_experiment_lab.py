@@ -354,9 +354,17 @@ setTimeout(()=>{
   document.getElementById('setupBtn')?.remove();document.getElementById('undoBtn')?.remove();
   const t=document.querySelector('.transport');if(!t||document.getElementById('waveBack5'))return;
   const mk=(id,label,delta)=>{const b=document.createElement('button');b.id=id;b.className='btn icon';b.textContent=label;b.title=`${delta<0?'Lùi':'Tiến'} 5 giây`;b.onclick=()=>{const w=document.getElementById('wave');if(!w)return;w.focus();w.dispatchEvent(new KeyboardEvent('keydown',{key:delta<0?'ArrowLeft':'ArrowRight',bubbles:true}));for(let i=1;i<5;i++)w.dispatchEvent(new KeyboardEvent('keydown',{key:delta<0?'ArrowLeft':'ArrowRight',bubbles:true}));};return b;};
-  t.insertBefore(mk('waveBack5','−5s',-5),t.firstChild);t.insertBefore(mk('waveForward5','+5s',5),t.children[1]||null);
+  const back=mk('waveBack5','−5s',-5),forward=mk('waveForward5','+5s',5),clock=document.createElement('output');
+  clock.id='waveClock';clock.className='wave-clock';clock.setAttribute('aria-live','off');clock.textContent='00:00.0 / --:--';
+  const fmt=seconds=>{if(!Number.isFinite(seconds)||seconds<0)return '--:--';const h=Math.floor(seconds/3600),m=Math.floor(seconds%3600/60),s=(seconds%60).toFixed(1).padStart(4,'0');return h?String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+':'+s:String(m).padStart(2,'0')+':'+s;};
+  const syncClock=()=>{const p=document.getElementById('player');if(p)clock.textContent=fmt(p.currentTime)+' / '+fmt(p.duration);};
+  const player=document.getElementById('player');player?.addEventListener('timeupdate',syncClock);player?.addEventListener('seeked',syncClock);player?.addEventListener('loadedmetadata',syncClock);player?.addEventListener('emptied',syncClock);
+  // Keep transport controls as one left-aligned group: the clock must travel
+  // with −5s / play / +5s rather than drifting into the flexible middle area.
+  const controls=document.createElement('span');controls.className='wave-transport-controls';
+  const play=document.getElementById('play');t.insertBefore(controls,t.firstChild);controls.append(back,play,forward,clock);syncClock();
 },500);
-</script></body></html>''',
+</script><style>.wave-transport-controls{display:inline-flex;align-items:center;gap:6px;flex:0 0 auto}.wave-clock{min-width:106px;text-align:left;color:#d6e2e8;font:600 11px ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums;white-space:nowrap}@media(max-width:620px){.wave-transport-controls{gap:4px}.wave-clock{min-width:92px;font-size:10px}}</style></body></html>''',
 )
 
 # Remove the obsolete Models list from the legacy setup drawer. The only
