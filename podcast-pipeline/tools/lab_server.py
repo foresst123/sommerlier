@@ -181,7 +181,7 @@ def build_run(cfg, payload):
         raise BadRequest("ngưỡng DNSMOS không hợp lệ")
     if not 0 <= gate <= 1:
         raise BadRequest("ngưỡng DNSMOS phải trong 0..1")
-    vid = sanitize(variant.get("id"), "variant")
+    vid = sanitize("+".join(chain), "variant")  # named after what it runs, not after the UI trial id (a trial called dfn3 may run re_use)
     entry = {"id": vid, "chain": chain, "label": str(variant.get("label") or vid)[:120], "group": "lab",
              "set": {"audio_quality.min_normalized_quality": round(gate, 3), **overrides}}
     tail = []

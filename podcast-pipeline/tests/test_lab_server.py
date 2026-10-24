@@ -160,7 +160,7 @@ class _Done:
 def _finished_run(cfg, variant_status, rc=0, reason=None):
     run_dir = Path(ls.start_run(cfg, payload(cfg))["runDir"])
     (run_dir / "out").mkdir()
-    entries = [{"id": "none", "status": "ok"}, {"id": "t1", "status": variant_status, "reason": reason}]
+    entries = [{"id": "none", "status": "ok"}, {"id": "dfn3", "status": variant_status, "reason": reason}]
     (run_dir / "out" / "variants_manifest.json").write_text(json.dumps({"variants": entries}))
     ls.reap(_Done(rc), run_dir)
     return ls.run_status(cfg, "r1")
@@ -197,12 +197,12 @@ def test_a_skipped_variant_is_flagged_while_the_job_is_still_running(cfg):
     run_dir = Path(ls.start_run(cfg, payload(cfg))["runDir"])
     (run_dir / "out").mkdir()
     (run_dir / "out" / "variants_manifest.json").write_text(json.dumps({"variants": [
-        {"id": "none", "status": "missing"}, {"id": "t1", "status": "skipped", "reason": "re_use: REUSE_PYTHON is not set"}]}))
+        {"id": "none", "status": "missing"}, {"id": "dfn3", "status": "skipped", "reason": "re_use: REUSE_PYTHON is not set"}]}))
     ls.write_status(run_dir, state="running", pid=None)
     st = ls.run_status(cfg, "r1")
     assert st["state"] == "running" and "REUSE_PYTHON" in st["warning"] and st["problem"] is None if "problem" in st else True
     ls.write_status(run_dir, state="running")
-    (run_dir / "out" / "variants_manifest.json").write_text(json.dumps({"variants": [{"id": "none", "status": "missing"}, {"id": "t1", "status": "missing"}]}))
+    (run_dir / "out" / "variants_manifest.json").write_text(json.dumps({"variants": [{"id": "none", "status": "missing"}, {"id": "dfn3", "status": "missing"}]}))
     assert ls.run_status(cfg, "r1")["warning"] is None  # nothing wrong yet: still waiting for results
 
 
@@ -222,3 +222,10 @@ def test_a_bad_set_env_key_stops_the_server(tmp_path):
         ls.main(["--audio-root", str(tmp_path), "--out-root", str(tmp_path / "o"), "--launcher", "", "--set-env", "no-equals-sign"])
     with pytest.raises(SystemExit):
         ls.main(["--audio-root", str(tmp_path), "--out-root", str(tmp_path / "o"), "--launcher", "", "--set-env", "BAD KEY=1"])
+
+
+def test_variant_is_named_after_its_chain_not_the_ui_trial_id(cfg):
+    p = payload(cfg, ("re_use", "blend30"))
+    variants, argv, info = ls.build_run(cfg, p)
+    assert variants["variants"][0]["id"] == info["id"] == "re_use+blend30"
+    assert ls.sanitize("a b/c") == "a-b-c"

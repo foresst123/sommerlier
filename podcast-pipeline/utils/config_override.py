@@ -3,7 +3,9 @@
 import json
 
 # Sections a profile always may have; any key already in the profile is allowed too.
-BASE_SECTIONS = ("steps", "pipeline", "models", "performance", "audio_quality", "outputs", "batch")
+# "denoise" is read by PipelineService (config.get("denoise")): shared keys plus an optional sub-dict per backend,
+# e.g. denoise.chunk_s=30 or denoise.re_use.chunk_s=10. No profile defines it, so it must be creatable here.
+BASE_SECTIONS = ("steps", "pipeline", "models", "performance", "audio_quality", "outputs", "batch", "denoise")
 
 
 def parse_set(item):

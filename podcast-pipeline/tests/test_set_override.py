@@ -91,3 +91,11 @@ def test_main_applies_set_like_config():
 def test_main_rejects_bad_section():
     got, out = _resolve(["--env", "a100", "--set", "nope.x=1"])
     assert got is None and "unknown section 'nope'" in out
+
+
+def test_denoise_section_can_be_created_for_shared_and_per_backend_keys():
+    """main.py's --set denoise.chunk_s=30 used to die with "unknown section 'denoise'"; the denoise service reads config["denoise"]."""
+    prof = _profile()
+    applied = apply_overrides(prof, ["denoise.chunk_s=30", "denoise.re_use.chunk_s=10", "denoise.re_use.hop_portion=0.5"])
+    assert prof["denoise"] == {"chunk_s": 30, "re_use": {"chunk_s": 10, "hop_portion": 0.5}}
+    assert applied[0] == "denoise.chunk_s=30"
