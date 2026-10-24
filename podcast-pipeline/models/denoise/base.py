@@ -134,6 +134,37 @@ class DenoiseBackend:
             return np.zeros(0, dtype=np.float32)
         if not np.all(np.isfinite(wav)):
             raise ValueError(f"{self.name}: input audio contains NaN/inf")
+        if has_module("torch"):
+            import torch
+            try:
+                torch.set_num_threads(max(16, os.cpu_count() or 32))
+            except Exception:
+                pass
+        # Step-Level Prefix Cache: tái sử dụng ngay kết quả của bước model nếu đã từng chạy trên cùng audio đầu vào
+        cache_file = None
+        cache_dir = os.environ.get("DENOISE_STEP_CACHE", "/home/lamkd2/data/data_output/denoise/step_cache")
+        if n >= 5 * sr and cache_dir and os.path.isdir(os.path.dirname(cache_dir)):
+            try:
+                import hashlib, json
+                os.makedirs(cache_dir, exist_ok=True)
+                h = hashlib.sha1()
+                h.update(np.ascontiguousarray(wav, dtype=np.float32).tobytes())
+                meta = {
+                    "name": self.name, "sr": sr, "native_sr": self.native_sr,
+                    "chunk_s": self.chunk_s, "overlap_s": self.overlap_s, "delay": self.delay,
+                    "ckpt": getattr(self, "checkpoint_name", ""), "keep": getattr(self, "keep", []),
+                    "invert": getattr(self, "do_invert", False),
+                    "cfg": {k: str(v) for k, v in sorted(self.cfg.items()) if k not in ("device", "auto_download", "model_file_dir", "repo_dir", "python")},
+                }
+                h.update(json.dumps(meta, sort_keys=True).encode())
+                cache_file = os.path.join(cache_dir, f"{self.name}_{h.hexdigest()[:24]}.npy")
+                if os.path.isfile(cache_file):
+                    cached = np.load(cache_file)
+                    if len(cached) == n and np.all(np.isfinite(cached)):
+                        self._log(f"STEP CACHE HIT -> tái sử dụng kết quả đã chạy ({cache_file})", "info")
+                        return np.ascontiguousarray(cached, dtype=np.float32)
+            except Exception:
+                cache_file = None
         self.load()
         self._seed_all()
         x = resample_to(wav, sr, self.native_sr) if self.native_sr and sr != self.native_sr else np.array(wav, dtype=np.float32, copy=True)
@@ -152,4 +183,11 @@ class DenoiseBackend:
             y = fit_length(resample_to(y, self.native_sr, sr), n)
         y = np.ascontiguousarray(y, dtype=np.float32)
         self._check_finite(y, "(after resampling)")
+        if cache_file:
+            try:
+                tmp_c = f"{cache_file}.{os.getpid()}.tmp.npy"
+                np.save(tmp_c, y)
+                os.replace(tmp_c, cache_file)
+            except Exception:
+                pass
         return y

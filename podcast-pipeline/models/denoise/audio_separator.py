@@ -93,6 +93,33 @@ _HASH_FILES = ("vr_model_data.json", "mdx_model_data.json")  # read for models w
 
 def _import_separator():
     """Seam for tests: the audio-separator Separator class (imports torch lazily)."""
+    import torch
+    try:
+        torch.set_num_threads(max(16, os.cpu_count() or 32))
+    except Exception:
+        pass
+    try:
+        import samplerate, torchaudio
+        if not getattr(samplerate, "_gpu_patched", False):
+            _orig_resample = samplerate.resample
+            def _fast_resample(data, ratio, converter_type="sinc_best", *a, **kw):
+                try:
+                    x = np.asarray(data, dtype=np.float32)
+                    orig_sr = 44100
+                    new_sr = int(round(orig_sr * float(ratio)))
+                    if new_sr == orig_sr:
+                        return x
+                    t = torch.from_numpy(x.T if x.ndim == 2 else x).contiguous()
+                    if torch.cuda.is_available():
+                        t = t.cuda()
+                    out = torchaudio.functional.resample(t, orig_sr, new_sr).cpu().numpy()
+                    return out.T if x.ndim == 2 else out
+                except Exception:
+                    return _orig_resample(data, ratio, converter_type, *a, **kw)
+            samplerate.resample = _fast_resample
+            samplerate._gpu_patched = True
+    except Exception:
+        pass
     from audio_separator.separator import Separator
     return Separator
 
@@ -234,7 +261,7 @@ class AudioSeparatorBackend(DenoiseBackend):
             self._log("audio-separator chooses CUDA when present; device='cpu' cannot be forced", "warning")
         Separator = _import_separator()
         folder = _model_dir(self.cfg)
-        self._work = tempfile.mkdtemp(prefix="denoise_as_")
+        self._work = tempfile.mkdtemp(prefix="denoise_as_", dir="/dev/shm" if os.path.isdir("/dev/shm") else None)
         saved = os.environ.get("AUDIO_SEPARATOR_MODEL_DIR")
         try:
             if folder:  # the library lets this env var override the argument: make the configured folder win
