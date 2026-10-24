@@ -296,12 +296,12 @@ setTimeout(()=>{
 PAGE = PAGE.replace(
     "</body></html>",
     r'''<script>
-setTimeout(()=>{document.getElementById('exportBtn')?.remove();document.getElementById('aBtn')?.remove();document.getElementById('bBtn')?.remove();document.querySelector('.ab')?.remove();},700);
+setTimeout(()=>{document.getElementById('exportBtn')?.remove();const ab=document.querySelector('.ab');if(ab)ab.style.display='none';},700); /* hidden, not removed: selectLane/loadAudio/selectRun still read #aBtn and #bBtn */
 </script><style>#exportBtn,#aBtn,#bBtn,.ab{display:none!important}</style></body></html>''',
 )
 PAGE = PAGE.replace(
     "</body></html>",
-    r'''<script>setTimeout(()=>{document.getElementById('loop')?.closest('label')?.remove();document.getElementById('loop')?.remove();},700);</script><style>#loop{display:none!important}</style></body></html>''',
+    r'''<script>setTimeout(()=>{const o=document.querySelector('.transport #loop');o?.closest('label')?.remove();o?.remove();},700);</script><style>.transport #loop{display:none!important}</style></body></html>''',  # only the old transport copy goes; the lane header keeps its own #loop (ontimeupdate reads it)
 )
 PAGE = PAGE.replace(
     "</body></html>",
@@ -583,7 +583,16 @@ PAGE = PAGE.replace(
   const run = () => {
     if (typeof oldPrepare !== 'function') return;
     const existing = activeRun();
-    if (existing && (existing.status === 'submitting' || existing.status === 'running')) return;
+    if (existing && (existing.status === 'submitting' || existing.status === 'running')) {
+      // the stored status is only trustworthy while the tracker agrees; after a stopped server or a cancelled job it is stale
+      const inFlight = window.__labRunActive?.() || (existing.status === 'submitting' && Date.now() - Date.parse(existing.execution?.submittedAt || 0) < 15000);
+      if (inFlight) {
+        text('runReason', 'Đang có một lượt chạy trên backend; bấm chip trên thanh trên cùng để xem.');
+        if (typeof showNotice === 'function') showNotice('Đang có một lượt chạy — chờ xong hoặc hủy job rồi chạy lại');
+        return;
+      }
+      existing.status = 'failed'; existing.errorMessage = 'Lượt trước bị ngắt (server dừng hoặc job bị hủy)';
+    }
     const needs = forceModel || modelChanged();
     oldPrepare();
     const v = typeof selectedVariant === 'function' ? selectedVariant() : null;
@@ -1047,7 +1056,9 @@ PAGE = PAGE.replace(
     mambattention:[['chunk_s','Chunk (giây)','number','4'],['overlap_s','Overlap (giây)','number','0.5']],
     re_use:[['chunk_s','Chunk (giây)','number','5'],['hop_portion','Hop portion','number','0.5']],
     re_use_laughter:[['chunk_s','Chunk (giây)','number','5'],['hop_portion','Hop portion','number','0.5']],
-    audio_separator:[['segment_size','Segment size','number','256'],['overlap','Overlap','number','0.25']]
+    audio_separator:[['segment_size','Segment size','number','256'],['overlap','Overlap','number','0.25'],['auto_download','Tự tải checkpoint nếu thiếu (cần mạng)','select',['false','true']]],
+    // checkpoint-backed audio-separator aliases: with no model folder they are skipped unless the library may download
+    rf_denoise:[['auto_download','Tự tải checkpoint nếu thiếu (cần mạng)','select',['false','true']]], rf_denoise_aggr:[['auto_download','Tự tải checkpoint nếu thiếu (cần mạng)','select',['false','true']]], rf_vocals_3005:[['auto_download','Tự tải checkpoint nếu thiếu (cần mạng)','select',['false','true']]], rf_vocals_kim:[['auto_download','Tự tải checkpoint nếu thiếu (cần mạng)','select',['false','true']]], rf_dereverb:[['auto_download','Tự tải checkpoint nếu thiếu (cần mạng)','select',['false','true']]], uvr_deecho:[['auto_download','Tự tải checkpoint nếu thiếu (cần mạng)','select',['false','true']]], rf_crowd:[['auto_download','Tự tải checkpoint nếu thiếu (cần mạng)','select',['false','true']]]
   };
   window.__labCatalog = catalog; window.__labFields = fields;
   const install = () => {
@@ -1627,7 +1638,8 @@ PAGE = PAGE.replace(
         const blob = await res.blob();
         await window.loadAudio(new File([blob], name, {type: blob.type}), 'A');
       }
-      inputFile = full;
+      inputFile = full; try { sel = [0, duration]; } catch (_) {}  // the default 0-5 s selection would loop the first five seconds of a long file
+      window.__lanes?.refresh(true);
       const dir = full.slice(0, full.lastIndexOf('/'));
       if ($('audioDir')) { $('audioDir').value = dir; $('audioDir').dispatchEvent(new Event('input', {bubbles: true})); }
       picker.classList.remove('open');
@@ -1790,7 +1802,11 @@ PAGE = PAGE.replace(
         T.st = st; T.state = st.state; T.polledAt = Date.now();
         const last = (st.pipelineLogTail || st.logTail || '').trim().split('\n').filter(Boolean).pop() || '';
         if (st.state === 'running') { again = true; if (r) { r.status = 'running'; say('Đang chạy trên GPU · ' + last.slice(0, 140), 'Đang chạy trên GPU'); } }
-        else if (st.state === 'finished') { if (r) { r.status = 'accepted'; say(`Hoàn tất · ${st.outputs?.length || 0} file denoise · ${st.out}`, 'Hoàn tất'); } }
+        else if (st.state === 'finished') { if (r) {
+          r.status = 'accepted'; say(`Hoàn tất · ${st.outputs?.length || 0} file denoise · ${st.out}`, 'Hoàn tất');
+          const mine = (st.outputs || []).filter(x => st.id && x.includes('/out/' + st.id + '/')), stem = inputFile ? inputFile.split('/').pop().replace(/\.[^.]+$/, '') : '';
+          r.serverRun = {...(r.serverRun || {}), outputs: mine, output: mine.find(x => stem && x.includes('/' + stem + '/')) || mine[0] || null};
+        } }
         else if (st.state === 'dry-run') { if (r) { r.status = 'accepted'; say('Dry-run: đã ghi ' + st.runDir + ', chưa chạy', 'Dry-run: chưa chạy'); } }
         else if (r) { r.status = 'failed'; r.errorMessage = st.problem ? 'Không chạy được: ' + st.problem : `Lỗi (${st.state}, mã ${st.returncode ?? '?'}) · ${last.slice(0, 160)}`; say(r.errorMessage, 'Lỗi khi chạy'); }
       } catch (e) { again = true; T.state = 'lost'; }
@@ -1800,9 +1816,15 @@ PAGE = PAGE.replace(
     };
     clearTimeout(T.loop); T.loop = setTimeout(tick, 600);
   };
-  window.__pollRun = (r, v) => { if (r.serverRun?.runId) track(r.serverRun.runId, r); };
+  window.__pollRun = (r, v) => { if (r.serverRun?.runId) { r.runInfo = {stop: $('stopAfter')?.value, music: $('musicRemoval')?.checked, chunk: $('chunk')?.value}; track(r.serverRun.runId, r); } };
+  window.__labRunActive = () => T.state === 'running' || T.state === 'sending';
   // after a page reload, pick the latest run back up so a job in progress is never invisible
-  window.__restoreRun = () => api('/api/experiment/runs?limit=1').then(l => { if (l.runs?.[0] && !T.runId) track(l.runs[0].runId, null); }).catch(() => {});
+  window.__restoreRun = () => api('/api/experiment/runs?limit=1').then(l => {
+    const id = l.runs?.[0]?.runId; if (!id || T.runId) return;
+    let r = null;  // hand over the stored run object so its stale 'running' status is corrected by the first poll
+    if (typeof variants !== 'undefined') for (const v of variants) for (const x of (v.runs || [])) if (x.serverRun?.runId === id) r = x;
+    track(id, r);
+  }).catch(() => {});
 
   // ---- add a step: 1) pick a model or blend/dry from the list, 2) set its parameters ----
   const addCss = document.createElement('style');
@@ -1872,9 +1894,195 @@ PAGE = PAGE.replace(
     e.preventDefault(); e.stopImmediatePropagation(); openAdd();
   }, true);
 
-  // renderVariants clears the chain list; always rebuild it afterwards
+  // ---- lane stack: A = source, then one lane per run (B, C, D, ...) with its recipe, to listen to and compare ----
+  const lsCss = document.createElement('style');
+  lsCss.textContent = '#canvasWrap .wave,#canvasWrap .track-labels,#canvasWrap .ruler,#canvasWrap .selection,#canvasWrap .playhead{display:none!important}#abCompare{display:none!important}'
+    + '#laneStack{--ls-lbl:clamp(150px,22vw,240px);position:absolute;left:8px;right:8px;top:6px;bottom:46px;display:none;flex-direction:column;min-height:0}#canvasWrap[data-ls=on] #laneStack{display:flex}#canvasWrap[data-ls=on] #emptyWaveState{display:none!important}'
+    + '.ls-scroll{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;border:1px solid #1f2c35;border-radius:8px;background:#0a1016;scrollbar-width:thin}'
+    + '.ls-head{position:sticky;top:0;z-index:3;display:grid;grid-template-columns:var(--ls-lbl,240px) minmax(0,1fr);background:#0c141b;border-bottom:1px solid #1f2c35;font:10px ui-monospace,monospace;color:#617480}'
+    + '.ls-loop{margin-left:10px;text-transform:none;letter-spacing:0;font-weight:500;cursor:pointer;white-space:nowrap}.ls-loop input{accent-color:var(--cyan);vertical-align:-2px}'
+    + '.ls-head .ls-ticks{display:flex;justify-content:space-between;padding:4px 6px}.ls-head .ls-hl{padding:4px 10px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:700}'
+    + '.ls-rows{position:relative}.ls-row{display:grid;grid-template-columns:var(--ls-lbl,240px) minmax(0,1fr);height:62px;border-bottom:1px solid #16212a}.ls-row.on{background:#10252a}.ls-row.on .ls-letter{box-shadow:0 0 0 2px #fff8}'
+    + '.ls-label{display:flex;align-items:center;gap:8px;padding:6px 8px;min-width:0;cursor:pointer}.ls-label:hover{background:#101b23}.ls-row.on .ls-label:hover{background:#12303a}'
+    + '.ls-letter{flex:0 0 auto;width:26px;height:26px;border-radius:7px;display:grid;place-items:center;font:800 13px ui-monospace,monospace;color:#071113}'
+    + '.ls-txt{min-width:0;flex:1}.ls-txt strong{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;font-size:12px;line-height:1.25;overflow:hidden;word-break:break-word}.ls-txt small{display:block;color:var(--muted);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}'
+    + '.ls-play{flex:0 0 auto;padding:4px 8px}.ls-wave{position:relative;min-width:0}.ls-wave canvas{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair}'
+    + '.ls-note{position:absolute;inset:0;display:grid;place-items:center;color:#617480;font-size:11px;pointer-events:none}'
+    + '.ls-over{position:absolute;top:0;bottom:0;left:var(--ls-lbl,240px);right:0;pointer-events:none;z-index:2}.ls-sel{position:absolute;top:0;bottom:0;background:#f4b66022;border-left:1px solid var(--amber);border-right:1px solid var(--amber)}'
+    + '.ls-ph{position:absolute;top:0;bottom:0;width:0;border-left:1px solid #fff;box-shadow:0 0 6px #fff8}';
+  document.head.appendChild(lsCss);
+  const wrap = $('canvasWrap');
+  const stack = document.createElement('div');
+  stack.id = 'laneStack'; stack.setAttribute('data-raw', '');
+  stack.innerHTML = '<div class="ls-scroll" id="lsScroll"><div class="ls-head"><span class="ls-hl" title="Mọi kênh dùng chung một thang biên độ">Kênh · bấm để nghe <label class="ls-loop" title="Phát lặp lại vùng đã kéo chọn"><input type="checkbox" id="loop" checked> lặp vùng chọn</label></span><div class="ls-ticks" id="lsTicks"></div></div><div class="ls-rows" id="lsRows"></div></div>';
+  if (wrap) wrap.insertBefore(stack, wrap.firstChild);
+  const LS = {listening: 'A', peaks: new Map(), loading: new Map(), failed: new Set(), recent: [], sig: '', drag: null, counted: 0, ctx: null};
+  const MAX_LOADED = 4, AUTOLOAD = 3, BINS = 2400;
+  const palette = () => (typeof COLORS !== 'undefined' && COLORS.length ? COLORS : ['#57d3d0', '#f4b660', '#68d391', '#c58cff', '#6ba7ff', '#f27979']);
+  const mmss = t => { t = Math.max(0, Math.floor(t)); return String(Math.floor(t / 60)).padStart(2, '0') + ':' + String(t % 60).padStart(2, '0'); };
+  const peaksOf = pcm => {
+    const n = pcm.length, step = Math.max(1, Math.floor(n / BINS / 8)), out = new Float32Array(BINS);
+    for (let b = 0; b < BINS; b++) { const lo = Math.floor(b * n / BINS), hi = Math.min(n, Math.floor((b + 1) * n / BINS)); let m = 0; for (let i = lo; i < hi; i += step) { const v = Math.abs(pcm[i]); if (v > m) m = v; } out[b] = m; }
+    const top = out.reduce((x, y) => Math.max(x, y), 0) || 1; return {peaks: out, top};
+  };
+  const sourcePeaks = () => { if (typeof samples === 'undefined' || !samples.A) return null; if (LS.srcPcm !== samples.A) { LS.srcPcm = samples.A; LS.srcPeaks = peaksOf(samples.A); } return LS.srcPeaks; };
+  const allRuns = () => {
+    const out = []; if (typeof variants === 'undefined') return out;
+    variants.forEach(v => (v.runs || []).forEach((r, i) => out.push({v, r, order: String(r.created || '') + String(i).padStart(4, '0')})));
+    return out.sort((x, y) => x.order < y.order ? -1 : 1);
+  };
+  const letterOf = i => i < 25 ? String.fromCharCode(66 + i) : 'R' + (i + 2);
+  const stepsText = snap => (snap?.stepParams || []).filter(s => s && s.model && !['blend', 'dry'].includes(s.model))
+    .map(s => { const kv = Object.entries(s).filter(([k]) => k !== 'model' && k !== 'percent').map(([k, v]) => `${k.replace(/_s$/, '')}=${v}`).join(' '); return kv ? `${s.model} ${kv}` : ''; }).filter(Boolean).join(' · ');
+  const stateOf = ({r}) => r.status === 'failed' ? 'lỗi' : (r.status === 'running' || r.status === 'submitting') ? 'đang chạy' : r.serverRun?.output ? 'có output' : r.serverRun ? 'chưa có output' : 'chưa gửi';
+  const describe = (run, letter) => {
+    const {r} = run, snap = r.configSnapshot || {}, chain = (snap.chain && snap.chain.length ? snap.chain : [snap.model || '?']).join(' › ');
+    const info = r.runInfo || {}, when = r.created ? new Date(r.created).toLocaleTimeString('vi-VN', {hour: '2-digit', minute: '2-digit'}) : '';
+    const bits = [stepsText(snap), snap.threshold != null ? `gate ${Number(snap.threshold).toFixed(2)}` : '', info.stop ? `dừng sau ${info.stop}` : '',
+                  info.music === false ? 'tắt tách nhạc' : (info.music === true ? 'bật tách nhạc' : ''), when, stateOf(run)].filter(Boolean);
+    const tip = [`${letter} · ${chain}`, ...(snap.stepParams || []).filter(s => s?.model).map(s => '  ' + JSON.stringify(s)), `gate DNSMOS ${snap.threshold ?? '—'}`,
+                 info.stop ? `dừng sau: ${info.stop}` : '', info.music != null ? `tách nhạc: ${info.music ? 'bật' : 'tắt'}` : '', r.serverRun?.runDir ? `thư mục: ${r.serverRun.runDir}` : '', `trạng thái: ${stateOf(run)}`].filter(Boolean).join('\n');
+    return {title: chain, sub: bits.join(' · '), tip};
+  };
+  const rowsModel = () => {
+    const list = [], src = $('sourceName')?.textContent || '';
+    list.push({key: 'A', letter: 'A', title: 'Nguồn · audio gốc', sub: (typeof audioDuration !== 'undefined' && audioDuration.A ? mmss(audioDuration.A) + ' · ' : '') + (src && !/Chưa/.test(src) ? src.split(' · ')[0] : 'chưa nạp'),
+               tip: 'A = audio gốc đưa vào pipeline', playable: !!(typeof audioUrl !== 'undefined' && audioUrl.A), peaks: sourcePeaks(), color: palette()[0]});
+    allRuns().forEach((run, i) => {
+      const d = describe(run, letterOf(i)), id = run.r.id, loaded = typeof runAudio !== 'undefined' && !!runAudio[id];
+      list.push({key: id, run, letter: letterOf(i), title: d.title, sub: d.sub, tip: d.tip, loaded, loading: LS.loading.has(id), failed: LS.failed.has(id),
+                 playable: loaded || (!!run.r.serverRun?.output && !LS.failed.has(id)), peaks: LS.peaks.get(id) || null, color: palette()[(i + 1) % palette().length]});
+    });
+    const scaleTop = list.reduce((m, x) => Math.max(m, x.peaks?.top || 0), 0) || 1; list.forEach(x => { x.scaleTop = scaleTop; });
+    return list;
+  };
+  const playing = () => { const p = $('player'); return !!p && !p.paused && !p.ended; };
+  const drawRow = (row, model) => {
+    const cv = row.querySelector('canvas'); if (!cv) return;
+    const d = window.devicePixelRatio || 1, w = Math.max(1, Math.round(cv.clientWidth * d)), h = Math.max(1, Math.round(cv.clientHeight * d));
+    if (cv.width !== w) cv.width = w; if (cv.height !== h) cv.height = h;
+    const x = cv.getContext('2d'); x.clearRect(0, 0, w, h);
+    x.strokeStyle = '#1b2832'; x.lineWidth = 1; for (let i = 1; i < 8; i++) { x.beginPath(); x.moveTo(Math.round(i * w / 8) + .5, 0); x.lineTo(Math.round(i * w / 8) + .5, h); x.stroke(); }
+    if (!model.peaks) return;
+    const {peaks} = model.peaks, top = model.scaleTop || model.peaks.top, dur = (typeof duration !== 'undefined' && duration) || 1, vs = typeof viewStart !== 'undefined' ? viewStart : 0, span = (typeof viewSpan !== 'undefined' && viewSpan) || dur;
+    x.strokeStyle = model.color; x.beginPath();
+    for (let px = 0; px < w; px++) {
+      const t0 = vs + px / w * span, t1 = vs + (px + 1) / w * span;
+      const lo = Math.floor(Math.max(0, Math.min(.999, t0 / dur)) * BINS), hi = Math.max(lo + 1, Math.ceil(Math.max(0, Math.min(1, t1 / dur)) * BINS));
+      let m = 0; for (let k = lo; k < Math.min(BINS, hi); k++) if (peaks[k] > m) m = peaks[k];
+      const yy = Math.min(1, m / top) * h * .44 + .5; x.moveTo(px + .5, h / 2 - yy); x.lineTo(px + .5, h / 2 + yy);
+    }
+    x.stroke();
+  };
+  const positionLS = () => {
+    const over = $('lsOver'); if (!over || typeof current === 'undefined') return;
+    const pct = t => (t - viewStart) / viewSpan, ph = over.querySelector('.ls-ph'), se = over.querySelector('.ls-sel');
+    const c = pct(current); ph.style.display = c < 0 || c > 1 ? 'none' : ''; ph.style.left = (c * 100) + '%';
+    const a = Math.max(0, pct(sel[0])), b = Math.min(1, pct(sel[1])); se.style.display = b > a && (sel[1] - sel[0]) < duration * .999 ? '' : 'none'; se.style.left = (a * 100) + '%'; se.style.width = ((b - a) * 100) + '%';
+  };
+  const renderRuler = () => { const t = $('lsTicks'); if (!t || typeof viewStart === 'undefined') return; t.innerHTML = Array.from({length: 6}, (_, k) => `<span>${mmss(viewStart + k / 5 * viewSpan)}</span>`).join(''); };
+  const refresh = (force) => {
+    const rows = $('lsRows'); if (!rows || !wrap) return;
+    const model = rowsModel(), hasAudio = model[0].playable || model.some(m => m.run && m.peaks);
+    wrap.dataset.ls = hasAudio || model.length > 1 ? 'on' : 'off';
+    const sig = JSON.stringify(model.map(m => [m.key, m.title, m.sub, m.loaded, m.loading, m.failed, m.playable, !!m.peaks, m.key === LS.listening, m.key === LS.listening && playing()]));
+    if (sig !== LS.sig || force) {
+      LS.sig = sig;
+      rows.innerHTML = model.map(m => {
+        const on = m.key === LS.listening, btn = m.loading ? '<span class="ls-play btn" aria-busy="true">…</span>' : m.playable ? `<button class="btn ls-play" type="button" data-play="${esc(m.key)}" aria-label="Nghe kênh ${esc(m.letter)}">${on && playing() ? '❚❚' : '▶'}</button>` : '';
+        const note = m.peaks ? '' : `<div class="ls-note">${m.loading ? 'đang nạp audio…' : m.failed ? 'không nạp được output' : m.key === 'A' ? 'chọn audio đầu vào' : m.playable ? 'bấm ▶ để nạp và nghe' : (m.run && /đang chạy/.test(m.sub) ? 'đang chạy…' : 'chưa có output')}</div>`;
+        return `<div class="ls-row${on ? ' on' : ''}" data-key="${esc(m.key)}" title="${esc(m.tip)}"><div class="ls-label"><span class="ls-letter" style="background:${m.color}">${esc(m.letter)}</span><div class="ls-txt"><strong>${esc(m.title)}</strong><small>${esc(m.sub)}</small></div>${btn}</div><div class="ls-wave"><canvas></canvas>${note}</div></div>`;
+      }).join('') + '<div class="ls-over" id="lsOver"><div class="ls-sel"></div><div class="ls-ph"></div></div>';
+      rows.querySelectorAll('.ls-row').forEach((row, i) => drawRow(row, model[i]));
+      if (model.length > LS.counted && LS.counted) rows.lastElementChild.previousElementSibling?.scrollIntoView({block: 'nearest'});
+      LS.counted = model.length;
+    }
+    renderRuler(); positionLS(); autoload(model);
+  };
+  const redraw = () => { const rows = $('lsRows'); if (!rows) return; const model = rowsModel(); rows.querySelectorAll('.ls-row').forEach((row, i) => model[i] && drawRow(row, model[i])); renderRuler(); positionLS(); };
+
+  // ---- load a run's denoised audio on demand (kept to the last few; the waveform thumbnail outlives the audio) ----
+  const touch = id => { LS.recent = LS.recent.filter(x => x !== id); LS.recent.push(id); };
+  const evict = () => {
+    const ids = Object.keys(runAudio);
+    while (ids.length > MAX_LOADED) {
+      const victim = LS.recent.find(id => id !== LS.listening && runAudio[id]); if (!victim) break;
+      try { URL.revokeObjectURL(runAudio[victim].url); } catch (_) {}
+      delete runAudio[victim]; ids.splice(ids.indexOf(victim), 1); LS.recent = LS.recent.filter(x => x !== victim);
+    }
+  };
+  const ensureAudio = run => {
+    const r = run.r, id = r.id;
+    if (runAudio[id]) { touch(id); return Promise.resolve(runAudio[id]); }
+    const path = r.serverRun?.output; if (!path || LS.failed.has(id)) return Promise.resolve(null);
+    if (LS.loading.has(id)) return LS.loading.get(id);
+    const job = (async () => {
+      try {
+        const res = await fetch('/api/audio?path=' + encodeURIComponent(path)); if (!res.ok) throw new Error('HTTP ' + res.status);
+        const blob = await res.blob(), buf = await blob.arrayBuffer();
+        LS.ctx = LS.ctx || new AudioContext(); const dec = await LS.ctx.decodeAudioData(buf), pcm = dec.getChannelData(0).slice();
+        runAudio[id] = {url: URL.createObjectURL(blob), samples: pcm, duration: dec.duration, name: path.split('/').pop()};
+        r.audioArtifact = {name: runAudio[id].name, sessionOnly: true}; LS.peaks.set(id, peaksOf(pcm)); touch(id); evict(); return runAudio[id];
+      } catch (e) { LS.failed.add(id); return null; } finally { LS.loading.delete(id); refresh(true); }
+    })();
+    LS.loading.set(id, job); refresh(true); return job;
+  };
+  let autoBusy = false;
+  const autoload = async model => {
+    if (autoBusy) return;
+    const want = model.filter(m => m.run && m.run.r.serverRun?.output).slice(-AUTOLOAD).filter(m => !m.loaded && !m.loading && !m.failed).reverse();
+    if (!want.length) return;
+    autoBusy = true; try { for (const m of want) await ensureAudio(m.run); } finally { autoBusy = false; }
+  };
+
+  // the player ignores currentTime until its metadata is loaded (a fresh src) and the next timeupdate would then reset `current` to 0
+  const seekTo = t => {
+    current = t; const p = $('player'), u = audioUrl[activeLane]; if (u && p.src !== u) p.src = u;
+    if (p.readyState >= 1) { try { p.currentTime = t; } catch (_) {} } else p.addEventListener('loadedmetadata', () => { try { p.currentTime = t; } catch (_) {} }, {once: true});
+    positionLS();
+  };
+  // ---- listening: switch the audible lane without moving the playhead ----
+  const listen = async (key, startPlaying) => {
+    const p = $('player'), was = playing(), keep = current;
+    if (key === 'A') { if (!audioUrl.A) return; LS.listening = 'A'; selectLane('A'); }
+    else {
+      const run = allRuns().find(x => x.r.id === key); if (!run) return;
+      const a = await ensureAudio(run); if (!a) return;
+      audioUrl.B = a.url; samples.B = a.samples; audioDuration.B = a.duration;
+      if (!audioDuration.A) { duration = a.duration; viewStart = 0; viewSpan = a.duration; sel = [0, a.duration]; }
+      run.v.activeRunId = run.r.id; LS.listening = key; touch(key); selectLane('B');
+    }
+    seekTo(keep);
+    if (startPlaying || was) { p.play().catch(() => {}); const pb = $('play'); if (pb) pb.textContent = '❚❚'; }
+    refresh(true);
+  };
+
+  // ---- pointer: click seeks, drag selects a stretch to loop, Ctrl/Alt+wheel zooms, Shift+wheel pans ----
+  const timeAt = (e, el) => { const r = el.getBoundingClientRect(); return Math.max(0, Math.min(duration, viewStart + (e.clientX - r.left) / Math.max(1, r.width) * viewSpan)); };
+  stack.addEventListener('click', e => {
+    const btn = e.target.closest('[data-play]'); if (btn) { const k = btn.dataset.play; if (k === LS.listening && playing()) { $('player').pause(); $('play').textContent = '▶'; refresh(true); } else listen(k, true); return; }
+    const lab = e.target.closest('.ls-label'); if (lab) listen(lab.parentElement.dataset.key, false);
+  });
+  stack.addEventListener('pointerdown', e => { const w = e.target.closest('.ls-wave'); if (!w || e.button) return; LS.drag = {w, t0: timeAt(e, w), moved: false}; w.setPointerCapture?.(e.pointerId); });
+  stack.addEventListener('pointermove', e => { const d = LS.drag; if (!d) return; const t = timeAt(e, d.w); if (Math.abs(t - d.t0) > .15) d.moved = true; if (d.moved) { sel = [Math.min(d.t0, t), Math.max(d.t0, t)]; current = sel[0]; positionLS(); } });
+  stack.addEventListener('pointerup', e => { const d = LS.drag; LS.drag = null; if (!d) return; seekTo(d.moved ? sel[0] : timeAt(e, d.w)); window.positionOverlays?.(); });
+  stack.addEventListener('wheel', e => {
+    const w = e.target.closest('.ls-wave'); if (!w || !(e.shiftKey || e.ctrlKey || e.metaKey || e.altKey)) return; e.preventDefault();
+    if (e.shiftKey && !(e.ctrlKey || e.metaKey || e.altKey)) viewStart = Math.max(0, Math.min(duration - viewSpan, viewStart + e.deltaY / Math.max(1, w.clientWidth) * viewSpan));
+    else { const f = timeAt(e, w), k = e.deltaY > 0 ? 1.25 : .8, span = Math.max(1, Math.min(duration, viewSpan * k)), frac = (f - viewStart) / viewSpan; viewSpan = span; viewStart = Math.max(0, Math.min(duration - span, f - frac * span)); }
+    redraw();
+  }, {passive: false});
+  if (typeof ResizeObserver === 'function') new ResizeObserver(() => requestAnimationFrame(redraw)).observe(stack);
+  const baseOverlays = window.positionOverlays;
+  if (typeof baseOverlays === 'function') window.positionOverlays = function () { const out = baseOverlays.apply(this, arguments); positionLS(); return out; };
+  ['play', 'pause', 'ended'].forEach(ev => $('player')?.addEventListener(ev, () => refresh(true)));
+  window.addEventListener('lab:audio-state', () => refresh(true));
+  window.__lanes = {refresh, listen, redraw};
+
+  // renderVariants clears the chain list; always rebuild it afterwards, then refresh the lane stack
   const baseRender = window.renderVariants;
-  if (typeof baseRender === 'function') window.renderVariants = function () { const out = baseRender.apply(this, arguments); window.__renderCurrentModels?.(); return out; };
+  if (typeof baseRender === 'function') window.renderVariants = function () { const out = baseRender.apply(this, arguments); window.__renderCurrentModels?.(); queueMicrotask(() => refresh()); return out; };
+  setTimeout(() => refresh(true), 400);
   // the chosen server file travels with the recipe
   const baseRecipe = window.recipe;
   if (typeof baseRecipe === 'function') window.recipe = function () { const r = baseRecipe.apply(this, arguments); if (inputFile) r.settings.input_files = [inputFile]; const mb = $('musicRemoval'); if (mb) r.settings.music_removal = mb.checked; return r; };

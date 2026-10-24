@@ -107,12 +107,16 @@ def list_dir(cfg, raw):
 
 
 def number(value):
-    """'15' -> 15, '0.5' -> 0.5, anything else stays a string (the UI sends select values as text)."""
-    if isinstance(value, bool) or value is None:
+    """'15' -> 15, '0.5' -> 0.5, 'true'/'false' -> bool, anything else stays a string (the UI sends select values as text)."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
         raise BadRequest("giá trị tham số không hợp lệ")
     if isinstance(value, (int, float)):
         return value
     s = str(value).strip()
+    if s.lower() in ("true", "false"):
+        return s.lower() == "true"
     for cast in (int, float):
         try:
             return cast(s)

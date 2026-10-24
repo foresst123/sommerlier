@@ -296,3 +296,43 @@ def test_music_removal_is_a_visible_toggle_that_defaults_to_off_and_travels_with
     page = lab.PAGE
     assert 'id="musicRemoval"' in page and "musicBox.checked = musicSaved === 'on'" in page
     assert "r.settings.music_removal = mb.checked" in page
+
+
+def test_run_button_never_stays_blocked_by_a_stale_running_status():
+    page = lab.PAGE
+    # a stored 'running' only blocks while the tracker agrees; otherwise the run is marked interrupted and a new one starts
+    assert "window.__labRunActive?.()" in page and "existing.status = 'failed'; existing.errorMessage = 'Lượt trước bị ngắt" in page
+    assert "window.__labRunActive = () => T.state === 'running' || T.state === 'sending'" in page
+    # a real in-flight job is reported, not silently ignored
+    assert "Đang có một lượt chạy — chờ xong hoặc hủy job rồi chạy lại" in page
+    assert "x.serverRun?.runId === id) r = x" in page
+
+
+def test_each_run_gets_its_own_lane_with_its_recipe_in_a_scrollable_stack():
+    page = lab.PAGE
+    # A = source, B, C, D... = one lane per run, oldest first, listed in a scrollable container (never a fixed 4-lane canvas)
+    assert 'id="lsScroll"' in page and "overflow-y:auto" in page and "const letterOf = i => i < 25 ? String.fromCharCode(66 + i)" in page
+    assert "stepsText(snap)" in page and "dừng sau" in page and "tắt tách nhạc" in page and "gate " in page
+    # audio is fetched from the server on demand, a few runs at a time; the thumbnail outlives the audio
+    assert "fetch('/api/audio?path=' + encodeURIComponent(path))" in page and "const MAX_LOADED = 4, AUTOLOAD = 3" in page
+    assert "LS.peaks.set(id, peaksOf(pcm))" in page
+    # the old fixed canvas lanes are hidden, and the audible lane switches without moving the playhead
+    assert "#canvasWrap .wave,#canvasWrap .track-labels,#canvasWrap .ruler,#canvasWrap .selection,#canvasWrap .playhead{display:none!important}" in page
+    assert "audioUrl.B = a.url; samples.B = a.samples; audioDuration.B = a.duration;" in page and "selectLane('B')" in page
+
+
+def test_a_new_source_does_not_leave_the_default_five_second_loop_on():
+    assert "inputFile = full; try { sel = [0, duration]; } catch (_) {}" in lab.PAGE
+
+
+def test_aBtn_and_bBtn_are_hidden_not_removed():
+    page = lab.PAGE
+    assert "document.getElementById('aBtn')?.remove()" not in page and "document.getElementById('bBtn')?.remove()" not in page
+    assert "const ab=document.querySelector('.ab');if(ab)ab.style.display='none';" in page
+
+
+def test_audio_separator_models_offer_an_auto_download_switch():
+    page = lab.PAGE
+    # rf_denoise & co are skipped when no model folder is set; the dialog lets a run fetch the checkpoint (needs network)
+    assert page.count("['auto_download','Tự tải checkpoint nếu thiếu (cần mạng)','select',['false','true']]") >= 8
+    assert "rf_denoise:[['auto_download'" in page and "rf_crowd:[['auto_download'" in page

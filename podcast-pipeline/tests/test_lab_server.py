@@ -236,3 +236,11 @@ def test_music_removal_off_becomes_a_global_set_and_unset_keeps_the_default(cfg)
     assert argv[argv.index("--set") + 1] == "steps.music_removal=false"
     assert "--set" not in ls.build_run(cfg, payload(cfg, music_removal=True))[1]
     assert "--set" not in ls.build_run(cfg, payload(cfg))[1]
+
+
+def test_true_false_params_become_real_booleans(cfg):
+    """auto_download="false" as a string would be truthy in the backend (bool("false") is True)."""
+    steps = [{"model": "rf_denoise", "auto_download": "true"}, {"model": "dfn3", "chunk_s": "30"}]
+    v, argv, _ = ls.build_run(cfg, payload(cfg, ("rf_denoise", "dfn3"), steps))
+    assert v["variants"][0]["set"]["denoise.rf_denoise.auto_download"] is True
+    assert ls.number("False") is False and ls.number(True) is True and ls.number("30") == 30
