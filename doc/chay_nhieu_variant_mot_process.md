@@ -185,3 +185,13 @@ python tools/clean_variant_cache.py --audio-dir <thư_mục_audio> --variants to
 Chỉ xoá các thư mục `exp-<variant>_<tên file>` trong `cache/` và `cache_nomusic/` (tên dựng từ file variants và các file trong `--audio-dir`, nên cache của bộ dữ liệu khác nằm cùng thư mục không bị đụng).
 Với `--out-root` còn xoá các dấu `.done*`, `.ready_*`, `.failed_*`, thư mục kết quả của các file đó và `variants_manifest.json`; thiếu bước này `--resume` thấy dấu cũ và bỏ qua variant.
 Không đụng tới cache từng bước lọc nhiễu (`denoise/step_cache`, khoá theo nội dung audio) và các thư mục cache khác.
+
+## Kiểm tra đã chạy đủ chưa
+
+```bash
+python tools/verify_line.py --audio-dir <thư_mục_audio> --out-root <OUT>
+```
+Với từng cặp (variant, file) đọc thẳng trên đĩa: có `02_diarization`, `03_separation`, `05_asr` và mỗi file có segment không; mỗi điểm lọc nhiễu mà variant dùng có `denoise.json` và **không có lỗi**
+(lỗi nghĩa là bộ lọc đã rơi về audio gốc, khi đó variant đó không nói gì về bộ lọc); trạng thái trong `variants_manifest.json` là `ok`.
+Trả về 0 chỉ khi mọi thứ đủ; ngược lại liệt kê từng chỗ thiếu. Variant bị bỏ qua có chủ đích (`raw` khi `--music off`) được báo là skipped, không tính là thiếu.
+Bộ lọc không đổi gì (đầu ra giống hệt đầu vào) chỉ là cảnh báo.
