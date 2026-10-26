@@ -112,6 +112,22 @@ def chain_text(v: dict) -> str:
     return " → ".join(flow)
 
 
+def add_text_stats(rows: List[dict]) -> None:
+    """words and the word-level difference to the baseline text (not an error rate: there is no reference)."""
+    from tools.compare_lib.text_align import compare_transcripts, tokens
+    as_ref = lambda segs: [{"start": s["s"], "end": s["e"], "text": s["t"]} for s in segs]
+    base = next((r for r in rows if r.get("baseline") and r.get("segments")), None)
+    for r in rows:
+        segs = r.get("segments")
+        if segs is None:
+            continue
+        r["words"] = sum(len(tokens(s["t"])) for s in segs)
+        if base is not None and r is not base:
+            res = compare_transcripts(as_ref(base["segments"]), as_ref(segs), detail=False)
+            if res and res["wer"] is not None:
+                r["diff_vs_base"] = round(res["wer"], 4)
+
+
 def build_page_data(manifest_path: str, stem: str, out_dir: str, transcript: str = "asr",
                     per_sec: int = 50, audio_mode: str = "link") -> dict:
     with open(manifest_path, encoding="utf-8") as f:
@@ -141,6 +157,7 @@ def build_page_data(manifest_path: str, stem: str, out_dir: str, transcript: str
             row["missing"] = "no transcripts.json"
         rows.append(row)
     rows.sort(key=lambda r: not r["baseline"])  # baseline on top, plan order after it
+    add_text_stats(rows)
     return {"file": stem, "peaks_per_sec": per_sec, "transcript": transcript, "variants": rows}
 
 
@@ -242,8 +259,10 @@ DATA.variants.forEach((v, vi) => {
   if (v.baseline) tags.push('<span class="tag">baseline</span>');
   if (v.group) tags.push(`<span class="tag">${esc(v.group)}</span>`);
   if (v.status && v.status !== "ok") tags.push(`<span class="tag warn">${esc(v.status)}</span>`);
+  if (v.diff_vs_base != null) tags.push(`<span class="tag" title="khác baseline ở mức từ; không có bản chuẩn nên chưa nói bên nào đúng">` +
+    `khác baseline ${(v.diff_vs_base*100).toFixed(1)}%</span>`);
   head.innerHTML = `<b>${esc(v.id)}</b>${tags.join("")}<span class="mute">${speakers.length} speaker · ` +
-    `${(v.segments||[]).length} đoạn</span><span class="flow">${esc(v.flow)}</span>`;
+    `${(v.segments||[]).length} đoạn${v.words != null ? " · " + v.words + " từ" : ""}</span><span class="flow">${esc(v.flow)}</span>`;
   head.onclick = () => select(vi, true);
   block.appendChild(head);
   if (v.missing) { const m = document.createElement("div"); m.className = "missing";

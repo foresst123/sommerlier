@@ -107,3 +107,13 @@ def test_input_inside_out_keeps_the_relative_link(tmp_path):
     data = lanes.build_page_data(manifest, "ep1", str(out / "lanes"))
     raw = next(v for v in data["variants"] if v["id"] == "raw")
     assert raw["audio"].endswith("raw/input/ep1.wav") and "audio_source" not in raw
+
+
+def test_variant_rows_carry_word_count_and_difference_to_baseline(tmp_path):
+    manifest, out = _plan(tmp_path)
+    data = lanes.build_page_data(manifest, "ep1", str(out / "lanes"))
+    by = {v["id"]: v for v in data["variants"]}
+    assert by["none"]["words"] == 5 and "diff_vs_base" not in by["none"]
+    assert by["m_p3"]["words"] == 2 and by["m_p3"]["diff_vs_base"] > 0      # lost the second speaker's words
+    assert by["raw"]["diff_vs_base"] == 0.0                                  # same transcript as the baseline
+    assert "words" not in by["l_p1"] and "diff_vs_base" not in by["l_p1"]
