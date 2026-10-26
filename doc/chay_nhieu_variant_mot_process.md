@@ -175,3 +175,13 @@ nên process nào đang chờ thì thấy nó chờ gì.
 
 Bàn giao theo **cả variant**: một process chỉ báo `.ready` khi xong **tất cả file** của variant đó ở bước của nó, nên file dài nhất (ví dụ 47 phút) quyết định lúc process kế tiếp bắt đầu.
 Mã băm trong `.ready` bỏ qua các `--set performance.*` (đổi số worker không làm kết quả khác đi), nên mỗi process có thể có số worker riêng.
+
+## Xoá cache của đúng các file này
+
+```bash
+python tools/clean_variant_cache.py --audio-dir <thư_mục_audio> --variants tools/variants_placement.json --out-root <OUT>          # chỉ liệt kê
+python tools/clean_variant_cache.py --audio-dir <thư_mục_audio> --variants tools/variants_placement.json --out-root <OUT> --delete  # xoá thật
+```
+Chỉ xoá các thư mục `exp-<variant>_<tên file>` trong `cache/` và `cache_nomusic/` (tên dựng từ file variants và các file trong `--audio-dir`, nên cache của bộ dữ liệu khác nằm cùng thư mục không bị đụng).
+Với `--out-root` còn xoá các dấu `.done*`, `.ready_*`, `.failed_*`, thư mục kết quả của các file đó và `variants_manifest.json`; thiếu bước này `--resume` thấy dấu cũ và bỏ qua variant.
+Không đụng tới cache từng bước lọc nhiễu (`denoise/step_cache`, khoá theo nội dung audio) và các thư mục cache khác.
