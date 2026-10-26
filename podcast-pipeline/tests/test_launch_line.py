@@ -43,7 +43,7 @@ def test_six_scripts_form_a_chain(tmp_path):
 
 def test_gpus_and_sidon_workers_are_knobs(tmp_path):
     r, d = launch(tmp_path, env={"GPUS": "0 1 0 1 0 1", "SIDON_WORKERS": "1"})
-    gpus = [re.search(r"CUDA_VISIBLE_DEVICES=(\d)", s.read_text()).group(1) for s in sorted(d.glob("*.sh"))]
+    gpus = [re.search(r"^_slot=(\d)", s.read_text(), re.M).group(1) for s in sorted(d.glob("*.sh"))]
     assert gpus == ["0", "1", "0", "1", "0", "1"]
     assert "workers_per_gpu=1" in command_of(d / "4_p4_separation.sh")
     r, d = launch(tmp_path, env={"GPUS": "0 1"}, out="out2")
@@ -103,3 +103,28 @@ def test_a_shell_without_gpu_is_refused_unless_told_otherwise(tmp_path):
     env = {**os.environ, "PATH": f"{fake}:{os.environ['PATH']}"}
     r = subprocess.run(["bash", str(SCRIPT), str(audio), str(tmp_path / "o")], capture_output=True, text=True, env=env)
     assert r.returncode == 6 and "JOBID=" in r.stderr
+
+
+def _gpu_snippet(script_text):
+    lines = script_text.splitlines()
+    start = next(i for i, l in enumerate(lines) if l.startswith("_slot="))
+    return "\n".join(lines[start:start + 3])          # _slot, _job, the if
+
+
+def _chosen(script, cvd):
+    code = _gpu_snippet(script.read_text()) + '\necho "$CUDA_VISIBLE_DEVICES"'
+    env = {k: v for k, v in os.environ.items() if k != "CUDA_VISIBLE_DEVICES"}
+    if cvd is not None:
+        env["CUDA_VISIBLE_DEVICES"] = cvd
+    return subprocess.run(["bash", "-c", code], capture_output=True, text=True, env=env).stdout.strip()
+
+
+def test_gpu_slot_is_a_position_in_the_jobs_own_gpu_list(tmp_path):
+    r, d = launch(tmp_path, env={"GPUS": "0 1 0 1 1 0"})
+    scripts = sorted(d.glob("*.sh"))
+    # the job was given the physical cards 4 and 5: slot 0 is card 4, slot 1 is card 5, never card 0 or 1
+    assert [_chosen(s, "4,5") for s in scripts] == ["4", "5", "4", "5", "5", "4"]
+    # a job with one card: every slot lands on it
+    assert [_chosen(s, "6") for s in scripts] == ["6"] * 6
+    # no list from Slurm (run by hand): the slot is the device number
+    assert [_chosen(s, None) for s in scripts] == ["0", "1", "0", "1", "1", "0"]

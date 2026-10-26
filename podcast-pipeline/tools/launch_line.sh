@@ -7,7 +7,7 @@
 # Each one waits for the .ready_<stage> file of the one before it, see doc/chay_nhieu_variant_mot_process.md.
 #
 # Knobs (environment variables):
-#   GPUS="0 0 1 1 0 1"   physical GPU of process 1..6 (default balances the cards by rough memory use)
+#   GPUS="0 0 1 1 0 1"   position (in the job's GPU list) of process 1..6; default balances the cards by rough memory use
 #   SIDON_WORKERS=2      Sidon workers on the separation GPU (the profile says 3; fewer = less VRAM)
 #   SESSION=line         tmux session name           CONDA_ENV=som   conda env to activate
 #   VARIANTS=tools/variants_placement.json           ENVNAME=a100   profile
@@ -98,7 +98,13 @@ for i in 0 1 2 3 4 5; do
     echo "[ -f $(printf '%q' "$CONDA_BASE/etc/profile.d/conda.sh") ] && source $(printf '%q' "$CONDA_BASE/etc/profile.d/conda.sh") && conda activate $(printf '%q' "$CONDA_ENV")"
     echo "cd $(printf '%q' "$HERE")"
     echo "source tools/denoise_env.sh"
-    echo "export CUDA_VISIBLE_DEVICES=${GPU[i]}"
+    # GPUS holds positions in the job's own GPU list: inside srun Slurm sets CUDA_VISIBLE_DEVICES to the
+    # devices of the job (maybe physical ids such as 4,5), and a hard-coded 0 or 1 would be somebody else's card.
+    echo "_slot=${GPU[i]}"
+    echo '_job=(${CUDA_VISIBLE_DEVICES//,/ })'
+    echo 'if [ "${#_job[@]}" -gt 0 ]; then export CUDA_VISIBLE_DEVICES=${_job[$((_slot % ${#_job[@]}))]}; else export CUDA_VISIBLE_DEVICES=$_slot; fi'
+    echo 'echo "[gpu] job devices: ${_job[*]:-none set} -> this process uses CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"'
+    echo 'nvidia-smi -L 2>&1 | head -3 || true'
     printf 'python run_variants_resident.py'
     printf ' %q' "${COMMON[@]}"
     echo " ${STAGE_ARGS[i]}"

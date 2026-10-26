@@ -144,7 +144,7 @@ JOBID=18790 bash tools/launch_line.sh <thư_mục_audio> <thư_mục_kết_quả
 ```
 Không đặt `JOBID` mà shell không thấy GPU thì script từ chối chạy (tránh để các bộ lọc rơi về audio gốc rồi lưu vào cache).
 
-Biến môi trường chỉnh được: `GPUS="0 0 1 1 0 1"` (GPU của process 1..6; mặc định chia đều theo ước lượng VRAM, **chưa đo**),
+Biến môi trường chỉnh được: `GPUS="0 0 1 1 0 1"` (vị trí trong **danh sách GPU của job** cho process 1..6, không phải số GPU vật lý: trong `srun` Slurm đặt `CUDA_VISIBLE_DEVICES` theo GPU của job, script chọn phần tử thứ n của danh sách đó và in dòng `[gpu] ...` ở đầu log; mặc định chia đều theo ước lượng VRAM, **chưa đo**),
 `SIDON_WORKERS=2` (profile đặt 3; ít worker hơn thì dùng ít VRAM hơn), `SESSION`, `CONDA_ENV`, `VARIANTS`, `ENVNAME`,
 `DRY=1` (chỉ ghi file lệnh, không chạy), `FORCE=1`. Đối số thêm sau `OUT` được chuyển cho cả 6 process, ví dụ
 `--wait-timeout 240` hoặc `--accept-degraded`.
