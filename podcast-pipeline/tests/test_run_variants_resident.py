@@ -698,3 +698,300 @@ def test_hash_ignores_speed_knobs_but_not_result_settings(env):
     v = variants[0]
     assert rr.variant_hash(v, a, files) == rr.variant_hash(v, b, files)       # workers_per_gpu: same variant
     assert rr.variant_hash(v, a, files) != rr.variant_hash(v, c, files)       # a step changes the result
+
+
+# ------------------------------------------------- no-op stages and per-file hand-over
+def mark_ready(env, args, files, vid, stage, stem=None):
+    """What a producer of `stage` leaves for a consumer (stem=None: variant-level marker)."""
+    variants = {v["id"]: v for v in rr.resolve_plan(args)[0]}
+    d = env[0] / "out" / vid
+    d.mkdir(parents=True, exist_ok=True)
+    digest = rr.variant_hash(variants[vid], args, files, stop_after=stage)
+    (d / (f".ready_{stage}" + (f".{stem}" if stem else ""))).write_text(
+        json.dumps({"hash": digest, "stop_after": stage}))
+
+
+def test_noop_stage_detection_and_music_mode():
+    none = {"chain": [], "chain_pre_separation": [], "chain_pre_asr": [], "set": {}}
+    p1 = {**none, "chain": ["dfn3"]}
+    p2 = {**none, "chain_pre_separation": ["dfn3"]}
+    p3 = {**none, "chain_pre_asr": ["dfn3"]}
+    assert rr.noop_stages(none, "off") == ["denoise", "denoise_pre_separation", "denoise_pre_asr"]
+    assert rr.noop_stages(p1, "off") == ["denoise_pre_separation", "denoise_pre_asr"]
+    assert rr.noop_stages(p2, "off") == ["denoise", "denoise_pre_asr"]
+    assert rr.noop_stages(p3, "off") == ["denoise", "denoise_pre_separation"]
+    # with the profile's music removal the denoise stage is real work even without a chain
+    assert rr.noop_stages(none, "profile") == ["denoise_pre_separation", "denoise_pre_asr"]
+    off_set = {**none, "set": {"steps.music_analysis": False, "steps.music_removal": False}}
+    assert "denoise" in rr.noop_stages(off_set, "profile")
+    on_set = {**none, "set": {"steps.music_removal": True}}
+    assert "denoise" not in rr.noop_stages(on_set, "off")
+    for stage in ("diarization", "separation", "asr"):
+        assert not rr.is_noop(none, stage, "off")
+
+
+def test_effective_stage_walks_back_over_noops():
+    none = {"chain": [], "chain_pre_separation": [], "chain_pre_asr": [], "set": {}}
+    p2 = {**none, "chain_pre_separation": ["x"]}
+    assert rr.effective_stage(none, "denoise") is None                       # whole line so far is a no-op
+    assert rr.effective_stage(none, "diarization") == "diarization"
+    assert rr.effective_stage(none, "denoise_pre_separation") == "diarization"
+    assert rr.effective_stage(p2, "denoise_pre_separation") == "denoise_pre_separation"
+    assert rr.effective_stage(none, "denoise_pre_asr") == "separation"
+    assert rr.effective_stage(none, "denoise", "profile") == "denoise"
+    assert rr.effective_stage(none, "asr") == "asr"
+
+
+def test_consumer_skips_noop_stages_and_starts_at_once_when_nothing_is_upstream(env):
+    clock = Clock()
+    fake = FakeRun()
+    r, args, files = line_runner(env, fake, clock, "--music", "off", "--layout", "default", "--stop-after", "diarization",
+                                 "--wait-signal", "denoise", "--signal", "diarization", "--wait-timeout", "1")
+    schedule_stop(r, files, "diarization")
+    # none and p3 have no point-1 chain and music is off: no marker needed. dfn3 needs .ready_denoise (never comes)
+    assert [c[0] for c in fake.calls] == ["none", "p3"]
+    m = {x["id"]: x for x in manifest(env[0])["variants"]}
+    assert m["dfn3"]["reason"] == "producer never signalled" and m["none"]["status"] == "ok"
+    # the next process looks past the no-op denoise_pre_separation stage straight at the diarization marker
+    fake2 = FakeRun()
+    r2, args2, files2 = line_runner(env, fake2, Clock(), "--music", "off", "--layout", "default", "--stop-after", "separation",
+                                    "--wait-signal", "denoise_pre_separation", "--signal", "separation",
+                                    "--poll-seconds", "5", "--wait-timeout", "1")
+    nonev = next(v for v in r2.variants if v["id"] == "none")
+    (env[0] / "out" / "none" / ".ready_diarization").unlink()
+    assert r2._signal_state(nonev) == (None, None)         # it waits for the diarization marker, not denoise_pre_separation
+    mark_ready(env, args2, files2, "none", "diarization")
+    assert r2._signal_state(nonev) == ("ready", None)
+
+
+def test_noop_producer_hands_over_without_running_and_only_after_its_upstream(env):
+    tmp = env[0]
+    clock = Clock()
+    fake = FakeRun()
+    r, args, files = line_runner(env, fake, clock, "--layout", "default", "--stop-after", "denoise_pre_separation",
+                                 "--wait-signal", "diarization", "--signal", "denoise_pre_separation",
+                                 "--poll-seconds", "5", "--wait-timeout", "5")
+    ready = lambda vid: tmp / "out" / vid / ".ready_denoise_pre_separation"
+    seen = {}
+
+    def hook(n):
+        seen[n] = (ready("none").exists(), ready("p3").exists())
+        if n == 2:
+            mark_ready(env, args, files, "none", "diarization")
+            mark_ready(env, args, files, "p3", "diarization")
+    clock.hook = hook
+    schedule_stop(r, files, "denoise_pre_separation")
+    assert fake.calls == []                                            # never decodes the audio again
+    assert seen[1] == (False, False) and seen[2] == (False, False)     # nothing handed over before its upstream
+    assert ready("none").is_file() and ready("p3").is_file()
+    assert json.loads(ready("none").read_text())["stop_after"] == "denoise_pre_separation"
+    assert (tmp / "out" / "none" / ".done.denoise_pre_separation").is_file()
+    m = {x["id"]: x for x in manifest(tmp)["variants"]}
+    assert m["none"]["status"] == "ok" and m["none"]["reason"] == rr.NOOP_NOTE
+    # dfn3 has no pre_separation chain either, but its upstream never came: failed after the timeout
+    assert m["dfn3"]["status"] == "failed"
+
+
+def test_noop_producer_with_nothing_upstream_writes_its_marker_at_once(env):
+    fake = FakeRun()
+    r, args, files = line_runner(env, fake, Clock(), "--music", "off", "--layout", "default", "--stop-after", "denoise",
+                                 "--signal", "denoise")
+    schedule_stop(r, files, "denoise")
+    assert [c[0] for c in fake.calls] == ["dfn3"]                       # only dfn3 has real work at point 1
+    for vid in ("none", "dfn3", "p3"):
+        assert (env[0] / "out" / vid / ".ready_denoise").is_file()
+
+
+def pf(env, fake, clock, *extra, msgs=None):
+    args, variants, files, skipped = make(env, "--per-file", "--only-ids", "dfn3,p3", *extra)
+    r = rr.ResidentRunner(args, variants, files, run_batch=fake, skipped=skipped,
+                          say=(msgs.append if msgs is not None else (lambda m: None)),
+                          sleep=clock.sleep, clock=clock.time)
+    r.prepare()
+    return r, args, files
+
+
+class FileFake(FakeRun):
+    """Fails the files whose stem is listed for a variant, like run_batch_by_stage reports a failed file."""
+
+    def __init__(self, bad=()):
+        super().__init__()
+        self.bad = set(bad)
+
+    def __call__(self, pipeline, args, config, batch, logger=None, stages=None):
+        vid = args.job_id[len("exp-"):]
+        out = super().__call__(pipeline, args, config, batch, logger, stages)
+        return [(p, "sidon: boom") for p in batch if (vid, Path(p).stem) in self.bad]
+
+
+@pytest.fixture
+def env_sizes(env):
+    (env[1] / "a.wav").write_bytes(b"x" * 100)         # a is the long file
+    return env
+
+
+def test_per_file_producer_small_file_first_with_markers_per_stem(env_sizes):
+    env = env_sizes
+    tmp = env[0]
+    fake = FileFake()
+    r, args, files = pf(env, fake, Clock(), "--layout", "default", "--stop-after", "separation",
+                        "--signal", "separation")
+    schedule_stop(r, files, "separation")
+    assert [(c[0], c[2]) for c in fake.calls] == [(v, [n]) for v in ("none", "dfn3", "p3") for n in ("b.wav", "a.wav")]
+    for vid in ("none", "dfn3", "p3"):
+        d = tmp / "out" / vid
+        for stem in ("a", "b"):
+            data = json.loads((d / f".ready_separation.{stem}").read_text())
+            assert data["stop_after"] == "separation" and "hash" in data and "time" in data
+        assert not (d / ".ready_separation").exists()                  # no variant-level marker in this mode
+        assert (d / ".done.separation").is_file() and not (d / ".done").exists()
+
+
+def test_per_file_failed_stem_does_not_stop_the_others_and_variant_is_finalized_once(env_sizes):
+    env = env_sizes
+    tmp = env[0]
+    msgs = []
+    fake = FileFake(bad={("dfn3", "a")})
+    r, args, files = pf(env, fake, Clock(), "--layout", "default", "--stop-after", "separation",
+                        "--signal", "separation", msgs=msgs)
+    failures = schedule_stop(r, files, "separation")
+    d = tmp / "out" / "dfn3"
+    assert (d / ".failed_separation.a").is_file() and (d / ".ready_separation.b").is_file()
+    assert "sidon: boom" in json.loads((d / ".failed_separation.a").read_text())["reason"]
+    assert not (d / ".done.separation").exists()
+    assert len([m for m in msgs if m.startswith("[dfn3] FAILED")]) == 1
+    assert len([m for m in msgs if m.startswith("[none] ok")]) == 1
+    assert [p for p, _ in failures] and all("[dfn3]" in e for _, e in failures)
+    m = {x["id"]: x for x in manifest(tmp)["variants"]}
+    assert m["dfn3"]["status"] == "failed" and m["none"]["status"] == "ok"
+
+
+def test_per_file_consumer_runs_units_as_markers_appear_out_of_order(env_sizes):
+    env = env_sizes
+    tmp = env[0]
+    clock = Clock()
+    fake = FileFake()
+    msgs = []
+    r, args, files = pf(env, fake, clock, "--layout", "default", "--stop-after", "asr",
+                        "--wait-signal", "separation", "--poll-seconds", "5", msgs=msgs)
+    steps = {1: [("dfn3", "a")], 2: [("none", "b")],
+             3: [(v, s) for v in ("none", "dfn3", "p3") for s in ("a", "b")]}
+    clock.hook = lambda n: [mark_ready(env, args, files, v, "separation", s) for v, s in steps.get(n, [])]
+    schedule_stop(r, files, "asr")
+    got = [(c[0], c[2][0][0]) for c in fake.calls]
+    assert got[:2] == [("dfn3", "a"), ("none", "b")]
+    assert got[2:] == [("none", "a"), ("dfn3", "b"), ("p3", "b"), ("p3", "a")]     # plan order, small file first
+    for vid in ("none", "dfn3", "p3"):
+        assert (tmp / "out" / vid / ".done").is_file() and not (tmp / "out" / vid / ".done.asr").exists()
+    assert len([m for m in msgs if m.startswith("[none] ok")]) == 1
+
+
+def test_per_file_consumer_honours_failed_stem_and_finishes_the_rest(env_sizes):
+    env = env_sizes
+    tmp = env[0]
+    fake = FileFake()
+    r, args, files = pf(env, fake, Clock(), "--layout", "default", "--stop-after", "asr",
+                        "--wait-signal", "separation", "--wait-timeout", "1")
+    for v in ("none", "dfn3", "p3"):
+        for s in ("a", "b"):
+            if (v, s) != ("none", "a"):
+                mark_ready(env, args, files, v, "separation", s)
+    (tmp / "out" / "none").mkdir(parents=True, exist_ok=True)
+    (tmp / "out" / "none" / ".failed_separation.a").write_text(json.dumps({"reason": "OOM in sidon"}))
+    schedule_stop(r, files, "asr")
+    assert ("none", ["a.wav"]) not in [(c[0], c[2]) for c in fake.calls]
+    assert ("none", ["b.wav"]) in [(c[0], c[2]) for c in fake.calls]
+    m = {x["id"]: x for x in manifest(tmp)["variants"]}
+    assert m["none"]["status"] == "failed" and "producer failed: OOM in sidon" in m["none"]["reason"]
+    assert m["dfn3"]["status"] == "ok"
+
+
+def test_per_file_timeout_fails_only_unsignalled_stems(env_sizes):
+    env = env_sizes
+    fake = FileFake()
+    r, args, files = pf(env, fake, Clock(), "--layout", "default", "--stop-after", "asr",
+                        "--wait-signal", "separation", "--wait-timeout", "1")
+    mark_ready(env, args, files, "none", "separation", "b")
+    schedule_stop(r, files, "asr")
+    assert [(c[0], c[2]) for c in fake.calls] == [("none", ["b.wav"])]
+    m = {x["id"]: x for x in manifest(env[0])["variants"]}
+    assert m["none"]["status"] == "failed" and "producer never signalled" in m["none"]["reason"]
+
+
+def test_per_file_noop_producer_passes_stems_through(env_sizes):
+    env = env_sizes
+    clock = Clock()
+    fake = FileFake()
+    r, args, files = pf(env, fake, clock, "--layout", "default", "--stop-after", "denoise_pre_separation",
+                        "--wait-signal", "diarization", "--signal", "denoise_pre_separation",
+                        "--poll-seconds", "5", "--wait-timeout", "2")
+    d = env[0] / "out" / "none"
+    seen = {}
+
+    def hook(n):
+        seen[n] = sorted(p.name for p in d.glob(".ready_denoise_pre_separation.*")) if d.exists() else []
+        if n == 1:
+            mark_ready(env, args, files, "none", "diarization", "b")       # the short file arrives first
+        if n == 3:
+            mark_ready(env, args, files, "none", "diarization", "a")
+    clock.hook = hook
+    schedule_stop(r, files, "denoise_pre_separation")
+    assert fake.calls == []
+    assert seen[1] == [] and seen[2] == [".ready_denoise_pre_separation.b"]
+    assert sorted(p.name for p in d.glob(".ready_denoise_pre_separation.*")) == [
+        ".ready_denoise_pre_separation.a", ".ready_denoise_pre_separation.b"]
+    assert (d / ".done.denoise_pre_separation").is_file()
+
+
+def test_per_file_all_noop_upstream_runs_files_at_once_small_first(env_sizes):
+    env = env_sizes
+    fake = FileFake()
+    r, args, files = pf(env, fake, Clock(), "--music", "off", "--layout", "default", "--stop-after", "diarization",
+                        "--wait-signal", "denoise", "--signal", "diarization", "--wait-timeout", "1")
+    schedule_stop(r, files, "diarization")
+    first = [(c[0], c[2]) for c in fake.calls][:2]
+    assert first == [("none", ["b.wav"]), ("none", ["a.wav"])]
+
+
+def test_per_file_resume_skips_finished_variants_and_reruns_unfinished_files(env_sizes):
+    env = env_sizes
+    tmp = env[0]
+    r, args, files = pf(env, FileFake(), Clock(), "--layout", "default", "--stop-after", "separation",
+                        "--signal", "separation")
+    schedule_stop(r, files, "separation")
+    fake2 = FileFake()
+    r2, _, files2 = pf(env, fake2, Clock(), "--layout", "default", "--stop-after", "separation",
+                       "--signal", "separation", "--resume")
+    assert r2.runnable() == [] and fake2.calls == []
+    # one variant lost its .done: it reruns all its files (checkpoints make that cheap), the others stay
+    (tmp / "out" / "dfn3" / ".done.separation").unlink()
+    fake3 = FileFake()
+    r3, _, files3 = pf(env, fake3, Clock(), "--layout", "default", "--stop-after", "separation",
+                       "--signal", "separation", "--resume")
+    schedule_stop(r3, files3, "separation")
+    assert [(c[0], c[2]) for c in fake3.calls] == [("dfn3", ["b.wav"]), ("dfn3", ["a.wav"])]
+    assert (tmp / "out" / "dfn3" / ".ready_separation.a").is_file()
+
+
+def test_per_file_manifest_merges_producer_and_consumer(env_sizes):
+    env = env_sizes
+    r, args, files = pf(env, FileFake(), Clock(), "--layout", "default", "--stop-after", "separation",
+                        "--signal", "separation")
+    schedule_stop(r, files, "separation")
+    c, cargs, cfiles = pf(env, FileFake(), Clock(), "--layout", "default", "--stop-after", "asr",
+                          "--wait-signal", "separation", "--wait-timeout", "1")
+    schedule_stop(c, cfiles, "asr")
+    m = {x["id"]: x for x in manifest(env[0])["variants"]}
+    assert [x["id"] for x in manifest(env[0])["variants"]][:3] == ["none", "dfn3", "p3"]
+    assert {m[v]["stop_after"] for v in ("none", "dfn3", "p3")} == {"asr"}
+
+
+def test_dry_run_lists_noop_stages_and_per_file(env, capsys):
+    tmp, audio, var = env
+    assert rr.main(["--audio-dir", str(audio), "--variants", str(var), "--out-root", str(tmp / "out"),
+                    "--dry-run", "--music", "off", "--per-file", "--stop-after", "denoise_pre_separation", "--signal",
+                    "denoise_pre_separation", "--wait-signal", "diarization"]) == 0
+    out = capsys.readouterr().out
+    assert "per-file: yes" in out
+    assert "no-op stages: denoise, denoise_pre_separation, denoise_pre_asr   (this process only hands it over)" in out
+    assert "waits for: diarization" in out

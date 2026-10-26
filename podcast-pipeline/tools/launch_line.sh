@@ -14,12 +14,14 @@
 #   JOBID=18790          Slurm job whose GPUs the processes use (default: $SLURM_JOB_ID). Required on a Slurm machine: each window runs
 #                        `srun --jobid=18790 --overlap --pty bash <script>`. Needed when this shell is outside the job
 #                        (nvidia-smi says "No devices were found"); leave unset inside an salloc/srun shell.
+#   PER_FILE=0           hand over file by file is on by default (--per-file: small files reach the next stage first);
+#                        PER_FILE=0 hands a variant over only when all its files are done
 #   DRY=1                write the six scripts and print them, start nothing
 #   FORCE=1              reuse a tmux session name / an OUT dir written under other settings
 set -euo pipefail
 
 if [ $# -lt 2 ]; then
-  sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 fi
 AUDIO=$(realpath "$1"); OUT=$(realpath -m "$2"); shift 2
@@ -31,6 +33,7 @@ VARIANTS=${VARIANTS:-tools/variants_placement.json}
 ENVNAME=${ENVNAME:-a100}
 SIDON_WORKERS=${SIDON_WORKERS:-2}
 DRY=${DRY:-0}
+PER_FILE=${PER_FILE:-1}
 FORCE=${FORCE:-0}
 # Inside a job shell Slurm already exports SLURM_JOB_ID; a tmux window does NOT inherit this shell's environment
 # when the tmux server was started elsewhere, so every window is sent into the job with srun regardless.
@@ -96,6 +99,7 @@ window_cmd() {
 CONDA_BASE=$(conda info --base 2>/dev/null || echo "$HOME/miniforge3")
 COMMON=(--audio-dir "$AUDIO" --variants "$VARIANTS" --out-root "$OUT" --env "$ENVNAME" --layout default
         --skip-bootstrap --resume "${EXTRA[@]}")
+[ "$PER_FILE" = 0 ] || COMMON+=(--per-file)
 
 for i in 0 1 2 3 4 5; do
   script="$LAUNCH_DIR/$((i + 1))_${NAMES[i]}.sh"

@@ -173,7 +173,8 @@ python tools/line_status.py <thư_mục_kết_quả>
 In một bảng: mỗi variant một dòng, mỗi cột là một lần bàn giao (`.ready_<bước>`): `ok 3m` là đã bàn giao cách đây 3 phút, `FAIL` là bước đó lỗi (lý do ở dưới bảng), `.` là chưa tới. Bên dưới là dòng log cuối của từng process,
 nên process nào đang chờ thì thấy nó chờ gì.
 
-Bàn giao theo **cả variant**: một process chỉ báo `.ready` khi xong **tất cả file** của variant đó ở bước của nó, nên file dài nhất (ví dụ 47 phút) quyết định lúc process kế tiếp bắt đầu.
+Không có `--per-file` (`PER_FILE=0`) thì bàn giao theo **cả variant**: một process chỉ báo `.ready` khi xong **tất cả file** của variant đó ở bước của nó, nên file dài nhất (ví dụ 47 phút) quyết định lúc process kế tiếp bắt đầu.
+Với `--per-file` (mặc định của `launch_line.sh`) ô bảng là `ok` khi mọi file đã có dấu, `2/3` khi mới có một phần, `FAIL` nếu có file lỗi (lý do liệt kê dưới bảng, kèm tên file); ô `-` là bước không có việc cho variant đó (xem dưới).
 Mã băm trong `.ready` bỏ qua các `--set performance.*` (đổi số worker không làm kết quả khác đi), nên mỗi process có thể có số worker riêng.
 
 ## Xoá cache của đúng các file này
@@ -195,3 +196,32 @@ Với từng cặp (variant, file) đọc thẳng trên đĩa: có `02_diarizati
 (lỗi nghĩa là bộ lọc đã rơi về audio gốc, khi đó variant đó không nói gì về bộ lọc); trạng thái trong `variants_manifest.json` là `ok`.
 Trả về 0 chỉ khi mọi thứ đủ; ngược lại liệt kê từng chỗ thiếu. Variant bị bỏ qua có chủ đích (`raw` khi `--music off`) được báo là skipped, không tính là thiếu.
 Bộ lọc không đổi gì (đầu ra giống hệt đầu vào) chỉ là cảnh báo.
+
+## Bỏ qua bước không có việc làm
+
+Dây chuyền: denoise (điểm 1 + nhạc) -> diarization -> denoise_pre_separation (điểm 2) -> separation -> denoise_pre_asr (điểm 3) -> asr.
+Ba bước denoise là no-op với variant không có chuỗi lọc ở điểm đó: `denoise` khi variant không có `chain` **và** `--music off` (với `--music profile` bước này bỏ nhạc nên là việc thật,
+trừ variant tự tắt cả hai `steps.music_*`), `denoise_pre_separation` khi `chain_pre_separation` rỗng, `denoise_pre_asr` khi `chain_pre_asr` rỗng. Các bước khác luôn là việc thật.
+
+- **Phía chờ:** process có `--wait-signal S` đợi bước thật gần nhất ở S hoặc trước S (đi lùi dọc dây chuyền) và dùng đúng bước đó cho cả tên dấu `.ready_<bước>` lẫn mã băm. Nếu đi lùi tới đầu mà toàn no-op thì variant sẵn sàng ngay, không cần dấu.
+  Ví dụ `l_p2` (không có chuỗi điểm 1, nhạc tắt) vào diarization ngay; `none` đi từ diarization thẳng vào separation, không chờ process denoise 2.
+- **Phía sản xuất:** process mà bước của chính nó (`--stop-after`) là no-op với variant **không gọi run_batch** (chỉ tốn công giải mã lại audio). Nó chờ như consumer bước thật phía trước, rồi ghi `.ready_<bước>` của mình,
+  `.done.<bước>` và mục manifest `ok` với lý do "nothing to do at this point", không chạy gì. Dấu vẫn đúng sự thật nên `line_status.py` vẫn thấy cả chuỗi. Các process sau bỏ qua dấu này vì nhìn thẳng bước thật trước đó.
+- `--dry-run` in, cho từng variant process sở hữu, các bước no-op và bước nó chờ.
+
+## `--per-file`: bàn giao từng file
+
+Mặc định tắt trong `run_variants_resident.py`; `tools/launch_line.sh` bật sẵn, `PER_FILE=0` để tắt.
+
+- Dấu theo (variant, file): `.ready_<bước>.<stem>` và `.failed_<bước>.<stem>` (cùng nội dung JSON: `hash, stop_after, time` / `reason, hash`). Không ghi dấu mức variant trong chế độ này. Mã băm là `variant_hash` như cũ.
+- Một process chạy **một file mỗi lần**: `run_batch(pipeline, vargs, config, [file])`, trong cùng một variant theo thứ tự **kích thước tăng dần** (file nhỏ đi trước để tới bước sau sớm).
+  Producer ghi `.ready_<bước>.<stem>` ngay khi file đó xong không lỗi, ngược lại ghi `.failed_<bước>.<stem>`; việc dọn checkpoint của file lỗi (đúng variant đó) vẫn làm theo từng file.
+- Consumer lấy (variant, file) đầu tiên theo thứ tự kế hoạch rồi tới thứ tự file mà dấu của bước thật phía trước đã sẵn sàng. Dấu `.failed_` của một file chỉ đánh dấu file đó lỗi ("producer failed: ...") mà không chạy; các file còn lại của variant vẫn chạy.
+  Variant được chốt (trạng thái, `.done*`, gộp manifest) đúng một lần khi mọi file đã chạy hoặc lỗi. `--wait-timeout` vẫn là thời gian rảnh liên tục, hết hạn thì các file chưa có tín hiệu bị ghi lỗi "producer never signalled".
+  Process no-op chuyển tiếp từng file: dấu của file nào xuất hiện ở phía trước thì dấu của nó được ghi ngay.
+- main có thể gọi scheduler nhiều lần (mỗi nhóm theo giờ); danh sách file đã thấy và lỗi của từng variant được giữ giữa các lần gọi.
+- **Resume (chọn cho đơn giản):** `.done*` hợp lệ của bước đó thì bỏ qua cả variant (các dấu theo file giữ nguyên, và được ghi lại nếu thiếu). Không có `.done*` thì **chạy lại tất cả file** của variant; trước mỗi file, dấu `.ready/.failed` cũ của file đó bị xoá.
+  Nhờ checkpoint nên chạy lại rẻ, nhưng dấu của file đã xong sẽ biến mất rồi hiện lại, và process phía sau có thể chạy lại file đó nếu nó vẫn đang chạy.
+- Variant `degraded` (bộ lọc rơi về audio gốc) và không có `--accept-degraded`: mọi dấu `.ready` theo file của nó bị thay bằng `.failed`.
+- **Đánh đổi:** chạy từng file làm mất song song giữa các file trong một lượt (ví dụ hàng đợi ASR cross-file `files_in_flight` chỉ còn một file). Muốn song song thì dùng `--shard K/N` trên process đó: song song theo variant thay vì theo file.
+- `clean_variant_cache.py` đã xoá các dấu theo file (glob `.ready_*`, `.failed_*`); `verify_line.py` đọc kết quả trên đĩa nên không cần xử lý dấu.

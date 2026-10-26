@@ -81,6 +81,11 @@ STAGE_ORDER = ("input_quality", "music", "denoise", "diarization",
 POINT_STAGE = (("chain", "denoise"), ("chain_pre_separation", "denoise_pre_separation"),
                ("chain_pre_asr", "denoise_pre_asr"))
 
+# The 6-process line, in order. A stage with nothing to do for a variant is skipped (see is_noop).
+LINE = ("denoise", "diarization", "denoise_pre_separation", "separation", "denoise_pre_asr", "asr")
+MUSIC_KEYS = ("steps.music_analysis", "steps.music_removal")
+NOOP_NOTE = "nothing to do at this point"
+
 # pipeline.* keys read while main() builds the services: they cannot change per variant.
 BUILD_TIME_PIPELINE_KEYS = frozenset({
     "ASRMoE", "bss", "separator", "lang", "prefetch_workers", "dia3", "keep_models", "by_stage",
@@ -168,6 +173,40 @@ def reached_variant(variant, stop):
     return out
 
 
+def music_active(variant, music="off"):
+    """Whether the music stage does real work for this variant (analysis or removal switched on)."""
+    sets = variant.get("set") or {}
+    vals = [sets[k] for k in MUSIC_KEYS if k in sets]
+    if music == "off":                      # --music off forces both off; only the variant's own set can undo it
+        return any(vals)
+    return not (len(vals) == len(MUSIC_KEYS) and not any(vals))
+
+
+def is_noop(variant, stage, music="off"):
+    """Stage of the line that has nothing to do for this variant (the others are always real work)."""
+    if stage == "denoise":
+        return not variant.get("chain") and not music_active(variant, music)
+    if stage == "denoise_pre_separation":
+        return not variant.get("chain_pre_separation")
+    if stage == "denoise_pre_asr":
+        return not variant.get("chain_pre_asr")
+    return False
+
+
+def noop_stages(variant, music="off"):
+    return [st for st in LINE if is_noop(variant, st, music)]
+
+
+def effective_stage(variant, stage, music="off"):
+    """Nearest stage at or before `stage` that is real work for the variant; None = the whole line up to it is a no-op."""
+    if stage not in LINE:
+        return stage
+    for st in reversed(LINE[:LINE.index(stage) + 1]):
+        if not is_noop(variant, st, music):
+            return st
+    return None
+
+
 def plan_ownership(variants, skipped, shard):
     """Ids this process owns: plan entries (after skips) whose index % N == K-1."""
     k, n = shard
@@ -241,6 +280,9 @@ class ResidentRunner:
         self.poll_seconds = float(getattr(args, "poll_seconds", 15.0))
         self.wait_timeout = float(getattr(args, "wait_timeout", 0.0))
         self.owned = plan_ownership(variants, set(self.reasons), getattr(args, "shard", (1, 1)))
+        self.per_file = bool(getattr(args, "per_file", False))
+        self.music = getattr(args, "music", "off")
+        self.notes = {}                  # short reasons shown in the manifest for variants that are fine
         # A producer's resume marker is its own, so it never makes the consumer think the variant is done.
         self.done_name = f"{rv().DONE_MARKER}.{args.stop_after}" if self.signal else rv().DONE_MARKER
 
@@ -269,7 +311,7 @@ class ResidentRunner:
                 for v in mine:
                     os.symlink((out / v["id"]).resolve(), Path(scratch) / v["id"])
                 r.write_manifest(scratch, mine, set(self.stems), self.status, self.reference,
-                                 self.reasons, self.reports)
+                                 {**self.notes, **self.reasons}, self.reports)
                 new = json.loads((Path(scratch) / r.MANIFEST_NAME).read_text(encoding="utf-8"))
             for e in new["variants"]:
                 e["stop_after"] = stop
@@ -304,14 +346,15 @@ class ResidentRunner:
         return "ok"
 
     # -- handoff markers between processes
-    def _signal_path(self, vid, kind, stage):
-        return self.out_root / vid / f".{kind}_{stage}"
+    def _signal_path(self, vid, kind, stage, stem=None):
+        return self.out_root / vid / (f".{kind}_{stage}" + (f".{stem}" if stem else ""))
 
-    def _write_signal(self, v, ok, reason=None):
-        """Producer: .ready_<stage> (hash of the settings the consumer will recompute) or .failed_<stage>."""
+    def _write_signal(self, v, ok, reason=None, stem=None):
+        """Producer: .ready_<stage>[.<stem>] (hash of the settings the consumer recomputes) or .failed_<stage>[.<stem>]."""
         stage, vid = self.signal, v["id"]
         digest = variant_hash(v, self.args, self.files, stop_after=stage)
-        ready, failed = self._signal_path(vid, "ready", stage), self._signal_path(vid, "failed", stage)
+        ready = self._signal_path(vid, "ready", stage, stem)
+        failed = self._signal_path(vid, "failed", stage, stem)
         ready.parent.mkdir(parents=True, exist_ok=True)
         if ok:
             failed.unlink(missing_ok=True)
@@ -321,13 +364,23 @@ class ResidentRunner:
             ready.unlink(missing_ok=True)
             failed.write_text(json.dumps({"reason": reason or "failed", "hash": digest}))
 
-    def _signal_state(self, v):
-        """Consumer: ("ready", None), ("failed", reason) or (None, None) for what the producer left."""
-        stage, vid = self.wait_signal, v["id"]
+    def _write_signals(self, v, ok, reason=None):
+        for stem in (self.stems if self.per_file else [None]):
+            self._write_signal(v, ok, reason, stem)
+
+    def _signal_state(self, v, stem=None):
+        """Consumer: ("ready", None), ("failed", reason) or (None, None) for what the producer left.
+
+        The stage looked at is the nearest one before this process that is real work for the variant; when the
+        whole line up to here is a no-op the variant is ready at once.
+        """
+        stage, vid = effective_stage(v, self.wait_signal, self.music), v["id"]
+        if stage is None:
+            return "ready", None
         digest = variant_hash(v, self.args, self.files, stop_after=stage)
         for kind in ("failed", "ready"):
             try:
-                data = json.loads(self._signal_path(vid, kind, stage).read_text())
+                data = json.loads(self._signal_path(vid, kind, stage, stem).read_text())
             except (OSError, ValueError):
                 continue
             if kind == "failed" and data.get("hash") in (None, digest):
@@ -359,7 +412,7 @@ class ResidentRunner:
                         self.status[vid] = self._assess(v)
                         self.finalized.add(vid)
                         if self.signal and (self.status[vid] == "ok" or self.args.accept_degraded):
-                            self._write_signal(v, True)
+                            self._write_signals(v, True)
                 except (ValueError, OSError):
                     pass
         self._manifest()
@@ -378,10 +431,15 @@ class ResidentRunner:
             state = self._assess(v)
         kept = state == "ok" or (state == "degraded" and self.args.accept_degraded)
         if kept:
+            (self.out_root / vid).mkdir(parents=True, exist_ok=True)     # a no-op stage ran nothing, so no dir yet
             (self.out_root / vid / self.done_name).write_text(json.dumps(
                 {"hash": variant_hash(v, self.args, self.files), "exit": 0, "status": state}))
         if self.signal:
-            self._write_signal(v, kept, self.reasons.get(vid) or "degraded: the filter fell back to unfiltered audio")
+            why = self.reasons.get(vid) or "degraded: the filter fell back to unfiltered audio"
+            if not self.per_file:
+                self._write_signal(v, kept, why)
+            elif state == "degraded" and not kept:    # per-file: ready markers went out as each file finished
+                self._write_signals(v, False, why)    # the filter did not run: nothing of this variant is handed on
         self.status[vid] = state
         self.finalized.add(vid)
         self.say(f"[{vid}] {state.upper() if state != 'ok' else 'ok'} "
@@ -413,79 +471,139 @@ class ResidentRunner:
             except Exception as exc:
                 self.say(f"[{vargs.job_id}] could not clear partial output of {Path(path).name}: {exc}")
 
-    def _run_variant(self, v, pipeline, args, config, group, logger, stages):
-        """One variant over one group of files. Returns [(path, error)] for main."""
+    def own_noop(self, v):
+        """True when this process's own stage has nothing to do for v: it only hands the variant over."""
+        return self.args.stop_after in LINE and is_noop(v, self.args.stop_after, self.music)
+
+    def _units(self, v, group):
+        """What to hand to run_batch for v: the whole group, or (per-file) one file at a time, small first."""
+        if not self.per_file:
+            return [list(group)]
+        todo = [p for p in group if Path(p).stem not in self.seen.get(v["id"], set())]
+
+        def size(p):
+            try:
+                return (Path(p).stat().st_size, Path(p).name)
+            except OSError:
+                return (0, Path(p).name)
+        return [[p] for p in sorted(todo, key=size)]
+
+    def _stem_of(self, unit):
+        return Path(unit[0]).stem if self.per_file else None
+
+    def _run_variant(self, v, pipeline, args, config, paths, logger, stages):
+        """One variant over `paths` (a whole group, or one file when per-file). Returns [(path, error)] for main."""
         vid = v["id"]
         say = logger.info if logger is not None else self.say
+        noop = self.own_noop(v)
+        stem = self._stem_of(paths)
         if vid not in self.seen:           # first time this process starts it: drop what an earlier run left
             (self.out_root / vid / self.done_name).unlink(missing_ok=True)
-            if self.signal:
+            if self.signal and not self.per_file:
                 for kind in ("ready", "failed"):
                     self._signal_path(vid, kind, self.signal).unlink(missing_ok=True)
+        if self.signal and self.per_file:
+            for kind in ("ready", "failed"):
+                self._signal_path(vid, kind, self.signal, stem).unlink(missing_ok=True)
         vargs = copy.copy(args)
         for key, val in variant_overrides(v, self.args.stop_after, self.out_root).items():
             setattr(vargs, key, val)
         grp = f" group={v['group']}" if v.get("group") else ""
-        say(f"[{vid}] start{grp}: {len(group)} file(s), denoise={vargs.denoise} "
-            f"pre_separation={vargs.denoise_pre_separation} pre_asr={vargs.denoise_pre_asr}")
         t0 = time.time()
-        try:
-            found = self.run_batch(pipeline, vargs, config, group, logger=logger) \
-                if stages is None else \
-                self.run_batch(pipeline, vargs, config, group, logger=logger, stages=stages)
-            found = list(found or [])
-        except Exception as exc:  # one variant must never stop the others
-            self.crashed[vid] = f"{type(exc).__name__}: {exc}"
-            found = [(p, f"[{vid}] {self.crashed[vid]}") for p in group]
-            say(f"[{vid}] runner error: {self.crashed[vid]}")
-        finally:
-            reset_between_variants(pipeline, group)
-        self._discard_failed(pipeline, vargs, found, logger, crashed=vid in self.crashed)
+        crashed_here = False
+        if noop:
+            say(f"[{vid}] {self.args.stop_after}: {NOOP_NOTE}; handing over {len(paths)} file(s)")
+            found = []
+            self.notes[vid] = NOOP_NOTE
+        else:
+            say(f"[{vid}] start{grp}: {len(paths)} file(s), denoise={vargs.denoise} "
+                f"pre_separation={vargs.denoise_pre_separation} pre_asr={vargs.denoise_pre_asr}")
+            try:
+                found = self.run_batch(pipeline, vargs, config, paths, logger=logger) \
+                    if stages is None else \
+                    self.run_batch(pipeline, vargs, config, paths, logger=logger, stages=stages)
+                found = list(found or [])
+            except Exception as exc:  # one variant must never stop the others
+                err = f"{type(exc).__name__}: {exc}"
+                found = [(p, f"[{vid}] {err}") for p in paths]
+                crashed_here = True
+                if not self.per_file:    # per-file: only this file is lost
+                    self.crashed[vid] = err
+                say(f"[{vid}] runner error: {err}")
+            finally:
+                reset_between_variants(pipeline, paths)
+        self._discard_failed(pipeline, vargs, found, logger, crashed=crashed_here or vid in self.crashed)
         self.elapsed[vid] = self.elapsed.get(vid, 0) + time.time() - t0
         self.failures.setdefault(vid, []).extend(found)
-        self.seen.setdefault(vid, set()).update(Path(p).stem for p in group)
-        say(f"[{vid}] end of this group after {time.time() - t0:.0f}s ({len(found)} failure(s))")
+        self.seen.setdefault(vid, set()).update(Path(p).stem for p in paths)
+        if self.signal and self.per_file:
+            if found:
+                self._write_signal(v, False, str(found[0][1]), stem)
+            else:
+                self._write_signal(v, True, stem=stem)
+        say(f"[{vid}] end of this {'file' if self.per_file else 'group'} after {time.time() - t0:.0f}s "
+            f"({len(found)} failure(s))")
         if self.crashed.get(vid) or set(self.stems) <= self.seen[vid]:
             self._finish_variant(v)
         return [(p, e if str(e).startswith(f"[{vid}]") else f"[{vid}] {e}") for p, e in found]
 
-    def _producer_failed(self, v, group, reason, say):
+    def _unit_failed(self, v, unit, reason, say):
+        """The upstream process failed (or never signalled) for this unit: record it without running."""
         vid = v["id"]
-        self.crashed[vid] = f"producer failed: {reason}"
-        say(f"[{vid}] {self.crashed[vid]}")
-        self._finish_variant(v)
-        return [(p, f"[{vid}] {self.crashed[vid]}") for p in group]
+        text = reason
+        if not self.per_file:
+            self.crashed[vid] = text
+            say(f"[{vid}] {text}")
+            self._finish_variant(v)
+            return [(p, f"[{vid}] {text}") for p in unit]
+        say(f"[{vid}] {Path(unit[0]).name}: {text}")
+        self.failures.setdefault(vid, []).extend((p, f"[{vid}] {text}") for p in unit)
+        self.seen.setdefault(vid, set()).update(Path(p).stem for p in unit)
+        if self.signal:
+            self._write_signal(v, False, text, self._stem_of(unit))
+        if set(self.stems) <= self.seen[vid]:
+            self._finish_variant(v)
+        return [(p, f"[{vid}] {text}") for p in unit]
 
     def _consume(self, pipeline, args, config, group, logger, stages, say):
-        """Run variants as their producer signals them, not in plan order; wait while none is ready."""
-        failures, pending, announced = [], [v for v in self.runnable() if v["id"] not in self.crashed], False
+        """Run units as their upstream stage signals them, not in plan order; wait while none is ready."""
+        failures, announced = [], False
         idle_since = self.clock()
-        while pending:
-            pick = None
-            for v in list(pending):
-                state, why = self._signal_state(v)
-                if state == "failed":
-                    pending.remove(v)
-                    failures += self._producer_failed(v, group, why, say)
-                elif state == "ready" and pick is None:
-                    pick = v
-            if pick is not None:
-                pending.remove(pick)
-                say(f"[{pick['id']}] ready (.ready_{self.wait_signal}); starting")
-                failures += self._run_variant(pick, pipeline, args, config, group, logger, stages)
-                idle_since, announced = self.clock(), False
-                continue
+        while True:
+            pending = [(v, u) for v in self.runnable() if v["id"] not in self.crashed
+                       for u in self._units(v, group)]
             if not pending:
                 break
+            pick, dead = None, []
+            for v, unit in pending:
+                state, why = self._signal_state(v, self._stem_of(unit))
+                if state == "failed":
+                    dead.append((v, unit, why))
+                elif state == "ready" and pick is None:
+                    pick = (v, unit)
+            if dead:
+                for v, unit, why in dead:
+                    if v["id"] not in self.finalized:
+                        failures += self._unit_failed(v, unit, f"producer failed: {why}", say)
+                idle_since = self.clock()
+                continue
+            if pick is not None:
+                v, unit = pick
+                eff = effective_stage(v, self.wait_signal, self.music)
+                say(f"[{v['id']}] ready" + (f" (.ready_{eff})" if eff else " (nothing upstream)")
+                    + (f" {Path(unit[0]).name}" if self.per_file else "") + "; starting")
+                failures += self._run_variant(v, pipeline, args, config, unit, logger, stages)
+                idle_since, announced = self.clock(), False
+                continue
             if self.wait_timeout and self.clock() - idle_since >= self.wait_timeout * 60:
-                for v in pending:
-                    self.crashed[v["id"]] = "producer never signalled"
-                    say(f"[{v['id']}] producer never signalled (waited {self.wait_timeout:g} min)")
-                    self._finish_variant(v)
-                    failures += [(p, f"[{v['id']}] producer never signalled") for p in group]
+                for v, unit in pending:
+                    if v["id"] not in self.finalized:
+                        say(f"[{v['id']}] producer never signalled (waited {self.wait_timeout:g} min)")
+                        failures += self._unit_failed(v, unit, "producer never signalled", say)
                 break
             if not announced:
-                say(f"waiting for .ready_{self.wait_signal} of: " + ", ".join(v["id"] for v in pending))
+                names = sorted({v["id"] for v, _ in pending})
+                say(f"waiting for the upstream .ready_ marker of: " + ", ".join(names))
                 announced = True
             self.sleep(self.poll_seconds)
         return failures
@@ -503,8 +621,12 @@ class ResidentRunner:
             return self._consume(pipeline, args, config, group, logger, stages, say)
         failures = []
         for v in self.runnable():
-            if v["id"] not in self.crashed:
-                failures += self._run_variant(v, pipeline, args, config, group, logger, stages)
+            if v["id"] in self.crashed:
+                continue
+            for unit in self._units(v, group):
+                failures += self._run_variant(v, pipeline, args, config, unit, logger, stages)
+                if v["id"] in self.crashed:
+                    break
         return failures
 
 
@@ -607,6 +729,9 @@ def parse_args(argv=None):
     p.add_argument("--poll-seconds", type=float, default=15.0, dest="poll_seconds")
     p.add_argument("--wait-timeout", type=float, default=0.0, dest="wait_timeout", metavar="MINUTES",
                    help="consumer: give up on variants nobody signalled after this idle time (0 = never)")
+    p.add_argument("--per-file", action="store_true", dest="per_file",
+                   help="hand over file by file: one run_batch call per (variant, file), small files first, markers "
+                        ".ready_<stage>.<stem>; a long file no longer holds back the short ones")
     p.add_argument("--minutes-per-file-run", type=float, default=20.0, help=argparse.SUPPRESS)
     args = p.parse_args(argv)
     if args.mode == "overlap":
@@ -646,7 +771,8 @@ def print_dry_run(args, variants, files, skipped):
     owned = plan_ownership(variants, skipped, args.shard)
     print(f"\nrole: {role_of(args)}   shard: {args.shard[0]}/{args.shard[1]}   "
           f"signal: {args.signal or '-'}   wait-signal: {args.wait_signal or '-'}"
-          + (f" (poll {args.poll_seconds:g}s, timeout {args.wait_timeout:g} min)" if args.wait_signal else ""))
+          + (f" (poll {args.poll_seconds:g}s, timeout {args.wait_timeout:g} min)" if args.wait_signal else "")
+          + f"   per-file: {'yes' if args.per_file else 'no'}")
     print("this process owns: " + (", ".join(v["id"] for v in variants if v["id"] in owned) or "nothing"))
     input_dir = Path(args.out_root) / RESIDENT_DIR / "input_<timestamp>"
     print("\nmain.py argv (one process, models kept):")
@@ -661,6 +787,11 @@ def print_dry_run(args, variants, files, skipped):
             continue
         print(f"  [{v['id']}] " + json.dumps(variant_overrides(v, args.stop_after, args.out_root),
                                               ensure_ascii=False))
+        idle = noop_stages(v, args.music)
+        print(f"      no-op stages: {', '.join(idle) if idle else '-'}"
+              + ("   (this process only hands it over)" if args.stop_after in idle else "")
+              + (f"   waits for: {effective_stage(v, args.wait_signal, args.music) or 'nothing (ready at once)'}"
+                 if args.wait_signal else ""))
 
 
 def run_sequential(args, variants, files, skipped):

@@ -50,3 +50,12 @@ def test_out_root_clears_markers_and_stem_outputs_but_not_other_files(tmp_path):
     left = sorted(p.name for p in (out / "v1").iterdir())
     assert left == ["keep.txt"]                              # markers and the <stem> folder went, the rest stayed
     assert not (out / "variants_manifest.json").exists() and (out / "other_variant").is_dir()
+
+
+def test_per_file_markers_are_cleared_too(tmp_path):
+    audio, var, cache, out = make(tmp_path)
+    for m in (".ready_separation.a", ".ready_denoise_pre_asr.ep.final", ".failed_diarization.b"):
+        (out / "v1" / m).write_text("{}")
+    clean.main(["--audio-dir", str(audio), "--variants", str(var), "--cache-dir", str(cache),
+                "--out-root", str(out), "--delete"])
+    assert sorted(p.name for p in (out / "v1").iterdir()) == ["keep.txt"]
