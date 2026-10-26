@@ -293,14 +293,14 @@ DATA.variants.forEach((v, vi) => {
     m.textContent = v.missing; block.appendChild(m); }
   const pk = decode(v.peaks);
   const colorOf = {}; speakers.forEach((spk, si) => { colorOf[spk] = COLORS[si % COLORS.length]; });
-  const addLane = (kind, label, color, segs) => {
+  const addLane = (kind, label, color, segs, leftover) => {
     const lane = document.createElement("div"); lane.className = "lane " + kind;
     const name = document.createElement("div"); name.className = "lname";
     name.innerHTML = label;
     const cv = document.createElement("canvas");
     cv.style.height = (kind === "wave" ? WAVE_H : TEXT_H) + "px";
     lane.append(name, cv); block.appendChild(lane);
-    const L = {cv, kind, segs, pk, color, colorOf, speakers, vi};
+    const L = {cv, kind, segs, pk, color, colorOf, speakers, vi, leftover: !!leftover};
     lanes.push(L);
     cv.addEventListener("mousedown", e => { if (e.button) return; drag = {x0: e.offsetX, cv, vi}; e.preventDefault(); });
     cv.addEventListener("mousemove", e => hover(L, e.offsetX));
@@ -310,6 +310,8 @@ DATA.variants.forEach((v, vi) => {
     if (pk) addLane("wave", `<i style="background:${colorOf[spk]}"></i>${esc(spk)}`, colorOf[spk], mine);
     addLane("text", pk ? "chữ ASR" : `<i style="background:${colorOf[spk]}"></i>${esc(spk)}`, colorOf[spk], mine);
   });
+  // what the waveform holds outside every ASR segment: noise, music, or speech nobody was assigned
+  if (pk) addLane("wave", `<i style="background:var(--warn)"></i>không thuộc ai`, null, v.segments || [], true);
   wrap.appendChild(block);
   let a = null;
   if (v.audio) { a = new Audio(); a.preload = "none"; a.src = v.audio;
@@ -358,7 +360,7 @@ function setZoom(){
 
 function draw(){
   const w = viewW(), dpr = window.devicePixelRatio || 1;
-  const faint = col("--faint"), ink = col("--ink"), mute = col("--mute"), line = col("--line"), play = col("--play");
+  const faint = col("--faint"), ink = col("--ink"), mute = col("--mute"), line = col("--line"), play = col("--play"), warn = col("--warn");
   for (const L of lanes) {
     if (!vis[L.vi]) continue;
     const cv = L.cv, h = cv.clientHeight;
@@ -374,9 +376,9 @@ function draw(){
         for (const sg of L.segs) { if (sg.e < t0 || sg.s > t1) continue;
           const x0 = Math.max(0, Math.floor((sg.s - t0) * pxPerSec)), x1 = Math.min(w, Math.ceil((sg.e - t0) * pxPerSec));
           for (let x = x0; x < x1; x++) mine[x] = 1; }
-        g.fillStyle = L.color;
+        g.fillStyle = L.leftover ? warn : L.color;
         for (let x = 0; x < w; x++) {
-          if (!mine[x]) continue;
+          if (L.leftover ? mine[x] : !mine[x]) continue;
           const ta = t0 + x / pxPerSec, tb = ta + 1 / pxPerSec;
           let i0 = Math.floor(ta * PPS_DATA), i1 = Math.max(i0 + 1, Math.ceil(tb * PPS_DATA)), m = 0;
           if (i0 >= L.pk.length) break;
@@ -433,7 +435,8 @@ function showSel(){
 }
 function hover(L, x){
   const t = xToT(L.cv, x), s = L.segs.find(s => t >= s.s && t <= s.e);
-  if (!s) return;
+  if (!s) { if (L.leftover) { detail.className = ""; detail.innerHTML =
+    `<b>${esc(DATA.variants[L.vi].id)}</b> · ${fmt(t)}: không thuộc đoạn ASR nào`; } return; }
   const v = DATA.variants[L.vi];
   detail.className = "";
   detail.innerHTML = `<b>${esc(v.id)}</b> · ${esc(s.spk)} · ${fmt(s.s)}–${fmt(s.e)}: ${esc(s.t)}`;

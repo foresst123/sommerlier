@@ -145,3 +145,9 @@ def test_ctrl_wheel_zoom_is_anchored_at_the_pointer(tmp_path):
     manifest, out = _plan(tmp_path)
     page = lanes.render(lanes.build_page_data(manifest, "ep1", str(out / "lanes")))
     assert "function applyPx" in page and "e.ctrlKey || e.metaKey" in page and 'document.addEventListener("wheel"' in page
+
+
+def test_page_draws_the_waveform_that_belongs_to_no_speaker(tmp_path):
+    manifest, out = _plan(tmp_path)
+    page = lanes.render(lanes.build_page_data(manifest, "ep1", str(out / "lanes")))
+    assert "không thuộc ai" in page and "leftover" in page
