@@ -138,6 +138,12 @@ Script ghi 6 file lệnh vào `<OUT>/_resident/launch/`, mỗi process một c�
 Mỗi process tự `conda activate som`, `source tools/denoise_env.sh`, đặt `CUDA_VISIBLE_DEVICES` rồi chạy đúng tham số của nó.
 Dừng: `tmux kill-session -t line`; chạy lại đúng lệnh cũ thì `--resume` làm tiếp.
 
+**Trong Slurm:** nếu shell của bạn nằm ngoài job (`nvidia-smi` báo `No devices were found`) thì phải đặt `JOBID`, mỗi cửa sổ khi đó chạy `srun --jobid=<JOBID> --overlap --pty bash <file lệnh>`:
+```bash
+JOBID=18790 bash tools/launch_line.sh <thư_mục_audio> <thư_mục_kết_quả_MỚI>
+```
+Không đặt `JOBID` mà shell không thấy GPU thì script từ chối chạy (tránh để các bộ lọc rơi về audio gốc rồi lưu vào cache).
+
 Biến môi trường chỉnh được: `GPUS="0 0 1 1 0 1"` (GPU của process 1..6; mặc định chia đều theo ước lượng VRAM, **chưa đo**),
 `SIDON_WORKERS=2` (profile đặt 3; ít worker hơn thì dùng ít VRAM hơn), `SESSION`, `CONDA_ENV`, `VARIANTS`, `ENVNAME`,
 `DRY=1` (chỉ ghi file lệnh, không chạy), `FORCE=1`. Đối số thêm sau `OUT` được chuyển cho cả 6 process, ví dụ

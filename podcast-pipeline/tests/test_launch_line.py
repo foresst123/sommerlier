@@ -76,3 +76,30 @@ def test_an_out_dir_made_with_music_on_is_refused(tmp_path):
 def test_usage_without_arguments():
     r = subprocess.run(["bash", str(SCRIPT)], capture_output=True, text=True)
     assert r.returncode == 2 and "launch_line.sh AUDIO_DIR OUT_DIR" in r.stdout
+
+
+def test_jobid_wraps_every_window_in_srun(tmp_path):
+    r, d = launch(tmp_path, env={"JOBID": "18790"})
+    assert r.returncode == 0, r.stderr
+    windows = [l for l in r.stdout.splitlines() if l.startswith("== window")]
+    assert len(windows) == 6
+    for w in windows:
+        assert "srun --jobid=18790 --overlap --pty bash " in w and w.endswith("; exec bash")
+    r, d = launch(tmp_path, out="plain")
+    assert all("srun" not in l for l in r.stdout.splitlines() if l.startswith("== window"))
+
+
+def test_jobid_must_be_a_number(tmp_path):
+    r, _ = launch(tmp_path, env={"JOBID": "abc; rm"}, out="bad")
+    assert r.returncode == 2 and "number" in r.stderr
+
+
+def test_a_shell_without_gpu_is_refused_unless_told_otherwise(tmp_path):
+    audio = tmp_path / "audio"; audio.mkdir()
+    fake = tmp_path / "bin"; fake.mkdir()
+    (fake / "nvidia-smi").write_text("#!/bin/sh\necho 'No devices were found'; exit 9\n")
+    (fake / "nvidia-smi").chmod(0o755)
+    (fake / "tmux").write_text("#!/bin/sh\nexit 1\n"); (fake / "tmux").chmod(0o755)   # no session, never started
+    env = {**os.environ, "PATH": f"{fake}:{os.environ['PATH']}"}
+    r = subprocess.run(["bash", str(SCRIPT), str(audio), str(tmp_path / "o")], capture_output=True, text=True, env=env)
+    assert r.returncode == 6 and "JOBID=" in r.stderr

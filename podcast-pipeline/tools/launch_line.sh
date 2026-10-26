@@ -11,12 +11,15 @@
 #   SIDON_WORKERS=2      Sidon workers on the separation GPU (the profile says 3; fewer = less VRAM)
 #   SESSION=line         tmux session name           CONDA_ENV=som   conda env to activate
 #   VARIANTS=tools/variants_placement.json           ENVNAME=a100   profile
+#   JOBID=18790          Slurm job whose GPUs the processes use: each window runs
+#                        `srun --jobid=18790 --overlap --pty bash <script>`. Needed when this shell is outside the job
+#                        (nvidia-smi says "No devices were found"); leave unset inside an salloc/srun shell.
 #   DRY=1                write the six scripts and print them, start nothing
 #   FORCE=1              reuse a tmux session name / an OUT dir written under other settings
 set -euo pipefail
 
 if [ $# -lt 2 ]; then
-  sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 fi
 AUDIO=$(realpath "$1"); OUT=$(realpath -m "$2"); shift 2
@@ -29,6 +32,7 @@ ENVNAME=${ENVNAME:-a100}
 SIDON_WORKERS=${SIDON_WORKERS:-2}
 DRY=${DRY:-0}
 FORCE=${FORCE:-0}
+JOBID=${JOBID:-}
 read -r -a GPU <<< "${GPUS:-0 0 1 1 0 1}"
 
 NAMES=(p1_denoise1 p2_diarization p3_denoise2 p4_separation p5_denoise3 p6_asr)
@@ -61,6 +65,26 @@ if [ "$DRY" != 1 ] && tmux has-session -t "$SESSION" 2>/dev/null && [ "$FORCE" !
   exit 4
 fi
 
+# Without a job the windows inherit this shell, and a shell outside the Slurm job sees no GPU: the denoise
+# backends then fall back to the unfiltered audio and that result is cached. Refuse instead of starting.
+if [ "$DRY" != 1 ] && [ -z "$JOBID" ] && [ "${NO_GPU_CHECK:-0}" != 1 ]; then
+  if ! command -v nvidia-smi >/dev/null || ! nvidia-smi -L >/dev/null 2>&1; then
+    echo "This shell sees no GPU. Run it as:  JOBID=<slurm job id> bash tools/launch_line.sh ...   (NO_GPU_CHECK=1 to skip)" >&2
+    exit 6
+  fi
+fi
+case "$JOBID" in ''|*[!0-9]*) [ -z "$JOBID" ] || { echo "JOBID must be a number, got: $JOBID" >&2; exit 2; };; esac
+
+# What a tmux window runs for process i.
+window_cmd() {
+  local script=$1
+  if [ -n "$JOBID" ]; then
+    printf 'srun --jobid=%s --overlap --pty bash %q; exec bash' "$JOBID" "$script"
+  else
+    printf 'bash %q; exec bash' "$script"
+  fi
+}
+
 CONDA_BASE=$(conda info --base 2>/dev/null || echo "$HOME/miniforge3")
 COMMON=(--audio-dir "$AUDIO" --variants "$VARIANTS" --out-root "$OUT" --env "$ENVNAME" --layout default
         --skip-bootstrap --resume "${EXTRA[@]}")
@@ -84,7 +108,11 @@ for i in 0 1 2 3 4 5; do
 done
 
 if [ "$DRY" = 1 ]; then
-  for f in "$LAUNCH_DIR"/*.sh; do echo "== $f"; sed -n '4,$p' "$f"; done
+  for i in 0 1 2 3 4 5; do
+    f="$LAUNCH_DIR/$((i + 1))_${NAMES[i]}.sh"
+    echo "== window ${NAMES[i]}: $(window_cmd "$f")"
+    sed -n '4,$p' "$f"
+  done
   exit 0
 fi
 
@@ -93,12 +121,12 @@ command -v tmux >/dev/null || { echo "tmux not found; run the scripts in $LAUNCH
 for i in 0 1 2 3 4 5; do
   script="$LAUNCH_DIR/$((i + 1))_${NAMES[i]}.sh"
   if [ "$i" -eq 0 ]; then
-    tmux new-session -d -s "$SESSION" -n "${NAMES[i]}" "bash $(printf '%q' "$script"); exec bash"
+    tmux new-session -d -s "$SESSION" -n "${NAMES[i]}" "$(window_cmd "$script")"
   else
-    tmux new-window -t "$SESSION" -n "${NAMES[i]}" "bash $(printf '%q' "$script"); exec bash"
+    tmux new-window -t "$SESSION" -n "${NAMES[i]}" "$(window_cmd "$script")"
   fi
 done
-echo "started 6 processes in tmux session '$SESSION' (GPUs: ${GPU[*]})"
+echo "started 6 processes in tmux session '$SESSION' (GPUs: ${GPU[*]}${JOBID:+, Slurm job $JOBID})"
 echo "  watch:   tmux attach -t $SESSION        (Ctrl+B then n / p to switch windows, Ctrl+B then D to leave)"
 echo "  logs:    $OUT/_resident/logs/"
 echo "  stop:    tmux kill-session -t $SESSION  (re-run this command later: --resume continues)"
