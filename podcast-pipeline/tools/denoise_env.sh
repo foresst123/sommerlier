@@ -35,6 +35,22 @@ _dn_find_dir() {   # first folder holding file $1 (and download_checks.json, whi
   [ -n "$f" ] && dirname "$f"
 }
 
+# --- 1. what the Denoise Lab exports in its jobs (tools/lab_env.py): shell > candidate paths ----------
+# Same resolution as the "[lab] env set: ..." line of a lab job, so a machine the lab already works on
+# needs nothing else. Variables already set in this shell are kept.
+if [ -f tools/lab_env.py ]; then
+  eval "$(python - <<'PY' 2>/dev/null
+import shlex, sys
+sys.path.insert(0, "tools")
+import lab_env
+env, report = lab_env.resolve()
+for name, val in env.items():
+    print(f"export {name}={shlex.quote(str(val))}")
+PY
+)"
+fi
+
+# --- 2. anything still missing: search the disks ---------------------------------------------------
 # --- audio-separator folder -------------------------------------------------------------------------
 if [ -z "$AUDIO_SEPARATOR_MODEL_DIR" ] || [ ! -d "$AUDIO_SEPARATOR_MODEL_DIR" ]; then
   unset AUDIO_SEPARATOR_MODEL_DIR
