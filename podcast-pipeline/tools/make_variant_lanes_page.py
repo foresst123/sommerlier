@@ -236,6 +236,7 @@ border-radius:8px;padding:8px 10px;min-width:240px;max-height:70vh;overflow:auto
   <button id="ab" title="Phát cùng một đoạn lần lượt trên từng variant đang hiện">⇄ Nghe lần lượt</button>
   <label class="mute"><input type="checkbox" id="loop"> lặp</label>
   <label class="mute"><input type="checkbox" id="follow" checked> sóng trượt theo</label>
+  <label class="mute" title="Chữ gọn: tối đa 2 dòng, tự mở đủ khi zoom vào"><input type="checkbox" id="compact" checked> chữ gọn</label>
   <button id="clr" hidden>Bỏ chọn đoạn</button><span class="mute" id="selTxt"></span>
   <details id="vsel"><summary>Variant hiển thị: <span id="vcount"></span></summary><div id="vlist"></div></details>
   <span class="files" id="files"></span>
@@ -250,10 +251,10 @@ border-radius:8px;padding:8px 10px;min-width:240px;max-height:70vh;overflow:auto
 const DATA = __DATA__;
 const PPS_DATA = DATA.peaks_per_sec;
 const COLORS = ["#2563eb","#dc2626","#059669","#7c3aed","#d97706","#0891b2","#db2777","#4d7c0f"];
-const WAVE_H = 40, TEXT_H = 48, LINE_H = 16, MAX_LINES = 8;
+const WAVE_H = 36, TEXT_H = 34, LINE_H = 14, MAX_LINES = 8, COMPACT_LINES = 2, EXPAND_PPS = 150;
 const wrap = document.getElementById("wrap"), scroller = document.getElementById("scroll"),
       spacer = document.getElementById("spacer"), detail = document.getElementById("detail");
-const TEXT_FONT = '13px system-ui,sans-serif';
+const TEXT_FONT = '12px system-ui,sans-serif';
 const measure = document.createElement('canvas').getContext('2d'); measure.font = TEXT_FONT;
 const css = getComputedStyle(document.documentElement);
 const col = n => css.getPropertyValue(n).trim();
@@ -334,8 +335,9 @@ function sizeTextRows(){
   for (const L of lanes) { if (L.kind !== "text") continue;
     let n = 1;
     for (const sg of L.segs) n = Math.max(n, linesNeeded(sg.t, Math.max(20, (sg.e - sg.s) * pxPerSec - 9)));
-    L.lines = Math.min(n, MAX_LINES);
-    L.cv.style.height = Math.max(TEXT_H, L.lines * LINE_H + 10) + "px"; }
+    const cap = document.getElementById("compact").checked && pxPerSec < EXPAND_PPS ? COMPACT_LINES : MAX_LINES;
+    L.lines = Math.min(n, cap);
+    L.cv.style.height = Math.max(TEXT_H, L.lines * LINE_H + 8) + "px"; }
 }
 function zoomRange(){ const fit = Math.max(viewW(), 200) / duration; return [fit, Math.max(400, fit)]; }
 function applyPx(px, anchorT, anchorX){
@@ -395,7 +397,7 @@ function draw(){
         g.fillRect(x, 1, 3, h - 2);
         const tx = Math.max(x, 0), tw = x + bw - tx;        // a long segment keeps its text at the left edge of the view
         if (tw > 24) { g.save(); g.beginPath(); g.rect(tx + 5, 0, tw - 7, h); g.clip();
-          g.fillStyle = ink; wrapText(g, sg.t, tx + 6, 4, tw - 9, L.lines || 2, LINE_H); g.restore(); }
+          g.fillStyle = ink; wrapText(g, sg.t, tx + 6, 3, tw - 9, L.lines || 2, LINE_H); g.restore(); }
       }
     }
     if (sel) { const xa = (sel.a - t0) * pxPerSec, xb = (sel.b - t0) * pxPerSec;
@@ -548,6 +550,7 @@ document.addEventListener("wheel", e => {
   }
 }, {passive:false});
 document.getElementById("zoom").addEventListener("input", setZoom);
+document.getElementById("compact").onchange = () => { sizeTextRows(); draw(); };
 document.getElementById("play").onclick = () => { if (seq) stopSeq(); playing ? pause() : play(); };
 document.getElementById("back").onclick = () => seek(now - 5);
 document.getElementById("fwd").onclick = () => seek(now + 5);
