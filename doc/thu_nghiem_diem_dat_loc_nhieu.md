@@ -39,10 +39,13 @@ Nhãn mỗi biến thể là luồng đầy đủ, ví dụ `audio gốc → ti�
 cd podcast-pipeline
 python tools/run_variants.py --audio-dir <thư_mục_audio> \
     --variants tools/variants_placement.json --out-root <thư_mục_kết_quả> \
-    --env a100 --stop-after none --gpus 0,1 --parallel 2 --resume
+    --env a100 --stop-after asr --gpus 0,1 --parallel 2 --resume
 ```
 
-- Phải dùng `--stop-after none` (runner mặc định `asr`, dừng trước bước tạo hội thoại). `main.py` hiểu `none` là chạy hết mọi bước.
+- Hiện tại chạy tới `--stop-after asr` (cũng là mặc định của runner): nhạc, denoise ở 3 điểm, diarization, separation, ASR.
+  Refinement, relabel, transcript review, persona, chọn conversation, word alignment và export **tạm tắt**; LLM chỉ được tải ở
+  bước refinement nên không chiếm VRAM. Muốn đếm số conversation thì chạy lại với `--stop-after none` (thêm `--resume`:
+  các bước tới ASR đọc lại từ checkpoint, không tính lại).
 - Xem kế hoạch trước: thêm `--list` (hoặc `--dry-run` để in lệnh). Thêm `--only-available` để bỏ qua (có ghi lý do) biến thể mà backend chưa dùng được trên máy; `--groups light,mpsenet` để chạy theo nhóm; `--only-ids l_p2,l_p3` để chạy lại vài biến thể.
 - 14 biến thể x số file lần chạy pipeline đầy đủ. `--resume` bỏ qua biến thể đã có `.done`.
 
