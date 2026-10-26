@@ -46,7 +46,8 @@ Variant `degraded` (bộ lọc rơi về audio gốc) không có `.done`, giốn
 
 ## `--layout`
 
-- `split` (mặc định): Qwen3 một mình trên `gpu_2`; music, denoise, diarization, separation trên `gpu_1`.
+- `split` (mặc định): các model ASR trên `gpu_2`; music, denoise, diarization, separation trên `gpu_1`.
+- `split_strict`: như `split` và tắt luôn worker gán speaker (`assignment_workers_per_gpu=0`), để `gpu_2` chỉ còn model ASR. Đổi lại việc gán speaker chạy trong process chính nên stage separation chậm hơn.
 - `default`: không đổi gì, profile quyết định.
 
 Preset là dict `LAYOUT_PRESETS` ở đầu `run_variants_resident.py`, mỗi khoá là một đường dẫn `--set` vào `performance.stages.*`
@@ -54,9 +55,16 @@ Preset là dict `LAYOUT_PRESETS` ở đầu `run_variants_resident.py`, mỗi kh
 
 Giới hạn đã biết của `split`:
 - Backend lọc nhiễu chạy trong process chính với `device: auto` nên dùng `cuda:0`; giữ `--gpu-1 0`.
-- Các worker gán speaker (`assignment_workers_per_gpu`) vẫn được tạo trên cả hai card; chúng nhẹ nhưng không bị ghim.
+- Ở `split`, các worker gán speaker (`assignment_workers_per_gpu`) vẫn được tạo trên cả hai card (main.py khởi động chúng ở `gpu_1` và `gpu_2`). Các stage chạy lần lượt nên chúng không tranh tính toán với ASR, chỉ chiếm một ít VRAM của `gpu_2`; muốn bỏ hẳn dùng `split_strict`.
 - Nếu `--stop-after` vượt qua `asr`, LLM refinement dùng cả hai card (profile `pipeline_devices`), chung card với Qwen3 đang giữ.
 - Backend lọc nhiễu tự `unload()` sau mỗi lần gọi, nên `--keep_models` không giữ chúng: chúng được nạp lại cho mỗi file.
+
+Các giới hạn trên được in thành dòng `WARNING (--layout ...)` ngay khi bắt đầu chạy.
+
+## Khi một file lỗi
+
+Scheduler tự xoá checkpoint và output của file đó **trong variant đó** (`cache/exp-<id>_<tên file>` và `OUT/<id>/<tên file>`), như main làm cho lần chạy riêng,
+để `--resume` tính lại từ đầu file chứ không nạp lại các stage đã xong của lần lỗi. Variant khác không bị đụng tới.
 
 ## Không hỗ trợ
 

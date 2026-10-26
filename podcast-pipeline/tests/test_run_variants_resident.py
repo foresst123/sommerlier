@@ -291,3 +291,55 @@ def test_mode_overlap_exits_with_message(env):
         rr.parse_args(["--audio-dir", str(audio), "--out-root", str(tmp / "out"), "--mode", "overlap"])
     assert "not implemented" in str(exc.value) and "shares per-stage state" in str(exc.value)
     assert set(rr.MODES) == {"sequential"}
+
+
+def test_failed_file_is_cleared_with_the_variants_own_args(env):
+    fake = FakeRun(fail_ids={"dfn3"}, raise_ids={"p3"})
+    r, _, files = runner_for(env, fake)
+    cleared = []
+    r.discard_partial = lambda ledger, vargs, path, logger, pipeline: cleared.append(
+        (vargs.job_id, vargs.save_path, Path(path).name))
+    pipeline = SimpleNamespace(separation_svc=None, progress_ledger=object())
+    base = SimpleNamespace(env="a100", stop_after="asr", keep_models=True, step_asr=True,
+                           denoise="none", job_id="exp-resident", save_path="x")
+    config = {"environments": {"a100": {"steps": {"asr": True, "diarization": False}}}}
+    r.scheduler(pipeline, base, config, [str(f) for f in files])
+    assert [c[0] for c in cleared] == ["exp-dfn3"]            # its own job id, not exp-resident
+    assert cleared[0][1].endswith("/dfn3")                    # its own output dir
+    assert cleared[0][2] == "a.wav"                           # only the file that failed
+    # the variant whose whole pass crashed is not cleared file by file, and the others are untouched
+    assert all(c[0] != "exp-p3" and c[0] != "exp-none" for c in cleared)
+
+
+def test_discard_error_does_not_stop_the_run(env):
+    fake = FakeRun(fail_ids={"dfn3"})
+    r, _, files = runner_for(env, fake)
+    def boom(*a):
+        raise OSError("disk")
+    r.discard_partial = boom
+    pipeline = SimpleNamespace(separation_svc=None, progress_ledger=object())
+    base = SimpleNamespace(env="a100", stop_after="asr", keep_models=True, step_asr=True,
+                           denoise="none", job_id="exp-resident", save_path="x")
+    config = {"environments": {"a100": {"steps": {"asr": True, "diarization": False}}}}
+    r.scheduler(pipeline, base, config, [str(f) for f in files])
+    assert "nomusic" in [c[0] for c in fake.calls]
+
+
+def test_split_strict_keeps_assignment_workers_off_the_second_card():
+    assert rr.LAYOUT_PRESETS["split_strict"]["performance.stages.separation.assignment_workers_per_gpu"] == 0
+    assert "assignment_workers_per_gpu" not in " ".join(rr.LAYOUT_PRESETS["split"])
+    from utils.config_override import apply_overrides
+    from utils import performance_config
+    config = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
+    prof = copy.deepcopy(config["environments"]["a100"])
+    apply_overrides(prof, rr.layout_sets("split_strict"))
+    assert performance_config.resolve(prof)["stages"]["separation"]["assignment_workers_per_gpu"] == 0
+
+
+def test_layout_warnings():
+    mk = lambda **k: SimpleNamespace(**{"layout": "split", "gpu_1": 0, "stop_after": "asr", **k})
+    assert rr.layout_warnings(mk()) == []
+    assert rr.layout_warnings(mk(layout="default", gpu_1=1, stop_after="none")) == []
+    assert any("cuda:0" in w for w in rr.layout_warnings(mk(gpu_1=1)))
+    assert any("refinement" in w for w in rr.layout_warnings(mk(stop_after="none")))
+    assert any("refinement" in w for w in rr.layout_warnings(mk(layout="split_strict", stop_after="refinement")))

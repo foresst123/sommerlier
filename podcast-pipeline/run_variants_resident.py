@@ -32,8 +32,11 @@ TOOL = ROOT / "tools" / "run_variants.py"
 RESIDENT_DIR = "_resident"
 JOB_ID = "exp-resident"
 
-# --layout split: ASR (Qwen3) alone on gpu_2, everything else on gpu_1. Edit here to change it.
+# --layout split: the ASR models on gpu_2, everything else on gpu_1. Edit here to change it.
 # Keys are `--set` paths into the profile; all of them live in utils/performance_config.py.
+# split leaves the speaker-assignment workers on both cards (main.py starts them on gpu_1 and gpu_2): stages run
+# one after another, so they never compete with ASR, they only hold a little VRAM on gpu_2.
+# split_strict also turns them off, which keeps gpu_2 to the ASR models alone but assigns speakers in the main process.
 LAYOUT_PRESETS = {
     "default": {},
     "split": {
@@ -51,6 +54,11 @@ LAYOUT_PRESETS = {
         "performance.stages.music.cross_file_overlap": False,
     },
 }
+LAYOUT_PRESETS["split_strict"] = {**LAYOUT_PRESETS["split"],
+                                  "performance.stages.separation.assignment_workers_per_gpu": 0}
+# --stop-after values that end before refinement; later ones put the LLM on both cards (main.py pins that).
+STOPS_BEFORE_REFINEMENT = frozenset({"input_quality", "music", "denoise", "diarization", "denoise_pre_separation",
+                                     "separation", "music_removal", "denoise_pre_asr", "asr", "captioning"})
 
 # pipeline.* keys read while main() builds the services: they cannot change per variant.
 BUILD_TIME_PIPELINE_KEYS = frozenset({
@@ -174,6 +182,7 @@ class ResidentRunner:
         self.seen, self.failures, self.crashed = {}, {}, {}
         self.elapsed, self.finalized = {}, set()
         self.gated = False
+        self.discard_partial = None      # main._discard_partial, set by run_sequential
 
     # -- bookkeeping
     def _manifest(self):
@@ -254,6 +263,22 @@ class ResidentRunner:
         return self.status
 
     # -- the replacement for main.run_batch_by_stage
+    def _discard_failed(self, pipeline, vargs, found, logger, crashed=False):
+        """Clear a failed file's checkpoint and output of THIS variant, as main does for its own run.
+
+        main's own failure handling only sees main's args (job exp-resident), so it would leave
+        cache/exp-<id>_<stem> and <out>/<id>/<stem> behind and the next --resume would reload the stages
+        that finished in the failed attempt.
+        """
+        ledger = getattr(pipeline, "progress_ledger", None)
+        if crashed or not found or self.discard_partial is None or ledger is None:
+            return
+        for path, _err in found:
+            try:
+                self.discard_partial(ledger, vargs, path, logger, pipeline)
+            except Exception as exc:
+                self.say(f"[{vargs.job_id}] could not clear partial output of {Path(path).name}: {exc}")
+
     def scheduler(self, pipeline, args, config, group, logger=None, stages=None):
         r = rv()
         say = logger.info if logger is not None else self.say
@@ -290,6 +315,7 @@ class ResidentRunner:
                 say(f"[{vid}] runner error: {self.crashed[vid]}")
             finally:
                 reset_between_variants(pipeline, group)
+            self._discard_failed(pipeline, vargs, found, logger, crashed=vid in self.crashed)
             self.elapsed[vid] = self.elapsed.get(vid, 0) + time.time() - t0
             self.failures.setdefault(vid, []).extend(found)
             self.seen.setdefault(vid, set()).update(Path(p).stem for p in group)
@@ -303,6 +329,20 @@ class ResidentRunner:
 
 
 # ------------------------------------------------------------------------ plan / argv
+def layout_warnings(args):
+    """What --layout split cannot promise, said before the run starts."""
+    out = []
+    if not str(args.layout).startswith("split"):
+        return out
+    if int(args.gpu_1) != 0:
+        out.append("denoise backends use cuda:0 (device 'auto'), which is gpu_2 here: keep --gpu-1 0 so they stay "
+                   "off the ASR card")
+    if args.stop_after not in STOPS_BEFORE_REFINEMENT:
+        out.append("--stop-after goes past asr: main.py puts the refinement LLM on both cards, so it shares gpu_2 "
+                   "with the resident ASR models")
+    return out
+
+
 def layout_sets(layout):
     return [f"{k}={json.dumps(v)}" for k, v in LAYOUT_PRESETS[layout].items()]
 
@@ -404,6 +444,9 @@ def run_sequential(args, variants, files, skipped):
     import main as main_mod                # module level only parses args and loads the profile
     from utils.batch import run_batch_by_stage as original
     runner.run_batch = original
+    runner.discard_partial = main_mod._discard_partial
+    for line in layout_warnings(args):
+        print(f"WARNING (--layout {args.layout}): {line}", flush=True)
     main_mod.run_batch_by_stage = runner.scheduler
     try:
         main_mod.main()
