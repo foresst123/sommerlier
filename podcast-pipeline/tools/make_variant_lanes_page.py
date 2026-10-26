@@ -335,6 +335,17 @@ function sizeTextRows(){
     L.lines = Math.min(n, MAX_LINES);
     L.cv.style.height = Math.max(TEXT_H, L.lines * LINE_H + 10) + "px"; }
 }
+function zoomRange(){ const fit = Math.max(viewW(), 200) / duration; return [fit, Math.max(400, fit)]; }
+function applyPx(px, anchorT, anchorX){
+  const [lo, hi] = zoomRange();
+  pxPerSec = Math.min(hi, Math.max(lo, px));
+  spacer.style.width = Math.ceil(duration * pxPerSec) + "px";
+  sizeTextRows();
+  t0 = Math.max(0, Math.min(anchorT - anchorX / pxPerSec, duration - viewW() / pxPerSec));
+  scroller.scrollLeft = t0 * pxPerSec;
+  document.getElementById("zoom").value = hi > lo ? 100 * Math.log(pxPerSec / lo) / Math.log(hi / lo) : 0;
+  draw();
+}
 function setZoom(){
   const z = +document.getElementById("zoom").value / 100;      // 0..1 -> fit .. 400 px/s
   const fit = Math.max(viewW(), 200) / duration;
@@ -521,10 +532,18 @@ function follow(){ const w = viewW(), span = w / pxPerSec;
   if (now < t0 || now > t0 + span * 0.95) { t0 = Math.max(0, now - span * 0.1); scroller.scrollLeft = t0 * pxPerSec; } }
 
 scroller.addEventListener("scroll", () => { t0 = scroller.scrollLeft / pxPerSec; draw(); });
-wrap.addEventListener("wheel", e => { if (!e.ctrlKey && !e.metaKey && Math.abs(e.deltaX) < Math.abs(e.deltaY)) return;
-  e.preventDefault(); if (e.ctrlKey || e.metaKey) { const z = document.getElementById("zoom");
-    z.value = Math.min(100, Math.max(0, +z.value - Math.sign(e.deltaY) * 4)); setZoom(); }
-  else scroller.scrollLeft += e.deltaX; }, {passive:false});
+// Ctrl/Cmd + wheel zooms the waves around the pointer (the time under it stays put); a trackpad pinch arrives the same way.
+document.addEventListener("wheel", e => {
+  if (e.ctrlKey || e.metaKey) {
+    e.preventDefault();
+    const left = lanes[0] ? lanes[0].cv.getBoundingClientRect().left : 0;
+    const x = Math.min(Math.max(e.clientX - left, 0), viewW());
+    const dy = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY;
+    applyPx(pxPerSec * Math.exp(-dy * 0.0015), t0 + x / pxPerSec, x);
+  } else if (Math.abs(e.deltaX) > Math.abs(e.deltaY) && wrap.contains(e.target)) {
+    e.preventDefault(); scroller.scrollLeft += e.deltaX;
+  }
+}, {passive:false});
 document.getElementById("zoom").addEventListener("input", setZoom);
 document.getElementById("play").onclick = () => { if (seq) stopSeq(); playing ? pause() : play(); };
 document.getElementById("back").onclick = () => seek(now - 5);

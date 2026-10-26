@@ -139,3 +139,9 @@ def test_page_has_a_wave_row_and_a_text_row_per_speaker_and_a_sliding_view(tmp_p
     page = lanes.render(lanes.build_page_data(manifest, "ep1", str(out / "lanes")))
     for needle in ('addLane("wave"', 'addLane("text"', 'id="follow"', "function sizeTextRows", "MAX_LINES"):
         assert needle in page
+
+
+def test_ctrl_wheel_zoom_is_anchored_at_the_pointer(tmp_path):
+    manifest, out = _plan(tmp_path)
+    page = lanes.render(lanes.build_page_data(manifest, "ep1", str(out / "lanes")))
+    assert "function applyPx" in page and "e.ctrlKey || e.metaKey" in page and 'document.addEventListener("wheel"' in page
