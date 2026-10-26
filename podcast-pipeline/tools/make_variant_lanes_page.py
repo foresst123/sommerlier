@@ -233,11 +233,14 @@ border-radius:8px;padding:8px 10px;min-width:240px;max-height:70vh;overflow:auto
   <h1>__TITLE__</h1>
   <button id="play">▶ Phát</button>
   <button id="back">−5 s</button><button id="fwd">+5 s</button>
+  <button id="ab" title="Phát cùng một đoạn lần lượt trên từng variant đang hiện">⇄ Nghe lần lượt</button>
+  <label class="mute"><input type="checkbox" id="loop"> lặp</label>
+  <button id="clr" hidden>Bỏ chọn đoạn</button><span class="mute" id="selTxt"></span>
   <details id="vsel"><summary>Variant hiển thị: <span id="vcount"></span></summary><div id="vlist"></div></details>
   <span class="files" id="files"></span>
   <span class="clock" id="clock">0:00.0</span>
   <label class="mute">Zoom <input type="range" id="zoom" min="0" max="100" value="30"></label>
-  <span class="mute">Space: phát/dừng · ←/→: ±5 s · ↑/↓: đổi variant · bấm vào sóng/chữ: nhảy tới đó</span>
+  <span class="mute">Kéo chuột trên sóng/chữ: chọn một đoạn · bấm: nhảy tới đó · Space: phát/dừng · ←/→: ±5 s · ↑/↓: đổi variant (giữ nguyên vị trí)</span>
 </header>
 <div id="wrap"></div>
 <div id="detail" class="mute">Di chuột lên một đoạn chữ để xem đầy đủ.</div>
@@ -258,6 +261,7 @@ for (const v of DATA.variants) duration = Math.max(duration, v.duration || 0,
 duration = Math.max(duration, 1);
 
 let pxPerSec = 20, t0 = 0, now = 0, active = 0, playing = false;
+let sel = null, drag = null, seq = null;               // sel {a,b}: the chosen stretch; seq: the one-after-another listen
 const KEY = "lanes-visible-" + DATA.file;
 let vis = DATA.variants.map(() => true);
 try { const saved = JSON.parse(localStorage.getItem(KEY) || "null");
@@ -295,7 +299,7 @@ DATA.variants.forEach((v, vi) => {
     lane.append(name, cv); block.appendChild(lane);
     const L = {cv, kind, segs, pk, color, colorOf, speakers, vi};
     lanes.push(L);
-    cv.addEventListener("click", e => { const t = xToT(cv, e.offsetX); select(vi, false); seek(t); });
+    cv.addEventListener("mousedown", e => { if (e.button) return; drag = {x0: e.offsetX, cv, vi}; e.preventDefault(); });
     cv.addEventListener("mousemove", e => hover(L, e.offsetX));
   };
   if (pk) addLane("wave", "sóng âm", null, v.segments || []);
@@ -361,6 +365,9 @@ function draw(){
           g.fillStyle = ink; wrapText(g, sg.t, x + 6, 4, bw - 9, 2, 15); g.restore(); }
       }
     }
+    if (sel) { const xa = (sel.a - t0) * pxPerSec, xb = (sel.b - t0) * pxPerSec;
+      if (xb > 0 && xa < w) { g.fillStyle = play; g.globalAlpha = 0.13; g.fillRect(Math.max(0, xa), 0, Math.min(w, xb) - Math.max(0, xa), h);
+        g.globalAlpha = 0.7; g.fillRect(Math.max(0, xa), 0, 1, h); g.fillRect(Math.min(w, xb) - 1, 0, 1, h); g.globalAlpha = 1; } }
     const px = (now - t0) * pxPerSec;
     if (px >= 0 && px <= w) { g.fillStyle = L.vi === active ? play : mute; g.fillRect(px, 0, 1.5, h); }
   }
@@ -376,6 +383,22 @@ function wrapText(g, text, x, y, maxW, maxLines, lh){
     g.fillText(line, x, y + (n - 1) * lh); line = words[i];
   }
   if (line) g.fillText(line, x, y + n * lh);
+}
+window.addEventListener("mousemove", e => {
+  if (!drag) return;
+  const r = drag.cv.getBoundingClientRect(), x = e.clientX - r.left;
+  if (Math.abs(x - drag.x0) > 4) { const a = xToT(null, drag.x0), b = xToT(null, x);
+    sel = {a: Math.max(0, Math.min(a, b)), b: Math.min(duration, Math.max(a, b))}; showSel(); draw(); }
+});
+window.addEventListener("mouseup", e => {
+  if (!drag) return;
+  const d = drag; drag = null;
+  const r = d.cv.getBoundingClientRect(), x = e.clientX - r.left;
+  if (Math.abs(x - d.x0) <= 4) { sel = null; showSel(); if (d.vi !== active) select(d.vi, false); seek(xToT(null, d.x0)); }
+});
+function showSel(){
+  document.getElementById("clr").hidden = !sel;
+  document.getElementById("selTxt").textContent = sel ? `đoạn ${fmt(sel.a)} – ${fmt(sel.b)} (${(sel.b - sel.a).toFixed(1)} s)` : "";
 }
 function hover(L, x){
   const t = xToT(L.cv, x), s = L.segs.find(s => t >= s.s && t <= s.e);
@@ -425,11 +448,13 @@ function select(vi, keepTime){
   if (was) play(); else draw();
 }
 function seek(t){
+  if (seq) stopSeq();
   now = Math.min(Math.max(0, t), duration);
   const a = audios[active]; if (a && playing) a.currentTime = now;
   follow(); draw();
 }
 function play(){
+  if (sel && !seq && (now < sel.a || now >= sel.b - 0.05)) now = sel.a;
   const a = audios[active];
   if (!a) { detail.textContent = "Variant này không có audio để phát."; return; }
   audios.forEach(x => x && x !== a && x.pause());
@@ -439,9 +464,37 @@ function play(){
   if (a.readyState >= 1) start(); else { a.preload = "auto"; a.addEventListener("loadedmetadata", start, {once:true}); a.load(); }
 }
 function pause(){ const a = audios[active]; if (a) a.pause(); playing = false; updateBtn(); }
+document.getElementById("ab").onclick = () => { if (seq) { stopSeq(); pause(); } else startSeq(); };
+document.getElementById("clr").onclick = () => { sel = null; showSel(); draw(); };
 function updateBtn(){ document.getElementById("play").textContent = playing ? "⏸ Dừng" : "▶ Phát"; }
 function tick(){ if (!playing) return; const a = audios[active]; if (a) now = a.currentTime;
+  const end = seq ? seq.end : (sel ? sel.b : null);
+  if (end != null && now >= end) {
+    if (seq) { nextInSeq(); return; }
+    if (document.getElementById("loop").checked) seek(sel.a); else { pause(); now = sel.a; if (a) a.currentTime = now; follow(); draw(); return; }
+  }
   follow(); draw(); requestAnimationFrame(tick); }
+function visibleWithAudio(){ return DATA.variants.map((v, i) => i).filter(i => vis[i] && audios[i]); }
+function startSeq(){
+  const order = visibleWithAudio();
+  if (!order.length) { detail.textContent = "Không có variant nào có audio để nghe."; return; }
+  const a = sel ? sel.a : now, b = sel ? sel.b : Math.min(duration, now + 8);
+  seq = {order, idx: -1, a, end: b};
+  nextInSeq();
+}
+function stopSeq(){ if (seq) { seq = null; document.getElementById("ab").textContent = "⇄ Nghe lần lượt"; } }
+function nextInSeq(){
+  if (!seq) return;
+  seq.idx++;
+  if (seq.idx >= seq.order.length) {
+    if (document.getElementById("loop").checked) seq.idx = 0; else { stopSeq(); pause(); return; } }
+  if (playing) pause();
+  active = seq.order[seq.idx]; now = seq.a;
+  DATA.variants.forEach((v, i) => v._block.classList.toggle("active", i === active));
+  DATA.variants[active]._block.scrollIntoView({block: "nearest"});
+  document.getElementById("ab").textContent = `⏹ ${DATA.variants[active].id} (${seq.idx + 1}/${seq.order.length})`;
+  play();
+}
 function follow(){ const w = viewW();
   if (now < t0 || now > t0 + w / pxPerSec * 0.95) { t0 = Math.max(0, now - w / pxPerSec * 0.1);
     scroller.scrollLeft = t0 * pxPerSec; } }
@@ -452,7 +505,7 @@ wrap.addEventListener("wheel", e => { if (!e.ctrlKey && !e.metaKey && Math.abs(e
     z.value = Math.min(100, Math.max(0, +z.value - Math.sign(e.deltaY) * 4)); setZoom(); }
   else scroller.scrollLeft += e.deltaX; }, {passive:false});
 document.getElementById("zoom").addEventListener("input", setZoom);
-document.getElementById("play").onclick = () => playing ? pause() : play();
+document.getElementById("play").onclick = () => { if (seq) stopSeq(); playing ? pause() : play(); };
 document.getElementById("back").onclick = () => seek(now - 5);
 document.getElementById("fwd").onclick = () => seek(now + 5);
 document.addEventListener("keydown", e => {

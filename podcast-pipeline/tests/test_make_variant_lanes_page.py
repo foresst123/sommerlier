@@ -125,3 +125,10 @@ def test_page_has_a_variant_picker_and_links_between_files(tmp_path):
     assert data["files"] == ["ep1"]
     page = lanes.render(data)
     assert 'id="vlist"' in page and "localStorage" in page and "applyVisibility" in page
+
+
+def test_page_can_select_a_stretch_and_listen_to_it_variant_by_variant(tmp_path):
+    manifest, out = _plan(tmp_path)
+    page = lanes.render(lanes.build_page_data(manifest, "ep1", str(out / "lanes")))
+    for needle in ('id="ab"', 'id="loop"', "function startSeq", "function nextInSeq", "mousedown"):
+        assert needle in page
