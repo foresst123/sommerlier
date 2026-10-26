@@ -236,3 +236,18 @@ card 0 đầy 98% còn card 1 trống.
 (luật CUDA bình thường: chỉ số của con tính theo danh sách của cha). Dòng `[gpu] this process owns CUDA_VISIBLE_DEVICES=1: a worker that asks for cuda index i runs on 0->1` ở đầu log xác nhận nó đang bật.
 Kiểm tra: `nvidia-smi --query-compute-apps=gpu_bus_id,pid,used_memory --format=csv,noheader | sort` phải thấy Sidon và `VLLM::EngineCore` ở card 1 nếu process 4 và 6 được đặt ở card 1.
 Process không có `CUDA_VISIBLE_DEVICES` riêng thì không bị đổi gì.
+
+
+## Xem trang kết quả và nghe audio file nặng
+
+`python -m http.server` gửi nguyên cả file và bỏ qua `Range`, nên WAV 47 phút (~135 MB) phải tải xong mới tua được. Dùng server riêng, chỉ dùng thư viện chuẩn, có `Range`:
+
+```bash
+python tools/serve_results.py --root <OUT> --audio-dir <thư_mục_audio_gốc>      # cổng 8001
+# laptop: ssh -L 8001:localhost:8001 lamkd2@<dgx>     rồi mở http://localhost:8001/lanes/  và  http://localhost:8001/compare.html
+```
+- Trình duyệt chỉ xin đoạn đang nghe (`206 Partial Content`), nên bấm phát là nghe ngay và tua tới đâu tải tới đó; phát cần khoảng 0,4 Mbit/s.
+- `--audio-dir` gắn thư mục audio gốc ở `/_audio/`. Variant không có bộ lọc nào và tắt nhạc (ví dụ `none`) không có file wav riêng,
+  nên trang lanes phát bản gốc từ `/_audio/<tên file>`. Thư mục audio gốc cần để phẳng (file ngay trong thư mục, không lồng).
+- Mặc định chỉ nghe trên `127.0.0.1`; `--host 0.0.0.0` mở thư mục cho bất kỳ ai tới được cổng đó.
+- Không dùng WebSocket: thẻ `<audio>` của trình duyệt không đọc được WebSocket, và `Range` đã cho cùng kết quả (tải dần, tua) bằng bộ phát gốc.

@@ -16,7 +16,9 @@ overlap shows up in two rows at once. Speaker labels are per variant: diarizatio
 separately in each, so SPEAKER_00 of one variant need not be SPEAKER_00 of another.
 
 --audio link (default) refers to the wav files by a path relative to the page, so keep the
-page inside the same tree (or serve OUT with `python -m http.server`). The page itself has no
+page inside the same tree and serve OUT with `python tools/serve_results.py --root OUT --audio-dir AUDIO` (it answers
+HTTP Range, so a long file plays and seeks without being downloaded whole, and it serves the original recordings at
+/_audio/, which is where a variant with no wav of its own plays from). The page itself has no
 CDN or network dependency.
 """
 
@@ -46,8 +48,16 @@ TRANSCRIPTS = {
 AUDIO_EXT = (".wav", ".flac", ".mp3", ".m4a", ".opus", ".ogg")
 
 
-def variant_audio(file_dir: str, input_dir: Optional[str], stem: str) -> Optional[str]:
-    """The wav the variant's later stages worked on, see the module docstring."""
+def input_dirs_of(out_root: str, vid: str) -> List[str]:
+    """Where the original recording of a variant may be linked: the old runner's OUT/<id>/input, then the folders
+    the resident line makes (OUT/_resident/input_*), newest first."""
+    resident = sorted(glob.glob(os.path.join(glob.escape(out_root), "_resident", "input_*")),
+                      key=lambda p: os.path.getmtime(p), reverse=True)
+    return [os.path.join(out_root, vid, "input"), *resident]
+
+
+def variant_audio(file_dir: str, input_dir, stem: str) -> Optional[str]:
+    """The wav the variant's later stages worked on, see the module docstring. `input_dir` is one folder or a list."""
     for d in DENOISE_POINTS:
         p = os.path.join(file_dir, d, "after_denoise.wav")
         if os.path.isfile(p):
@@ -55,8 +65,8 @@ def variant_audio(file_dir: str, input_dir: Optional[str], stem: str) -> Optiona
     p = os.path.join(file_dir, "01_music", "after_music.wav")
     if os.path.isfile(p):
         return p
-    if input_dir:
-        for p in sorted(glob.glob(os.path.join(glob.escape(input_dir), glob.escape(stem) + ".*"))):
+    for folder in ([input_dir] if isinstance(input_dir, str) else (input_dir or [])):
+        for p in sorted(glob.glob(os.path.join(glob.escape(folder), glob.escape(stem) + ".*"))):
             if p.lower().endswith(AUDIO_EXT):
                 return os.path.realpath(p)
     return None
@@ -83,6 +93,12 @@ def peaks(path: Optional[str], per_sec: int):
     pad[:len(wav)] = np.abs(wav)
     pk = np.minimum(pad.reshape(n, hop).max(axis=1), 1.0)
     return base64.b64encode(np.round(pk * 255).astype(np.uint8).tobytes()).decode("ascii"), len(wav) / sr
+
+
+def _inside(path: str, folder: str) -> bool:
+    """Is `path` under `folder` as written (symlinks not followed)?"""
+    path, folder = os.path.abspath(path), os.path.abspath(folder)
+    return path == folder or path.startswith(folder + os.sep)
 
 
 def chain_text(v: dict) -> str:
@@ -112,11 +128,15 @@ def build_page_data(manifest_path: str, stem: str, out_dir: str, transcript: str
             row["missing"] = f"no output for {stem} (status {row['status']})"
             rows.append(row)
             continue
-        audio = variant_audio(file_dir, os.path.join(out_root, v["id"], "input"), stem)
+        audio = variant_audio(file_dir, input_dirs_of(out_root, v["id"]), stem)
         row["peaks"], row["duration"] = peaks(audio, per_sec)
         row["segments"] = variant_segments(file_dir, transcript)
         if audio and audio_mode == "link":
-            row["audio"] = os.path.relpath(audio, out_dir).replace(os.sep, "/")
+            if _inside(audio, out_root):
+                row["audio"] = os.path.relpath(audio, out_dir).replace(os.sep, "/")
+            else:   # the original recording lives outside OUT: tools/serve_results.py --audio-dir serves it here
+                row["audio"] = "../_audio/" + os.path.basename(audio)
+                row["audio_source"] = "input"
         if row["segments"] is None:
             row["missing"] = "no transcripts.json"
         rows.append(row)

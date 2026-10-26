@@ -85,3 +85,25 @@ def test_audio_none_keeps_waveform_and_text(tmp_path):
     data = lanes.build_page_data(manifest, "ep1", str(out / "lanes"), audio_mode="none")
     assert all("audio" not in v for v in data["variants"])
     assert data["variants"][0]["peaks"]
+
+
+def test_original_recording_outside_out_is_linked_through_the_audio_mount(tmp_path):
+    out = tmp_path / "out"
+    real = tmp_path / "recordings"; real.mkdir()
+    sf.write(str(real / "ep1.wav"), np.zeros(SR, dtype=np.float32), SR)
+    inp = out / "_resident" / "input_20260101_000000_1"; inp.mkdir(parents=True)
+    (inp / "ep1.wav").symlink_to(real / "ep1.wav")
+    d = out / "none" / "ep1"                                      # no after_music.wav: music steps are off
+    _transcripts(str(d / "05_asr" / "transcripts.json"), [{"start": 0, "end": 1, "speaker": "S0", "text": "x"}])
+    (out / "variants_manifest.json").write_text(json.dumps({"baseline": "none", "variants": [
+        {"id": "none", "chain": [], "status": "ok", "files": {"ep1": str(d)}}]}))
+    data = lanes.build_page_data(str(out / "variants_manifest.json"), "ep1", str(out / "lanes"))
+    row = data["variants"][0]
+    assert row["audio"] == "../_audio/ep1.wav" and row["audio_source"] == "input" and row["peaks"]
+
+
+def test_input_inside_out_keeps_the_relative_link(tmp_path):
+    manifest, out = _plan(tmp_path)                               # raw has OUT/raw/input/ep1.wav, a real file in OUT
+    data = lanes.build_page_data(manifest, "ep1", str(out / "lanes"))
+    raw = next(v for v in data["variants"] if v["id"] == "raw")
+    assert raw["audio"].endswith("raw/input/ep1.wav") and "audio_source" not in raw
