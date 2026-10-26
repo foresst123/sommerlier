@@ -995,3 +995,41 @@ def test_dry_run_lists_noop_stages_and_per_file(env, capsys):
     assert "per-file: yes" in out
     assert "no-op stages: denoise, denoise_pre_separation, denoise_pre_asr   (this process only hands it over)" in out
     assert "waits for: diarization" in out
+
+
+def _child_cuda(env_value, visible):
+    """CUDA_VISIBLE_DEVICES a spawned child really gets when the parent owns `visible`."""
+    import subprocess
+    undo = rr.install_child_gpu_mapping(visible)
+    try:
+        env = {**__import__("os").environ}
+        if env_value is None:
+            env.pop("CUDA_VISIBLE_DEVICES", None)
+        else:
+            env["CUDA_VISIBLE_DEVICES"] = env_value
+        out = subprocess.run([sys.executable, "-c", "import os;print(os.environ.get('CUDA_VISIBLE_DEVICES'))"],
+                             env=env, capture_output=True, text=True).stdout.strip()
+    finally:
+        undo()
+    return out
+
+
+def test_a_worker_asking_for_cuda_0_gets_the_card_its_parent_owns():
+    assert _child_cuda("0", "1") == "1"            # parent sees card 1 only; its worker asks for index 0
+    assert _child_cuda("0", "5") == "5"
+    assert _child_cuda("0", "0,1") == "0" and _child_cuda("1", "0,1") == "1"   # a parent that sees both: unchanged
+    assert _child_cuda("1", "1") == "1"            # inherited value of the parent itself stays
+    assert _child_cuda("0,1", "1") == "0,1"        # lists are not touched
+    assert _child_cuda(None, "1") == "None"        # no variable asked: nothing added
+
+
+def test_without_a_visible_list_nothing_is_patched():
+    import subprocess
+    real = subprocess.Popen
+    undo = rr.install_child_gpu_mapping("")
+    assert subprocess.Popen is real
+    undo()
+    undo = rr.install_child_gpu_mapping("1")
+    assert subprocess.Popen is not real
+    undo()
+    assert subprocess.Popen is real

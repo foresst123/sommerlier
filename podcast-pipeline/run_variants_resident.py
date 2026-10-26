@@ -794,6 +794,48 @@ def print_dry_run(args, variants, files, skipped):
                  if args.wait_signal else ""))
 
 
+def child_gpu_map(visible):
+    """Index a child asks for -> the id this process really owns, from its own CUDA_VISIBLE_DEVICES list.
+
+    A process that sees only card 1 calls it cuda:0, and the pipeline's worker services then start every
+    worker with CUDA_VISIBLE_DEVICES=0 -- the job's card 0, not this process's card. CUDA's own rule is that a
+    child's index is relative to the parent's visible list; this restores it for the children we spawn.
+    """
+    ids = [x.strip() for x in str(visible or "").split(",") if x.strip()]
+    return ids
+
+
+def install_child_gpu_mapping(visible=None):
+    """Make subprocess.Popen map a digit CUDA_VISIBLE_DEVICES in `env` through this process's visible list.
+
+    Returns a function that undoes it. Does nothing when this process has no CUDA_VISIBLE_DEVICES of its own
+    (it then sees every card and the pipeline's indexes already mean what they say).
+    """
+    import subprocess
+    ids = child_gpu_map(os.environ.get("CUDA_VISIBLE_DEVICES") if visible is None else visible)
+    if not ids or not all(x.isdigit() for x in ids):
+        return lambda: None
+    real = subprocess.Popen
+
+    class MappedPopen(real):
+        def __init__(self, *a, **kw):
+            env = kw.get("env")
+            want = None if env is None else str(env.get("CUDA_VISIBLE_DEVICES", "")).strip()
+            if want and want.isdigit() and int(want) < len(ids):
+                env = dict(env)
+                env["CUDA_VISIBLE_DEVICES"] = ids[int(want)]
+                kw["env"] = env
+            super().__init__(*a, **kw)
+
+    subprocess.Popen = MappedPopen
+    print(f"[gpu] this process owns CUDA_VISIBLE_DEVICES={','.join(ids)}: a worker that asks for cuda index i "
+          f"runs on {', '.join(f'{i}->{d}' for i, d in enumerate(ids))}", flush=True)
+
+    def undo():
+        subprocess.Popen = real
+    return undo
+
+
 def run_sequential(args, variants, files, skipped):
     """Variants one after another inside the resident process; each is a stage-by-stage pass."""
     runner = ResidentRunner(args, variants, files, skipped=skipped)
@@ -816,9 +858,11 @@ def run_sequential(args, variants, files, skipped):
     for line in layout_warnings(args):
         print(f"WARNING (--layout {args.layout}): {line}", flush=True)
     main_mod.run_batch_by_stage = runner.scheduler
+    undo_gpu_map = install_child_gpu_mapping()
     try:
         main_mod.main()
     finally:
+        undo_gpu_map()
         main_mod.run_batch_by_stage = original
         runner.finish()
     return runner

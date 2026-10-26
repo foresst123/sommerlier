@@ -225,3 +225,14 @@ Mặc định tắt trong `run_variants_resident.py`; `tools/launch_line.sh` b�
 - Variant `degraded` (bộ lọc rơi về audio gốc) và không có `--accept-degraded`: mọi dấu `.ready` theo file của nó bị thay bằng `.failed`.
 - **Đánh đổi:** chạy từng file làm mất song song giữa các file trong một lượt (ví dụ hàng đợi ASR cross-file `files_in_flight` chỉ còn một file). Muốn song song thì dùng `--shard K/N` trên process đó: song song theo variant thay vì theo file.
 - `clean_variant_cache.py` đã xoá các dấu theo file (glob `.ready_*`, `.failed_*`); `verify_line.py` đọc kết quả trên đĩa nên không cần xử lý dấu.
+
+## Worker con chạy đúng card của process cha
+
+Mỗi process của dây chuyền chỉ thấy **một** card (`CUDA_VISIBLE_DEVICES=<card>`), nên với nó đó là `cuda:0`. Các dịch vụ worker của pipeline (Sidon, gán speaker, vLLM Qwen3, Nemotron...) khi sinh process con
+luôn đặt `CUDA_VISIBLE_DEVICES=<chỉ số>` tuyệt đối, tức `0`: đó là card 0 **của job**, không phải card của process cha. Kết quả đo trên máy: ba process dặn dùng card 1 vẫn đặt Sidon, worker gán speaker và `VLLM::EngineCore` trên card 0,
+card 0 đầy 98% còn card 1 trống.
+
+`run_variants_resident.py` sửa bằng cách bọc `subprocess.Popen`: một `CUDA_VISIBLE_DEVICES` là một chữ số `i` trong môi trường của process con được đổi thành phần tử thứ `i` trong danh sách card của chính process cha
+(luật CUDA bình thường: chỉ số của con tính theo danh sách của cha). Dòng `[gpu] this process owns CUDA_VISIBLE_DEVICES=1: a worker that asks for cuda index i runs on 0->1` ở đầu log xác nhận nó đang bật.
+Kiểm tra: `nvidia-smi --query-compute-apps=gpu_bus_id,pid,used_memory --format=csv,noheader | sort` phải thấy Sidon và `VLLM::EngineCore` ở card 1 nếu process 4 và 6 được đặt ở card 1.
+Process không có `CUDA_VISIBLE_DEVICES` riêng thì không bị đổi gì.
