@@ -200,9 +200,11 @@ button:hover{background:var(--hi)}
 .mute{color:var(--mute)}
 input[type=range]{width:140px}
 #wrap{position:relative}
-.block{border-bottom:1px solid var(--line);background:var(--panel)}
+.block{border-bottom:3px solid var(--line);background:var(--panel);padding-bottom:6px}
 .block.active{background:var(--hi)}
-.bhead{display:flex;gap:8px;align-items:baseline;padding:6px 12px 2px;cursor:pointer}
+.bhead{display:flex;gap:8px;align-items:baseline;padding:8px 12px 4px;cursor:pointer;font-size:14px;border-left:4px solid transparent}
+.block.active .bhead{border-left-color:var(--play)}
+.lane.text{border-top:1px dashed var(--line)}
 .bhead b{font-weight:600}
 .flow{color:var(--mute);font-size:12px}
 .tag{font-size:11px;border:1px solid var(--line);border-radius:10px;padding:0 6px;color:var(--mute)}
@@ -244,7 +246,7 @@ border-radius:8px;padding:8px 10px;min-width:240px;max-height:70vh;overflow:auto
 const DATA = __DATA__;
 const PPS_DATA = DATA.peaks_per_sec;
 const COLORS = ["#2563eb","#dc2626","#059669","#7c3aed","#d97706","#0891b2","#db2777","#4d7c0f"];
-const WAVE_H = 46, TEXT_H = 34;
+const WAVE_H = 56, TEXT_H = 48;
 const wrap = document.getElementById("wrap"), scroller = document.getElementById("scroll"),
       spacer = document.getElementById("spacer"), detail = document.getElementById("detail");
 const css = getComputedStyle(document.documentElement);
@@ -283,22 +285,22 @@ DATA.variants.forEach((v, vi) => {
   if (v.missing) { const m = document.createElement("div"); m.className = "missing";
     m.textContent = v.missing; block.appendChild(m); }
   const pk = decode(v.peaks);
-  speakers.forEach((spk, si) => {
-    const color = COLORS[si % COLORS.length];
-    const segs = v.segments.filter(s => s.spk === spk);
-    for (const kind of ["wave", "text"]) {
-      const lane = document.createElement("div"); lane.className = "lane";
-      const name = document.createElement("div"); name.className = "lname";
-      name.innerHTML = kind === "wave" ? `<i style="background:${color}"></i>${esc(spk)}` : "";
-      const cv = document.createElement("canvas");
-      cv.style.height = (kind === "wave" ? WAVE_H : TEXT_H) + "px";
-      lane.append(name, cv); block.appendChild(lane);
-      const L = {cv, kind, segs, pk, color, vi};
-      lanes.push(L);
-      cv.addEventListener("click", e => { const t = xToT(cv, e.offsetX); select(vi, false); seek(t); });
-      cv.addEventListener("mousemove", e => hover(L, e.offsetX));
-    }
-  });
+  const colorOf = {}; speakers.forEach((spk, si) => { colorOf[spk] = COLORS[si % COLORS.length]; });
+  const addLane = (kind, label, color, segs) => {
+    const lane = document.createElement("div"); lane.className = "lane " + kind;
+    const name = document.createElement("div"); name.className = "lname";
+    name.innerHTML = label;
+    const cv = document.createElement("canvas");
+    cv.style.height = (kind === "wave" ? WAVE_H : TEXT_H) + "px";
+    lane.append(name, cv); block.appendChild(lane);
+    const L = {cv, kind, segs, pk, color, colorOf, speakers, vi};
+    lanes.push(L);
+    cv.addEventListener("click", e => { const t = xToT(cv, e.offsetX); select(vi, false); seek(t); });
+    cv.addEventListener("mousemove", e => hover(L, e.offsetX));
+  };
+  if (pk) addLane("wave", "sóng âm", null, v.segments || []);
+  speakers.forEach(spk => addLane("text", `<i style="background:${colorOf[spk]}"></i>${esc(spk)}`, colorOf[spk],
+    v.segments.filter(s => s.spk === spk)));
   wrap.appendChild(block);
   let a = null;
   if (v.audio) { a = new Audio(); a.preload = "none"; a.src = v.audio;
@@ -334,28 +336,29 @@ function draw(){
       g.fillStyle = line; g.fillRect(0, h/2, w, 0.5);
       if (L.pk) {
         const mid = h/2, amp = h/2 - 2;
-        const inSeg = new Uint8Array(Math.ceil(w));
-        for (const s of L.segs) { if (s.e < t0 || s.s > t1) continue;
-          const a = Math.max(0, Math.floor((s.s - t0) * pxPerSec)), b = Math.min(w, Math.ceil((s.e - t0) * pxPerSec));
-          for (let x = a; x < b; x++) inSeg[x] = 1; }
+        const who = new Uint8Array(Math.ceil(w));          // 0 none, 1..n speaker, 255 overlap
+        for (const sg of L.segs) { if (sg.e < t0 || sg.s > t1) continue;
+          const k = L.speakers.indexOf(sg.spk) + 1;
+          const x0 = Math.max(0, Math.floor((sg.s - t0) * pxPerSec)), x1 = Math.min(w, Math.ceil((sg.e - t0) * pxPerSec));
+          for (let x = x0; x < x1; x++) who[x] = who[x] && who[x] !== k ? 255 : k; }
         for (let x = 0; x < w; x++) {
           const ta = t0 + x / pxPerSec, tb = ta + 1 / pxPerSec;
           let i0 = Math.floor(ta * PPS_DATA), i1 = Math.max(i0 + 1, Math.ceil(tb * PPS_DATA)), m = 0;
           if (i0 >= L.pk.length) break;
           for (let i = i0; i < i1 && i < L.pk.length; i++) if (L.pk[i] > m) m = L.pk[i];
-          const y = Math.max(0.5, m / 255 * amp);
-          g.fillStyle = inSeg[x] ? L.color : faint;
+          const y = Math.max(0.5, m / 255 * amp), k = who[x];
+          g.fillStyle = k === 0 ? faint : (k === 255 ? ink : COLORS[(k - 1) % COLORS.length]);
           g.fillRect(x, mid - y, 1, 2 * y);
         }
       }
     } else {
-      g.font = "12px system-ui,sans-serif"; g.textBaseline = "middle";
-      for (const s of L.segs) { if (s.e < t0 || s.s > t1) continue;
-        const x = (s.s - t0) * pxPerSec, bw = Math.max(2, (s.e - s.s) * pxPerSec);
-        g.fillStyle = L.color; g.globalAlpha = 0.12; g.fillRect(x, 2, bw, h - 4); g.globalAlpha = 1;
-        g.fillRect(x, 2, 2, h - 4);
-        if (bw > 14) { g.save(); g.beginPath(); g.rect(x + 4, 0, bw - 6, h); g.clip();
-          g.fillStyle = ink; g.fillText(s.t, x + 5, h/2); g.restore(); }
+      g.font = "12.5px system-ui,sans-serif"; g.textBaseline = "top";
+      for (const sg of L.segs) { if (sg.e < t0 || sg.s > t1) continue;
+        const x = (sg.s - t0) * pxPerSec, bw = Math.max(2, (sg.e - sg.s) * pxPerSec);
+        g.fillStyle = L.color; g.globalAlpha = 0.14; g.fillRect(x, 1, bw, h - 2); g.globalAlpha = 1;
+        g.fillRect(x, 1, 3, h - 2);
+        if (bw > 24) { g.save(); g.beginPath(); g.rect(x + 5, 0, bw - 7, h); g.clip();
+          g.fillStyle = ink; wrapText(g, sg.t, x + 6, 4, bw - 9, 2, 15); g.restore(); }
       }
     }
     const px = (now - t0) * pxPerSec;
@@ -364,6 +367,16 @@ function draw(){
   document.getElementById("clock").textContent = fmt(now) + " / " + fmt(duration);
 }
 
+function wrapText(g, text, x, y, maxW, maxLines, lh){
+  const words = String(text || "").split(/\s+/).filter(Boolean); let line = "", n = 0;
+  for (let i = 0; i < words.length; i++) {
+    const t = line ? line + " " + words[i] : words[i];
+    if (g.measureText(t).width <= maxW || !line) { line = t; continue; }
+    if (++n >= maxLines) { g.fillText(line + " …", x, y + (n - 1) * lh); return; }
+    g.fillText(line, x, y + (n - 1) * lh); line = words[i];
+  }
+  if (line) g.fillText(line, x, y + n * lh);
+}
 function hover(L, x){
   const t = xToT(L.cv, x), s = L.segs.find(s => t >= s.s && t <= s.e);
   if (!s) return;
