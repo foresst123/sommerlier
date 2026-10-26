@@ -105,6 +105,29 @@ def test_apply_many_failure_keeps_every_input(fake_api, monkeypatch):
     assert "out of memory" in info["errors"][0] and info["filtered"] == 0
 
 
+def test_apply_many_empties_a_leakage_segment_but_not_the_waveform(fake_api, monkeypatch):
+    class Silent(RuntimeError):
+        pass
+
+    class Gate(FakeBackend):
+        def enhance(self, wav, sr):
+            if float(np.max(np.abs(wav))) < 0.01:
+                raise Silent("output is silent although the input has signal")
+            return (wav * 0.5).astype(np.float32)
+
+    monkeypatch.setattr(denoise_service, "_silent_error", lambda: Silent)
+    monkeypatch.setattr(denoise_service, "_load_api", lambda: (
+        lambda name, cfg=None, logger=None: Gate(name, "gate"),
+        lambda spec: [str(spec)], lambda spec: str(spec)))
+    speech_seg, leak = speech(1.0, 0), speech(1.0, 1) * 0.001
+    outs, info = DenoiseService().apply_many([speech(2.0, 2), speech_seg, leak], SR, "gate", None, None)
+    assert info["errors"] == [] and info["silenced"] == 1
+    assert np.allclose(outs[1], speech_seg * 0.5, atol=1e-6) and not np.any(outs[2])
+    outs, info = DenoiseService().apply_many([leak, speech_seg], SR, "gate", None, None)
+    assert "silent" in info["errors"][0], "a silent waveform still fails the whole chain"
+    assert np.array_equal(outs[1], speech_seg)
+
+
 def test_apply_many_bad_input_never_raises():
     outs, info = DenoiseService().apply_many([speech(1.0)], SR, "nonesuch", None, None)
     assert info["errors"] and len(outs) == 1

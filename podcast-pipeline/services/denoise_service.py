@@ -28,6 +28,14 @@ def _load_api():
     return get_backend, parse_chain, chain_id
 
 
+def _silent_error():
+    try:
+        from models.denoise.audio_separator import SilentOutputError
+        return SilentOutputError
+    except Exception:
+        return type("NoSilentOutputError", (Exception,), {})
+
+
 def is_none(spec) -> bool:
     return spec is None or str(spec).strip().lower() in NONE_SPECS
 
@@ -200,6 +208,7 @@ class DenoiseService:
                 "errors": [], "steps": [], "blend": None}
         outs = {i: ins[i] for i in todo}
         step_ins = dict(outs)
+        silenced = set()
         try:
             from models.denoise.pseudo import blend, parse_pseudo, validate_chain_tokens
             get_backend, parse_chain, chain_id = _load_api()
@@ -218,6 +227,8 @@ class DenoiseService:
                 if pseudo is not None:
                     kind, pct = pseudo
                     for i in todo:
+                        if i in silenced:
+                            continue
                         cand = blend(outs[i], ins[i] if kind == "blend" else step_ins[i], pct)
                         problem = _check(ins[i], cand, sr, name)
                         if problem:
@@ -232,7 +243,18 @@ class DenoiseService:
                     if logger:
                         logger.info(f"[denoise] {name} on {len(todo)} arrays")
                     for i in todo:
-                        cand = np.asarray(backend.enhance(outs[i], sr), dtype=np.float32)
+                        if i in silenced:
+                            continue
+                        try:
+                            cand = np.asarray(backend.enhance(outs[i], sr), dtype=np.float32)
+                        except _silent_error() as exc:
+                            if i == 0:
+                                raise
+                            # a separated segment that is only leakage: the model is right to empty it
+                            cand = np.zeros_like(outs[i])
+                            silenced.add(i)
+                            if logger:
+                                logger.debug(f"[denoise] {name}: array {i} emptied ({exc})")
                         problem = _check(ins[i], cand, sr, name)
                         if problem:
                             raise ValueError(f"array {i}: {problem}")
@@ -256,6 +278,7 @@ class DenoiseService:
             outs = {i: ins[i] for i in todo}
         else:
             info["filtered"] = len(todo) if chain else 0
+            info["silenced"] = len(silenced)
         result = [outs.get(i, ins[i]) for i in range(len(ins))]
         if ins:
             lag, corr = estimate_lag(ins[0], result[0], sr)

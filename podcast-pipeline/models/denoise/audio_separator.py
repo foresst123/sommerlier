@@ -86,6 +86,10 @@ from .chunking import fit_length
 NATIVE_SR = 44100
 SILENT_IN = 1e-3    # input peak above which a silent output counts as a failure
 SILENT_OUT = 1e-5
+
+
+class SilentOutputError(DenoiseError):
+    """The model removed everything: a broken stem choice for a whole recording, plain leakage for a short segment."""
 _STEM = re.compile(r"^in_\((.+?)\)_.*\.[A-Za-z0-9]+$")
 _LIST_FILES = ("download_checks.json",)                    # read by every load_model
 _HASH_FILES = ("vr_model_data.json", "mdx_model_data.json")  # read for models without a YAML (VR/MDX)
@@ -342,7 +346,7 @@ class AudioSeparatorBackend(DenoiseBackend):
         if not np.all(np.isfinite(y)):
             raise DenoiseError(f"{self.name}: model produced non-finite samples")
         if float(np.max(np.abs(x))) > SILENT_IN and float(np.max(np.abs(y))) < SILENT_OUT:
-            raise DenoiseError(f"{self.name}: output is silent although the input has signal "
+            raise SilentOutputError(f"{self.name}: output is silent although the input has signal "
                                f"(kept stem {self.keep}{', inverted' if self.do_invert else ''}); wrong stem or a model that removes speech")
         return y
 
