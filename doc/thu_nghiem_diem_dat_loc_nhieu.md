@@ -84,3 +84,15 @@ python tools/make_variant_lanes_page.py --manifest <thư_mục_kết_quả>/vari
 - Audio được tham chiếu bằng đường dẫn tương đối: giữ trang trong `<thư_mục_kết_quả>/lanes/`. Nếu trình duyệt chặn
   phát file cục bộ: `cd <thư_mục_kết_quả> && python -m http.server 8001` rồi mở `http://localhost:8001/lanes/...`.
 - Nhãn speaker là của từng variant (diarization chạy riêng), `SPEAKER_00` ở hai variant không nhất thiết là cùng người.
+
+## Tìm và export đường dẫn model
+
+```bash
+cd podcast-pipeline
+source tools/denoise_env.sh              # tìm trên máy, export AUDIO_SEPARATOR_MODEL_DIR và MPSENET_DIR, in OK/THIẾU cho 4 model
+source tools/denoise_env.sh --download   # model nào chưa có thì tải (cần mạng) rồi export
+DENOISE_SEARCH="/ổ/khác" source tools/denoise_env.sh   # tìm thêm ở chỗ khác
+```
+
+`source` chứ không chạy trực tiếp, vì biến chỉ có hiệu lực trong shell hiện tại. Phải `source` lại ở mỗi shell mới (và trong job `srun` mới).
+`mpsenet_dns` còn cần `pip install -r requirements-denoise.txt` (einops, ...) nếu báo thiếu package.
