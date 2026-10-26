@@ -186,10 +186,20 @@ def _build_parser():
                              "(dfn3, mf2se48, mpsenet) or a serial chain such as "
                              "dfn3>mf2se48. Each variant needs its own --job_id and "
                              "--save_path so caches and outputs do not mix.")
+    parser.add_argument("--denoise_pre_separation", default="none", metavar="SPEC",
+                        help="Same chain syntax as --denoise, applied after diarization "
+                             "and before separation (profile: "
+                             "pipeline.denoise_pre_separation). Diarization still sees "
+                             "the --denoise audio.")
+    parser.add_argument("--denoise_pre_asr", default="none", metavar="SPEC",
+                        help="Same chain syntax as --denoise, applied after separation "
+                             "and before ASR (profile: pipeline.denoise_pre_asr), to the "
+                             "waveform and to every separated segment.")
     parser.add_argument(
         "--stop_after", type=str,
-        choices=["input_quality", "music", "denoise", "diarization", "separation",
-                 "music_removal", "asr",
+        choices=["input_quality", "music", "denoise", "diarization",
+                 "denoise_pre_separation", "separation",
+                 "music_removal", "denoise_pre_asr", "asr",
                  "captioning", "refinement", "speaker_relabel", "transcript_review",
                  "persona_profile", "word_alignment", "conversation_exports", "none"],
         help="Stop pipeline gracefully after this stage. The profile's "
@@ -284,12 +294,13 @@ for k, v in env_profile.get("pipeline", {}).items():
     _from_config(k, v)
 
 # A bad chain should stop the run now, not fail every file later.
-if str(getattr(args, "denoise", "none") or "none").strip().lower() not in ("", "none"):
-    try:
-        from services.denoise_service import parse_spec
-        parse_spec(args.denoise)
-    except Exception as _exc:
-        raise SystemExit(f"main.py: error: --denoise {args.denoise!r}: {_exc}")
+for _flag in ("denoise", "denoise_pre_separation", "denoise_pre_asr"):
+    if str(getattr(args, _flag, "none") or "none").strip().lower() not in ("", "none"):
+        try:
+            from services.denoise_service import parse_spec
+            parse_spec(getattr(args, _flag))
+        except Exception as _exc:
+            raise SystemExit(f"main.py: error: --{_flag} {getattr(args, _flag)!r}: {_exc}")
 
 # "none" is how the command line cancels a profile that stops early.
 if getattr(args, "stop_after", None) == "none":

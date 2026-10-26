@@ -1,0 +1,97 @@
+{
+  "baseline": "none",
+  "variants": [
+    {
+      "id": "raw",
+      "label": "audio gốc → diarization → separation → asr (không tách nhạc)",
+      "group": "control",
+      "note": "Audio gốc không xử lý gì: tắt cả quét nhạc lẫn tách nhạc, không lọc nhiễu.",
+      "chain": "none",
+      "set": {
+        "steps.music_analysis": false,
+        "steps.music_removal": false
+      }
+    },
+    {
+      "id": "none",
+      "label": "audio gốc → tiền xử lý → diarization → separation → asr",
+      "group": "control",
+      "note": "Baseline: pipeline hiện tại (có bước nhạc), không lọc nhiễu."
+    },
+    {
+      "id": "l_p1",
+      "chain": "rf_crowd>rf_vocals_resurrection>rf_dereverb_anvuew",
+      "label": "audio gốc → tiền xử lý → rf_crowd → rf_vocals_resurrection → rf_dereverb_anvuew → diarization → separation → asr",
+      "group": "light"
+    },
+    {
+      "id": "l_p2",
+      "chain_pre_separation": "rf_crowd>rf_vocals_resurrection>rf_dereverb_anvuew",
+      "label": "audio gốc → tiền xử lý → diarization → rf_crowd → rf_vocals_resurrection → rf_dereverb_anvuew → separation → asr",
+      "group": "light"
+    },
+    {
+      "id": "l_p3",
+      "chain_pre_asr": "rf_crowd>rf_vocals_resurrection>rf_dereverb_anvuew",
+      "label": "audio gốc → tiền xử lý → diarization → separation → rf_crowd → rf_vocals_resurrection → rf_dereverb_anvuew → asr",
+      "group": "light"
+    },
+    {
+      "id": "m_p1",
+      "chain": "mpsenet_dns",
+      "label": "audio gốc → tiền xử lý → mpsenet_dns → diarization → separation → asr",
+      "group": "mpsenet"
+    },
+    {
+      "id": "m_p2",
+      "chain_pre_separation": "mpsenet_dns",
+      "label": "audio gốc → tiền xử lý → diarization → mpsenet_dns → separation → asr",
+      "group": "mpsenet"
+    },
+    {
+      "id": "m_p3",
+      "chain_pre_asr": "mpsenet_dns",
+      "label": "audio gốc → tiền xử lý → diarization → separation → mpsenet_dns → asr",
+      "group": "mpsenet"
+    },
+    {
+      "id": "lm_p1",
+      "chain": "rf_crowd>rf_vocals_resurrection>rf_dereverb_anvuew>mpsenet_dns",
+      "label": "audio gốc → tiền xử lý → rf_crowd → rf_vocals_resurrection → rf_dereverb_anvuew → mpsenet_dns → diarization → separation → asr",
+      "group": "same_point"
+    },
+    {
+      "id": "lm_p2",
+      "chain_pre_separation": "rf_crowd>rf_vocals_resurrection>rf_dereverb_anvuew>mpsenet_dns",
+      "label": "audio gốc → tiền xử lý → diarization → rf_crowd → rf_vocals_resurrection → rf_dereverb_anvuew → mpsenet_dns → separation → asr",
+      "group": "same_point"
+    },
+    {
+      "id": "lm_p3",
+      "chain_pre_asr": "rf_crowd>rf_vocals_resurrection>rf_dereverb_anvuew>mpsenet_dns",
+      "label": "audio gốc → tiền xử lý → diarization → separation → rf_crowd → rf_vocals_resurrection → rf_dereverb_anvuew → mpsenet_dns → asr",
+      "group": "same_point"
+    },
+    {
+      "id": "l_p1_m_p2",
+      "chain": "rf_crowd>rf_vocals_resurrection>rf_dereverb_anvuew",
+      "chain_pre_separation": "mpsenet_dns",
+      "label": "audio gốc → tiền xử lý → rf_crowd → rf_vocals_resurrection → rf_dereverb_anvuew → diarization → mpsenet_dns → separation → asr",
+      "group": "light_earlier"
+    },
+    {
+      "id": "l_p1_m_p3",
+      "chain": "rf_crowd>rf_vocals_resurrection>rf_dereverb_anvuew",
+      "chain_pre_asr": "mpsenet_dns",
+      "label": "audio gốc → tiền xử lý → rf_crowd → rf_vocals_resurrection → rf_dereverb_anvuew → diarization → separation → mpsenet_dns → asr",
+      "group": "light_earlier"
+    },
+    {
+      "id": "l_p2_m_p3",
+      "chain_pre_separation": "rf_crowd>rf_vocals_resurrection>rf_dereverb_anvuew",
+      "chain_pre_asr": "mpsenet_dns",
+      "label": "audio gốc → tiền xử lý → diarization → rf_crowd → rf_vocals_resurrection → rf_dereverb_anvuew → separation → mpsenet_dns → asr",
+      "group": "light_earlier"
+    }
+  ]
+}

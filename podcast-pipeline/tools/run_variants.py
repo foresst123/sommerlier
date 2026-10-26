@@ -70,6 +70,10 @@ OUT_FLAG = "--save_path"
 DEFAULT_MAIN = (ROOT / "main.py").resolve()
 DONE_MARKER = ".done"
 MANIFEST_NAME = "variants_manifest.json"
+# Noise-filter points: (variant key suffix, main.py flag, stage dir, point name in denoise.json).
+POINTS = (("", "--denoise", "01b_denoise", "pre_diarization"),
+          ("_pre_separation", "--denoise_pre_separation", "02b_denoise_pre_separation", "pre_separation"),
+          ("_pre_asr", "--denoise_pre_asr", "04b_denoise_pre_asr", "pre_asr"))
 NOOP_CORR = 0.99999  # corr_with_input at or above this = the filter changed nothing
 
 
@@ -170,9 +174,19 @@ def override_tag(overrides, music_separator=None, extra_args=()):
     return tag
 
 
+def _all_chains(v):
+    """The (suffix, flag, dir, point, chain) of each point of a variant, empty chains included."""
+    return [(sfx, flag, d, point, v.get("chain" + sfx) or []) for sfx, flag, d, point in POINTS]
+
+
+def has_chain(v):
+    return any(c for *_, c in _all_chains(v))
+
+
 def load_variants(path):
-    """Return variants [{id, chain, label, spec, group, note, tag, set, music_separator,
-    extra_args}], baseline first. Identical entries merge; clashing ids are an error."""
+    """Return variants [{id, chain, chain_pre_separation, chain_pre_asr, label, spec, group, note,
+    tag, set, music_separator, extra_args}], baseline first. Identical entries merge; clashing ids
+    are an error. `chain` is the pre-diarization point; spec* are the chains as main.py gets them."""
     parse_chain, chain_id = _denoise_helpers()
     data = {}
     if path:
@@ -180,29 +194,51 @@ def load_variants(path):
             data = json.load(f)
     entries = list(data.get("variants") or [])
     if not (entries and all(isinstance(e, dict) and e.get("group") == "lab" for e in entries)):
-        entries.insert(0, {"chain": data.get("baseline", "none")})
+        # An explicit baseline entry (no chain/overrides, id none) keeps its label; it goes first.
+        own = [e for e in entries if isinstance(e, dict) and str(e.get("id") or "none") == "none"
+               and not any(parse_chain(e.get("chain" + sfx)) for sfx, *_ in POINTS)
+               and not (e.get("set") or e.get("music_separator") or e.get("extra_args"))]
+        if own:
+            entries.remove(own[0])
+            entries.insert(0, own[0])
+        else:
+            entries.insert(0, {"chain": data.get("baseline", "none")})
     out, by_id, dups = [], {}, []
     for entry in entries:
         if isinstance(entry, str):
             entry = {"chain": entry}
-        chain = parse_chain(entry.get("chain"))
+        chains = {sfx: parse_chain(entry.get("chain" + sfx)) for sfx, *_ in POINTS}
+        chain = chains[""]
         overrides = _norm_set(entry.get("set"))
         sep = entry.get("music_separator") or None
         extra = _norm_extra(entry.get("extra_args"))
         has_over = bool(overrides or sep or extra)
-        vid = str(entry.get("id") or "") or (
-            f"{chain_id(chain)}.{override_tag(overrides, sep, extra)}" if has_over else chain_id(chain))
+        parts = [chain_id(chain)]
+        if chains["_pre_separation"]:
+            parts.append("sep-" + chain_id(chains["_pre_separation"]))
+        if chains["_pre_asr"]:
+            parts.append("asr-" + chain_id(chains["_pre_asr"]))
+        if has_over:
+            parts.append(override_tag(overrides, sep, extra))
+        vid = str(entry.get("id") or "") or ".".join(parts)
         v = {"id": vid, "chain": list(chain),
+             "chain_pre_separation": list(chains["_pre_separation"]),
+             "chain_pre_asr": list(chains["_pre_asr"]),
              "label": entry.get("label") or vid,
              "spec": ">".join(chain),
+             "spec_pre_separation": ">".join(chains["_pre_separation"]),
+             "spec_pre_asr": ">".join(chains["_pre_asr"]),
              "group": entry.get("group") or None,
              "note": entry.get("note") or None,
              "tag": entry.get("tag") or None,
              "set": overrides, "music_separator": sep, "extra_args": extra}
         if not ID_RE.match(vid):
             raise SystemExit(f"variant id {vid!r} is not filename-safe (use letters, digits, . _ + -)")
+        if vid == "none" and has_chain(v):
+            raise SystemExit("variant id 'none' is the baseline and cannot have a chain; give it another 'id'")
         if vid in by_id:
-            same = all(by_id[vid][k] == v[k] for k in ("chain", "set", "music_separator", "extra_args"))
+            same = all(by_id[vid][k] == v[k] for k in
+                       ("chain", "chain_pre_separation", "chain_pre_asr", "set", "music_separator", "extra_args"))
             if not same:
                 dups.append(vid)
             continue
@@ -212,8 +248,9 @@ def load_variants(path):
         raise SystemExit(f"duplicate variant id(s) with different settings: {sorted(set(dups))}; "
                          "give each variant a unique 'id'")
     if out[0]["id"] != "none" and not all(v.get("group") == "lab" for v in out):
-        out.insert(0, {"id": "none", "chain": [], "label": "none", "spec": "", "group": None,
-                       "note": None, "tag": None, "set": {}, "music_separator": None,
+        out.insert(0, {"id": "none", "chain": [], "chain_pre_separation": [], "chain_pre_asr": [],
+                       "label": "none", "spec": "", "spec_pre_separation": "", "spec_pre_asr": "",
+                       "group": None, "note": None, "tag": None, "set": {}, "music_separator": None,
                        "extra_args": []})
     return out
 
@@ -269,7 +306,7 @@ def check_availability(variants, cfg=None):
     skipped = {}
     for v in variants:
         reasons = []
-        for name in _backend_tokens(v["chain"]):
+        for name in dict.fromkeys(t for *_, c in _all_chains(v) for t in _backend_tokens(c)):
             ok, why = avail.get(name, (False, "unknown backend (not in the registry)"))
             if not ok:
                 reasons.append(f"{name}: {why}")
@@ -327,8 +364,9 @@ def build_command(variant, files, args, input_dir=None):
            "--job_id", f"exp-{variant['id']}",
            "--env", args.env,
            "--stop_after", args.stop_after]
-    if variant["chain"]:
-        cmd += ["--denoise", variant["spec"]]
+    for sfx, flag, *_ in POINTS:
+        if variant.get("chain" + sfx):
+            cmd += [flag, variant["spec" + sfx]]
     if variant.get("music_separator"):
         cmd += ["--music_separator", str(variant["music_separator"])]
     # A comparison run is not a dataset export: keep it out of the shared clean-data folder.
@@ -362,7 +400,8 @@ def discover_dirs(vdir, stems):
         if Path(root) == vdir:
             dirs[:] = [d for d in dirs if d != "input"]
         has = set(dirs)
-        if Path(root).name in stems and ({"01b_denoise", "02_diarization", "05_asr"} & has):
+        if Path(root).name in stems and ({"01b_denoise", "02b_denoise_pre_separation",
+                                                    "04b_denoise_pre_asr", "02_diarization", "05_asr"} & has):
             found.setdefault(Path(root).name, str(Path(root).resolve()))
             dirs[:] = []
     return found
@@ -386,7 +425,7 @@ def _has_real_filter(chain):
     return any(t != "identity" for t in _backend_tokens(chain))
 
 
-def file_verdict(chain, info, exists=True):
+def file_verdict(chain, info, exists=True, stage_dir="01b_denoise"):
     """Verdict for one file from its parsed denoise.json (None = absent/corrupt).
 
     Returns {"verdict","errors","corr_with_input","lag_samples"}; see the module docstring.
@@ -398,7 +437,7 @@ def file_verdict(chain, info, exists=True):
         verdict = "ok"
     elif not isinstance(info, dict):
         verdict = "missing"
-        errors = errors or ["01b_denoise/denoise.json is " + ("unreadable" if exists else "absent")]
+        errors = errors or [f"{stage_dir}/denoise.json is " + ("unreadable" if exists else "absent")]
     elif errors:
         verdict = "fallback"
     elif isinstance(corr, (int, float)) and corr >= NOOP_CORR and _has_real_filter(chain):
@@ -408,23 +447,50 @@ def file_verdict(chain, info, exists=True):
     return {"verdict": verdict, "errors": errors, "corr_with_input": corr, "lag_samples": lag}
 
 
-def denoise_report(chain, file_dirs, stems):
-    """{file stem: file_verdict} for a finished variant; a stem with no output dir counts as missing."""
+def denoise_report(chain, file_dirs, stems, stage_dir="01b_denoise"):
+    """{file stem: file_verdict} for one point of a finished variant; a stem with no output dir counts as missing."""
     report = {}
     for stem in sorted(stems):
         d = file_dirs.get(stem)
         if d is None:
             if chain:
-                report[stem] = file_verdict(chain, None, exists=False)
+                report[stem] = file_verdict(chain, None, exists=False, stage_dir=stage_dir)
                 report[stem]["errors"] = ["no output directory for this file"]
             continue
-        path = Path(d) / "01b_denoise" / "denoise.json"
+        path = Path(d) / stage_dir / "denoise.json"
         exists = path.is_file()
         try:
             info = json.loads(path.read_text(encoding="utf-8")) if exists else None
         except (OSError, ValueError):
             info = None
-        report[stem] = file_verdict(chain, info, exists)
+        report[stem] = file_verdict(chain, info, exists, stage_dir)
+    return report
+
+
+_SEVERITY = {"missing": 3, "fallback": 3, "suspect_noop": 2, "ok": 1}
+
+
+def variant_report(variant, file_dirs, stems):
+    """{stem: verdict dict} over every active point. One point: exactly denoise_report. Several
+    (or a point other than pre_diarization): the worst verdict, errors prefixed with their point,
+    and "points" holding each point's own verdict."""
+    active = [(d, point, c) for _, _, d, point, c in _all_chains(variant) if c]
+    if not active:
+        return denoise_report([], file_dirs, stems)
+    if len(active) == 1 and active[0][1] == "pre_diarization":
+        return denoise_report(active[0][2], file_dirs, stems, active[0][0])
+    per = {point: denoise_report(c, file_dirs, stems, d) for d, point, c in active}
+    report = {}
+    for stem in sorted(stems):
+        rows = {pt: rep[stem] for pt, rep in per.items() if stem in rep}
+        if not rows:
+            continue
+        worst = max(rows.values(), key=lambda r: _SEVERITY.get(r["verdict"], 0))
+        first = next(iter(rows.values()))
+        report[stem] = {"verdict": worst["verdict"],
+                        "errors": [f"{pt}: {e}" for pt, r in rows.items() for e in r["errors"]],
+                        "corr_with_input": first["corr_with_input"],
+                        "lag_samples": first["lag_samples"], "points": rows}
     return report
 
 
@@ -441,6 +507,8 @@ def write_manifest(out_root, variants, stems, status, reference, reasons=None, r
         rep = (reports or {}).get(v["id"]) or {}
         entries.append({
             "id": v["id"], "chain": v["chain"], "label": v["label"],
+            "chain_pre_separation": v.get("chain_pre_separation") or [],
+            "chain_pre_asr": v.get("chain_pre_asr") or [],
             "out_dir": str(vdir.resolve()), "job_id": f"exp-{v['id']}",
             "status": status.get(v["id"], "missing"),
             "group": v.get("group"), "note": v.get("note"),
@@ -577,7 +645,7 @@ class Runner:
     def _assess(self, variant):
         """Read every file's denoise.json; record the report; "degraded" or "ok"."""
         vdir = self.out_root / variant["id"]
-        report = denoise_report(variant["chain"], discover_dirs(vdir, set(self.stems)), self.stems)
+        report = variant_report(variant, discover_dirs(vdir, set(self.stems)), self.stems)
         counts = report_counts(report, len(self.stems))
         self.reports[variant["id"]] = {"denoise_report": report, **counts}
         if counts["suspect_files"]:
@@ -709,7 +777,7 @@ def preflight(python, modules, timeout=240):
 
 
 def print_plan(variants, files, skipped, args):
-    rows = [("id", "group", "chain", "tag", "overrides", "available")]
+    rows = [("id", "group", "chain", "pre_separation", "pre_asr", "tag", "overrides", "available")]
     for v in variants:
         over = [f"{k}={json.dumps(x)}" for k, x in (v.get("set") or {}).items()]
         if v.get("music_separator"):
@@ -717,7 +785,8 @@ def print_plan(variants, files, skipped, args):
         over += v.get("extra_args") or []
         avail = ("SKIPPED: " + skipped[v["id"]]) if v["id"] in skipped else (
             "yes" if args.only_available else "-")
-        rows.append((v["id"], v.get("group") or "-", v["spec"] or "none", v.get("tag") or "-",
+        rows.append((v["id"], v.get("group") or "-", v["spec"] or "none",
+                     v.get("spec_pre_separation") or "none", v.get("spec_pre_asr") or "none", v.get("tag") or "-",
                      " ".join(over) or "-", avail))
     widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
     for r in rows:

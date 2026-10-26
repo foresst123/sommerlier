@@ -20,6 +20,7 @@ from services.transcript_review_service import apply_review_flags
 from services.word_alignment_service import apply_word_alignments
 from services.stage_output_service import StageOutputService
 from schemas.audio import AudioData
+from services.denoise_service import is_none
 from utils.sdpa_guard import capture_baseline, restore_if_changed
 
 # Taken at import, before any stage can run a third-party sdpa_kernel().
@@ -625,8 +626,9 @@ class PipelineService:
         return pids
 
     # Thứ tự các điểm dừng của run(); None (chạy hết) tới được mọi bước.
-    _STOP_ORDER = ("input_quality", "music", "denoise", "diarization", "separation", "music_removal",
-                   "asr", "captioning", "refinement", "speaker_relabel",
+    _STOP_ORDER = ("input_quality", "music", "denoise", "diarization",
+                   "denoise_pre_separation", "separation", "music_removal",
+                   "denoise_pre_asr", "asr", "captioning", "refinement", "speaker_relabel",
                    "transcript_review", "persona_profile", "conversation_selection",
                    "word_alignment", "conversation_exports")
 
@@ -919,6 +921,35 @@ class PipelineService:
         ).hexdigest()[:20]
         return f"v1-{digest}"
 
+    def _denoise_waveform(self, spec, config, checkpoint, audio_data, stage_out,
+                          computed_stages, *, cache, base_ns, key, point) -> bool:
+        """Run one chain on audio_data.waveform with a checkpoint cache; True if a chain is set.
+
+        `cache` is the checkpoint stage; its namespace holds the chain id and the
+        namespace of the waveform the chain was applied to, so a changed chain or
+        input recomputes. Stage output is written once, when computed.
+        """
+        from services.denoise_service import DenoiseService, chain_id_of
+        if is_none(spec):
+            return False
+        cid = chain_id_of(spec)
+        if cid == "none":
+            return False
+        checkpoint.namespaces[cache] = f"{cid}-{base_ns}"
+        cached = checkpoint.load_array(cache)
+        if cached is not None and len(cached) == len(audio_data.waveform):
+            audio_data.waveform = cached
+            if self.logger:
+                self.logger.info(f"Loading denoised ({cid}, {point}) waveform from checkpoint cache")
+            return True
+        info = DenoiseService().apply(audio_data, spec, config.get("denoise"), self.logger)
+        checkpoint.save_array(cache, audio_data.waveform)
+        if key not in computed_stages:
+            stage_out.write_denoise(info, audio_data.waveform, audio_data.sample_rate,
+                                    key=key, point=point)
+            computed_stages.add(key)
+        return True
+
     def _apply_denoise(self, args, config, checkpoint, audio_data, stage_out,
                        computed_stages) -> None:
         """Replace audio_data.waveform with the --denoise chain's output.
@@ -927,26 +958,87 @@ class PipelineService:
         stage-major re-entries reload it and a changed chain recomputes. With no
         chain nothing is read, written or renamed.
         """
-        from services.denoise_service import DenoiseService, chain_id_of, is_none
-        spec = getattr(args, "denoise", None)
-        if is_none(spec):
+        self._denoise_waveform(
+            getattr(args, "denoise", None), config, checkpoint, audio_data, stage_out,
+            computed_stages, cache="denoised_audio", key="denoise", point="pre_diarization",
+            base_ns=checkpoint.namespaces.get("processed_audio"))
+
+    def _apply_denoise_pre_separation(self, args, config, checkpoint, audio_data,
+                                      stage_out, computed_stages, audio_path=None) -> None:
+        """--denoise_pre_separation: filter the waveform separation and later stages see.
+
+        Runs on every run() entry that gets past diarization (from the cache after
+        the first time), so later stage-major passes never see the unfiltered audio.
+        """
+        if is_none(getattr(args, "denoise_pre_separation", None)):
             return
+        base = checkpoint.namespaces.get(
+            "denoised_audio" if not is_none(getattr(args, "denoise", None))
+            else "processed_audio")
+        if self._denoise_waveform(
+                args.denoise_pre_separation, config, checkpoint, audio_data, stage_out,
+                computed_stages, cache="denoised_audio_pre_separation", base_ns=base,
+                key="denoise_pre_separation", point="pre_separation"):
+            # A window plan prefetched from the pre-filter waveform must not be used.
+            drop = getattr(self.separation_svc, "drop_prefetched_plan", None)
+            if callable(drop) and audio_path:
+                drop(audio_path)
+
+    @staticmethod
+    def _pre_asr_base_ns(args, checkpoint) -> str:
+        """Namespace of the waveform P3 filters: the latest of P1/P2/processed audio."""
+        for flag, stage in (("denoise_pre_separation", "denoised_audio_pre_separation"),
+                            ("denoise", "denoised_audio")):
+            if not is_none(getattr(args, flag, None)) and stage in checkpoint.namespaces:
+                return checkpoint.namespaces[stage]
+        return checkpoint.namespaces.get("processed_audio") or ""
+
+    def _apply_denoise_pre_asr(self, args, config, checkpoint, audio_data, stage_out,
+                               computed_stages, speech_segments):
+        """--denoise_pre_asr: filter the waveform and every separated core ASR will read.
+
+        Returns the segments to use: copies carrying the filtered audio, so the
+        objects from the separation checkpoint are never mutated. Runs on every
+        entry that reaches ASR; cached arrays make later passes cheap.
+        """
+        from services.denoise_service import DenoiseService, chain_id_of
+        spec = getattr(args, "denoise_pre_asr", None)
+        if is_none(spec) or speech_segments is None:
+            return speech_segments
         cid = chain_id_of(spec)
         if cid == "none":
-            return
-        checkpoint.namespaces["denoised_audio"] = (
-            f"{cid}-{checkpoint.namespaces['processed_audio']}")
-        cached = checkpoint.load_array("denoised_audio")
-        if cached is not None and len(cached) == len(audio_data.waveform):
-            audio_data.waveform = cached
+            return speech_segments
+        ns = f"{cid}-{self._pre_asr_base_ns(args, checkpoint)}-{checkpoint.namespaces.get('separation') or 'sep'}"
+        checkpoint.namespaces["denoised_audio_pre_asr"] = ns
+        checkpoint.namespaces["denoised_segments_pre_asr"] = ns
+        idx = [i for i, seg in enumerate(speech_segments) if seg.audio is not None]
+        cached_wav = checkpoint.load_array("denoised_audio_pre_asr")
+        cached_segs = checkpoint.load("denoised_segments_pre_asr")
+        if (cached_wav is not None and len(cached_wav) == len(audio_data.waveform)
+                and isinstance(cached_segs, dict)
+                and set(cached_segs) == set(idx)
+                and all(len(cached_segs[i]) == len(speech_segments[i].audio) for i in idx)):
+            wav, cores = cached_wav, [cached_segs[i] for i in idx]
             if self.logger:
-                self.logger.info(f"Loading denoised ({cid}) waveform from checkpoint cache")
-            return
-        info = DenoiseService().apply(audio_data, spec, config.get("denoise"), self.logger)
-        checkpoint.save_array("denoised_audio", audio_data.waveform)
-        if "denoise" not in computed_stages:
-            stage_out.write_denoise(info, audio_data.waveform, audio_data.sample_rate)
-            computed_stages.add("denoise")
+                self.logger.info(f"Loading pre-ASR denoised ({cid}) audio from checkpoint cache")
+        else:
+            arrays = [audio_data.waveform] + [speech_segments[i].audio for i in idx]
+            outs, info = DenoiseService().apply_many(
+                arrays, audio_data.sample_rate, spec, config.get("denoise"), self.logger)
+            wav, cores = outs[0], outs[1:]
+            checkpoint.save_array("denoised_audio_pre_asr", wav)
+            checkpoint.save("denoised_segments_pre_asr", dict(zip(idx, cores)))
+            if "denoise_pre_asr" not in computed_stages:
+                info["segments_with_audio"] = len(idx)  # arrays = these + the waveform
+                stage_out.write_denoise(info, wav, audio_data.sample_rate,
+                                        key="denoise_pre_asr", point="pre_asr")
+                computed_stages.add("denoise_pre_asr")
+        audio_data.waveform = wav
+        out = list(speech_segments)
+        for i, core in zip(idx, cores):
+            out[i] = copy.copy(speech_segments[i])
+            out[i].audio = core
+        return out
 
     def _strip_music(self, args, config, checkpoint, audio_data, audio_path,
                      music_map) -> bool:
@@ -1704,7 +1796,10 @@ class PipelineService:
                     checkpoint.save("diarization", result)
                     # Valid segments exist: start window building before the
                     # audit clips, which nothing downstream depends on.
-                    if self.step_enabled(args, "separation"):
+                    # Not with a pre-separation filter: the plan would be built
+                    # from the unfiltered waveform.
+                    if (self.step_enabled(args, "separation")
+                            and is_none(getattr(args, "denoise_pre_separation", None))):
                         self.separation_svc.prefetch_overlap_plan(
                             result.segments, audio_data, audio_path)
                     stage_out.write_diarization(
@@ -1760,6 +1855,21 @@ class PipelineService:
             stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
                                       "stopped_after": "diarization"})
             return None
+
+        # Second noise-filter point: diarization above used the P1 audio; separation
+        # and everything after use this one. Applied on every entry (cached after the
+        # first), since each stage-major pass reloads the audio from checkpoints.
+        if diarization_result is not None:
+            self._apply_denoise_pre_separation(
+                args, config, checkpoint, audio_data, stage_out, computed_stages,
+                audio_path)
+            if getattr(args, "stop_after", None) == "denoise_pre_separation":
+                if self.logger:
+                    self.logger.info("Stopping after the pre-separation noise filter "
+                                     "as requested by --stop_after.")
+                stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
+                                          "stopped_after": "denoise_pre_separation"})
+                return None
 
         # 4. Tách giọng tại vùng overlap
         speech_segments = None
@@ -1860,6 +1970,19 @@ class PipelineService:
                                       "stopped_after": "music_removal"})
             return None
             
+        # Third noise-filter point, on every entry that reaches ASR (cached after the
+        # first). Copies the segments instead of editing the checkpointed objects.
+        speech_segments = self._apply_denoise_pre_asr(
+            args, config, checkpoint, audio_data, stage_out, computed_stages,
+            speech_segments)
+        if getattr(args, "stop_after", None) == "denoise_pre_asr":
+            if self.logger:
+                self.logger.info("Stopping after the pre-ASR noise filter as requested "
+                                 "by --stop_after.")
+            stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
+                                      "stopped_after": "denoise_pre_asr"})
+            return None
+
         # Không còn tách nhạc theo từng segment ở đây. Bước quét và bỏ nhạc đã
         # chuyển lên đầu để diarization và các bước sau cùng dùng âm thanh sạch.
 

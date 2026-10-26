@@ -245,8 +245,10 @@ def _chips(variants, base):
     for v in variants:
         vid = html.escape(v["id"], quote=True)
         label = html.escape(str(v.get("label") or v["id"]))
-        tip = html.escape(str(v.get("note") or " > ".join(map(str, v.get("chain") or [])) or "baseline"),
-                          quote=True)
+        flow = " | ".join(f"{name}: {' > '.join(map(str, v[key]))}" for name, key in (
+            ("pre_diarization", "chain"), ("pre_separation", "chain_pre_separation"),
+            ("pre_asr", "chain_pre_asr")) if v.get(key))
+        tip = html.escape(str(v.get("note") or flow or "baseline"), quote=True)
         if v.get("set"):
             tip += html.escape(" | set: " + json.dumps(v["set"], ensure_ascii=False), quote=True)
         if v.get("degraded"):

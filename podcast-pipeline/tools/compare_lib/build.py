@@ -62,6 +62,9 @@ def build_compare_data(manifest_path: str, files: Optional[List[str]] = None,
     variants_out, usable = [], []
     for v in manifest.get("variants", []):
         row = {"id": v["id"], "chain": v.get("chain", []), "label": v.get("label", v["id"])}
+        for key in ("chain_pre_separation", "chain_pre_asr"):
+            if v.get(key):
+                row[key] = list(v[key])
         status = v.get("status", "ok")
         row["status"] = status
         if status == "degraded":
@@ -136,7 +139,8 @@ def build_compare_data(manifest_path: str, files: Optional[List[str]] = None,
         denoise = {}
         for vid, o in loaded.items():
             mv = manifest_by_id[vid]
-            ent = denoise_entry(mv.get("chain"), o.get("denoise"), (mv.get("denoise_report") or {}).get(stem))
+            ent = denoise_entry(sum((list(mv.get(k) or []) for k in ("chain", "chain_pre_separation", "chain_pre_asr")), []),
+                                o.get("denoise"), (mv.get("denoise_report") or {}).get(stem))
             if ent is not None:
                 denoise[vid] = ent
                 den_all.setdefault(vid, []).append(ent)

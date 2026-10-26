@@ -179,6 +179,10 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
     stop_inside_diarization = original_stop == "denoise"
     if stop_inside_diarization:
         stop_gate = "diarization"
+    # The other two filter points likewise run inside the separation / asr pass.
+    inside_pass = {"denoise_pre_separation": "separation", "denoise_pre_asr": "asr"}
+    if original_stop in inside_pass:
+        stop_gate = inside_pass[original_stop]
 
     for stage in stages:
         if stage is not None and stop_gate is not None:
@@ -266,6 +270,8 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
 
         stage_args = copy.copy(args)
         stage_args.stop_after = "denoise" if (stop_inside_diarization and stage == "diarization") else stage
+        if original_stop in inside_pass and stage == inside_pass[original_stop]:
+            stage_args.stop_after = original_stop
         # Whether this batch goes on past this stage; a stage that hands the LLM
         # to the next one only keeps it when there is a next one.
         stage_args.batch_continues = stop_gate != stage

@@ -19,6 +19,7 @@ MAX_LAG_SEC = 0.1          # largest shift the lag estimate looks for
 LAG_WINDOW_SEC = 60.0      # cross-correlate at most this much audio
 SPEECH_DB = -45.0          # a 90th-percentile frame level above this means speech
 SILENT_DB = -80.0          # an output below this where the input had speech is dead
+MIN_ARRAY_SEC = 0.5        # apply_many leaves shorter arrays alone: backends choke on them
 
 
 def _load_api():
@@ -176,3 +177,89 @@ class DenoiseService:
         info["noise_floor_db_after"] = noise_floor_db(out, sr)
         audio_data.waveform = out
         return info
+
+
+    def apply_many(self, arrays, sr, chain_spec, cfg=None, logger=None):
+        """Run one chain over several arrays, loading each backend once.
+
+        Returns (outs, info). outs[i] is arrays[i] filtered, or arrays[i] itself when
+        it is shorter than MIN_ARRAY_SEC (counted in info["skipped_short"]) or when
+        the chain failed on any array: all-or-nothing, like apply(). Never raises.
+        info follows apply() for arrays[0] (the waveform) and adds the array counts.
+        """
+        if not isinstance(cfg, dict):
+            cfg = None
+        sr = int(sr)
+        ins = [np.ascontiguousarray(a, dtype=np.float32) for a in arrays]
+        todo = [i for i, a in enumerate(ins) if len(a) >= int(MIN_ARRAY_SEC * sr)]
+        info = {"chain": [], "chain_id": "none", "sample_rate": sr,
+                "samples": int(len(ins[0])) if ins else 0, "lag_samples": 0,
+                "noise_floor_db_before": noise_floor_db(ins[0], sr) if ins else None,
+                "noise_floor_db_after": None, "corr_with_input": None,
+                "arrays": len(ins), "filtered": 0, "skipped_short": len(ins) - len(todo),
+                "errors": [], "steps": [], "blend": None}
+        outs = {i: ins[i] for i in todo}
+        step_ins = dict(outs)
+        try:
+            from models.denoise.pseudo import blend, parse_pseudo, validate_chain_tokens
+            get_backend, parse_chain, chain_id = _load_api()
+            chain = list(parse_chain(chain_spec))
+            info["chain"] = chain
+            info["chain_id"] = chain_id(chain)
+            validate_chain_tokens(chain)
+        except Exception as exc:
+            info["errors"].append(f"denoise unavailable: {exc}")
+            chain = []
+        for name in chain if todo else []:
+            backend = None
+            started = time.time()
+            pseudo = parse_pseudo(name)
+            try:
+                if pseudo is not None:
+                    kind, pct = pseudo
+                    for i in todo:
+                        cand = blend(outs[i], ins[i] if kind == "blend" else step_ins[i], pct)
+                        problem = _check(ins[i], cand, sr, name)
+                        if problem:
+                            raise ValueError(f"array {i}: {problem}")
+                        outs[i] = cand
+                    if kind == "blend":
+                        info["blend"] = {"percent": pct}
+                else:
+                    backend = get_backend(name, cfg, logger)
+                    backend.load()
+                    step_ins = dict(outs)
+                    if logger:
+                        logger.info(f"[denoise] {name} on {len(todo)} arrays")
+                    for i in todo:
+                        cand = np.asarray(backend.enhance(outs[i], sr), dtype=np.float32)
+                        problem = _check(ins[i], cand, sr, name)
+                        if problem:
+                            raise ValueError(f"array {i}: {problem}")
+                        outs[i] = cand
+                info["steps"].append({"token": name, "kind": "blend" if pseudo else "backend",
+                                      "seconds": round(time.time() - started, 3)})
+            except Exception as exc:
+                info["errors"].append(f"{name}: {exc}" if name not in str(exc) else str(exc))
+                break
+            finally:
+                if backend is not None:
+                    try:
+                        backend.unload()
+                    except Exception as exc:
+                        if logger:
+                            logger.warning(f"[denoise] could not unload {name}: {exc}")
+        if info["errors"]:
+            if logger:
+                logger.warning("[denoise] keeping the unfiltered audio: "
+                               + "; ".join(info["errors"]))
+            outs = {i: ins[i] for i in todo}
+        else:
+            info["filtered"] = len(todo) if chain else 0
+        result = [outs.get(i, ins[i]) for i in range(len(ins))]
+        if ins:
+            lag, corr = estimate_lag(ins[0], result[0], sr)
+            info["lag_samples"] = int(lag)
+            info["corr_with_input"] = corr
+            info["noise_floor_db_after"] = noise_floor_db(result[0], sr)
+        return result, info

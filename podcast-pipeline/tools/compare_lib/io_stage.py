@@ -104,9 +104,13 @@ def _norm_segments(rows, with_text=False) -> Optional[List[dict]]:
 def load_file_output(path: str, name: Optional[str] = None) -> Dict[str, Any]:
     """Normalized view of one file's output dir; never raises on missing stages."""
     raw = os.path.join(path, "01_music", "after_music.wav")
-    den = os.path.join(path, "01b_denoise", "after_denoise.wav")
+    # The latest filter point is what the later stages worked on: pre_asr, pre_separation, then 01b.
+    points = [os.path.join(path, d) for d in ("04b_denoise_pre_asr", "02b_denoise_pre_separation", "01b_denoise")]
+    den = next((os.path.join(d, "after_denoise.wav") for d in points
+                if os.path.isfile(os.path.join(d, "after_denoise.wav"))), None)
+    den_json = next((os.path.join(d, "denoise.json") for d in points
+                     if os.path.isfile(os.path.join(d, "denoise.json"))), points[-1] + "/denoise.json")
     raw = raw if os.path.isfile(raw) else None
-    den = den if os.path.isfile(den) else None
 
     diar = _norm_segments(_rows(read_json(os.path.join(path, "02_diarization", "segments.json"))))
     sep_rows = _rows(read_json(os.path.join(path, "03_separation", "segments.json")))
@@ -124,7 +128,7 @@ def load_file_output(path: str, name: Optional[str] = None) -> Dict[str, Any]:
         "dir": path,
         "duration": duration,
         "audio": {"raw": raw, "denoised": den},
-        "denoise": read_json(os.path.join(path, "01b_denoise", "denoise.json")),
+        "denoise": read_json(den_json),
         "diarization": diar,
         "separation": ({"segments": _norm_segments(sep_rows), "stats": sep_stats}
                        if sep_rows is not None or sep_stats is not None else None),

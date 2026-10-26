@@ -100,8 +100,10 @@ class StageOutputService:
         "music": "01_music",
         "denoise": "01b_denoise",
         "diarization": "02_diarization",
+        "denoise_pre_separation": "02b_denoise_pre_separation",
         "separation": "03_separation",
         "music_removal": "04_music_removal",
+        "denoise_pre_asr": "04b_denoise_pre_asr",
         "asr": "05_asr",
         "refinement": "06_refinement",
         "relabel": "07_relabel",
@@ -342,14 +344,16 @@ class StageOutputService:
                 if self.logger:
                     self.logger.warning(f"Could not write after_music.wav: {exc}")
 
-    def write_denoise(self, info: dict, audio=None, sample_rate=None):
+    def write_denoise(self, info: dict, audio=None, sample_rate=None, key="denoise",
+                      point="pre_diarization"):
         """The noise-filtered waveform every later stage works on, and how it was made."""
         if not self.enabled:
             return
-        stage = self.stage_dir("denoise")
+        info = dict(info, point=point)
+        stage = self.stage_dir(key)
         self._write_json(os.path.join(stage, "denoise.json"), info, allow_nan=False)
-        self.manifest["stages"]["denoise"] = {
-            "dir": self.STAGES["denoise"],
+        self.manifest["stages"][key] = {
+            "dir": self.STAGES[key],
             "stats": {k: info.get(k) for k in ("chain_id", "lag_samples",
                                                "noise_floor_db_before",
                                                "noise_floor_db_after")}}
