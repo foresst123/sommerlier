@@ -164,3 +164,14 @@ Trong PyTorch 2.8 `torch.export.load` nuốt mọi `RuntimeError` của định 
 Nên câu đó chỉ là lỗi phụ; lỗi gốc (thường là hết VRAM khi nạp lên GPU, hoặc file `.pt2` xuất bằng bản torch khác) bị che.
 Để xem lỗi gốc: `~/sommerlier/sidon_env/bin/python -c "import torch; from torch.export.pt2_archive._package import load_pt2; load_pt2('<file .pt2 trong cache HF>')"`.
 Nếu nạp trên CPU được mà trên GPU không được thì đó là thiếu VRAM: đổi `GPUS` để Sidon không chung card với nhiều process, hoặc giảm `SIDON_WORKERS`.
+
+## Xem dây chuyền đang ở đâu
+
+```bash
+python tools/line_status.py <thư_mục_kết_quả>
+```
+In một bảng: mỗi variant một dòng, mỗi cột là một lần bàn giao (`.ready_<bước>`): `ok 3m` là đã bàn giao cách đây 3 phút, `FAIL` là bước đó lỗi (lý do ở dưới bảng), `.` là chưa tới. Bên dưới là dòng log cuối của từng process,
+nên process nào đang chờ thì thấy nó chờ gì.
+
+Bàn giao theo **cả variant**: một process chỉ báo `.ready` khi xong **tất cả file** của variant đó ở bước của nó, nên file dài nhất (ví dụ 47 phút) quyết định lúc process kế tiếp bắt đầu.
+Mã băm trong `.ready` bỏ qua các `--set performance.*` (đổi số worker không làm kết quả khác đi), nên mỗi process có thể có số worker riêng.

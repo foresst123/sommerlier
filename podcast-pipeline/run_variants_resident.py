@@ -175,11 +175,17 @@ def plan_ownership(variants, skipped, shard):
     return {vid for i, vid in enumerate(eligible) if i % n == k - 1}
 
 
+# Speed knobs (workers, placement) never change what a variant produces, and the processes of the line differ
+# in them (the separation process has its own Sidon worker count): they must not make one process's .ready_<stage>
+# look stale to the next, nor invalidate a finished variant.
+HASH_IGNORED_SETS = ("performance.",)
+
+
 def variant_hash(variant, args, files, stop_after=None):
     stop = args.stop_after if stop_after is None else stop_after
     sig = {"id": variant["id"], "env": args.env,
            "overrides": variant_overrides(variant, stop),
-           "global_set": list(args.global_set or [])}
+           "global_set": [g for g in (args.global_set or []) if not g.startswith(HASH_IGNORED_SETS)]}
     return rv().run_hash([json.dumps(sig, sort_keys=True)], files)
 
 

@@ -686,3 +686,15 @@ def test_variant_that_only_turns_music_off_is_the_baseline_again(env):
     args = rr.parse_args(["--audio-dir", str(audio), "--variants", str(var), "--out-root", str(tmp / "out"),
                           "--music", "profile"])
     assert rr.resolve_plan(args)[2] == {}
+
+
+def test_hash_ignores_speed_knobs_but_not_result_settings(env):
+    tmp, audio, var = env
+    base = ["--audio-dir", str(audio), "--variants", str(var), "--out-root", str(tmp / "out"), "--music", "profile"]
+    a = rr.parse_args(base)
+    b = rr.parse_args(base + ["--set", "performance.stages.separation.workers_per_gpu=1"])
+    c = rr.parse_args(base + ["--set", "steps.music_removal=false"])
+    variants, files, _ = rr.resolve_plan(a)
+    v = variants[0]
+    assert rr.variant_hash(v, a, files) == rr.variant_hash(v, b, files)       # workers_per_gpu: same variant
+    assert rr.variant_hash(v, a, files) != rr.variant_hash(v, c, files)       # a step changes the result

@@ -154,3 +154,24 @@ def test_job_id_defaults_to_the_slurm_job_of_the_shell(tmp_path):
     assert windows and all("srun --jobid=777 --overlap --pty bash " in w for w in windows)
     r, _ = launch(tmp_path, env={"SLURM_JOB_ID": "777", "JOBID": "18790"}, out="o2")
     assert all("--jobid=18790 " in l for l in r.stdout.splitlines() if l.startswith("== window"))
+
+
+def test_every_handover_of_the_line_is_recognised_by_the_next_process(tmp_path):
+    """The hash a process writes in .ready_<stage> must equal the one the next process recomputes."""
+    import importlib.util
+    import shlex
+    spec = importlib.util.spec_from_file_location("rr", SCRIPT.parents[1] / "run_variants_resident.py")
+    rr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rr)
+    (tmp_path / "audio").mkdir(exist_ok=True)
+    (tmp_path / "audio" / "a.wav").write_bytes(b"x")
+    r, d = launch(tmp_path, env={"JOBID": "1"})
+    procs = []
+    for script in sorted(d.glob("*.sh")):
+        args = rr.parse_args(shlex.split(command_of(script))[2:])
+        procs.append((script.name, args) + tuple(rr.resolve_plan(args)[:2]))
+    stages = ["denoise", "diarization", "denoise_pre_separation", "separation", "denoise_pre_asr"]
+    for (pn, pa, pv, pf), (cn, ca, cv, cf), stage in zip(procs, procs[1:], stages):
+        for vp, vc in zip(pv, cv):
+            assert rr.variant_hash(vp, pa, pf, stop_after=stage) == rr.variant_hash(vc, ca, cf, stop_after=stage), \
+                f"{pn} -> {cn} would not see {vp['id']} as ready"
