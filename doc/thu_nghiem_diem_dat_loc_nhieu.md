@@ -67,3 +67,17 @@ python tools/make_compare_page.py <out>/compare_data.json -o <out>/compare.html
 Trang so sánh đo thật: chỉ số âm thanh so với bản gốc, **WER so với baseline** (và so với bản gõ tay nếu có `--reference-dir`), **DER so với baseline** (khác biệt phân đoạn người nói giữa biến thể và baseline), số từ/số đoạn của ASR, verdict từng điểm. Cần nghe: WER/DER so với baseline chỉ cho biết khác bao nhiêu, không nói tốt hơn hay kém hơn; chỉ WER so với bản gõ tay mới là sai số thật.
 
 Trang so sánh **không đếm số hội thoại**. Số hội thoại phải tự đếm trong từng biến thể: `<out>/<id>/<file>/07d_conversation_selection/selection.json` (vùng được chọn) và `09_conversation_exports/exports.json` (bản đã xuất). Cũng chưa có DER so với nhãn thật.
+
+## Trang xem từng variant theo speaker
+
+Mỗi file audio một trang: mỗi variant một khối, mỗi speaker một dòng sóng (đoạn của speaker đó tô màu), text ASR nằm ngay dưới.
+
+```bash
+python tools/make_variant_lanes_page.py --manifest <thư_mục_kết_quả>/variants_manifest.json
+# -> <thư_mục_kết_quả>/lanes/<tên_file>_lanes.html
+```
+
+- `--transcript latest` để xem text sau refinement / word alignment thay vì `05_asr`.
+- Audio được tham chiếu bằng đường dẫn tương đối: giữ trang trong `<thư_mục_kết_quả>/lanes/`. Nếu trình duyệt chặn
+  phát file cục bộ: `cd <thư_mục_kết_quả> && python -m http.server 8001` rồi mở `http://localhost:8001/lanes/...`.
+- Nhãn speaker là của từng variant (diarization chạy riêng), `SPEAKER_00` ở hai variant không nhất thiết là cùng người.
