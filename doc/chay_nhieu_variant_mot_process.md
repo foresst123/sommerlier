@@ -85,3 +85,44 @@ python tools/make_compare_page.py ...
 python tools/make_variant_lanes_page.py ...
 ```
 (đối số giống khi chạy bằng `tools/run_variants.py`; `OUT/_resident/` là thư mục nội bộ, chỉ chứa input symlink.)
+
+## Dây chuyền nhiều process
+
+Muốn các GPU rảnh không ngồi chờ: một (hoặc vài) process "producer" chạy giai đoạn 1 (music, denoise, diarization, separation) cho variant này sang variant khác,
+còn process "consumer" chạy ASR cho những variant mà separation đã xong. Không dùng thread; mỗi process có model riêng và thấy một GPU qua `CUDA_VISIBLE_DEVICES`
+nên dùng `--layout default`. Ba lệnh (mỗi lệnh một cửa sổ tmux; thứ tự khởi động tuỳ ý):
+
+```bash
+# tmux 1: producer trên GPU 0
+CUDA_VISIBLE_DEVICES=0 python run_variants_resident.py --audio-dir DIR --variants tools/variants_placement.json \
+    --out-root OUT --layout default --stop-after separation --signal separation --resume
+
+# tmux 2: consumer trên GPU 1
+CUDA_VISIBLE_DEVICES=1 python run_variants_resident.py --audio-dir DIR --variants tools/variants_placement.json \
+    --out-root OUT --layout default --stop-after asr --wait-signal separation --resume --poll-seconds 15
+
+# tmux 3 (tuỳ chọn): thêm producer, chia kế hoạch bằng --shard (cùng hoặc khác GPU)
+#   producer 1: ... --shard 1/2      producer 2: ... --shard 2/2
+```
+
+Các tham số giữ nguyên giữa các process (cùng `--audio-dir/--variants/--out-root/--env/--set/--only-ids/--groups`), vì hash dùng để nhận tín hiệu tính từ chúng.
+
+Cách bàn giao dựa vào checkpoint: producer chạy `--stop_after separation`, ghi checkpoint vào `cache/exp-<variant>_<stem>` rồi tạo `OUT/<id>/.ready_separation`
+(`{hash, stop_after, time}`); nếu lỗi tạo `.failed_separation` (`{reason, hash}`). Consumer chạy `--stop_after asr` với cùng job id nên đọc lại checkpoint đó và chỉ làm phần ASR.
+Consumer không chạy theo thứ tự kế hoạch: nó lấy variant sẵn sàng đầu tiên (có `.ready_` với hash khớp hash tính lại), gặp `.failed_` thì ghi `failed` ("producer failed: ...") mà không chạy,
+không có gì sẵn sàng thì ngủ `--poll-seconds` (mặc định 15) rồi xem lại. `--wait-timeout PHÚT` (0 = chờ mãi, tính từ lần hoạt động cuối) quá hạn thì các variant còn chờ bị ghi `failed` ("producer never signalled").
+`.ready_` có hash cũ (đổi `--set`, file đầu vào, env) bị bỏ qua.
+
+- `--shard K/N` (K từ 1): process chỉ sở hữu các mục kế hoạch có `chỉ số % N == K-1` (chỉ số tính sau khi bỏ các variant skipped, `none` tính vào). Các shard rời nhau, hợp lại là cả kế hoạch. Mọi process phải thấy cùng danh sách skipped (cùng máy/cùng `--only-available`).
+- `--signal STAGE` phải bằng `--stop-after`; `--wait-signal STAGE` phải là stage sớm hơn `--stop-after`. Thứ tự stage là `STAGE_ORDER` (bản sao `PipelineService._STOP_ORDER`, có test so khớp).
+- Resume: process có `--signal` ghi `.done.<stop_after>` (marker riêng), các process khác dùng `.done`, nên marker của producer không làm consumer tưởng đã xong.
+- Đánh giá denoise theo điểm dừng: producer dừng ở separation chỉ xét các điểm lọc đã chạy (pre_diarization, pre_separation), không xét `chain_pre_asr`, nên không bị coi là `degraded`.
+- `variants_manifest.json` do mọi process ghi: đọc-sửa-ghi dưới `flock` trên `OUT/.manifest.lock`, thay thế nguyên tử. Mỗi process chỉ ghi mục của variant nó sở hữu (và các mục skipped), giữ nguyên mục của process khác, giữ thứ tự kế hoạch; cùng một variant thì mục của stop_after muộn hơn thắng. Mỗi mục có thêm khoá `stop_after` (các tool so sánh bỏ qua khoá thừa).
+- Thư mục input mỗi process: `OUT/_resident/input_<thời gian>_<pid>`.
+
+Giới hạn:
+- Checkpoint `input_audio_quality` (cổng DNSMOS) gắn với đường dẫn tuyệt đối của file đầu vào; consumer dùng thư mục input khác producer nên nếu cổng DNSMOS bật thì nó tính lại. Profile `a100` để `audio_quality.enabled = false` nên không ảnh hưởng ở đó.
+- VRAM: mỗi process nạp model riêng. Consumer nạp Qwen3 vLLM; `a100` đặt `gpu_memory_utilization: 0.5` và `kv_cache_memory_bytes` 5 GiB (Qwen3-ASR-1.7B). Ước tính (chưa đo): với `gpu_memory_utilization` là tỉ lệ tổng VRAM thì chỉ vừa 1 consumer trên card 40 GB (khoảng 20 GB mỗi cái, hai cái là chạm trần);
+  nếu vLLM dùng `kv_cache_memory_bytes` thay cho tỉ lệ, mỗi consumer khoảng 10 đến 12 GB (trọng số bf16 cỡ 3,5 GB + 5 GiB KV + dư) nên có thể 2 đến 3 cái. Hãy đo bằng `nvidia-smi` trước khi chạy nhiều consumer trên một card.
+- Nhiều producer trên cùng một card chia nhau tính toán của card đó (không nhanh hơn tỉ lệ thuận), và mỗi producer giữ một bản Sidon/diarizer/Roformer riêng.
+- `--dry-run` in vai trò (producer/consumer/all), shard, signal/wait và danh sách variant process đó sở hữu.

@@ -40,7 +40,9 @@ class FakeRun:
             (d / "02_diarization").mkdir(parents=True, exist_ok=True)
             for spec, sub in ((args.denoise, "01b_denoise"), (args.denoise_pre_separation, "02b_denoise_pre_separation"),
                               (args.denoise_pre_asr, "04b_denoise_pre_asr")):
-                if spec != "none":
+                point_stage = {"01b_denoise": "denoise", "02b_denoise_pre_separation": "denoise_pre_separation",
+                               "04b_denoise_pre_asr": "denoise_pre_asr"}[sub]
+                if spec != "none" and rr.stage_rank(args.stop_after) >= rr.stage_rank(point_stage):
                     (d / sub).mkdir(exist_ok=True)
                     info = {"chain_id": spec, "errors": ["x: boom"] if vid in self.errors_ids else [],
                             "corr_with_input": 0.9, "lag_samples": 0}
@@ -210,7 +212,8 @@ def test_manifest_schema_equals_old_runner(env, tmp_path):
     rv.write_manifest(old_root, r.variants, set(r.stems), {}, {s: None for s in r.stems})
     old = json.loads((old_root / "variants_manifest.json").read_text())
     assert set(mine) == set(old)
-    assert all(set(x) == set(old["variants"][0]) for x in mine["variants"])
+    assert all(set(x) == set(old["variants"][0]) | {"stop_after"} for x in mine["variants"])
+    assert {x["stop_after"] for x in mine["variants"]} == {"asr"}
     assert mine["version"] == 1 and mine["baseline"] == "none"
     assert {x["job_id"] for x in mine["variants"]} == {f"exp-{v['id']}" for v in r.variants}
 
@@ -343,3 +346,305 @@ def test_layout_warnings():
     assert any("cuda:0" in w for w in rr.layout_warnings(mk(gpu_1=1)))
     assert any("refinement" in w for w in rr.layout_warnings(mk(stop_after="none")))
     assert any("refinement" in w for w in rr.layout_warnings(mk(layout="split_strict", stop_after="refinement")))
+
+
+# ------------------------------------------------------------------ assembly line (several processes)
+class Clock:
+    """Injected clock + sleep: sleeping only moves the clock, and may run a hook (e.g. the producer finishing)."""
+
+    def __init__(self):
+        self.now, self.sleeps, self.hook = 0.0, [], None
+
+    def time(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+        if self.hook:
+            self.hook(len(self.sleeps))
+
+
+def line_runner(env, fake, clock=None, *extra):
+    args, variants, files, skipped = make(env, *extra)
+    clock = clock or Clock()
+    r = rr.ResidentRunner(args, variants, files, run_batch=fake, skipped=skipped, say=lambda m: None,
+                          sleep=clock.sleep, clock=clock.time)
+    r.prepare()
+    return r, args, files
+
+
+def producer_then_files(env, *extra):
+    r, args, files = line_runner(env, FakeRun(), None, "--layout", "default", "--stop-after", "separation",
+                                 "--signal", "separation", *extra)
+    schedule_stop(r, files, "separation")
+    return r, args, files
+
+
+def schedule_stop(r, files, stop):
+    pipeline = SimpleNamespace(separation_svc=None)
+    base = SimpleNamespace(env="a100", stop_after=stop, keep_models=True, denoise="none",
+                           job_id="exp-resident", save_path="x")
+    config = {"environments": {"a100": {"steps": {}}}}
+    return r.scheduler(pipeline, base, config, [str(f) for f in files])
+
+
+def test_producer_writes_ready_with_the_consumers_hash_and_its_own_done(env):
+    tmp = env[0]
+    r, args, files = producer_then_files(env)
+    out = tmp / "out"
+    cargs, variants, cfiles, _ = make(env, "--stop-after", "asr", "--wait-signal", "separation")
+    for v in variants:
+        if v["id"] == "own":
+            continue
+        vd = out / v["id"]
+        ready = json.loads((vd / ".ready_separation").read_text())
+        assert ready["hash"] == rr.variant_hash(v, cargs, cfiles, stop_after="separation")
+        assert ready["stop_after"] == "separation" and "time" in ready
+        assert (vd / ".done.separation").is_file() and not (vd / ".done").exists()
+        assert not (vd / ".failed_separation").exists()
+
+
+def test_stale_ready_is_removed_when_the_producer_starts_fresh(env):
+    tmp = env[0]
+    for vid in ("dfn3", "none"):
+        d = tmp / "out" / vid
+        d.mkdir(parents=True)
+        (d / ".ready_separation").write_text("{}")
+        (d / ".failed_separation").write_text("{}")
+    seen = []
+
+    class Spy(FakeRun):
+        def __call__(self, pipeline, args, config, batch, logger=None, stages=None):
+            vd = Path(args.save_path)
+            seen.append((args.job_id, (vd / ".ready_separation").exists(), (vd / ".failed_separation").exists()))
+            return super().__call__(pipeline, args, config, batch, logger, stages)
+
+    r, args, files = line_runner(env, Spy(), None, "--layout", "default", "--stop-after", "separation",
+                                 "--signal", "separation")
+    schedule_stop(r, files, "separation")
+    assert ("exp-dfn3", False, False) in seen and ("exp-none", False, False) in seen
+
+
+def test_producer_failure_writes_failed_marker(env):
+    tmp = env[0]
+    r, args, files = line_runner(env, FakeRun(fail_ids={"dfn3"}), None, "--layout", "default",
+                                 "--stop-after", "separation", "--signal", "separation")
+    schedule_stop(r, files, "separation")
+    failed = json.loads((tmp / "out" / "dfn3" / ".failed_separation").read_text())
+    assert "asr: bad" in failed["reason"] and not (tmp / "out" / "dfn3" / ".ready_separation").exists()
+
+
+def test_stop_aware_assess_does_not_flag_pre_asr_chain_for_a_producer(env):
+    tmp = env[0]
+    r, args, files = producer_then_files(env)
+    m = {x["id"]: x for x in manifest(tmp)["variants"]}
+    assert m["p3"]["status"] == "ok" and m["p3"]["degraded_files"] == 0
+    assert m["p3"]["stop_after"] == "separation"
+    full = rr.reached_variant({"chain": ["a"], "chain_pre_separation": ["b"], "chain_pre_asr": ["c"]}, "denoise")
+    assert full == {"chain": ["a"], "chain_pre_separation": [], "chain_pre_asr": []}
+    assert rr.reached_variant({"chain": ["a"], "chain_pre_asr": ["c"]}, "asr")["chain_pre_asr"] == ["c"]
+    assert rr.reached_variant({"chain": ["a"], "chain_pre_asr": ["c"]}, None)["chain_pre_asr"] == ["c"]
+    assert rr.reached_variant({"chain": ["a"]}, "music")["chain"] == []
+
+
+def consumer(env, clock, *extra, fake=None):
+    fake = fake or FakeRun()
+    r, args, files = line_runner(env, fake, clock, "--layout", "default", "--stop-after", "asr",
+                                 "--wait-signal", "separation", "--poll-seconds", "5", *extra)
+    return r, args, files, fake
+
+
+def signal_ready(env, args, files, vid):
+    variants = {v["id"]: v for v in rr.resolve_plan(args)[0]}
+    d = env[0] / "out" / vid
+    d.mkdir(parents=True, exist_ok=True)
+    digest = rr.variant_hash(variants[vid], args, files, stop_after="separation")
+    (d / ".ready_separation").write_text(json.dumps({"hash": digest, "stop_after": "separation"}))
+
+
+def test_consumer_waits_then_runs_ready_variants_out_of_plan_order(env):
+    clock = Clock()
+    r, args, files, fake = consumer(env, clock)
+    # nothing ready at first; after the 2nd sleep the producer finishes p3, after the 4th dfn3, then the rest
+    order = {2: ["p3"], 4: ["dfn3"], 5: ["none", "nomusic"]}
+    clock.hook = lambda n: [signal_ready(env, args, files, vid) for vid in order.get(n, [])]
+    schedule_stop(r, files, "asr")
+    assert [c[0] for c in fake.calls] == ["p3", "dfn3", "none", "nomusic"]     # plan order is none, dfn3, p3, nomusic
+    assert clock.sleeps[:2] == [5, 5]
+    assert (env[0] / "out" / "p3" / ".done").is_file() and not (env[0] / "out" / "p3" / ".done.asr").exists()
+
+
+def test_consumer_honours_failed_marker_without_running(env):
+    clock = Clock()
+    fake = FakeRun()
+    r, args, files, fake = consumer(env, clock, fake=fake)
+    for vid in ("none", "p3", "nomusic"):
+        signal_ready(env, args, files, vid)
+    (env[0] / "out" / "dfn3").mkdir(parents=True)
+    (env[0] / "out" / "dfn3" / ".failed_separation").write_text(json.dumps({"reason": "OOM in sidon"}))
+    failures = schedule_stop(r, files, "asr")
+    assert "dfn3" not in [c[0] for c in fake.calls] and clock.sleeps == []
+    m = {x["id"]: x for x in manifest(env[0])["variants"]}
+    assert m["dfn3"]["status"] == "failed" and m["dfn3"]["reason"] == "producer failed: OOM in sidon"
+    assert any("producer failed: OOM in sidon" in e for _, e in failures)
+
+
+def test_consumer_timeout_marks_pending_failed(env):
+    clock = Clock()
+    r, args, files, fake = consumer(env, clock, "--wait-timeout", "1")
+    signal_ready(env, args, files, "none")
+    schedule_stop(r, files, "asr")
+    assert [c[0] for c in fake.calls] == ["none"]
+    m = {x["id"]: x for x in manifest(env[0])["variants"]}
+    assert m["none"]["status"] == "ok"
+    for vid in ("dfn3", "p3", "nomusic"):
+        assert m[vid]["status"] == "failed" and m[vid]["reason"] == "producer never signalled"
+    assert clock.now >= 60
+
+
+def test_consumer_ignores_a_ready_with_a_stale_hash(env):
+    clock = Clock()
+    r, args, files, fake = consumer(env, clock, "--wait-timeout", "1")
+    d = env[0] / "out" / "none"
+    d.mkdir(parents=True)
+    (d / ".ready_separation").write_text(json.dumps({"hash": "deadbeef", "stop_after": "separation"}))
+    schedule_stop(r, files, "asr")
+    assert fake.calls == []
+    assert {x["id"]: x for x in manifest(env[0])["variants"]}["none"]["reason"] == "producer never signalled"
+
+
+def test_consumer_resume_uses_plain_done_and_skips_finished(env):
+    clock = Clock()
+    r, args, files, fake = consumer(env, clock, "--wait-timeout", "1")
+    for vid in ("none", "dfn3", "p3", "nomusic"):
+        signal_ready(env, args, files, vid)
+    schedule_stop(r, files, "asr")
+    assert len(fake.calls) == 4
+    r2, _, _, fake2 = consumer(env, Clock(), "--resume")
+    assert r2.runnable() == [] and fake2.calls == []
+
+
+def test_shards_are_disjoint_and_cover_the_plan(env):
+    _, variants, files, skipped = make(env)
+    plan = [v["id"] for v in variants if v["id"] != "own"]       # "own" is skipped, so not in the index
+    for n in (1, 2, 3):
+        parts = [rr.plan_ownership(variants, skipped, (k, n)) for k in range(1, n + 1)]
+        assert set().union(*parts) == set(plan) and sum(len(x) for x in parts) == len(plan)
+    assert rr.plan_ownership(variants, skipped, (1, 2)) == {"none", "p3"}
+    assert rr.plan_ownership(variants, skipped, (2, 2)) == {"dfn3", "nomusic"}
+    fake = FakeRun()
+    r, _, files2 = line_runner(env, fake, None, "--shard", "2/2")
+    schedule(r, files2)
+    assert [c[0] for c in fake.calls] == ["dfn3", "nomusic"]
+
+
+def test_manifest_merge_keeps_other_process_entries_and_later_stage_wins(env):
+    tmp = env[0]
+    prod, _, files = line_runner(env, FakeRun(), None, "--layout", "default", "--stop-after", "separation",
+                                 "--signal", "separation", "--shard", "1/2")
+    schedule_stop(prod, files, "separation")
+    m = manifest(tmp)
+    assert [x["id"] for x in m["variants"]] == ["none", "p3", "own"]        # only what shard 1 owns (+ skipped)
+    cons, cargs, files = line_runner(env, FakeRun(), None, "--layout", "default", "--stop-after", "asr",
+                                     "--wait-signal", "separation", "--shard", "1/2")
+    m = {x["id"]: x for x in manifest(tmp)["variants"]}
+    assert m["none"]["stop_after"] == "separation" and m["none"]["status"] == "ok"   # consumer's "missing" did not hide it
+    schedule_stop(cons, files, "asr")
+    m = manifest(tmp)
+    ids = [x["id"] for x in m["variants"]]
+    assert ids == ["none", "p3", "own"]
+    assert {x["id"]: x["stop_after"] for x in m["variants"]}["none"] == "asr"
+    # an earlier stage never overwrites a later one
+    prod2, _, files = line_runner(env, FakeRun(), None, "--layout", "default", "--stop-after", "separation",
+                                  "--signal", "separation", "--shard", "1/2", "--resume")
+    assert {x["id"]: x["stop_after"] for x in manifest(tmp)["variants"]}["none"] == "asr"
+    # the other shard's entries appear in plan order
+    other, _, files = line_runner(env, FakeRun(), None, "--shard", "2/2")
+    schedule(other, files)
+    assert [x["id"] for x in manifest(tmp)["variants"]] == ["none", "dfn3", "p3", "nomusic", "own"]
+
+
+def test_manifest_written_by_two_writers_stays_valid(env):
+    import threading
+    r1, _, _ = line_runner(env, FakeRun(), None, "--shard", "1/2")
+    r2, _, _ = line_runner(env, FakeRun(), None, "--shard", "2/2")
+    errors = []
+
+    def hammer(r):
+        try:
+            for _ in range(25):
+                r._manifest()
+        except Exception as exc:        # a torn read or a clash on the scratch / tmp files
+            errors.append(exc)
+
+    threads = [threading.Thread(target=hammer, args=(r,)) for r in (r1, r2)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert errors == []
+    m = manifest(env[0])
+    assert [x["id"] for x in m["variants"]] == ["none", "dfn3", "p3", "nomusic", "own"]
+    assert not list((env[0] / "out").glob(".manifest_*"))
+
+
+def test_other_tools_ignore_the_extra_manifest_key(env):
+    sys.path.insert(0, str(ROOT / "tools"))
+    try:
+        from compare_lib.build import build_compare_data
+    finally:
+        sys.path.pop(0)
+    r, args, files = runner_for(env, FakeRun())
+    schedule(r, files)
+    data = build_compare_data(str(env[0] / "out" / "variants_manifest.json"))
+    assert {v["id"] for v in data["variants"]} >= {"none", "dfn3"}
+
+
+def test_validation_errors(env, capsys):
+    tmp, audio, var = env
+    base = ["--audio-dir", str(audio), "--out-root", str(tmp / "out")]
+
+    def bad(*extra):
+        with pytest.raises(SystemExit) as exc:
+            rr.parse_args(base + list(extra))
+        assert exc.value.code == 2
+        return capsys.readouterr().err
+
+    assert "--shard" in bad("--shard", "0/2") and "--shard" in bad("--shard", "3/2") and "--shard" in bad("--shard", "x")
+    assert "must equal --stop-after" in bad("--signal", "separation")               # stop-after defaults to asr
+    assert "must equal --stop-after" in bad("--signal", "asr", "--stop-after", "separation")
+    assert "earlier than --stop-after" in bad("--wait-signal", "asr")
+    assert "earlier than --stop-after" in bad("--wait-signal", "asr", "--stop-after", "separation")
+    assert "earlier than --stop-after" in bad("--wait-signal", "nonsense")
+    assert "--poll-seconds" in bad("--poll-seconds", "0")
+    ok = rr.parse_args(base + ["--shard", "2/3", "--signal", "separation", "--stop-after", "separation"])
+    assert ok.shard == (2, 3)
+
+
+def test_stage_order_matches_pipeline_service_source():
+    import ast
+    tree = ast.parse((ROOT / "services" / "pipeline_service.py").read_text(encoding="utf-8"))
+    found = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == "_STOP_ORDER" for t in node.targets):
+            found = tuple(ast.literal_eval(node.value))
+    assert found == rr.STAGE_ORDER
+
+
+def test_input_dir_name_has_the_pid():
+    src = (ROOT / "run_variants_resident.py").read_text(encoding="utf-8")
+    assert "{os.getpid()}" in src and "input_{datetime.now()" in src
+
+
+def test_dry_run_shows_role_shard_and_owned_variants(env, capsys):
+    tmp, audio, var = env
+    base = ["--audio-dir", str(audio), "--variants", str(var), "--out-root", str(tmp / "out"), "--dry-run"]
+    assert rr.main(base + ["--stop-after", "separation", "--signal", "separation", "--shard", "1/2"]) == 0
+    out = capsys.readouterr().out
+    assert "role: producer" in out and "shard: 1/2" in out and "signal: separation" in out
+    assert "this process owns: none, p3" in out
+    assert "[dfn3] {" not in out and "[p3] {" in out
+    assert rr.main(base + ["--wait-signal", "separation", "--poll-seconds", "7", "--wait-timeout", "30"]) == 0
+    out = capsys.readouterr().out
+    assert "role: consumer" in out and "wait-signal: separation (poll 7s, timeout 30 min)" in out
+    assert rr.main(base) == 0
+    assert "role: all" in capsys.readouterr().out

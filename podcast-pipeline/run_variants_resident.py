@@ -17,15 +17,23 @@ variants_manifest.json are the same as the old runner's, so the compare / lanes 
 """
 
 import argparse
+import contextlib
 import copy
 import importlib.util
 import json
 import os
 import shlex
+import re
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # not POSIX: the manifest lock degrades to nothing
+    fcntl = None
 
 ROOT = Path(__file__).resolve().parent
 TOOL = ROOT / "tools" / "run_variants.py"
@@ -59,6 +67,16 @@ LAYOUT_PRESETS["split_strict"] = {**LAYOUT_PRESETS["split"],
 # --stop-after values that end before refinement; later ones put the LLM on both cards (main.py pins that).
 STOPS_BEFORE_REFINEMENT = frozenset({"input_quality", "music", "denoise", "diarization", "denoise_pre_separation",
                                      "separation", "music_removal", "denoise_pre_asr", "asr", "captioning"})
+
+# Copy of PipelineService._STOP_ORDER (importing that needs torch); a test compares it with the source text.
+STAGE_ORDER = ("input_quality", "music", "denoise", "diarization",
+               "denoise_pre_separation", "separation", "music_removal",
+               "denoise_pre_asr", "asr", "captioning", "refinement", "speaker_relabel",
+               "transcript_review", "persona_profile", "conversation_selection",
+               "word_alignment", "conversation_exports")
+# (variant key of a denoise point, stop point at which that point has run)
+POINT_STAGE = (("chain", "denoise"), ("chain_pre_separation", "denoise_pre_separation"),
+               ("chain_pre_asr", "denoise_pre_asr"))
 
 # pipeline.* keys read while main() builds the services: they cannot change per variant.
 BUILD_TIME_PIPELINE_KEYS = frozenset({
@@ -131,9 +149,33 @@ def gate_problem(variant, config, env):
     return None
 
 
-def variant_hash(variant, args, files):
+def stage_rank(stop):
+    """Position of a stop point; None / "none" runs everything, an unknown one sorts before all."""
+    if stop in (None, "none"):
+        return len(STAGE_ORDER)
+    return STAGE_ORDER.index(stop) if stop in STAGE_ORDER else -1
+
+
+def reached_variant(variant, stop):
+    """Shallow copy of the variant without the denoise chains that only run after `stop`."""
+    out = dict(variant)
+    for key, stage in POINT_STAGE:
+        if stage_rank(stop) < stage_rank(stage):
+            out[key] = []
+    return out
+
+
+def plan_ownership(variants, skipped, shard):
+    """Ids this process owns: plan entries (after skips) whose index % N == K-1."""
+    k, n = shard
+    eligible = [v["id"] for v in variants if v["id"] not in skipped and not unsupported_reason(v)]
+    return {vid for i, vid in enumerate(eligible) if i % n == k - 1}
+
+
+def variant_hash(variant, args, files, stop_after=None):
+    stop = args.stop_after if stop_after is None else stop_after
     sig = {"id": variant["id"], "env": args.env,
-           "overrides": variant_overrides(variant, args.stop_after),
+           "overrides": variant_overrides(variant, stop),
            "global_set": list(args.global_set or [])}
     return rv().run_hash([json.dumps(sig, sort_keys=True)], files)
 
@@ -169,10 +211,12 @@ def reset_between_variants(pipeline, paths=()):
 
 # --------------------------------------------------------------------------- runner
 class ResidentRunner:
-    def __init__(self, args, variants, files, run_batch=None, skipped=None, say=None):
+    def __init__(self, args, variants, files, run_batch=None, skipped=None, say=None,
+                 sleep=None, clock=None):
         self.args, self.variants, self.files = args, variants, files
         self.run_batch = run_batch
         self.say = say or (lambda msg: print(msg, flush=True))
+        self.sleep, self.clock = sleep or time.sleep, clock or time.time
         self.out_root = Path(args.out_root)
         self.stems = [f.stem for f in files]
         self.reasons = dict(skipped or {})
@@ -183,19 +227,61 @@ class ResidentRunner:
         self.elapsed, self.finalized = {}, set()
         self.gated = False
         self.discard_partial = None      # main._discard_partial, set by run_sequential
+        self.signal = getattr(args, "signal", None)
+        self.wait_signal = getattr(args, "wait_signal", None)
+        self.poll_seconds = float(getattr(args, "poll_seconds", 15.0))
+        self.wait_timeout = float(getattr(args, "wait_timeout", 0.0))
+        self.owned = plan_ownership(variants, set(self.reasons), getattr(args, "shard", (1, 1)))
+        # A producer's resume marker is its own, so it never makes the consumer think the variant is done.
+        self.done_name = f"{rv().DONE_MARKER}.{args.stop_after}" if self.signal else rv().DONE_MARKER
 
     # -- bookkeeping
+    @contextlib.contextmanager
+    def _manifest_lock(self):
+        self.out_root.mkdir(parents=True, exist_ok=True)
+        with open(self.out_root / ".manifest.lock", "a+") as f:
+            if fcntl is not None:
+                fcntl.flock(f, fcntl.LOCK_EX)
+            yield                         # closing the file releases the lock
+
     def _manifest(self):
-        rv().write_manifest(self.out_root, self.variants, set(self.stems), self.status,
-                            self.reference, self.reasons, self.reports)
+        """Read-modify-write of variants_manifest.json: our entries replace ours, the rest is kept."""
+        r, out, stop = rv(), self.out_root, self.args.stop_after
+        mine = [v for v in self.variants if v["id"] in self.owned or self.status.get(v["id"]) == "skipped"]
+        with self._manifest_lock():
+            try:
+                prior = json.loads((out / r.MANIFEST_NAME).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                prior = {}
+            old = {e["id"]: e for e in prior.get("variants") or [] if isinstance(e, dict) and "id" in e}
+            # write_manifest only writes OUR_ROOT/variants_manifest.json: build the entries in a scratch dir
+            # whose variant dirs link to the real ones, so out_dir and files point at the real output.
+            with tempfile.TemporaryDirectory(dir=out, prefix=".manifest_") as scratch:
+                for v in mine:
+                    os.symlink((out / v["id"]).resolve(), Path(scratch) / v["id"])
+                r.write_manifest(scratch, mine, set(self.stems), self.status, self.reference,
+                                 self.reasons, self.reports)
+                new = json.loads((Path(scratch) / r.MANIFEST_NAME).read_text(encoding="utf-8"))
+            for e in new["variants"]:
+                e["stop_after"] = stop
+                prev = old.get(e["id"])
+                keep = prev is not None and (stage_rank(prev.get("stop_after")) > stage_rank(stop)
+                                             or e["status"] == "missing")
+                if not keep:
+                    old[e["id"]] = e
+            order = [v["id"] for v in self.variants if v["id"] in old]
+            order += [i for i in old if i not in order]
+            new["variants"] = [old[i] for i in order]
+            r.write_json_atomic(out / r.MANIFEST_NAME, new)
 
     def runnable(self):
-        return [v for v in self.variants if v["id"] not in self.reasons
+        return [v for v in self.variants if v["id"] in self.owned and v["id"] not in self.reasons
                 and v["id"] not in self.finalized]
 
     def _assess(self, variant):
-        """Read every file's denoise.json; record the report; "degraded" or "ok"."""
+        """Read the denoise.json of every point that ran before the stop; "degraded" or "ok"."""
         r = rv()
+        variant = reached_variant(variant, self.args.stop_after)
         report = r.variant_report(variant, r.discover_dirs(self.out_root / variant["id"],
                                                            set(self.stems)), self.stems)
         counts = r.report_counts(report, len(self.stems))
@@ -208,8 +294,41 @@ class ResidentRunner:
             return "degraded"
         return "ok"
 
+    # -- handoff markers between processes
+    def _signal_path(self, vid, kind, stage):
+        return self.out_root / vid / f".{kind}_{stage}"
+
+    def _write_signal(self, v, ok, reason=None):
+        """Producer: .ready_<stage> (hash of the settings the consumer will recompute) or .failed_<stage>."""
+        stage, vid = self.signal, v["id"]
+        digest = variant_hash(v, self.args, self.files, stop_after=stage)
+        ready, failed = self._signal_path(vid, "ready", stage), self._signal_path(vid, "failed", stage)
+        ready.parent.mkdir(parents=True, exist_ok=True)
+        if ok:
+            failed.unlink(missing_ok=True)
+            ready.write_text(json.dumps({"hash": digest, "stop_after": stage,
+                                         "time": datetime.now().isoformat(timespec="seconds")}))
+        else:
+            ready.unlink(missing_ok=True)
+            failed.write_text(json.dumps({"reason": reason or "failed", "hash": digest}))
+
+    def _signal_state(self, v):
+        """Consumer: ("ready", None), ("failed", reason) or (None, None) for what the producer left."""
+        stage, vid = self.wait_signal, v["id"]
+        digest = variant_hash(v, self.args, self.files, stop_after=stage)
+        for kind in ("failed", "ready"):
+            try:
+                data = json.loads(self._signal_path(vid, kind, stage).read_text())
+            except (OSError, ValueError):
+                continue
+            if kind == "failed" and data.get("hash") in (None, digest):
+                return "failed", str(data.get("reason") or "failed")
+            if kind == "ready" and data.get("hash") == digest:   # a stale hash is no signal at all
+                return "ready", None
+        return None, None
+
     def prepare(self):
-        """Resume check per variant (our own .done markers, not main's ledger); first manifest."""
+        """Resume check per variant (our own markers, not main's ledger); first manifest."""
         r = rv()
         self.out_root.mkdir(parents=True, exist_ok=True)
         for v in self.variants:
@@ -221,19 +340,22 @@ class ResidentRunner:
                 self.reasons[vid], self.status[vid] = why, "skipped"
                 self.say(f"[{vid}] SKIPPED: {why}")
                 continue
-            marker = self.out_root / vid / r.DONE_MARKER
+            if vid not in self.owned:
+                continue
+            marker = self.out_root / vid / self.done_name
             if self.args.resume and marker.is_file():
                 try:
                     if json.loads(marker.read_text()).get("hash") == variant_hash(v, self.args, self.files):
                         self.say(f"[{vid}] up to date, skipped")
                         self.status[vid] = self._assess(v)
                         self.finalized.add(vid)
+                        if self.signal and (self.status[vid] == "ok" or self.args.accept_degraded):
+                            self._write_signal(v, True)
                 except (ValueError, OSError):
                     pass
         self._manifest()
 
     def _finish_variant(self, v):
-        r = rv()
         vid = v["id"]
         fails, crash = self.failures.get(vid, []), self.crashed.get(vid)
         missing = set(self.stems) - self.seen.get(vid, set())
@@ -245,9 +367,12 @@ class ResidentRunner:
             state, self.reasons[vid] = "failed", f"{len(missing)} file(s) never reached"
         else:
             state = self._assess(v)
-        if state == "ok" or (state == "degraded" and self.args.accept_degraded):
-            (self.out_root / vid / r.DONE_MARKER).write_text(json.dumps(
+        kept = state == "ok" or (state == "degraded" and self.args.accept_degraded)
+        if kept:
+            (self.out_root / vid / self.done_name).write_text(json.dumps(
                 {"hash": variant_hash(v, self.args, self.files), "exit": 0, "status": state}))
+        if self.signal:
+            self._write_signal(v, kept, self.reasons.get(vid) or "degraded: the filter fell back to unfiltered audio")
         self.status[vid] = state
         self.finalized.add(vid)
         self.say(f"[{vid}] {state.upper() if state != 'ok' else 'ok'} "
@@ -279,10 +404,85 @@ class ResidentRunner:
             except Exception as exc:
                 self.say(f"[{vargs.job_id}] could not clear partial output of {Path(path).name}: {exc}")
 
-    def scheduler(self, pipeline, args, config, group, logger=None, stages=None):
-        r = rv()
+    def _run_variant(self, v, pipeline, args, config, group, logger, stages):
+        """One variant over one group of files. Returns [(path, error)] for main."""
+        vid = v["id"]
         say = logger.info if logger is not None else self.say
-        failures = []
+        if vid not in self.seen:           # first time this process starts it: drop what an earlier run left
+            (self.out_root / vid / self.done_name).unlink(missing_ok=True)
+            if self.signal:
+                for kind in ("ready", "failed"):
+                    self._signal_path(vid, kind, self.signal).unlink(missing_ok=True)
+        vargs = copy.copy(args)
+        for key, val in variant_overrides(v, self.args.stop_after, self.out_root).items():
+            setattr(vargs, key, val)
+        grp = f" group={v['group']}" if v.get("group") else ""
+        say(f"[{vid}] start{grp}: {len(group)} file(s), denoise={vargs.denoise} "
+            f"pre_separation={vargs.denoise_pre_separation} pre_asr={vargs.denoise_pre_asr}")
+        t0 = time.time()
+        try:
+            found = self.run_batch(pipeline, vargs, config, group, logger=logger) \
+                if stages is None else \
+                self.run_batch(pipeline, vargs, config, group, logger=logger, stages=stages)
+            found = list(found or [])
+        except Exception as exc:  # one variant must never stop the others
+            self.crashed[vid] = f"{type(exc).__name__}: {exc}"
+            found = [(p, f"[{vid}] {self.crashed[vid]}") for p in group]
+            say(f"[{vid}] runner error: {self.crashed[vid]}")
+        finally:
+            reset_between_variants(pipeline, group)
+        self._discard_failed(pipeline, vargs, found, logger, crashed=vid in self.crashed)
+        self.elapsed[vid] = self.elapsed.get(vid, 0) + time.time() - t0
+        self.failures.setdefault(vid, []).extend(found)
+        self.seen.setdefault(vid, set()).update(Path(p).stem for p in group)
+        say(f"[{vid}] end of this group after {time.time() - t0:.0f}s ({len(found)} failure(s))")
+        if self.crashed.get(vid) or set(self.stems) <= self.seen[vid]:
+            self._finish_variant(v)
+        return [(p, e if str(e).startswith(f"[{vid}]") else f"[{vid}] {e}") for p, e in found]
+
+    def _producer_failed(self, v, group, reason, say):
+        vid = v["id"]
+        self.crashed[vid] = f"producer failed: {reason}"
+        say(f"[{vid}] {self.crashed[vid]}")
+        self._finish_variant(v)
+        return [(p, f"[{vid}] {self.crashed[vid]}") for p in group]
+
+    def _consume(self, pipeline, args, config, group, logger, stages, say):
+        """Run variants as their producer signals them, not in plan order; wait while none is ready."""
+        failures, pending, announced = [], [v for v in self.runnable() if v["id"] not in self.crashed], False
+        idle_since = self.clock()
+        while pending:
+            pick = None
+            for v in list(pending):
+                state, why = self._signal_state(v)
+                if state == "failed":
+                    pending.remove(v)
+                    failures += self._producer_failed(v, group, why, say)
+                elif state == "ready" and pick is None:
+                    pick = v
+            if pick is not None:
+                pending.remove(pick)
+                say(f"[{pick['id']}] ready (.ready_{self.wait_signal}); starting")
+                failures += self._run_variant(pick, pipeline, args, config, group, logger, stages)
+                idle_since, announced = self.clock(), False
+                continue
+            if not pending:
+                break
+            if self.wait_timeout and self.clock() - idle_since >= self.wait_timeout * 60:
+                for v in pending:
+                    self.crashed[v["id"]] = "producer never signalled"
+                    say(f"[{v['id']}] producer never signalled (waited {self.wait_timeout:g} min)")
+                    self._finish_variant(v)
+                    failures += [(p, f"[{v['id']}] producer never signalled") for p in group]
+                break
+            if not announced:
+                say(f"waiting for .ready_{self.wait_signal} of: " + ", ".join(v["id"] for v in pending))
+                announced = True
+            self.sleep(self.poll_seconds)
+        return failures
+
+    def scheduler(self, pipeline, args, config, group, logger=None, stages=None):
+        say = logger.info if logger is not None else self.say
         if not self.gated:
             for v in self.runnable():
                 why = gate_problem(v, config, getattr(args, "env", self.args.env))
@@ -290,41 +490,12 @@ class ResidentRunner:
                     self.reasons[v["id"]], self.status[v["id"]] = why, "skipped"
                     self.say(f"[{v['id']}] SKIPPED: {why}")
             self.gated = True
+        if self.wait_signal:
+            return self._consume(pipeline, args, config, group, logger, stages, say)
+        failures = []
         for v in self.runnable():
-            vid = v["id"]
-            if vid in self.crashed:
-                continue
-            marker = self.out_root / vid / r.DONE_MARKER
-            if vid not in self.seen:
-                marker.unlink(missing_ok=True)
-            vargs = copy.copy(args)
-            for key, val in variant_overrides(v, self.args.stop_after, self.out_root).items():
-                setattr(vargs, key, val)
-            grp = f" group={v['group']}" if v.get("group") else ""
-            say(f"[{vid}] start{grp}: {len(group)} file(s), denoise={vargs.denoise} "
-                f"pre_separation={vargs.denoise_pre_separation} pre_asr={vargs.denoise_pre_asr}")
-            t0 = time.time()
-            try:
-                found = self.run_batch(pipeline, vargs, config, group, logger=logger) \
-                    if stages is None else \
-                    self.run_batch(pipeline, vargs, config, group, logger=logger, stages=stages)
-                found = list(found or [])
-            except Exception as exc:  # one variant must never stop the others
-                self.crashed[vid] = f"{type(exc).__name__}: {exc}"
-                found = [(p, f"[{vid}] {self.crashed[vid]}") for p in group]
-                say(f"[{vid}] runner error: {self.crashed[vid]}")
-            finally:
-                reset_between_variants(pipeline, group)
-            self._discard_failed(pipeline, vargs, found, logger, crashed=vid in self.crashed)
-            self.elapsed[vid] = self.elapsed.get(vid, 0) + time.time() - t0
-            self.failures.setdefault(vid, []).extend(found)
-            self.seen.setdefault(vid, set()).update(Path(p).stem for p in group)
-            failures += [(p, f"[{vid}] {e}") if not str(e).startswith(f"[{vid}]") else (p, e)
-                         for p, e in found]
-            say(f"[{vid}] end of this group after {time.time() - t0:.0f}s "
-                f"({len(found)} failure(s))")
-            if self.crashed.get(vid) or set(self.stems) <= self.seen[vid]:
-                self._finish_variant(v)
+            if v["id"] not in self.crashed:
+                failures += self._run_variant(v, pipeline, args, config, group, logger, stages)
         return failures
 
 
@@ -401,18 +572,51 @@ def parse_args(argv=None):
     p.add_argument("--skip-bootstrap", action="store_true", help="forward --skip_bootstrap to main.py")
     p.add_argument("--reference-dir")
     p.add_argument("--reference", nargs="*", metavar="STEM=PATH")
+    p.add_argument("--shard", default="1/1", metavar="K/N",
+                   help="this process owns plan entries with index %% N == K-1 (1-based K)")
+    p.add_argument("--signal", metavar="STAGE",
+                   help="producer: write OUT/<id>/.ready_STAGE when a variant is done (STAGE = --stop-after)")
+    p.add_argument("--wait-signal", metavar="STAGE", dest="wait_signal",
+                   help="consumer: run a variant only once its producer wrote .ready_STAGE (earlier than --stop-after)")
+    p.add_argument("--poll-seconds", type=float, default=15.0, dest="poll_seconds")
+    p.add_argument("--wait-timeout", type=float, default=0.0, dest="wait_timeout", metavar="MINUTES",
+                   help="consumer: give up on variants nobody signalled after this idle time (0 = never)")
     p.add_argument("--minutes-per-file-run", type=float, default=20.0, help=argparse.SUPPRESS)
     args = p.parse_args(argv)
     if args.mode == "overlap":
         raise SystemExit(OVERLAP_MESSAGE)
     if not args.audio_dir and not args.files:
         p.error("one of --audio-dir or --files is required")
+    m = re.fullmatch(r"(\d+)/(\d+)", args.shard.strip())
+    if not m or not 1 <= int(m.group(1)) <= int(m.group(2)):
+        p.error(f"--shard expects K/N with 1 <= K <= N, got {args.shard!r}")
+    args.shard = (int(m.group(1)), int(m.group(2)))
+    if args.stop_after != "none" and args.stop_after not in STAGE_ORDER:
+        p.error(f"--stop-after {args.stop_after!r} is not a stage; known: {', '.join(STAGE_ORDER)}, none")
+    if args.signal and args.signal != args.stop_after:
+        p.error(f"--signal {args.signal!r} must equal --stop-after {args.stop_after!r}")
+    if args.wait_signal and (args.wait_signal not in STAGE_ORDER
+                             or stage_rank(args.wait_signal) >= stage_rank(args.stop_after)):
+        p.error(f"--wait-signal {args.wait_signal!r} must be a stage earlier than --stop-after {args.stop_after!r}")
+    if args.poll_seconds <= 0 or args.wait_timeout < 0:
+        p.error("--poll-seconds must be > 0 and --wait-timeout >= 0")
     args.out_root = str(Path(args.out_root).resolve())
     return args
 
 
+def role_of(args):
+    if args.signal and args.wait_signal:
+        return "producer+consumer"
+    return "producer" if args.signal else "consumer" if args.wait_signal else "all"
+
+
 def print_dry_run(args, variants, files, skipped):
     rv().print_plan(variants, files, skipped, args)
+    owned = plan_ownership(variants, skipped, args.shard)
+    print(f"\nrole: {role_of(args)}   shard: {args.shard[0]}/{args.shard[1]}   "
+          f"signal: {args.signal or '-'}   wait-signal: {args.wait_signal or '-'}"
+          + (f" (poll {args.poll_seconds:g}s, timeout {args.wait_timeout:g} min)" if args.wait_signal else ""))
+    print("this process owns: " + (", ".join(v["id"] for v in variants if v["id"] in owned) or "nothing"))
     input_dir = Path(args.out_root) / RESIDENT_DIR / "input_<timestamp>"
     print("\nmain.py argv (one process, models kept):")
     print("  " + shlex.join(build_argv(args, input_dir)))
@@ -421,6 +625,8 @@ def print_dry_run(args, variants, files, skipped):
         why = skipped.get(v["id"]) or unsupported_reason(v)
         if why:
             print(f"  [{v['id']}] SKIPPED: {why}")
+            continue
+        if v["id"] not in owned:
             continue
         print(f"  [{v['id']}] " + json.dumps(variant_overrides(v, args.stop_after, args.out_root),
                                               ensure_ascii=False))
@@ -435,7 +641,7 @@ def run_sequential(args, variants, files, skipped):
         print("nothing to run: every variant is skipped or up to date", flush=True)
         return runner
     out = Path(args.out_root)
-    input_dir = out / RESIDENT_DIR / f"input_{datetime.now():%Y%m%d_%H%M%S}"
+    input_dir = out / RESIDENT_DIR / f"input_{datetime.now():%Y%m%d_%H%M%S}_{os.getpid()}"
     rv().link_inputs(input_dir, files)
     os.chdir(ROOT)                         # main.py resolves config.json against the cwd
     if str(ROOT) not in sys.path:
