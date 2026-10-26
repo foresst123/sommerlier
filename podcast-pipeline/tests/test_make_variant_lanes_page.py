@@ -132,3 +132,10 @@ def test_page_can_select_a_stretch_and_listen_to_it_variant_by_variant(tmp_path)
     page = lanes.render(lanes.build_page_data(manifest, "ep1", str(out / "lanes")))
     for needle in ('id="ab"', 'id="loop"', "function startSeq", "function nextInSeq", "mousedown"):
         assert needle in page
+
+
+def test_page_has_a_wave_row_and_a_text_row_per_speaker_and_a_sliding_view(tmp_path):
+    manifest, out = _plan(tmp_path)
+    page = lanes.render(lanes.build_page_data(manifest, "ep1", str(out / "lanes")))
+    for needle in ('addLane("wave"', 'addLane("text"', 'id="follow"', "function sizeTextRows", "MAX_LINES"):
+        assert needle in page

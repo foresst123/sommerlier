@@ -235,6 +235,7 @@ border-radius:8px;padding:8px 10px;min-width:240px;max-height:70vh;overflow:auto
   <button id="back">−5 s</button><button id="fwd">+5 s</button>
   <button id="ab" title="Phát cùng một đoạn lần lượt trên từng variant đang hiện">⇄ Nghe lần lượt</button>
   <label class="mute"><input type="checkbox" id="loop"> lặp</label>
+  <label class="mute"><input type="checkbox" id="follow" checked> sóng trượt theo</label>
   <button id="clr" hidden>Bỏ chọn đoạn</button><span class="mute" id="selTxt"></span>
   <details id="vsel"><summary>Variant hiển thị: <span id="vcount"></span></summary><div id="vlist"></div></details>
   <span class="files" id="files"></span>
@@ -249,9 +250,11 @@ border-radius:8px;padding:8px 10px;min-width:240px;max-height:70vh;overflow:auto
 const DATA = __DATA__;
 const PPS_DATA = DATA.peaks_per_sec;
 const COLORS = ["#2563eb","#dc2626","#059669","#7c3aed","#d97706","#0891b2","#db2777","#4d7c0f"];
-const WAVE_H = 56, TEXT_H = 48;
+const WAVE_H = 40, TEXT_H = 48, LINE_H = 16, MAX_LINES = 8;
 const wrap = document.getElementById("wrap"), scroller = document.getElementById("scroll"),
       spacer = document.getElementById("spacer"), detail = document.getElementById("detail");
+const TEXT_FONT = '13px system-ui,sans-serif';
+const measure = document.createElement('canvas').getContext('2d'); measure.font = TEXT_FONT;
 const css = getComputedStyle(document.documentElement);
 const col = n => css.getPropertyValue(n).trim();
 
@@ -302,9 +305,11 @@ DATA.variants.forEach((v, vi) => {
     cv.addEventListener("mousedown", e => { if (e.button) return; drag = {x0: e.offsetX, cv, vi}; e.preventDefault(); });
     cv.addEventListener("mousemove", e => hover(L, e.offsetX));
   };
-  if (pk) addLane("wave", "sóng âm", null, v.segments || []);
-  speakers.forEach(spk => addLane("text", `<i style="background:${colorOf[spk]}"></i>${esc(spk)}`, colorOf[spk],
-    v.segments.filter(s => s.spk === spk)));
+  speakers.forEach(spk => {
+    const mine = v.segments.filter(s => s.spk === spk);
+    if (pk) addLane("wave", `<i style="background:${colorOf[spk]}"></i>${esc(spk)}`, colorOf[spk], mine);
+    addLane("text", pk ? "chữ ASR" : `<i style="background:${colorOf[spk]}"></i>${esc(spk)}`, colorOf[spk], mine);
+  });
   wrap.appendChild(block);
   let a = null;
   if (v.audio) { a = new Audio(); a.preload = "none"; a.src = v.audio;
@@ -317,11 +322,25 @@ function esc(s){return String(s ?? "").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&
 function viewW(){ const L = lanes[0]; return L ? L.cv.clientWidth : wrap.clientWidth; }
 function xToT(cv, x){ return t0 + x / pxPerSec; }
 
+function linesNeeded(text, maxW){
+  const words = String(text || "").split(/\s+/).filter(Boolean); let line = "", n = 1;
+  for (const w of words) { const t = line ? line + " " + w : w;
+    if (measure.measureText(t).width <= maxW || !line) line = t; else { n++; line = w; } }
+  return n;
+}
+function sizeTextRows(){
+  for (const L of lanes) { if (L.kind !== "text") continue;
+    let n = 1;
+    for (const sg of L.segs) n = Math.max(n, linesNeeded(sg.t, Math.max(20, (sg.e - sg.s) * pxPerSec - 9)));
+    L.lines = Math.min(n, MAX_LINES);
+    L.cv.style.height = Math.max(TEXT_H, L.lines * LINE_H + 10) + "px"; }
+}
 function setZoom(){
   const z = +document.getElementById("zoom").value / 100;      // 0..1 -> fit .. 400 px/s
   const fit = Math.max(viewW(), 200) / duration;
   pxPerSec = fit * Math.pow(400 / fit, z);
   spacer.style.width = Math.ceil(duration * pxPerSec) + "px";
+  sizeTextRows();
   scroller.scrollLeft = t0 * pxPerSec;
   draw();
 }
@@ -340,29 +359,30 @@ function draw(){
       g.fillStyle = line; g.fillRect(0, h/2, w, 0.5);
       if (L.pk) {
         const mid = h/2, amp = h/2 - 2;
-        const who = new Uint8Array(Math.ceil(w));          // 0 none, 1..n speaker, 255 overlap
+        const mine = new Uint8Array(Math.ceil(w));          // pixels where this speaker's ASR segments are
         for (const sg of L.segs) { if (sg.e < t0 || sg.s > t1) continue;
-          const k = L.speakers.indexOf(sg.spk) + 1;
           const x0 = Math.max(0, Math.floor((sg.s - t0) * pxPerSec)), x1 = Math.min(w, Math.ceil((sg.e - t0) * pxPerSec));
-          for (let x = x0; x < x1; x++) who[x] = who[x] && who[x] !== k ? 255 : k; }
+          for (let x = x0; x < x1; x++) mine[x] = 1; }
+        g.fillStyle = L.color;
         for (let x = 0; x < w; x++) {
+          if (!mine[x]) continue;
           const ta = t0 + x / pxPerSec, tb = ta + 1 / pxPerSec;
           let i0 = Math.floor(ta * PPS_DATA), i1 = Math.max(i0 + 1, Math.ceil(tb * PPS_DATA)), m = 0;
           if (i0 >= L.pk.length) break;
           for (let i = i0; i < i1 && i < L.pk.length; i++) if (L.pk[i] > m) m = L.pk[i];
-          const y = Math.max(0.5, m / 255 * amp), k = who[x];
-          g.fillStyle = k === 0 ? faint : (k === 255 ? ink : COLORS[(k - 1) % COLORS.length]);
+          const y = Math.max(0.5, m / 255 * amp);
           g.fillRect(x, mid - y, 1, 2 * y);
         }
       }
     } else {
-      g.font = "12.5px system-ui,sans-serif"; g.textBaseline = "top";
+      g.font = TEXT_FONT; g.textBaseline = "top";
       for (const sg of L.segs) { if (sg.e < t0 || sg.s > t1) continue;
         const x = (sg.s - t0) * pxPerSec, bw = Math.max(2, (sg.e - sg.s) * pxPerSec);
         g.fillStyle = L.color; g.globalAlpha = 0.14; g.fillRect(x, 1, bw, h - 2); g.globalAlpha = 1;
         g.fillRect(x, 1, 3, h - 2);
-        if (bw > 24) { g.save(); g.beginPath(); g.rect(x + 5, 0, bw - 7, h); g.clip();
-          g.fillStyle = ink; wrapText(g, sg.t, x + 6, 4, bw - 9, 2, 15); g.restore(); }
+        const tx = Math.max(x, 0), tw = x + bw - tx;        // a long segment keeps its text at the left edge of the view
+        if (tw > 24) { g.save(); g.beginPath(); g.rect(tx + 5, 0, tw - 7, h); g.clip();
+          g.fillStyle = ink; wrapText(g, sg.t, tx + 6, 4, tw - 9, L.lines || 2, LINE_H); g.restore(); }
       }
     }
     if (sel) { const xa = (sel.a - t0) * pxPerSec, xb = (sel.b - t0) * pxPerSec;
@@ -495,9 +515,10 @@ function nextInSeq(){
   document.getElementById("ab").textContent = `⏹ ${DATA.variants[active].id} (${seq.idx + 1}/${seq.order.length})`;
   play();
 }
-function follow(){ const w = viewW();
-  if (now < t0 || now > t0 + w / pxPerSec * 0.95) { t0 = Math.max(0, now - w / pxPerSec * 0.1);
-    scroller.scrollLeft = t0 * pxPerSec; } }
+function follow(){ const w = viewW(), span = w / pxPerSec;
+  if (playing && document.getElementById("follow").checked && span < duration) {   // the waves slide, the playhead stays put
+    t0 = Math.max(0, Math.min(now - span * 0.3, duration - span)); scroller.scrollLeft = t0 * pxPerSec; return; }
+  if (now < t0 || now > t0 + span * 0.95) { t0 = Math.max(0, now - span * 0.1); scroller.scrollLeft = t0 * pxPerSec; } }
 
 scroller.addEventListener("scroll", () => { t0 = scroller.scrollLeft / pxPerSec; draw(); });
 wrap.addEventListener("wheel", e => { if (!e.ctrlKey && !e.metaKey && Math.abs(e.deltaX) < Math.abs(e.deltaY)) return;
