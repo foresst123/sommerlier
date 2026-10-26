@@ -158,7 +158,8 @@ def build_page_data(manifest_path: str, stem: str, out_dir: str, transcript: str
         rows.append(row)
     rows.sort(key=lambda r: not r["baseline"])  # baseline on top, plan order after it
     add_text_stats(rows)
-    return {"file": stem, "peaks_per_sec": per_sec, "transcript": transcript, "variants": rows}
+    return {"file": stem, "files": stems_of(manifest_path), "peaks_per_sec": per_sec,
+            "transcript": transcript, "variants": rows}
 
 
 def stems_of(manifest_path: str) -> List[str]:
@@ -215,6 +216,14 @@ background:var(--panel);border-top:1px solid var(--line)}
 #spacer{height:1px}
 #detail{position:sticky;bottom:16px;background:var(--panel);border-top:1px solid var(--line);padding:6px 12px;
 min-height:30px;font-size:13px}
+details#vsel{position:relative}
+details#vsel summary{cursor:pointer;border:1px solid var(--line);border-radius:6px;padding:3px 9px;list-style:none}
+#vlist{position:absolute;top:30px;left:0;z-index:9;background:var(--panel);border:1px solid var(--line);
+border-radius:8px;padding:8px 10px;min-width:240px;max-height:70vh;overflow:auto;box-shadow:0 6px 20px rgba(0,0,0,.18)}
+#vlist label{display:flex;gap:6px;align-items:center;padding:2px 0;white-space:nowrap}
+#vlist .row{display:flex;gap:6px;margin-bottom:6px}
+.files a{margin-right:8px;color:var(--mute);text-decoration:none;border-bottom:1px solid transparent}
+.files a.cur{color:var(--ink);font-weight:600;border-bottom-color:var(--play)}
 .missing{padding:4px 12px 8px;color:var(--warn)}
 @media (max-width:700px){:root{--name:110px}.flow{display:none}}
 </style></head><body>
@@ -222,6 +231,8 @@ min-height:30px;font-size:13px}
   <h1>__TITLE__</h1>
   <button id="play">▶ Phát</button>
   <button id="back">−5 s</button><button id="fwd">+5 s</button>
+  <details id="vsel"><summary>Variant hiển thị: <span id="vcount"></span></summary><div id="vlist"></div></details>
+  <span class="files" id="files"></span>
   <span class="clock" id="clock">0:00.0</span>
   <label class="mute">Zoom <input type="range" id="zoom" min="0" max="100" value="30"></label>
   <span class="mute">Space: phát/dừng · ←/→: ±5 s · ↑/↓: đổi variant · bấm vào sóng/chữ: nhảy tới đó</span>
@@ -245,6 +256,10 @@ for (const v of DATA.variants) duration = Math.max(duration, v.duration || 0,
 duration = Math.max(duration, 1);
 
 let pxPerSec = 20, t0 = 0, now = 0, active = 0, playing = false;
+const KEY = "lanes-visible-" + DATA.file;
+let vis = DATA.variants.map(() => true);
+try { const saved = JSON.parse(localStorage.getItem(KEY) || "null");
+  if (Array.isArray(saved) && saved.length === vis.length && saved.some(Boolean)) vis = saved.map(Boolean); } catch (e) {}
 const audios = [], lanes = [];
 
 function fmt(t){t=Math.max(0,t);const m=Math.floor(t/60),s=t-m*60;return m+":"+(s<10?"0":"")+s.toFixed(1);}
@@ -309,6 +324,7 @@ function draw(){
   const w = viewW(), dpr = window.devicePixelRatio || 1;
   const faint = col("--faint"), ink = col("--ink"), mute = col("--mute"), line = col("--line"), play = col("--play");
   for (const L of lanes) {
+    if (!vis[L.vi]) continue;
     const cv = L.cv, h = cv.clientHeight;
     if (cv.width !== Math.round(w*dpr) || cv.height !== Math.round(h*dpr)) {
       cv.width = Math.round(w*dpr); cv.height = Math.round(h*dpr); }
@@ -356,6 +372,39 @@ function hover(L, x){
   detail.innerHTML = `<b>${esc(v.id)}</b> · ${esc(s.spk)} · ${fmt(s.s)}–${fmt(s.e)}: ${esc(s.t)}`;
 }
 
+function nextVisible(from, step){
+  const n = DATA.variants.length;
+  for (let k = 1; k <= n; k++) { const i = (from + step * k + n * k) % n; if (vis[i]) return i; }
+  return from;
+}
+function applyVisibility(){
+  if (!vis[active]) { const was = playing; if (playing) pause(); active = vis.indexOf(true); if (was) play(); }
+  DATA.variants.forEach((v, i) => { v._block.hidden = !vis[i]; });
+  document.getElementById("vcount").textContent = vis.filter(Boolean).length + "/" + vis.length;
+  document.querySelectorAll("#vlist input").forEach((c, i) => { c.checked = vis[i]; });
+  try { localStorage.setItem(KEY, JSON.stringify(vis)); } catch (e) {}
+  DATA.variants.forEach((v, i) => v._block.classList.toggle("active", i === active));
+  draw();
+}
+function buildPicker(){
+  const box = document.getElementById("vlist");
+  box.innerHTML = '<div class="row"><button id="vall">Hiện tất cả</button><button id="vnone">Chỉ baseline</button></div>';
+  DATA.variants.forEach((v, i) => {
+    const l = document.createElement("label");
+    l.innerHTML = `<input type="checkbox" checked> ${esc(v.id)}` + (v.baseline ? " <span class='mute'>(baseline)</span>" : "") +
+      (v.status && v.status !== "ok" ? ` <span class="tag warn">${esc(v.status)}</span>` : "");
+    l.querySelector("input").onchange = e => {
+      vis[i] = e.target.checked;
+      if (!vis.some(Boolean)) { vis[i] = true; e.target.checked = true; }
+      applyVisibility(); };
+    box.appendChild(l);
+  });
+  document.getElementById("vall").onclick = () => { vis = vis.map(() => true); applyVisibility(); };
+  document.getElementById("vnone").onclick = () => {
+    const b = Math.max(0, DATA.variants.findIndex(v => v.baseline)); vis = vis.map((_, i) => i === b); applyVisibility(); };
+  document.getElementById("files").innerHTML = (DATA.files || []).map(f =>
+    `<a href="${encodeURIComponent(f)}_lanes.html" class="${f === DATA.file ? "cur" : ""}">${esc(f)}</a>`).join("");
+}
 function select(vi, keepTime){
   const was = playing; if (playing) pause();
   active = vi;
@@ -399,11 +448,11 @@ document.addEventListener("keydown", e => {
   else if (e.key === "ArrowLeft") seek(now - 5);
   else if (e.key === "ArrowRight") seek(now + 5);
   else if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault();
-    const n = DATA.variants.length; select((active + (e.key === "ArrowDown" ? 1 : n - 1)) % n, true);
+    select(nextVisible(active, e.key === "ArrowDown" ? 1 : -1), true);
     DATA.variants[active]._block.scrollIntoView({block: "nearest"}); }
 });
 window.addEventListener("resize", setZoom);
-select(0, true); setZoom();
+buildPicker(); select(0, true); applyVisibility(); setZoom();
 </script></body></html>
 """
 

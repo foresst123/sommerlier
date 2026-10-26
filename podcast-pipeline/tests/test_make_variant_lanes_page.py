@@ -117,3 +117,11 @@ def test_variant_rows_carry_word_count_and_difference_to_baseline(tmp_path):
     assert by["m_p3"]["words"] == 2 and by["m_p3"]["diff_vs_base"] > 0      # lost the second speaker's words
     assert by["raw"]["diff_vs_base"] == 0.0                                  # same transcript as the baseline
     assert "words" not in by["l_p1"] and "diff_vs_base" not in by["l_p1"]
+
+
+def test_page_has_a_variant_picker_and_links_between_files(tmp_path):
+    manifest, out = _plan(tmp_path)
+    data = lanes.build_page_data(manifest, "ep1", str(out / "lanes"))
+    assert data["files"] == ["ep1"]
+    page = lanes.render(data)
+    assert 'id="vlist"' in page and "localStorage" in page and "applyVisibility" in page
