@@ -64,6 +64,9 @@ LAYOUT_PRESETS = {
 }
 LAYOUT_PRESETS["split_strict"] = {**LAYOUT_PRESETS["split"],
                                   "performance.stages.separation.assignment_workers_per_gpu": 0}
+# --music off: what is forced on every variant, and the cache that keeps these runs apart from music-on ones.
+MUSIC_OFF_SETS = ("steps.music_analysis=false", "steps.music_removal=false")
+NO_MUSIC_CACHE_DIR = "cache_nomusic"
 # --stop-after values that end before refinement; later ones put the LLM on both cards (main.py pins that).
 STOPS_BEFORE_REFINEMENT = frozenset({"input_quality", "music", "denoise", "diarization", "denoise_pre_separation",
                                      "separation", "music_removal", "denoise_pre_asr", "asr", "captioning"})
@@ -535,12 +538,25 @@ def build_argv(args, input_dir):
     return argv
 
 
+def is_music_off_copy(variant):
+    """A variant that only turns the music steps off: with --music off it is the baseline again."""
+    chains = [variant.get(k) for k in ("chain", "chain_pre_separation", "chain_pre_asr")]
+    sets = variant.get("set") or {}
+    return (not any(chains) and bool(sets)
+            and set(sets) <= {"steps.music_analysis", "steps.music_removal"}
+            and not any(sets.values()) and not variant.get("music_separator") and not variant.get("extra_args"))
+
+
 def resolve_plan(args):
     r = rv()
     variants = r.filter_groups(r.load_variants(args.variants), args.groups.split(","))
     variants = r.pick_variants(variants, args.only_ids.split(","))
     files = r.collect_files(args.audio_dir, args.files)
     skipped = r.check_availability(variants) if args.only_available else {}
+    if args.music == "off":
+        for v in variants:
+            if is_music_off_copy(v):
+                skipped.setdefault(v["id"], "same as the baseline when --music off (no music step runs anywhere)")
     return variants, files, skipped
 
 
@@ -565,6 +581,10 @@ def parse_args(argv=None):
     p.add_argument("--gpu-2", type=int, default=1, dest="gpu_2")
     p.add_argument("--layout", choices=sorted(LAYOUT_PRESETS), default="split",
                    help="split: Qwen3 alone on gpu_2, the rest on gpu_1; default: the profile decides")
+    p.add_argument("--music", choices=["off", "profile"], default="off",
+                   help="off (default): no music analysis and no music removal for any variant, so every filter "
+                        "sees the recording as it is; profile: whatever the profile says (a100 removes music "
+                        "from the whole file with BS-RoFormer)")
     p.add_argument("--mode", choices=["sequential", "overlap"], default="sequential")
     p.add_argument("--accept-degraded", action="store_true",
                    help="write .done for a degraded variant too (so --resume keeps it)")
@@ -601,6 +621,11 @@ def parse_args(argv=None):
     if args.poll_seconds <= 0 or args.wait_timeout < 0:
         p.error("--poll-seconds must be > 0 and --wait-timeout >= 0")
     args.out_root = str(Path(args.out_root).resolve())
+    if args.music == "off":
+        args.global_set = list(MUSIC_OFF_SETS) + list(args.global_set)
+        # Diarization / separation checkpoints are not keyed by the audio they were computed on, so a cache
+        # written with music removal on must never be read by a run with it off.
+        args.cache_dir = args.cache_dir or NO_MUSIC_CACHE_DIR
     return args
 
 

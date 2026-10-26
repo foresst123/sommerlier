@@ -567,7 +567,6 @@ def main():
         env_bootstrap.ensure_hf_token(config, logger, required=False)
         qwen_backend = str(env_profile.get("models", {}).get("qwen3", {})
                            .get("backend", "transformers")).lower()
-        from utils.diarization_backend import resolve_diarization_backend
         # A Nemotron run needs no DiariZen env; its own env is managed by hand
         # (NEMOTRON_PYTHON or nemotron_env), see doc/nemotron_diarization_experiment.md.
         diar_env = [] if resolve_diarization_backend(args, env_profile) == "nemotron" else ["diarizen"]

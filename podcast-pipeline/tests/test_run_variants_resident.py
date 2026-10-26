@@ -63,8 +63,9 @@ def env(tmp_path):
 
 def make(env, *extra):
     tmp, audio, var = env
+    music = [] if "--music" in extra else ["--music", "profile"]     # these tests are about the plan, not the music switch
     args = rr.parse_args(["--audio-dir", str(audio), "--variants", str(var),
-                          "--out-root", str(tmp / "out"), *extra])
+                          "--out-root", str(tmp / "out"), *music, *extra])
     variants, files, skipped = rr.resolve_plan(args)
     return args, variants, files, skipped
 
@@ -648,3 +649,40 @@ def test_dry_run_shows_role_shard_and_owned_variants(env, capsys):
     assert "role: consumer" in out and "wait-signal: separation (poll 7s, timeout 30 min)" in out
     assert rr.main(base) == 0
     assert "role: all" in capsys.readouterr().out
+
+
+def test_music_off_is_the_default_and_forces_both_music_steps_off(env):
+    tmp, audio, var = env
+    args = rr.parse_args(["--audio-dir", str(audio), "--variants", str(var), "--out-root", str(tmp / "out")])
+    assert args.music == "off"
+    assert args.global_set[:2] == ["steps.music_analysis=false", "steps.music_removal=false"]
+    assert args.cache_dir == "cache_nomusic"                      # never read a cache written with music removal on
+    argv = rr.build_argv(args, Path("/in"))
+    assert "steps.music_removal=false" in argv and argv[argv.index("--cache_dir") + 1] == "cache_nomusic"
+
+
+def test_music_profile_changes_nothing(env):
+    args, *_ = make(env)
+    assert args.music == "profile" and args.cache_dir is None
+    assert not [g for g in args.global_set if g.startswith("steps.music")]
+
+
+def test_music_off_keeps_an_explicit_cache_dir_and_user_sets_last(env):
+    tmp, audio, var = env
+    args = rr.parse_args(["--audio-dir", str(audio), "--variants", str(var), "--out-root", str(tmp / "out"),
+                          "--cache-dir", "mycache", "--set", "steps.music_removal=true"])
+    assert args.cache_dir == "mycache"
+    assert args.global_set[-1] == "steps.music_removal=true"       # the user's own --set wins (applied last)
+
+
+def test_variant_that_only_turns_music_off_is_the_baseline_again(env):
+    tmp, audio, var = env
+    raw = {"variants": [{"chain": "none", "id": "raw", "set": {"steps.music_analysis": False, "steps.music_removal": False}},
+                        {"chain": "dfn3", "id": "f"}]}
+    var.write_text(json.dumps(raw))
+    args = rr.parse_args(["--audio-dir", str(audio), "--variants", str(var), "--out-root", str(tmp / "out")])
+    variants, files, skipped = rr.resolve_plan(args)
+    assert "raw" in skipped and "f" not in skipped and "none" not in skipped
+    args = rr.parse_args(["--audio-dir", str(audio), "--variants", str(var), "--out-root", str(tmp / "out"),
+                          "--music", "profile"])
+    assert rr.resolve_plan(args)[2] == {}

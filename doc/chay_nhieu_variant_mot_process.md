@@ -126,3 +126,35 @@ Giới hạn:
   nếu vLLM dùng `kv_cache_memory_bytes` thay cho tỉ lệ, mỗi consumer khoảng 10 đến 12 GB (trọng số bf16 cỡ 3,5 GB + 5 GiB KV + dư) nên có thể 2 đến 3 cái. Hãy đo bằng `nvidia-smi` trước khi chạy nhiều consumer trên một card.
 - Nhiều producer trên cùng một card chia nhau tính toán của card đó (không nhanh hơn tỉ lệ thuận), và mỗi producer giữ một bản Sidon/diarizer/Roformer riêng.
 - `--dry-run` in vai trò (producer/consumer/all), shard, signal/wait và danh sách variant process đó sở hữu.
+
+## Một lệnh mở cả 6 process
+
+```bash
+cd ~/sommerlier/podcast-pipeline && git pull
+bash tools/launch_line.sh <thư_mục_audio> <thư_mục_kết_quả_MỚI>
+tmux attach -t line        # Ctrl+B rồi n/p đổi cửa sổ, Ctrl+B rồi D để thoát mà vẫn chạy
+```
+Script ghi 6 file lệnh vào `<OUT>/_resident/launch/`, mỗi process một cửa sổ `tmux`, log ở `<OUT>/_resident/logs/`.
+Mỗi process tự `conda activate som`, `source tools/denoise_env.sh`, đặt `CUDA_VISIBLE_DEVICES` rồi chạy đúng tham số của nó.
+Dừng: `tmux kill-session -t line`; chạy lại đúng lệnh cũ thì `--resume` làm tiếp.
+
+Biến môi trường chỉnh được: `GPUS="0 0 1 1 0 1"` (GPU của process 1..6; mặc định chia đều theo ước lượng VRAM, **chưa đo**),
+`SIDON_WORKERS=2` (profile đặt 3; ít worker hơn thì dùng ít VRAM hơn), `SESSION`, `CONDA_ENV`, `VARIANTS`, `ENVNAME`,
+`DRY=1` (chỉ ghi file lệnh, không chạy), `FORCE=1`. Đối số thêm sau `OUT` được chuyển cho cả 6 process, ví dụ
+`--wait-timeout 240` hoặc `--accept-degraded`.
+
+## `--music` (mặc định `off`)
+
+Mặc định không variant nào quét hay bỏ nhạc (`steps.music_analysis=false`, `steps.music_removal=false` được ép cho mọi variant),
+nên các bộ lọc thấy đúng bản ghi gốc. `--music profile` trả về hành vi của profile (a100 bỏ nhạc cả file bằng BS-RoFormer).
+Hệ quả khi `off`:
+- variant chỉ tắt bước nhạc (`raw`) trùng với `none`, nên bị bỏ qua và ghi lý do;
+- cache mặc định đổi sang `cache_nomusic`, vì checkpoint diarization/separation không ghi lại audio nó được tính trên;
+- `launch_line.sh` từ chối một thư mục kết quả đã có `variants_manifest.json` mà không tạo bằng cùng chế độ nhạc. Dùng thư mục mới.
+
+## Lỗi Sidon `There is no item named 'version' in the archive`
+
+Trong PyTorch 2.8 `torch.export.load` nuốt mọi `RuntimeError` của định dạng mới rồi thử định dạng cũ, và chính lần thử cũ mới báo câu trên.
+Nên câu đó chỉ là lỗi phụ; lỗi gốc (thường là hết VRAM khi nạp lên GPU, hoặc file `.pt2` xuất bằng bản torch khác) bị che.
+Để xem lỗi gốc: `~/sommerlier/sidon_env/bin/python -c "import torch; from torch.export.pt2_archive._package import load_pt2; load_pt2('<file .pt2 trong cache HF>')"`.
+Nếu nạp trên CPU được mà trên GPU không được thì đó là thiếu VRAM: đổi `GPUS` để Sidon không chung card với nhiều process, hoặc giảm `SIDON_WORKERS`.
