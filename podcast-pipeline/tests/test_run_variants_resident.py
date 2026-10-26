@@ -1033,3 +1033,39 @@ def test_without_a_visible_list_nothing_is_patched():
     assert subprocess.Popen is not real
     undo()
     assert subprocess.Popen is real
+
+
+class _FakeSeparation:
+    def __init__(self):
+        self.calls = []
+
+    def prefetch_overlap_plan(self, *a, **k):
+        self.calls.append(a)
+        return "built"
+
+
+def _run_scheduler(env, stop_after, sep):
+    r, args, files = runner_for(env, FakeRun(), "--stop-after", stop_after)
+    pipeline = SimpleNamespace(separation_svc=sep)
+    base = SimpleNamespace(env="a100", stop_after=stop_after, keep_models=True, step_asr=True,
+                           denoise="none", job_id="exp-resident", save_path="x")
+    config = {"environments": {"a100": {"steps": {"asr": True, "diarization": False}}}}
+    msgs = []
+    r.say = msgs.append
+    r.scheduler(pipeline, base, config, [str(f) for f in files])
+    return msgs
+
+
+def test_window_prefetch_is_off_where_separation_does_not_run(env):
+    for stop in ("denoise", "diarization", "denoise_pre_separation"):
+        sep = _FakeSeparation()
+        msgs = _run_scheduler(env, stop, sep)
+        assert sep.prefetch_overlap_plan("segments") is None and sep.calls == [], stop
+        assert any("prefetch is off" in m for m in msgs)
+
+
+def test_window_prefetch_stays_on_when_this_process_runs_separation(env):
+    for stop in ("separation", "asr"):
+        sep = _FakeSeparation()
+        _run_scheduler(env, stop, sep)
+        assert sep.prefetch_overlap_plan("segments") == "built" and sep.calls == [("segments",)], stop

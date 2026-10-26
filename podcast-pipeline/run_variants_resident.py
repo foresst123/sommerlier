@@ -274,6 +274,7 @@ class ResidentRunner:
         self.seen, self.failures, self.crashed = {}, {}, {}
         self.elapsed, self.finalized = {}, set()
         self.gated = False
+        self._prefetch_checked = False
         self.discard_partial = None      # main._discard_partial, set by run_sequential
         self.signal = getattr(args, "signal", None)
         self.wait_signal = getattr(args, "wait_signal", None)
@@ -608,8 +609,24 @@ class ResidentRunner:
             self.sleep(self.poll_seconds)
         return failures
 
+    def _skip_wasted_prefetch(self, pipeline, say):
+        """Diarization starts building the overlap windows of separation (a 6-process pool, CPU) as soon as a file's
+        diarization is ready, and the stage cannot end before that finishes. A process that stops before
+        separation never uses those windows -- separation runs in another process -- so the work only burns CPU and
+        delays the hand-over. Turn it off there."""
+        if stage_rank(self.args.stop_after) >= stage_rank("separation"):
+            return
+        sep = getattr(pipeline, "separation_svc", None)
+        if sep is not None and hasattr(sep, "prefetch_overlap_plan"):
+            sep.prefetch_overlap_plan = lambda *a, **k: None
+            say(f"[line] separation window prefetch is off in this process (--stop-after {self.args.stop_after}: "
+                "separation runs in another process)")
+
     def scheduler(self, pipeline, args, config, group, logger=None, stages=None):
         say = logger.info if logger is not None else self.say
+        if not self._prefetch_checked:
+            self._prefetch_checked = True
+            self._skip_wasted_prefetch(pipeline, say)
         if not self.gated:
             for v in self.runnable():
                 why = gate_problem(v, config, getattr(args, "env", self.args.env))

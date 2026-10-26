@@ -251,3 +251,11 @@ python tools/serve_results.py --root <OUT> --audio-dir <thư_mục_audio_gốc> 
   nên trang lanes phát bản gốc từ `/_audio/<tên file>`. Thư mục audio gốc cần để phẳng (file ngay trong thư mục, không lồng).
 - Mặc định chỉ nghe trên `127.0.0.1`; `--host 0.0.0.0` mở thư mục cho bất kỳ ai tới được cổng đó.
 - Không dùng WebSocket: thẻ `<audio>` của trình duyệt không đọc được WebSocket, và `Range` đã cho cùng kết quả (tải dần, tua) bằng bộ phát gốc.
+
+## Diarization chậm, CPU đầy mà GPU rảnh
+
+Ngay sau diarization của một file, pipeline dựng sẵn các cửa sổ chồng tiếng cho separation bằng một pool 6 process (CPU), và stage diarization không kết thúc trước khi việc đó xong
+(`pipeline_service.py`, hàm `_finish`). Trong dây chuyền separation chạy ở process khác nên các cửa sổ đó không bao giờ được dùng: chỉ tốn CPU và kéo dài lúc bàn giao.
+`run_variants_resident.py` tắt việc đó ở mọi process có `--stop-after` trước `separation` (log có dòng `[line] separation window prefetch is off in this process`);
+process separation và ASR giữ nguyên. Bản thân suy luận của Nemotron là vòng lặp streaming từng khối nhỏ nên GPU dùng thấp (vài %) là bình thường; CPU bị chặn ở số luồng mỗi process (log `CPU: N core(s) usable, K thread(s) per process`).
+Xem process nào ăn CPU: `ps -eo pid,pcpu,nlwp,etime,args --sort=-pcpu | head -15`.
