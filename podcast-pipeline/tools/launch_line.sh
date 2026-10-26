@@ -11,7 +11,7 @@
 #   SIDON_WORKERS=2      Sidon workers on the separation GPU (the profile says 3; fewer = less VRAM)
 #   SESSION=line         tmux session name           CONDA_ENV=som   conda env to activate
 #   VARIANTS=tools/variants_placement.json           ENVNAME=a100   profile
-#   JOBID=18790          Slurm job whose GPUs the processes use: each window runs
+#   JOBID=18790          Slurm job whose GPUs the processes use (default: $SLURM_JOB_ID). Required on a Slurm machine: each window runs
 #                        `srun --jobid=18790 --overlap --pty bash <script>`. Needed when this shell is outside the job
 #                        (nvidia-smi says "No devices were found"); leave unset inside an salloc/srun shell.
 #   DRY=1                write the six scripts and print them, start nothing
@@ -32,7 +32,9 @@ ENVNAME=${ENVNAME:-a100}
 SIDON_WORKERS=${SIDON_WORKERS:-2}
 DRY=${DRY:-0}
 FORCE=${FORCE:-0}
-JOBID=${JOBID:-}
+# Inside a job shell Slurm already exports SLURM_JOB_ID; a tmux window does NOT inherit this shell's environment
+# when the tmux server was started elsewhere, so every window is sent into the job with srun regardless.
+JOBID=${JOBID:-${SLURM_JOB_ID:-}}
 read -r -a GPU <<< "${GPUS:-0 0 1 1 0 1}"
 
 NAMES=(p1_denoise1 p2_diarization p3_denoise2 p4_separation p5_denoise3 p6_asr)
@@ -67,6 +69,12 @@ fi
 
 # Without a job the windows inherit this shell, and a shell outside the Slurm job sees no GPU: the denoise
 # backends then fall back to the unfiltered audio and that result is cached. Refuse instead of starting.
+if [ "$DRY" != 1 ] && [ -z "$JOBID" ] && [ "${NO_SRUN:-0}" != 1 ] && command -v srun >/dev/null 2>&1; then
+  # A shell on a compute node can see every GPU of the machine, including other jobs' cards, so "sees a GPU"
+  # proves nothing: without srun into the job the windows run on cards that are not yours.
+  echo "Slurm is here: say which job to run in.   JOBID=<slurm job id> bash tools/launch_line.sh ...   (NO_SRUN=1 to skip)" >&2
+  exit 6
+fi
 if [ "$DRY" != 1 ] && [ -z "$JOBID" ] && [ "${NO_GPU_CHECK:-0}" != 1 ]; then
   if ! command -v nvidia-smi >/dev/null || ! nvidia-smi -L >/dev/null 2>&1; then
     echo "This shell sees no GPU. Run it as:  JOBID=<slurm job id> bash tools/launch_line.sh ...   (NO_GPU_CHECK=1 to skip)" >&2

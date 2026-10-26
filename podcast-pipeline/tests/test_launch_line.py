@@ -128,3 +128,29 @@ def test_gpu_slot_is_a_position_in_the_jobs_own_gpu_list(tmp_path):
     assert [_chosen(s, "6") for s in scripts] == ["6"] * 6
     # no list from Slurm (run by hand): the slot is the device number
     assert [_chosen(s, None) for s in scripts] == ["0", "1", "0", "1", "1", "0"]
+
+
+def _fake_bin(tmp_path, **tools):
+    d = tmp_path / "bin"; d.mkdir(exist_ok=True)
+    for name, body in tools.items():
+        (d / name).write_text(f"#!/bin/sh\n{body}\n"); (d / name).chmod(0o755)
+    return {**os.environ, "PATH": f"{d}:{os.environ['PATH']}"}
+
+
+def test_on_a_slurm_machine_a_job_id_is_required_even_if_gpus_are_visible(tmp_path):
+    audio = tmp_path / "audio"; audio.mkdir()
+    env = _fake_bin(tmp_path, srun="exit 0", **{"nvidia-smi": "echo GPU 0: A100; exit 0"}, tmux="exit 1")
+    env.pop("SLURM_JOB_ID", None)
+    r = subprocess.run(["bash", str(SCRIPT), str(audio), str(tmp_path / "o")], capture_output=True, text=True, env=env)
+    assert r.returncode == 6 and "JOBID=<slurm job id>" in r.stderr
+    r = subprocess.run(["bash", str(SCRIPT), str(audio), str(tmp_path / "o2")], capture_output=True, text=True,
+                       env={**env, "NO_SRUN": "1"})
+    assert r.returncode != 6                      # explicit opt-out goes on (then fails later: no real tmux here)
+
+
+def test_job_id_defaults_to_the_slurm_job_of_the_shell(tmp_path):
+    r, _ = launch(tmp_path, env={"SLURM_JOB_ID": "777"})
+    windows = [l for l in r.stdout.splitlines() if l.startswith("== window")]
+    assert windows and all("srun --jobid=777 --overlap --pty bash " in w for w in windows)
+    r, _ = launch(tmp_path, env={"SLURM_JOB_ID": "777", "JOBID": "18790"}, out="o2")
+    assert all("--jobid=18790 " in l for l in r.stdout.splitlines() if l.startswith("== window"))
