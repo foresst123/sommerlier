@@ -4,12 +4,13 @@ at any time without touching the running processes.
 
     python tools/job_dashboard.py OUT [--final FINAL] [--port 8765] [--host 127.0.0.1]
     ssh -L 8765:localhost:8765 <dgx>          # from the laptop, then http://localhost:8765/
+    python tools/job_dashboard.py OUT --agent  # on the machines of the other jobs: publishes their GPUs
     python tools/job_dashboard.py OUT --once  # print the numbers as JSON and exit
 
 Per stage (denoise, diarization, separation_plan, separation, asr, conversation_selection) it counts the files
 that are done (.ready_<stage>.<stem>), running (.claim_ with no ready/failed yet) and failed, with files per
 minute over the last 10 minutes and the time left at that speed. It also lists the failures with their reason,
-the last line and age of every process log, the GPUs of the host the page runs on and the final dataset
+the last line and age of every process log, the GPUs of every host that runs the page or `--agent` and the final dataset
 (<FINAL>/lhotse). Standard library only.
 """
 import argparse
@@ -21,6 +22,7 @@ import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import line_status as ls  # noqa: E402
@@ -117,6 +119,27 @@ def gpus():
     return rows
 
 
+def publish_gpus(out):
+    """Write this host's GPUs to OUT/_resident/gpu_<host>.json so the page on any host shows every machine."""
+    path = out / "_resident" / f"gpu_{os.uname().nodename}.json"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"host": os.uname().nodename, "time": time.time(), "gpus": gpus()}))
+    os.replace(tmp, path)
+
+
+def all_gpus(out, max_age=60):
+    """{host: [gpu rows]} from every gpu_<host>.json written in the last max_age seconds; mine is read live."""
+    hosts = {os.uname().nodename: gpus()}
+    for f in (out / "_resident").glob("gpu_*.json"):
+        try:
+            d = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if d.get("host") not in hosts and time.time() - float(d.get("time", 0)) <= max_age and d.get("gpus"):
+            hosts[d["host"]] = d["gpus"]
+    return {h: g for h, g in hosts.items() if g}
+
+
 def final_state(final):
     manifest = final / "lhotse" / "manifest.jsonl.gz"
     parts = list((final / "lhotse" / ".parts").glob("*.jsonl.gz")) if (final / "lhotse").is_dir() else []
@@ -135,7 +158,7 @@ def collect(out, final):
             "stages": stage_counts(out, stems, now), "failures": failures(out, stems),
             "claims": [{"stage": st, "file": stem, "who": who}
                        for _v, st, stem, who in ls.claims(out) if who][:100],
-            "processes": processes(out), "gpus": gpus(), "final": final_state(final),
+            "processes": processes(out), "gpus": all_gpus(out), "final": final_state(final),
             "disk": {"free_gb": round(disk.free / 1e9), "total_gb": round(disk.total / 1e9)},
             "warning": ls.frozen_warning(out, ls._resident()) or ""}
 
@@ -158,9 +181,9 @@ th{color:var(--mute);font-weight:500;border-top:0}.bad{color:var(--bad)}.ok{colo
 <h1>Tiến độ job</h1><div class="sub" id="sub">đang tải…</div><div id="warn" class="warn"></div>
 <div class="card"><h2>Các stage</h2><div id="stages"></div></div>
 <div class="card"><h2>Kết quả cuối</h2><div id="final"></div></div>
-<div class="card"><h2>GPU của máy đang chạy trang này</h2><div class="g" id="gpus"></div></div>
+<div class="card"><h2>GPU của các máy</h2><div class="g" id="gpus"></div></div>
 <div class="card"><h2>Lỗi</h2><div id="fail"></div></div>
-<div class="card"><h2>Tiến trình (dòng log cuối)</h2><div id="proc"></div></div>
+<div class="card"><h2>3 job (dòng log cuối của từng tiến trình)</h2><div id="proc"></div></div>
 <div class="card"><h2>Đang giữ file</h2><div id="claims"></div></div>
 </main><script>
 const $=id=>document.getElementById(id), esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
@@ -173,9 +196,10 @@ async function tick(){
   return `<div class="row"><b>${k}</b><div class="bar" title="xong ${s.done}, chạy ${s.running}, lỗi ${s.failed}"><i class="d" style="width:${p(s.done)}%"></i><i class="r" style="width:${p(s.running)}%"></i><i class="f" style="width:${p(s.failed)}%"></i></div>
   <div class="num">${s.done}/${s.total}${s.running?` · <span style="color:var(--run)">${s.running} chạy</span>`:''}${s.failed?` · <span class="bad">${s.failed} lỗi</span>`:''}<br><span class="mute">${s.rate}/phút · còn ${fmt(s.eta_min)}</span></div></div>`}).join('');
  const f=d.final;$('final').innerHTML=(f.manifest?`<span class="ok">manifest.jsonl.gz</span> ${f.manifest_mb} MB (cập nhật ${f.manifest_age} trước)`:'<span class="mute">chưa có manifest.jsonl.gz</span>')+` · ${f.recordings} bản ghi đã vào Lhotse`+Object.entries(f.conversations).map(([k,v])=>` · ${k}: ${v}`).join('');
- $('gpus').innerHTML=d.gpus.length?d.gpus.map(g=>`<div><b>GPU ${g.index}</b> <span class="mute">${esc(g.name)}</span><div class="bar"><i class="r" style="width:${100*g.used/g.total}%"></i></div>${(g.used/1024).toFixed(1)}/${(g.total/1024).toFixed(0)} GiB · tải ${g.util}%</div>`).join(''):'<span class="mute">không có nvidia-smi trên máy này</span>';
+ const hs=Object.entries(d.gpus);$('gpus').innerHTML=hs.length?hs.map(([h,gs])=>gs.map(g=>`<div><b>${esc(h)} · GPU ${g.index}</b><div class="bar"><i class="r" style="width:${100*g.used/g.total}%"></i></div>${(g.used/1024).toFixed(1)}/${(g.total/1024).toFixed(0)} GiB · tải ${g.util}%</div>`).join('')).join(''):'<span class="mute">chưa có máy nào báo GPU</span>';
  $('fail').innerHTML=d.failures.length?`<table><tr><th>stage</th><th>file</th><th>lý do</th><th>cách đây</th></tr>${d.failures.map(r=>`<tr><td>${r.stage}</td><td>${esc(r.file)}</td><td class="bad">${esc(r.reason)}</td><td>${r.age}</td></tr>`).join('')}</table>`:'<span class="ok">không có lỗi</span>';
- $('proc').innerHTML=`<table>${d.processes.map(p=>`<tr><td>${p.name}</td><td class="${p.age_s>600?'warn':'mute'}">${p.age}</td><td class="log">${esc(p.line)}</td></tr>`).join('')}</table>`;
+ const jn={front:'Job 1 · front',asr:'Job 2 · ASR',llm:'Job 3 · LLM'};
+ $('proc').innerHTML=['front','asr','llm'].map(j=>{const ps=d.processes.filter(p=>p.name.startsWith(j+'_'));return `<div class="mute" style="margin:8px 0 2px"><b>${jn[j]}</b> · ${ps.length?ps.length+' tiến trình':'chưa có log'}</div>`+(ps.length?`<table>${ps.map(p=>`<tr><td>${p.name.replace(/^[a-z]+_[0-9]+_/,'')}</td><td class="${p.age_s>600?'warn':'mute'}">${p.age}</td><td class="log">${esc(p.line)}</td></tr>`).join('')}</table>`:'')}).join('');
  $('claims').innerHTML=d.claims.length?`<table>${d.claims.map(c=>`<tr><td>${c.stage}</td><td>${esc(c.file)}</td><td class="mute">${esc(c.who)}</td></tr>`).join('')}</table>`:'<span class="mute">không có</span>';
 }
 tick();setInterval(tick,5000);
@@ -211,11 +235,28 @@ def main(argv=None):
     ap.add_argument("--final", type=Path, default=None, help="default OUT/final")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--host", default="127.0.0.1", help="0.0.0.0 to open it to the network")
+    ap.add_argument("--agent", action="store_true",
+                    help="only publish this host's GPUs every 5 s (run it on the machines of the other jobs)")
     ap.add_argument("--once", action="store_true", help="print the numbers as JSON and exit")
     args = ap.parse_args(argv)
     if not args.out.is_dir():
         sys.exit(f"not a directory: {args.out}")
     final = args.final or args.out / "final"
+    if args.agent or not args.once:
+        def loop():
+            while True:
+                try:
+                    publish_gpus(args.out)
+                except OSError:
+                    pass
+                time.sleep(5)
+        if args.agent:
+            print(f"publishing the GPUs of {os.uname().nodename} to {args.out}/_resident (Ctrl+C to stop)", flush=True)
+            try:
+                loop()
+            except KeyboardInterrupt:
+                return 0
+        Thread(target=loop, daemon=True).start()
     if args.once:
         print(json.dumps(collect(args.out, final), indent=2, ensure_ascii=False))
         return 0

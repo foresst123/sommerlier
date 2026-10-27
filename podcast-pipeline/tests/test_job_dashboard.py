@@ -69,3 +69,20 @@ def test_server_serves_page_and_api(tmp_path):
         assert api["files"] == 3
     finally:
         server.shutdown()
+
+
+def test_gpus_of_other_hosts_are_read(tmp_path):
+    out = make_out(tmp_path)
+    (out / "_resident" / "gpu_other.json").write_text(json.dumps(
+        {"host": "other", "time": time.time(), "gpus": [{"index": "2", "name": "x", "used": 1, "total": 2, "util": 3}]}))
+    (out / "_resident" / "gpu_old.json").write_text(json.dumps(
+        {"host": "old", "time": time.time() - 999, "gpus": [{"index": "0", "name": "x", "used": 1, "total": 2, "util": 3}]}))
+    hosts = jd.all_gpus(out)
+    assert "other" in hosts and "old" not in hosts
+
+
+def test_publish_gpus_writes_file(tmp_path, monkeypatch):
+    out = make_out(tmp_path)
+    monkeypatch.setattr(jd, "gpus", lambda: [{"index": "0", "name": "x", "used": 1, "total": 2, "util": 3}])
+    jd.publish_gpus(out)
+    assert list((out / "_resident").glob("gpu_*.json"))
