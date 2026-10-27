@@ -403,3 +403,24 @@ def test_only_restarts_the_matching_processes(tmp_path):
                 pass
         keep.kill()
         gone.kill()
+
+
+def test_stop_sweeps_orphaned_workers(tmp_path):
+    out = tmp_path / "out"
+    logs = out / "_resident" / "logs"
+    logs.mkdir(parents=True)
+    (logs / "asr.pids").write_text("")
+    worker = tmp_path / "fake_worker.py"
+    worker.write_text("import time\ntime.sleep(60)\n")
+    # a grandchild whose parent exits is re-parented (pid 1 here); a worker the job left behind looks like that
+    subprocess.Popen(["bash", "-c", f"({sys.executable} {worker} >/dev/null 2>&1 &) ; sleep 0.3"],
+                     start_new_session=True).wait()
+    found = subprocess.run(["bash", "-c", f"ps -eo ppid=,cmd= | grep '{worker}' | grep -v grep"],
+                           capture_output=True, text=True).stdout.split()
+    if not found or found[0] != "1":
+        import pytest
+        pytest.skip("orphans are not re-parented to pid 1 in this environment")
+    script = Path(__file__).resolve().parents[1] / "tools" / "job_stop.sh"
+    r = subprocess.run(["bash", str(script), "asr", str(out)], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert "orphaned worker" in r.stdout, (r.stdout, r.stderr)

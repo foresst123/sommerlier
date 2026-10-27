@@ -209,6 +209,18 @@ job_stop_pids() {
     done < "$file"
 }
 
+job_sweep_orphans() {
+    # the model workers run in their own process group, so stopping the job leaves them behind holding VRAM:
+    # stop this user's worker processes whose parent is gone (ppid 1)
+    local pid n=0
+    for pid in $(ps -u "$(id -un)" -o pid=,ppid=,cmd= | awk '$2==1 && /_worker\.py|VLLM|EngineCore/ {print $1}'); do
+        kill -TERM "$pid" 2>/dev/null && n=$((n + 1))
+    done
+    if [ "$n" -gt 0 ]; then
+        echo "stopped $n orphaned worker process(es) that still held GPU memory"
+    fi
+}
+
 job_start() {
     echo "== job ${JOB_NAME}: JOBID=${JOBID:-none}  GPUS=\"$GPUS\" ($( [ -n "$JOBID" ] && echo "positions in job $JOBID" || echo "physical GPU ids"))  REPLICAS_PER_GPU=$REPLICAS_PER_GPU  OUT=$OUT"
     printf '  %-34s %-12s %s\n' process GPU stage

@@ -7,3 +7,5 @@ source "$HERE/tools/job_common.sh"
 file="$2/_resident/logs/$1.pids"
 [ -f "$file" ] || { echo "no pids file: $file" >&2; exit 1; }
 job_stop_pids "$file"
+sleep 3
+job_sweep_orphans
