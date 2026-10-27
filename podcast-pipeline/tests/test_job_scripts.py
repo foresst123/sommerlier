@@ -245,3 +245,38 @@ def test_gpus_are_physical_ids_and_no_jobid_is_needed(tmp_path):
                              capture_output=True, text=True).stdout
         seen.add(out)
     assert seen == {"4", "5"}          # one copy per card, the physical id, whatever CUDA_VISIBLE_DEVICES said
+
+
+def test_start_runs_nohup_processes_and_never_touches_tmux(tmp_path):
+    import os, subprocess, time
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    (fakebin / "tmux").write_text(f"#!/bin/sh\necho called > {tmp_path}/tmux_called\nexit 1\n")
+    (fakebin / "tmux").chmod(0o755)
+    for n in ("a", "b"):
+        (tmp_path / f"{n}.sh").write_text(f"#!/bin/bash\necho {n} > {tmp_path}/{n}.ran\nsleep 30\n")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    script = (f'source tools/job_common.sh; JOB_NAME=t LOG_DIR={logs} OUT={tmp_path} DRY=0 FORCE=0 JOBID= GPUS="0 1" '
+              f'REPLICAS_PER_GPU=1; PROC_NAMES=(a b); PROC_GPU=(none none); PROC_STAGE=(s s); '
+              f'PROC_FILES=({tmp_path}/a.sh {tmp_path}/b.sh); job_start')
+    env = {**os.environ, "PATH": f"{fakebin}:{os.environ['PATH']}"}
+    try:
+        r = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, timeout=30)
+        assert r.returncode == 0, r.stderr
+        for _ in range(50):
+            if (tmp_path / "a.ran").exists() and (tmp_path / "b.ran").exists():
+                break
+            time.sleep(0.1)
+        assert (tmp_path / "a.ran").exists() and (tmp_path / "b.ran").exists()
+        assert not (tmp_path / "tmux_called").exists() and "no tmux" in r.stdout
+        pids = (logs / "t.pids").read_text().split("\n")
+        assert [l.split()[1] for l in pids if l] == ["a", "b"]
+        again = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, timeout=30)
+        assert again.returncode == 4 and "still running" in again.stderr      # no second copy without FORCE
+    finally:
+        subprocess.run(["bash", "-c", f"source tools/job_common.sh; job_stop_pids {logs}/t.pids"], capture_output=True)
+    time.sleep(0.3)
+    for line in (logs / "t.pids").read_text().splitlines():
+        state = subprocess.run(["ps", "-o", "stat=", "-p", line.split()[0]], capture_output=True, text=True).stdout.strip()
+        assert state == "" or state.startswith("Z")                       # ended (a zombie nobody reaped counts)

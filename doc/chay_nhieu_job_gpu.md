@@ -39,12 +39,18 @@ AUDIO=/data/vi_podcasts_20 OUT=/data/run1 GPUS="2 3" bash tools/job_asr.sh
 AUDIO=/data/vi_podcasts_20 OUT=/data/run1 GPUS="4 5" bash tools/job_llm.sh
 ```
 
-Mỗi script mở một phiên tmux (`job_front`, `job_asr`, `job_llm`), một cửa sổ cho mỗi process. Mặc định chạy
-thẳng trên máy này, **không cần JOBID, không srun**: bạn chỉ chọn GPU bằng `GPUS`. Nếu muốn chạy trong một job Slurm
-cụ thể thì thêm `JOBID=<n>`, khi đó mỗi cửa sổ chạy `srun --jobid=<n> --overlap --pty bash <script>`.
+Các script **không mở tmux**: bạn tự mở terminal (tmux của bạn) rồi chạy script, mỗi process của job được bật nền bằng
+`nohup` (mỗi process một nhóm tiến trình riêng, không phụ thuộc terminal). Mặc định chạy thẳng trên máy này, **không cần
+JOBID, không srun**: bạn chỉ chọn GPU bằng `GPUS`. Nếu muốn chạy trong một job Slurm cụ thể thì thêm `JOBID=<n>`, khi đó
+mỗi process chạy `srun --jobid=<n> --overlap bash <script>`.
+
+- PID từng process ghi ở `<OUT>/_resident/logs/<front|asr|llm>.pids`, log ở `<OUT>/_resident/logs/<job>_<số>_<tên>.log`
+  (`tail -f` để xem).
+- Dừng: `bash tools/job_stop.sh front <OUT>` (hoặc `asr`, `llm`). Chạy lại script sau đó, `--resume` làm tiếp.
+- Chạy script lần nữa khi process cũ còn sống sẽ bị từ chối; `FORCE=1` dừng các process cũ rồi chạy lại.
 
 Biến dùng chung: `AUDIO`, `OUT` (bắt buộc), `GPUS="0 1"` (số card vật lý), `JOBID` (tuỳ chọn), `CACHE` (mặc định `OUT/_resident/cache`),
-`ENV_NAME=a100`, `CONDA_ENV=som`, `VARIANTS=tools/variants_production.json`, `SESSION`, `FORCE=1` (dùng lại tên phiên tmux).
+`ENV_NAME=a100`, `CONDA_ENV=som`, `VARIANTS=tools/variants_production.json`, `FORCE=1` (dừng process cũ của job rồi chạy lại).
 
 Biến riêng của `job_front.sh`:
 

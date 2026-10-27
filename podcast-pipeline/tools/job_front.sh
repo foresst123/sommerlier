@@ -13,7 +13,7 @@
 #         PLAN_REPLICAS=1     copies of separation_plan (CPU); more than 1 uses --claim
 #         SIDON_WORKERS=2     Sidon workers per copy (performance.stages.separation.workers_per_gpu)
 #         diarization          workers=1 per copy (each copy is on its own card)
-#         VARIANTS, ENV_NAME=a100, CONDA_ENV=som, CACHE, SESSION, DRY=1, NO_SRUN=1, FORCE=1
+#         VARIANTS, ENV_NAME=a100, CONDA_ENV=som, CACHE, DRY=1, FORCE=1 (stop the earlier processes first)
 set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$HERE/tools/job_common.sh"

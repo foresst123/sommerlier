@@ -5,7 +5,7 @@
 #   job_copies STAGE "ARGS" [denoise]   one copy of STAGE per GPU position in GPU_POS (x REPLICAS_PER_GPU), --claim when >1
 #   job_plan STAGE "ARGS"               PLAN_REPLICAS copies of a CPU-only stage (CUDA_VISIBLE_DEVICES empty)
 #   job_proc NAME GPUS "ARGS" [denoise] one process script; GPUS is "none" or GPU positions ("0", "0 1")
-#   job_start                           prints the process -> GPU -> stage table; DRY=1 stops there, else starts tmux
+#   job_start                           prints the process -> GPU -> stage table; DRY=1 stops there, else starts them in the background with nohup
 #   job_set_gpus POS...                 used by the process scripts: CUDA_VISIBLE_DEVICES of the job at those positions
 #
 # Without JOBID (the usual way) GPUS are the PHYSICAL GPU ids you pick: GPUS="2 3" runs on cards 2 and 3, no srun.
@@ -13,8 +13,8 @@
 # list: Slurm sets CUDA_VISIBLE_DEVICES to the job's cards (maybe "4,5"), so position 1 is the second one.
 #
 # Knobs (environment): AUDIO, OUT (required), GPUS (physical ids), JOBID (optional, see above), CACHE, ENV_NAME=a100, CONDA_ENV=som,
-#   VARIANTS=tools/variants_production.json, SESSION, DRY=1 (write scripts and print the table only),
-#   FORCE=1 (reuse a tmux session name). NO_SRUN is accepted and ignored: srun is only used when JOBID is given.
+#   VARIANTS=tools/variants_production.json, DRY=1 (write scripts and print the table only),
+#   FORCE=1 (stop this job's earlier background processes first). NO_SRUN is accepted and ignored: srun is only used when JOBID is given.
 
 job_gpu_list() {
     # prints the CUDA_VISIBLE_DEVICES value of the job's cards at the given positions
@@ -77,7 +77,6 @@ job_init() {
     ENV_NAME=${ENV_NAME:-a100}
     CONDA_ENV=${CONDA_ENV:-som}
     VARIANTS=${VARIANTS:-tools/variants_production.json}
-    SESSION=${SESSION:-job_$JOB_NAME}
     DRY=${DRY:-0}
     FORCE=${FORCE:-0}
     JOBID=${JOBID:-}      # only an explicit JOBID turns srun on; an inherited SLURM_JOB_ID does not
@@ -173,12 +172,25 @@ job_plan() {
     done
 }
 
-job_window_cmd() {
+job_run_bg() {
+    # starts one process script in the background, in its own process group, detached from this terminal
+    local script=$1
     if [ -n "$JOBID" ]; then
-        printf 'srun --jobid=%s --overlap --pty bash %q; exec bash' "$JOBID" "$1"
+        setsid nohup srun --jobid="$JOBID" --overlap bash "$script" >/dev/null 2>&1 &
     else
-        printf 'bash %q; exec bash' "$1"
+        setsid nohup bash "$script" >/dev/null 2>&1 &
     fi
+    echo $!
+}
+
+job_stop_pids() {
+    # stops every process group recorded in a pids file; leaves the file in place
+    local file=$1 pid name
+    [ -f "$file" ] || return 0
+    while read -r pid name; do
+        [ -n "$pid" ] || continue
+        kill -TERM -- "-$pid" 2>/dev/null && echo "stopped $name (process group $pid)"
+    done < "$file"
 }
 
 job_start() {
@@ -192,26 +204,28 @@ job_start() {
         echo "DRY=1: process scripts are in $LAUNCH_DIR; nothing started"
         return 0
     fi
-    command -v tmux >/dev/null || { echo "tmux not found; run the scripts in $LAUNCH_DIR by hand" >&2; exit 5; }
-    if tmux has-session -t "$SESSION" 2>/dev/null; then
-        if [ "$FORCE" = 1 ]; then
-            tmux kill-session -t "$SESSION"
-        else
-            echo "tmux session '$SESSION' already exists: tmux attach -t $SESSION   (or SESSION=other, or FORCE=1)" >&2
-            exit 4
+    local pids="$LOG_DIR/${JOB_NAME}.pids" pid name alive=0
+    if [ -f "$pids" ]; then
+        while read -r pid name; do
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then alive=$((alive + 1)); fi
+        done < "$pids"
+        if [ "$alive" -gt 0 ]; then
+            if [ "$FORCE" = 1 ]; then
+                job_stop_pids "$pids"
+                sleep 2
+            else
+                echo "$alive process(es) of job ${JOB_NAME} are still running (see $pids). Stop them first (bash tools/job_stop.sh $JOB_NAME $OUT) or FORCE=1" >&2
+                exit 4
+            fi
         fi
     fi
-    local cmd
+    : > "$pids"
     for i in "${!PROC_NAMES[@]}"; do
-        cmd=$(job_window_cmd "${PROC_FILES[i]}")
-        if [ "$i" -eq 0 ]; then
-            tmux new-session -d -s "$SESSION" -n "${PROC_NAMES[i]}" "$cmd"
-        else
-            tmux new-window -t "$SESSION" -n "${PROC_NAMES[i]}" "$cmd"
-        fi
+        pid=$(job_run_bg "${PROC_FILES[i]}")
+        echo "$pid ${PROC_NAMES[i]}" >> "$pids"
     done
-    echo "started ${#PROC_NAMES[@]} processes in tmux session '$SESSION'"
-    echo "  watch: tmux attach -t $SESSION   (Ctrl+B then n / p switches windows, Ctrl+B then D leaves)"
-    echo "  logs:  $LOG_DIR/"
-    echo "  stop:  tmux kill-session -t $SESSION   (start the job script again later: --resume continues)"
+    echo "started ${#PROC_NAMES[@]} background processes (nohup, no tmux); pids in $pids"
+    echo "  logs:  $LOG_DIR/${JOB_NAME}_*.log   (tail -f one of them)"
+    echo "  state: python tools/line_status.py $OUT"
+    echo "  stop:  bash tools/job_stop.sh $JOB_NAME $OUT   (start again later: --resume continues)"
 }
