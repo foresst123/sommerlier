@@ -87,7 +87,7 @@ from utils.llm_json import clean_reply, is_cut_in_thought, is_readable, objects_
 from utils.transcript_windows import line_number
 
 # Bump when the prompt or the acceptance rules change.
-CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v14-concise"
+CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v15-no-howto"
 CONVERSATION_SELECTION_CHECKPOINT_VERSION = 1
 
 _TEMPLATE_SLACK_TOKENS = 64
@@ -285,11 +285,6 @@ Vùng là cầu nối, intro, outro, quảng cáo; quá ngắn, hoặc quá dài
 - interruptions (chỉ khi interrupt): mảng {"line": số dòng câu ngắt lời, "intent": topic_shift | clarify | disagree | complete}. topic_shift = chuyển chủ đề, clarify = hỏi lại/làm rõ, disagree = phản đối, complete = nói tiếp/hoàn thành ý người kia. Thời điểm do code đo lại. Không có thì [].
 - emotions: mỗi dòng một phần tử {"line": số dòng, "emotion": nhãn, "conf": 0..1}, chỉ dựa vào chữ (bạn không nghe được audio). Nhãn là MỘT trong: {emotion_labels}. Không rõ thì ghi neutral hoặc bỏ dòng.
 - summary: 1-3 câu tiếng Việt, tối đa khoảng 50 từ: nói về gì, diễn biến, kết thúc. Gọi theo vai ("người hỏi"/"người đáp"), không đoán tên hay giới tính, không thêm ngoài transcript.
-
-## CÁCH LÀM (ngắn, không chép lại các dòng)
-1. Ghi số dòng của các chỗ phải ngắt và các dòng nghi ngờ.
-2. Với mỗi vùng giữa hai điểm ngắt, tính thời lượng và đếm người nói; chỉ xét kỹ vùng có vẻ giữ được, vùng rõ ràng bỏ thì ghi một dòng lý do.
-3. Quyết định keep, self_contained, vai, ngắt lời, rồi viết JSON. Không xét lại vùng đã chốt. Đừng tốn suy nghĩ vào chữ sai một hai từ hay thông số lệch nhỏ.
 
 ## VÍ DỤ (minh họa cách quyết định; KHÔNG sao chép nội dung hay chủ đề). Các dòng bớt thông số cho gọn.
 

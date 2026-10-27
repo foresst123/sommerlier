@@ -102,3 +102,8 @@ def test_the_same_region_with_its_own_topic_is_not_refused(tmp_path):
                              max_candidates=1)
     (row,) = result.report["replies"]
     assert row["proposal_results"][0]["validator"] != "copied_example"
+
+
+def test_the_prompt_has_no_scratch_steps_the_json_only_reply_cannot_hold():
+    prompt = _prompt()
+    assert "CÁCH LÀM" not in prompt and "Ghi số dòng của các chỗ phải ngắt" not in prompt
