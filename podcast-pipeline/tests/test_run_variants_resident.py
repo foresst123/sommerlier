@@ -705,6 +705,8 @@ def test_hash_ignores_speed_knobs_but_not_result_settings(env):
     v = variants[0]
     assert rr.variant_hash(v, a, files) == rr.variant_hash(v, b, files)       # workers_per_gpu: same variant
     assert rr.variant_hash(v, a, files) != rr.variant_hash(v, c, files)       # a step changes the result
+    d = rr.parse_args(base + ["--set", 'outputs.clean_two_channel_dir="/x/final"'])
+    assert rr.variant_hash(v, a, files) == rr.variant_hash(v, d, files)       # the final root is set on "all" only
 
 
 # ------------------------------------------------- no-op stages and per-file hand-over

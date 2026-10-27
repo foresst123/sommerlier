@@ -232,7 +232,9 @@ def plan_ownership(variants, skipped, shard):
 # Speed knobs (workers, placement) never change what a variant produces, and the processes of the line differ
 # in them (the separation process has its own Sidon worker count): they must not make one process's .ready_<stage>
 # look stale to the next, nor invalidate a finished variant.
-HASH_IGNORED_SETS = ("performance.",)
+# Where the final dataset goes is set only on the "all" process (tools/job_front.sh): it must not make the markers
+# the earlier processes wrote look stale to it.
+HASH_IGNORED_SETS = ("performance.", "outputs.clean_two_channel_dir=")
 
 
 def variant_hash(variant, args, files, stop_after=None):
