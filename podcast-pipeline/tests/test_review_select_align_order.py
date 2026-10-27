@@ -289,7 +289,11 @@ def test_stop_after_transcript_review_is_a_stop_point_between_relabel_and_alignm
 def test_main_accepts_the_stop_point_and_the_a100_profile_turns_review_on():
     import json
     with open(os.path.join(ROOT, "main.py"), encoding="utf-8") as fh:
-        assert '"transcript_review"' in fh.read()
+        assert "pipeline_stop_points()" in fh.read()   # choices come from _STOP_ORDER
+    import sys
+    sys.path.insert(0, ROOT)
+    from utils.batch import pipeline_stop_points
+    assert "transcript_review" in pipeline_stop_points()
     with open(os.path.join(ROOT, "config.json"), encoding="utf-8") as fh:
         a100 = json.load(fh)["environments"]["a100"]
     assert a100["steps"]["transcript_review"] is True

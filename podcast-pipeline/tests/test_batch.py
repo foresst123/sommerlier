@@ -720,3 +720,90 @@ def test_stop_after_denoise_ends_inside_the_diarization_pass():
     stages = [s for s, _ in pipe.calls]
     assert stages[-2:] == ["denoise", "denoise"]
     assert "diarization" not in stages and "separation" not in stages and "asr" not in stages
+
+
+# --- every --stop_after point is a real stage boundary -----------------------
+
+_ALL_OPT_INS_ON = dict(
+    step_speaker_relabel=True, step_transcript_review=True, step_persona_profile=True,
+    step_conversation_selection=True, step_word_alignment=True, step_conversation_exports=True)
+_AUDIO_QUALITY_ON = {"environments": {"a100": {"audio_quality": {"enabled": True}}}}
+
+# What each --stop_after value makes the pipeline receive, pass by pass, with every
+# stage switched on. A point inside a pass arrives as that pass's stop_after.
+_TAIL = ["speaker_relabel", "transcript_review", "persona_profile",
+         "conversation_selection", "word_alignment", "conversation_exports"]
+_EXPECTED_STOPS = {
+    "input_quality": ["input_quality"],
+    "music": ["input_quality", "music"],
+    "denoise": ["input_quality", "music", "denoise"],
+    "diarization": ["input_quality", "music", "diarization"],
+    "denoise_pre_separation": ["input_quality", "music", "diarization", "denoise_pre_separation"],
+    "separation_plan": ["input_quality", "music", "diarization", "separation_plan"],
+    "separation": ["input_quality", "music", "diarization", "separation"],
+    "music_removal": ["input_quality", "music", "diarization", "music_removal"],
+    "denoise_pre_asr": ["input_quality", "music", "diarization", "separation", "denoise_pre_asr"],
+    "asr": ["input_quality", "music", "diarization", "separation", "asr"],
+    "captioning": ["input_quality", "music", "diarization", "separation", "asr", "captioning"],
+    "refinement": ["input_quality", "music", "diarization", "separation", "asr", "captioning",
+                   "refinement"],
+    "speaker_relabel": ["input_quality", "music", "diarization", "separation", "asr", "captioning",
+                        "refinement", "speaker_relabel"],
+    "transcript_review": ["input_quality", "music", "diarization", "separation", "asr", "captioning",
+                          "refinement", "speaker_relabel", "transcript_review"],
+    "persona_profile": ["input_quality", "music", "diarization", "separation", "asr", "captioning",
+                        "refinement", "speaker_relabel", "transcript_review", "persona_profile"],
+    "conversation_selection": ["input_quality", "music", "diarization", "separation", "asr",
+                               "captioning", "refinement"] + _TAIL[:4],
+    "word_alignment": ["input_quality", "music", "diarization", "separation", "asr", "captioning",
+                       "refinement"] + _TAIL[:5],
+    "conversation_exports": ["input_quality", "music", "diarization", "separation", "asr",
+                             "captioning", "refinement"] + _TAIL,
+    None:["input_quality", "music", "diarization", "separation", "asr", "captioning",
+           "refinement"] + _TAIL + [None],
+}
+
+
+def test_every_stop_point_of_the_pipeline_has_an_expected_pass_sequence():
+    from utils.batch import pipeline_stop_points
+    assert set(pipeline_stop_points()) == set(_EXPECTED_STOPS) - {None}, (
+        "a stop point added to PipelineService._STOP_ORDER needs its row in _EXPECTED_STOPS")
+
+
+def test_each_stop_point_ends_the_batch_at_its_own_pass():
+    from utils.batch import pipeline_stop_points
+    for stop in list(pipeline_stop_points()) + [None]:
+        pipe = FakePipeline()
+        run_batch_by_stage(pipe, _args(stop_after=stop, env="a100", **_ALL_OPT_INS_ON),
+                           _AUDIO_QUALITY_ON, ["f1"])
+        got = [s for s, _ in pipe.calls]
+        assert got == _EXPECTED_STOPS[stop], f"--stop_after {stop}: ran {got}"
+
+
+def test_separation_plan_stops_inside_the_separation_pass_and_runs_no_gpu_stage():
+    """The regression: batch never mapped separation_plan to a pass, so the run went on
+    through separation, ASR and the LLM stages after the CPU-only plan was saved."""
+    pipe = FakePipeline()
+    run_batch_by_stage(pipe, _args(stop_after="separation_plan", env="a100", **_ALL_OPT_INS_ON),
+                       {}, ["f1", "f2"])
+    assert [s for s, _ in pipe.calls] == ["music"] * 2 + ["diarization"] * 2 + ["separation_plan"] * 2
+
+
+def test_music_removal_stops_inside_the_separation_pass():
+    """music_removal is also a pipeline-level stop after separation: same bug, same fix."""
+    pipe = FakePipeline()
+    run_batch_by_stage(pipe, _args(stop_after="music_removal", env="a100", **_ALL_OPT_INS_ON),
+                       {}, ["f1"])
+    assert [s for s, _ in pipe.calls] == ["music", "diarization", "music_removal"]
+
+
+def test_pipeline_stop_points_is_read_from_the_pipeline_source():
+    import pytest
+    from utils.batch import pipeline_stop_points
+    src = 'class X:\n    _STOP_ORDER = ("a", "b",\n                   "c")\n'
+    assert pipeline_stop_points(src) == ("a", "b", "c")
+    points = pipeline_stop_points()
+    assert points[0] == "input_quality" and points[-1] == "conversation_exports"
+    assert "conversation_selection" in points and "separation_plan" in points
+    with pytest.raises(ValueError):
+        pipeline_stop_points("x = 1\n")

@@ -107,3 +107,19 @@ def test_missing_new_stage_handover_or_final_done_is_reported(tmp_path, capsys):
     assert "b: separation_plan hand-over missing" in text
     assert "final process did not finish" in text
     assert "a: conversation_selection failed" in text
+
+
+def test_without_variants_it_checks_the_production_variants(tmp_path, monkeypatch, capsys):
+    """The default was variants_placement.json, which is not the set the production line runs.
+    The default is a path from the repo root, not from the cwd, so it works from anywhere."""
+    expected = Path(__file__).resolve().parents[1] / "tools" / "variants_production.json"
+    assert vl.DEFAULT_VARIANTS == expected and expected.is_file()
+    assert [v["id"] for v in load_variants_of(expected)] == ["prod"]
+    audio, var, out = build(tmp_path)
+    monkeypatch.setattr(vl, "DEFAULT_VARIANTS", var)     # the stand-in set, read through the default
+    assert vl.main(["--audio-dir", str(audio), "--out-root", str(out)]) == 0
+    assert "3/3 variants complete" in capsys.readouterr().out
+
+
+def load_variants_of(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"))["variants"]

@@ -199,13 +199,12 @@ def _build_parser():
                         help="Same chain syntax as --denoise, applied after separation "
                              "and before ASR (profile: pipeline.denoise_pre_asr), to the "
                              "waveform and to every separated segment.")
+    # Same source as PipelineService._STOP_ORDER, so a point the pipeline honours
+    # is never rejected here (conversation_selection once was).
+    from utils.batch import pipeline_stop_points
     parser.add_argument(
         "--stop_after", type=str,
-        choices=["input_quality", "music", "denoise", "diarization",
-                 "denoise_pre_separation", "separation_plan", "separation",
-                 "music_removal", "denoise_pre_asr", "asr",
-                 "captioning", "refinement", "speaker_relabel", "transcript_review",
-                 "persona_profile", "word_alignment", "conversation_exports", "none"],
+        choices=[*pipeline_stop_points(), "none"],
         help="Stop pipeline gracefully after this stage. The profile's "
              "pipeline.stop_after sets a default; 'none' runs every stage even "
              "when the profile asks to stop early.")
