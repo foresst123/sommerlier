@@ -92,3 +92,28 @@ def test_ansi_codes_are_stripped_from_the_log_line(tmp_path):
     out = make_out(tmp_path)
     (out / "_resident" / "logs" / "front_1_denoise_gpu0.log").write_text("\x1b[1;34mhello\x1b[0m\n")
     assert jd.collect(out, out / "final")["processes"][0]["line"] == "hello"
+
+
+def test_manifest_hours_total_and_by_category(tmp_path):
+    import gzip
+    out = make_out(tmp_path)
+    lh = out / "final" / "lhotse"
+    lh.mkdir(parents=True)
+    cuts = [
+        {"duration": 3600.0, "recording": {"sources": [{"source": "/x/final/interrupt/a_10s/stereo_2ch.wav"}]}},
+        {"duration": 1800.0, "recording": {"sources": [{"source": "/x/final/turn_by_turn/b_5s/stereo_2ch.wav"}]}},
+        {"duration": 900.0, "recording": {"sources": [{"source": "/x/final/interrupt/c_7s/stereo_2ch.wav"}]}},
+    ]
+    with gzip.open(lh / "manifest.jsonl.gz", "wt", encoding="utf-8") as f:
+        for c in cuts:
+            f.write(json.dumps(c) + "\n")
+        f.write("not json\n")
+    data = jd.final_state(out / "final")["data"]
+    assert data["cuts"] == 3 and data["hours"] == 1.75
+    assert data["by_category"]["interrupt"] == {"cuts": 2, "hours": 1.25}
+    assert data["by_category"]["turn_by_turn"]["cuts"] == 1
+
+
+def test_manifest_hours_is_none_without_a_manifest(tmp_path):
+    out = make_out(tmp_path)
+    assert jd.final_state(out / "final")["data"] is None

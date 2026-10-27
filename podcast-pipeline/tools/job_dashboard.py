@@ -14,6 +14,7 @@ the last line and age of every process log, the GPUs of every host that runs the
 (<FINAL>/lhotse). Standard library only.
 """
 import argparse
+import gzip
 import json
 import os
 import re
@@ -142,14 +143,61 @@ def all_gpus(out, max_age=60):
     return {h: g for h, g in hosts.items() if g}
 
 
+_MANIFEST_CACHE = {}
+CATEGORIES = ("interrupt", "backchannel", "turn_by_turn")
+
+
+def manifest_hours(manifest):
+    """{"cuts", "hours", "by_category": {name: {"cuts", "hours"}}} read from the merged Lhotse manifest.
+
+    One line = one exported conversation (a MultiCut); its category is the folder of its audio under FINAL.
+    The result is cached by (mtime, size): the file is only read again when the run has changed it, and a read that
+    hits a half-written file keeps the last good numbers.
+    """
+    try:
+        st = manifest.stat()
+    except OSError:
+        return None
+    key = (str(manifest), st.st_mtime_ns, st.st_size)
+    hit = _MANIFEST_CACHE.get(str(manifest))
+    if hit and hit[0] == key:
+        return hit[1]
+    total, cuts, cats = 0.0, 0, {}
+    try:
+        with gzip.open(manifest, "rt", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    cut = json.loads(line)
+                    dur = float(cut.get("duration") or 0.0)
+                except (ValueError, TypeError, AttributeError):
+                    continue
+                src = ""
+                for source in (cut.get("recording") or {}).get("sources") or []:
+                    src = str(source.get("source") or "")
+                    break
+                name = next((c for c in CATEGORIES if f"/{c}/" in src), "other")
+                total += dur
+                cuts += 1
+                row = cats.setdefault(name, {"cuts": 0, "hours": 0.0})
+                row["cuts"] += 1
+                row["hours"] += dur / 3600.0
+    except (OSError, EOFError):
+        return hit[1] if hit else None
+    result = {"cuts": cuts, "hours": round(total / 3600.0, 2),
+              "by_category": {k: {"cuts": v["cuts"], "hours": round(v["hours"], 2)} for k, v in cats.items()}}
+    _MANIFEST_CACHE[str(manifest)] = (key, result)
+    return result
+
+
 def final_state(final):
     manifest = final / "lhotse" / "manifest.jsonl.gz"
     parts = list((final / "lhotse" / ".parts").glob("*.jsonl.gz")) if (final / "lhotse").is_dir() else []
-    exported = {k: len(list((final / k).glob("*/"))) for k in ("interrupt", "backchannel", "turn_by_turn")
-                if (final / k).is_dir()}
-    return {"manifest": manifest.is_file(), "manifest_mb": round(manifest.stat().st_size / 1e6, 2)
-            if manifest.is_file() else 0, "manifest_age": ls.age(manifest) if manifest.is_file() else "",
-            "recordings": len(parts), "conversations": exported}
+    exported = {k: len(list((final / k).glob("*/"))) for k in CATEGORIES if (final / k).is_dir()}
+    quarantine = len(list((final / "_quarantine").glob("*/"))) if (final / "_quarantine").is_dir() else 0
+    return {"path": str(final), "exists": final.is_dir(), "manifest": manifest.is_file(),
+            "manifest_mb": round(manifest.stat().st_size / 1e6, 2) if manifest.is_file() else 0,
+            "manifest_age": ls.age(manifest) if manifest.is_file() else "", "recordings": len(parts),
+            "conversations": exported, "quarantine": quarantine, "data": manifest_hours(manifest)}
 
 
 def collect(out, final):
@@ -197,7 +245,7 @@ async function tick(){
  $('stages').innerHTML=Object.entries(d.stages).map(([k,s])=>{const t=s.total||1,p=x=>(100*x/t).toFixed(1);
   return `<div class="row"><b>${k}</b><div class="bar" title="xong ${s.done}, chạy ${s.running}, lỗi ${s.failed}"><i class="d" style="width:${p(s.done)}%"></i><i class="r" style="width:${p(s.running)}%"></i><i class="f" style="width:${p(s.failed)}%"></i></div>
   <div class="num">${s.done}/${s.total}${s.running?` · <span style="color:var(--run)">${s.running} chạy</span>`:''}${s.failed?` · <span class="bad">${s.failed} lỗi</span>`:''}<br><span class="mute">${s.rate}/phút · còn ${fmt(s.eta_min)}</span></div></div>`}).join('');
- const f=d.final;$('final').innerHTML=(f.manifest?`<span class="ok">manifest.jsonl.gz</span> ${f.manifest_mb} MB (cập nhật ${f.manifest_age} trước)`:'<span class="mute">chưa có manifest.jsonl.gz</span>')+` · ${f.recordings} bản ghi đã vào Lhotse`+Object.entries(f.conversations).map(([k,v])=>` · ${k}: ${v}`).join('');
+ const f=d.final,dt=f.data;$('final').innerHTML=`<div class="mute">${esc(f.path)}${f.exists?'':' (chưa có thư mục)'}</div>`+(dt?`<div style="font-size:22px;margin:6px 0"><b>${dt.hours} giờ</b> <span class="mute">· ${dt.cuts} hội thoại</span></div>`+Object.entries(dt.by_category).map(([k,v])=>`<span style="margin-right:14px">${k}: <b>${v.hours} giờ</b> <span class="mute">(${v.cuts})</span></span>`).join('')+`<div class="mute" style="margin-top:6px">manifest.jsonl.gz ${f.manifest_mb} MB, cập nhật ${f.manifest_age} trước · ${f.recordings} bản ghi đã vào Lhotse${f.quarantine?` · ${f.quarantine} bị cách ly`:''}</div>`:'<span class="mute">chưa có manifest.jsonl.gz (chưa có hội thoại nào xuất xong)</span>'+(f.quarantine?` · ${f.quarantine} bị cách ly`:''));
  const hs=Object.entries(d.gpus);$('gpus').innerHTML=hs.length?hs.map(([h,gs])=>gs.map(g=>`<div><b>${esc(h)} · GPU ${g.index}</b><div class="bar"><i class="r" style="width:${100*g.used/g.total}%"></i></div>${(g.used/1024).toFixed(1)}/${(g.total/1024).toFixed(0)} GiB · tải ${g.util}%</div>`).join('')).join(''):'<span class="mute">chưa có máy nào báo GPU</span>';
  $('fail').innerHTML=d.failures.length?`<table><tr><th>stage</th><th>file</th><th>lý do</th><th>cách đây</th></tr>${d.failures.map(r=>`<tr><td>${r.stage}</td><td>${esc(r.file)}</td><td class="bad">${esc(r.reason)}</td><td>${r.age}</td></tr>`).join('')}</table>`:'<span class="ok">không có lỗi</span>';
  const jn={front:'Job 1 · front',asr:'Job 2 · ASR',llm:'Job 3 · LLM'};
