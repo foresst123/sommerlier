@@ -1082,8 +1082,12 @@ def main():
             persona_cfg = dict(env_profile.get("models", {}).get("persona_profile", {}))
             persona_svc = PersonaProfileService(
                 stage_llm(pass_llm, refinement_svc, "persona"), logger=logger, **persona_cfg)
+        # Denoise chain for the assistant track only (profile: conversation_exports.assistant_clean_chain).
         conversation_export_svc = ConversationExportService(
             stage_llm(pass_llm, refinement_svc, "selection"), logger=logger,
+            assistant_clean_chain=env_profile.get("conversation_exports", {}).get(
+                "assistant_clean_chain", "none"),
+            denoise_cfg=env_profile.get("denoise"),
             **dict(env_profile.get("models", {}).get("conversation_selection", {})))
         alignment_cfg = dict(
             env_profile.get("models", {}).get("word_alignment", {}))

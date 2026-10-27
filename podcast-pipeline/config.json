@@ -244,9 +244,12 @@
           "coverage_min_speech_frames": 5
         }
       },
+      "conversation_exports": {
+        "assistant_clean_chain": "rf_vocals_resurrection>mpsenet_dns"
+      },
       "steps": {
         "music_analysis": false,
-        "music_removal": true,
+        "music_removal": false,
         "cut_music": false,
         "diarization": true,
         "separation": true,
@@ -263,9 +266,9 @@
       "pipeline": {
         "vad": true,
         "bss": true,
-        "music": true,
+        "music": false,
         "music_scope": "full",
-        "denoise": "none",
+        "denoise": "rf_crowd>blend50",
         "denoise_pre_separation": "none",
         "denoise_pre_asr": "none",
         "llm_trace": true,
