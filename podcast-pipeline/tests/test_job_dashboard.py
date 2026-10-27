@@ -86,3 +86,9 @@ def test_publish_gpus_writes_file(tmp_path, monkeypatch):
     monkeypatch.setattr(jd, "gpus", lambda: [{"index": "0", "name": "x", "used": 1, "total": 2, "util": 3}])
     jd.publish_gpus(out)
     assert list((out / "_resident").glob("gpu_*.json"))
+
+
+def test_ansi_codes_are_stripped_from_the_log_line(tmp_path):
+    out = make_out(tmp_path)
+    (out / "_resident" / "logs" / "front_1_denoise_gpu0.log").write_text("\x1b[1;34mhello\x1b[0m\n")
+    assert jd.collect(out, out / "final")["processes"][0]["line"] == "hello"

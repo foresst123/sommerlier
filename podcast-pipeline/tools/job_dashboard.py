@@ -16,6 +16,7 @@ the last line and age of every process log, the GPUs of every host that runs the
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -29,6 +30,7 @@ import line_status as ls  # noqa: E402
 
 STAGES = ("denoise", "diarization", "separation_plan", "separation", "asr", "conversation_selection")
 RATE_WINDOW = 600
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\[[0-9;]*m")
 
 
 def _mtime(p):
@@ -101,7 +103,7 @@ def processes(out):
             alive = False   # only meaningful on the host that started it; the page says so
         age_s = time.time() - _mtime(logs / f"{name}.log")
         rows.append({"name": name, "job": job_pid[0] if job_pid else "", "alive": alive,
-                     "age": when, "age_s": round(age_s), "line": text})
+                     "age": when, "age_s": round(age_s), "line": ANSI.sub("", text).strip()})
     return rows
 
 
