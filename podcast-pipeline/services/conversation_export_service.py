@@ -74,6 +74,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from services.denoise_service import DenoiseService, is_none, parse_spec
+
 from utils.conversation_events import (
     CATEGORY_NAMES, INTERRUPTION_INTENTS, TURN_BY_TURN, EventParams, analyze, categorize,
     category_is_plausible,
@@ -655,6 +657,9 @@ MIXTURE_FILE = "mixture.wav"
 ASSISTANT_FILE = "assistant.wav"
 USER_FILE = "user.wav"
 STEREO_FILE = "stereo_2ch.wav"
+# Written beside the originals only when a clean chain ran cleanly (see _clean_assistant).
+ASSISTANT_CLEAN_FILE = "assistant_clean.wav"
+STEREO_CLEAN_FILE = "stereo_2ch_clean.wav"
 ALIGNMENTS_FILE = "stereo_2ch.json"      # moshi-finetune: assistant words, next to the wav
 JSON_FILE = "conversation.json"
 TEXT_FILE = "transcript.txt"
@@ -1002,9 +1007,22 @@ class ConversationExportService:
     RENDER_CACHE_BYTES = 512 * 1024 * 1024
 
     def __init__(self, llm, logger=None, render_workers: int = 1,
-                 reuse_render: bool = False, replay_old_replies: bool = False, **settings):
+                 reuse_render: bool = False, replay_old_replies: bool = False,
+                 assistant_clean_chain: str = "none", denoise_cfg: Optional[dict] = None,
+                 **settings):
         self.llm = llm
         self.logger = logger
+        # Denoise chain for the assistant track only ("none" = off). Malformed chains raise
+        # here, not once per excerpt; the filter itself never raises (see _clean_assistant).
+        self.assistant_clean_chain = (
+            "none" if is_none(assistant_clean_chain) else str(assistant_clean_chain).strip())
+        self.denoise_cfg = denoise_cfg if isinstance(denoise_cfg, dict) else None
+        if self.assistant_clean_chain != "none":
+            from models.denoise.pseudo import validate_chain_tokens
+            validate_chain_tokens(parse_spec(self.assistant_clean_chain))
+        # Excerpts are written from render_workers threads; one filter run at a time keeps
+        # a single backend model on the GPU.
+        self._clean_lock = threading.Lock()
         # Reuse the model's earlier replies for windows it already answered (from older
         # checkpoints, see replay_from_payloads), so loosening a validator setting re-judges
         # the same answers without asking the model again. Not part of the settings digest
@@ -2141,6 +2159,42 @@ class ConversationExportService:
                 "duration": round(num_samples / float(sample_rate), 6),
                 "files": info, "checks": checks}
 
+    def _clean_assistant(self, directory: str, assistant, user, sample_rate: int):
+        """Filter the assistant track with assistant_clean_chain and write the clean pair.
+
+        Returns (record for conversation.json, files to add to the item's file map). The
+        clean files are written only when the chain ran over the whole track without an
+        error: a failed filter keeps the original audio, and writing that under the
+        clean name would pass it off as filtered. The filter never raises.
+        """
+        import soundfile as sf
+        mono = np.asarray(assistant, dtype=np.float32)
+        if mono.ndim == 2:
+            mono = mono[:, 0]
+        # One track per excerpt for now: apply_many loads the backend per call. Batching a
+        # whole source file would need the renders held back until all of them are cut.
+        with self._clean_lock:
+            outs, info = DenoiseService().apply_many(
+                [mono], int(sample_rate), self.assistant_clean_chain, self.denoise_cfg, self.logger)
+        record = {"chain": self.assistant_clean_chain, "chain_id": info["chain_id"],
+                  "steps": [step["token"] for step in info["steps"]],
+                  "errors": list(info["errors"]), "written": False}
+        if info["errors"]:
+            record["reason"] = "filter_failed"
+            return record, {}
+        if not info.get("filtered"):
+            record["reason"] = "too_short"
+            return record, {}
+        clean = np.asarray(outs[0], dtype=np.float32)
+        pair = (clean, user) if self.cfg.assistant_channel == "left" else (user, clean)
+        sf.write(os.path.join(directory, ASSISTANT_CLEAN_FILE), clean,
+                 sample_rate, subtype="PCM_16")
+        sf.write(os.path.join(directory, STEREO_CLEAN_FILE), np.column_stack(pair),
+                 sample_rate, subtype="PCM_16")
+        record["written"] = True
+        return record, {"assistant_clean": ASSISTANT_CLEAN_FILE,
+                        "stereo_2ch_clean": STEREO_CLEAN_FILE}
+
     def _alignments(self, finder, plan: _Plan, origin: float) -> dict:
         """moshi-finetune sidecar: the assistant's words, timed from the start of the audio."""
         rows = []
@@ -2169,6 +2223,7 @@ class ConversationExportService:
         os.makedirs(directory, exist_ok=True)
         files = {"mixture": MIXTURE_FILE}
         audio_files = {"mixture": MIXTURE_FILE}
+        clean, clean_files = None, {}
         sf.write(os.path.join(directory, MIXTURE_FILE), render.mixture,
                  sample_rate, subtype="PCM_16")
         if render.left is not None:
@@ -2184,7 +2239,10 @@ class ConversationExportService:
                      sample_rate, subtype="PCM_16")
             audio_files.update({"assistant": ASSISTANT_FILE, "user": USER_FILE,
                                 "stereo_2ch": STEREO_FILE})
+            if self.assistant_clean_chain != "none":
+                clean, clean_files = self._clean_assistant(directory, assistant, user, sample_rate)
         files.update(audio_files)
+        files.update(clean_files)
         files["alignments"] = ALIGNMENTS_FILE
         origin = render.lo / float(sample_rate)
         with open(os.path.join(directory, ALIGNMENTS_FILE), "w", encoding="utf-8") as fh:
@@ -2199,6 +2257,8 @@ class ConversationExportService:
                                       self.cfg.assistant_channel),
             sample_rate=int(sample_rate), num_samples=int(len(render.mixture)),
             source_stem=base_name)
+        if clean is not None:
+            meta["assistant_clean"] = clean
         with open(os.path.join(directory, JSON_FILE), "w", encoding="utf-8") as fh:
             json.dump(meta, fh, ensure_ascii=False, indent=2)
         with open(os.path.join(directory, TEXT_FILE), "w", encoding="utf-8") as fh:
