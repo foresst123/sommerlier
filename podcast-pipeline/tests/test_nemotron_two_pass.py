@@ -87,6 +87,52 @@ def test_pass1_guides_pass2_context_around_a_boundary_speaker():
     assert guided[0].context_end >= 23.0
 
 
+def test_pass1_reconciles_the_same_speaker_across_a_silence_with_wespeaker():
+    first = ChunkResult(
+        _window(0.0, 30.0),
+        [{"start": 0.0, "end": 12.0, "speaker": "speaker_0"}],
+    )
+    second = ChunkResult(
+        _window(30.0, 60.0),
+        [{"start": 12.0, "end": 16.0, "speaker": "speaker_7"}],
+    )
+    calls = []
+
+    out = globalize_pass1(
+        [first, second],
+        speaker_similarity=lambda *args: calls.append(args) or 0.95,
+        clean_speech_seconds={
+            ("pass1", "speaker_7"): 2.0,
+            ("pass1", "SPEAKER_00"): 2.0,
+        },
+        min_clean_speech_seconds=1.5,
+    )
+
+    assert out[1][0]["speaker"] == "SPEAKER_00"
+    assert out[1][0]["speaker_source"] == "wespeaker"
+    assert calls == [("speaker_7", "SPEAKER_00")]
+
+
+def test_pass1_reconciliation_is_one_to_one_within_a_chunk():
+    first = ChunkResult(
+        _window(0.0, 30.0),
+        [{"start": 0.0, "end": 36.0, "speaker": "speaker_0"}],
+    )
+    second = ChunkResult(
+        _window(30.0, 60.0),
+        [
+            {"start": 1.0, "end": 3.0, "speaker": "local_a"},
+            {"start": 3.0, "end": 5.0, "speaker": "local_b"},
+        ],
+    )
+
+    out = globalize_pass1([first, second], min_overlap=0.1)
+    speakers = [segment["speaker"] for segment in out[1]]
+
+    assert speakers.count("SPEAKER_00") == 1
+    assert len(set(speakers)) == 2
+
+
 def test_short_unmatched_backchannel_is_uncertain_and_does_not_call_wespeaker():
     pass1 = [{"start": 0.0, "end": 4.0, "speaker": "SPEAKER_00"}]
     pass2 = ChunkResult(
@@ -106,6 +152,19 @@ def test_short_unmatched_backchannel_is_uncertain_and_does_not_call_wespeaker():
     assert out[0][0]["speaker"] == "SPEAKER_UNKNOWN"
     assert out[0][0]["speaker_confidence"] is False
     assert calls == []
+
+
+def test_unknown_pass1_backchannel_cannot_become_a_confident_pass2_identity():
+    pass1 = [{"start": 0.0, "end": 4.0, "speaker": "SPEAKER_UNKNOWN"}]
+    pass2 = ChunkResult(
+        _window(0.0, 20.0),
+        [{"start": 2.0, "end": 3.0, "speaker": "speaker_9"}],
+    )
+
+    out = map_pass2_to_global([pass2], pass1)
+
+    assert out[0][0]["speaker"] == "SPEAKER_UNKNOWN"
+    assert out[0][0]["speaker_confidence"] is False
 
 
 def test_speaker_similarity_is_only_used_after_clean_speech_threshold():
@@ -130,6 +189,79 @@ def test_speaker_similarity_is_only_used_after_clean_speech_threshold():
     assert calls == [("speaker_9", "SPEAKER_00")]
     assert out[0][0]["speaker"] == "SPEAKER_00"
     assert out[0][0]["speaker_source"] == "wespeaker"
+
+
+def test_wespeaker_cache_keys_keep_pass1_and_pass2_labels_separate(monkeypatch):
+    import types
+    import torch
+    import nemotron_worker
+
+    calls = []
+
+    class FakeEmbedder:
+        def __init__(self, **kwargs):
+            pass
+
+        def embed(self, audio, sample_rate):
+            calls.append(audio.copy())
+            return torch.tensor([float(len(calls)), 1.0])
+
+    fake_module = types.SimpleNamespace(WeSpeakerONNXEmbedder=FakeEmbedder)
+    monkeypatch.setitem(sys.modules, "models.wespeaker_embedding", fake_module)
+
+    helpers = __import__("utils.nemotron_two_pass", fromlist=["ChunkResult"])
+    pass2 = helpers.ChunkResult(
+        _window(10.0, 30.0),
+        [{"start": 3.0, "end": 5.0, "speaker": "SPEAKER_00"}],
+    )
+    similarity, clean = nemotron_worker._lazy_wespeaker_similarity(
+        [{"start": 0.0, "end": 4.0, "speaker": "SPEAKER_00"}],
+        [pass2],
+        __import__("numpy").zeros(30 * 16000, dtype="float32"),
+        16000,
+        1.0,
+    )
+
+    assert clean[("pass1", "SPEAKER_00")] >= 1.0
+    assert clean[("pass2", "SPEAKER_00")] >= 1.0
+    similarity("SPEAKER_00", "SPEAKER_00")
+    assert len(calls) == 2
+
+
+def test_silero_loader_uses_the_installed_package_without_torch_hub(monkeypatch):
+    import types
+    import torch
+    import nemotron_worker
+
+    model = object()
+    fake_package = types.SimpleNamespace(
+        load_silero_vad=lambda **kwargs: model,
+        get_speech_timestamps=lambda audio, loaded, **kwargs: [
+            {"start": 0.1, "end": 0.2}
+        ],
+    )
+    monkeypatch.setitem(sys.modules, "silero_vad", fake_package)
+    monkeypatch.setattr(torch.hub, "load", lambda *args, **kwargs:
+                        pytest.fail("torch.hub.load must not be called"))
+
+    vad = nemotron_worker.load_silero_vad()
+    assert vad(torch.zeros(3200), 16000, {}) == [(0.1, 0.2)]
+
+
+def test_missing_silero_package_fails_with_an_installation_hint(monkeypatch):
+    import builtins
+    import nemotron_worker
+
+    real_import = builtins.__import__
+
+    def missing(name, *args, **kwargs):
+        if name == "silero_vad":
+            raise ModuleNotFoundError("No module named 'silero_vad'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", missing)
+    with pytest.raises(RuntimeError, match="silero-vad"):
+        nemotron_worker.load_silero_vad()
 
 
 def test_worker_two_passes_both_use_batch_size_16_and_preserve_the_file(tmp_path):
@@ -159,6 +291,7 @@ def test_worker_two_passes_both_use_batch_size_16_and_preserve_the_file(tmp_path
             "chunk_min_seconds": 20,
             "chunk_max_seconds": 30,
             "context_seconds": 2,
+            "wespeaker_fallback": False,
         },
         vad_intervals=lambda waveform, sample_rate, cfg: [(0.0, 10.0), (12.0, 48.0)],
     )

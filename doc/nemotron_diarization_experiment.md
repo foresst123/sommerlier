@@ -13,7 +13,9 @@ on a Mac without a GPU or NeMo; it has never run against the real model.**
   cores without removing silence, both Nemotron passes use batch 16, pass-1
   overlap establishes global identities, and pass-2 context is cropped back to
   each core before export. A lazy WeSpeaker fallback is considered only after
-  both sides have enough non-overlapping clean speech.
+  both sides have enough non-overlapping clean speech. Silero is loaded from
+  the pinned `silero-vad` package bundled in the Nemotron environment; worker
+  startup never calls `torch.hub` or reaches the network.
 - `podcast-pipeline/utils/nemotron_segments.py`: pure conversion (no NeMo/torch):
   raw segments to `{start, end, speaker}`, speakers renamed `SPEAKER_00..` by
   first appearance, optional same-speaker gap merge and minimum duration.

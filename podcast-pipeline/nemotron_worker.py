@@ -138,15 +138,18 @@ def load_silero_vad():
     """Load Silero once and return a small timestamp-only callable."""
     import torch
 
-    model, utils = torch.hub.load(
-        repo_or_dir=os.environ.get("SILERO_VAD_REV", "snakers4/silero-vad:v6.2"),
-        model="silero_vad",
-        force_reload=False,
-        onnx=False,
-        trust_repo=True,
-        source="github",
-    )
-    get_speech_timestamps = utils[0]
+    try:
+        from silero_vad import get_speech_timestamps
+        from silero_vad import load_silero_vad as load_model
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Nemotron two-pass mode requires the installed silero-vad package "
+            "(expected silero-vad==6.2.2); install requirements-nemotron.txt"
+        ) from exc
+    try:
+        model = load_model(onnx=False, sampling_rate=16000)
+    except Exception as exc:
+        raise RuntimeError(f"Could not load the offline Silero VAD package: {exc}") from exc
 
     def _vad(waveform, sample_rate, cfg):
         waveform = torch.as_tensor(waveform, dtype=torch.float32)
@@ -156,10 +159,10 @@ def load_silero_vad():
             "min_speech_duration_ms": int(cfg.get("vad_min_speech_ms", 80)),
             "min_silence_duration_ms": int(cfg.get("vad_min_silence_ms", 180)),
             "speech_pad_ms": int(cfg.get("vad_pad_ms", 160)),
+            "return_seconds": True,
         }
         timestamps = get_speech_timestamps(waveform, model, **kwargs)
-        return [(float(item["start"]) / sample_rate,
-                 float(item["end"]) / sample_rate) for item in timestamps]
+        return [(float(item["start"]), float(item["end"])) for item in timestamps]
 
     return _vad
 
@@ -225,98 +228,90 @@ def _absolute_core_segments(chunks):
     return result
 
 
-def _lazy_wespeaker_similarity(pass1_segments, pass2_chunks, waveform, sample_rate,
-                               min_clean_seconds):
-    """Build a lazy cosine matcher; the model is not loaded for short evidence."""
-    import numpy as np
+class _LazyWeSpeakerSimilarity:
+    """Namespace-aware, lazy WeSpeaker cosine matcher."""
 
-    pass1_audio = {}
-    for segment in pass1_segments:
-        pass1_audio.setdefault(str(segment["speaker"]), []).append(segment)
-    pass2_audio = {}
-    pass2_segments = _absolute_core_segments(pass2_chunks)
-    for segment in pass2_segments:
-        pass2_audio.setdefault(str(segment["speaker"]), []).append(segment)
+    def __init__(self, waveform, sample_rate):
+        self.waveform = waveform
+        self.sample_rate = sample_rate
+        self.groups = {}
+        self.embeddings = {}
+        self.embedder = None
 
-    # Core cropping removes duplicate context, but overlapping turns with the
-    # same local label can still be emitted by the model. Union those first so
-    # duplicate frames cannot satisfy the clean-speech threshold.
-    for groups in (pass1_audio, pass2_audio):
-        for label, values in groups.items():
-            union = []
-            for value in sorted(values, key=lambda s: (s["start"], s["end"])):
-                if union and value["start"] <= union[-1]["end"]:
-                    union[-1]["end"] = max(union[-1]["end"], value["end"])
-                else:
-                    union.append(dict(value))
-            groups[label] = union
+    def register(self, namespace, label, segments):
+        self.groups[(str(namespace), str(label))] = [dict(s) for s in segments]
 
-    def _clean_parts(groups, label):
-        others = [other for other_label, values in groups.items() if other_label != label
-                  for other in values]
+    def register_candidate(self, label, segments):
+        self.register("candidate", label, segments)
+
+    def register_reference(self, label, segments):
+        self.register("reference", label, segments)
+
+    def _audio_for(self, key):
+        import numpy as np
+
         parts = []
-        for source in groups.get(label, []):
-            pending = [(float(source["start"]), float(source["end"]))]
-            for other in others:
-                next_pending = []
-                other_start, other_end = float(other["start"]), float(other["end"])
-                for start, end in pending:
-                    if other_end <= start or other_start >= end:
-                        next_pending.append((start, end))
-                        continue
-                    if start < other_start:
-                        next_pending.append((start, other_start))
-                    if other_end < end:
-                        next_pending.append((other_end, end))
-                pending = next_pending
-            parts.extend({"start": start, "end": end}
-                         for start, end in pending if end > start)
-        return parts
-
-    clean = {}
-    for prefix, groups in (("pass1", pass1_audio), ("pass2", pass2_audio)):
-        for label in groups:
-            groups[label] = _clean_parts(groups, label)
-            clean[(prefix, label)] = sum(float(s["end"]) - float(s["start"])
-                                         for s in groups[label])
-
-    embedder = None
-    embeddings = {}
-
-    def _audio_for(groups, label):
-        parts = []
-        for segment in groups.get(label, []):
-            start = int(round(float(segment["start"]) * sample_rate))
-            end = int(round(float(segment["end"]) * sample_rate))
+        for segment in self.groups.get(key, []):
+            start = int(round(float(segment["start"]) * self.sample_rate))
+            end = int(round(float(segment["end"]) * self.sample_rate))
             if end > start:
-                parts.append(waveform[start:end])
+                parts.append(self.waveform[start:end])
         return np.concatenate(parts) if parts else None
 
-    def _similarity(local_label, global_label):
-        nonlocal embedder
-        if (clean.get(("pass2", local_label), 0.0) < min_clean_seconds
-                or clean.get(("pass1", global_label), 0.0) < min_clean_seconds):
-            return -1.0
+    def _key_pair(self, left, right):
+        if ("pass2", str(left)) in self.groups and ("pass1", str(right)) in self.groups:
+            return ("pass2", str(left)), ("pass1", str(right))
+        return ("candidate", str(left)), ("reference", str(right))
+
+    def __call__(self, left, right):
+        import numpy as np
+
+        left_key, right_key = self._key_pair(left, right)
         try:
-            if embedder is None:
+            if self.embedder is None:
                 from models.wespeaker_embedding import WeSpeakerONNXEmbedder
-                embedder = WeSpeakerONNXEmbedder(device="cpu")
-            for key, groups in ((local_label, pass2_audio),
-                                (global_label, pass1_audio)):
-                if key not in embeddings:
-                    audio = _audio_for(groups, key)
-                    embeddings[key] = embedder.embed(audio, sample_rate)
-            left = np.asarray(embeddings[local_label].detach().cpu(), dtype=np.float32)
-            right = np.asarray(embeddings[global_label].detach().cpu(), dtype=np.float32)
-            denominator = float(np.linalg.norm(left) * np.linalg.norm(right))
-            return float(np.dot(left, right) / denominator) if denominator else -1.0
+                self.embedder = WeSpeakerONNXEmbedder(device="cpu")
+            for key in (left_key, right_key):
+                if key not in self.embeddings:
+                    self.embeddings[key] = self.embedder.embed(
+                        self._audio_for(key), self.sample_rate)
+            left_embedding = np.asarray(
+                self.embeddings[left_key].detach().cpu(), dtype=np.float32)
+            right_embedding = np.asarray(
+                self.embeddings[right_key].detach().cpu(), dtype=np.float32)
+            denominator = float(np.linalg.norm(left_embedding)
+                                * np.linalg.norm(right_embedding))
+            return (float(np.dot(left_embedding, right_embedding) / denominator)
+                    if denominator else -1.0)
         except Exception:
             # Speaker identity is optional evidence. A missing ONNX runtime or
             # an invalid short clip must not turn the diarization request into
             # a hard failure.
             return -1.0
 
-    return _similarity, clean
+
+def _lazy_wespeaker_similarity(pass1_segments, pass2_chunks, waveform, sample_rate,
+                               min_clean_seconds):
+    """Build a lazy cosine matcher; the model is not loaded for short evidence."""
+    helpers = _load_two_pass_helpers()
+    matcher = _LazyWeSpeakerSimilarity(waveform, sample_rate)
+    pass1_audio = {}
+    for segment in pass1_segments:
+        pass1_audio.setdefault(str(segment["speaker"]), []).append(segment)
+    pass2_audio = {}
+    for segment in _absolute_core_segments(pass2_chunks):
+        pass2_audio.setdefault(str(segment["speaker"]), []).append(segment)
+
+    clean = {}
+    for prefix, groups in (("pass1", pass1_audio), ("pass2", pass2_audio)):
+        for label, segments in groups.items():
+            matcher.register(prefix, label, segments)
+            all_segments = []
+            for other_label, other_segments in groups.items():
+                all_segments.extend(dict(segment, speaker=other_label)
+                                     for segment in other_segments)
+            clean[(prefix, label)] = helpers.clean_speech_duration(all_segments, label)
+    return matcher, clean
 
 
 def run_two_pass(model, audio_path, cfg, *, vad_intervals=None):
@@ -338,9 +333,19 @@ def run_two_pass(model, audio_path, cfg, *, vad_intervals=None):
         pass1_paths = [_write_window(waveform, sample_rate, window, directory, i)
                        for i, window in enumerate(windows)]
         pass1_raw = _model_pass(model, pass1_paths, cfg)
-        pass1_chunks = [helpers.ChunkResult(window, convert.raw_to_segments(raw))
-                        for window, raw in zip(windows, pass1_raw)]
-        pass1_by_chunk = helpers.globalize_pass1(pass1_chunks)
+        pass1_chunks = [helpers.ChunkResult(
+            window, convert.raw_to_segments(raw), chunk_id=str(i))
+                        for i, (window, raw) in enumerate(zip(windows, pass1_raw))]
+        pass1_similarity = _LazyWeSpeakerSimilarity(waveform, sample_rate)
+        pass1_clean = helpers.chunk_clean_speech_seconds(pass1_chunks)
+        pass1_by_chunk = helpers.globalize_pass1(
+            pass1_chunks,
+            speaker_similarity=pass1_similarity if cfg.get("wespeaker_fallback", True)
+            else None,
+            clean_speech_seconds=pass1_clean,
+            min_clean_speech_seconds=float(
+                cfg.get("wespeaker_min_clean_speech_seconds", 1.5)),
+        )
         pass1_global = [segment for chunk in pass1_by_chunk for segment in chunk]
 
         guided = helpers.guide_windows_with_pass1(
@@ -352,8 +357,9 @@ def run_two_pass(model, audio_path, cfg, *, vad_intervals=None):
                                      len(windows) + i)
                        for i, window in enumerate(guided)]
         pass2_raw = _model_pass(model, pass2_paths, cfg)
-        pass2_chunks = [helpers.ChunkResult(window, convert.raw_to_segments(raw))
-                        for window, raw in zip(guided, pass2_raw)]
+        pass2_chunks = [helpers.ChunkResult(
+            window, convert.raw_to_segments(raw), chunk_id=str(i))
+                        for i, (window, raw) in enumerate(zip(guided, pass2_raw))]
         similarity = None
         clean_speech = None
         if cfg.get("wespeaker_fallback", True):

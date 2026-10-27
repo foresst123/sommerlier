@@ -20,6 +20,7 @@
 # branch has. Install from git (needs git and network on the DGX):
 nemo-toolkit[asr] @ git+https://github.com/NVIDIA/NeMo.git
 soundfile
+silero-vad==6.2.2
 # Optional guarded fallback for mapping pass-2 labels when pass-1 overlap is
 # insufficient; it is only invoked after the clean-speech threshold is met.
 onnxruntime-gpu>=1.23
