@@ -43,6 +43,33 @@ def test_vad_boundaries_cover_the_original_audio_and_use_speech_gaps():
                for w in windows)
 
 
+@pytest.mark.parametrize("duration", [40.0, 48.0, 55.0, 61.0, 75.0, 91.0])
+def test_vad_planner_rebalances_feasible_durations_without_short_tails(duration):
+    windows = build_vad_windows(
+        duration,
+        [],
+        target_seconds=25.0,
+        min_seconds=20.0,
+        max_seconds=30.0,
+    )
+
+    assert windows[0].core_start == 0.0
+    assert windows[-1].core_end == duration
+    assert all(left.core_end == right.core_start
+               for left, right in zip(windows, windows[1:]))
+    assert all(20.0 <= window.duration <= 30.0 for window in windows)
+
+
+def test_vad_planner_has_deterministic_short_chunks_only_when_constraints_are_impossible():
+    first = build_vad_windows(19.0, [], min_seconds=20.0, target_seconds=25.0,
+                              max_seconds=30.0)
+    impossible = build_vad_windows(31.0, [], min_seconds=20.0, target_seconds=25.0,
+                                   max_seconds=30.0)
+
+    assert [window.duration for window in first] == [19.0]
+    assert [window.duration for window in impossible] == [15.5, 15.5]
+
+
 def test_context_is_cropped_back_to_the_core_without_shifting_timestamps():
     window = _window(20.0, 40.0)
     segments = [
@@ -191,6 +218,39 @@ def test_speaker_similarity_is_only_used_after_clean_speech_threshold():
     assert out[0][0]["speaker_source"] == "wespeaker"
 
 
+def test_pass2_aggregates_all_segments_before_mapping_a_local_label():
+    pass1 = [{"start": 13.0, "end": 18.0, "speaker": "SPEAKER_00"}]
+    pass2 = ChunkResult(
+        _window(10.0, 30.0),
+        [
+            {"start": 3.0, "end": 4.0, "speaker": "speaker_9"},
+            {"start": 5.0, "end": 9.0, "speaker": "speaker_9"},
+        ],
+    )
+
+    out = map_pass2_to_global([pass2], pass1)
+
+    assert [segment["speaker"] for segment in out[0]] == [
+        "SPEAKER_00", "SPEAKER_00"]
+
+
+def test_pass2_mapping_is_one_to_one_when_two_local_labels_compete_for_one_global():
+    pass1 = [{"start": 12.0, "end": 20.0, "speaker": "SPEAKER_00"}]
+    pass2 = ChunkResult(
+        _window(10.0, 30.0),
+        [
+            {"start": 2.0, "end": 5.0, "speaker": "local_a"},
+            {"start": 5.0, "end": 8.0, "speaker": "local_b"},
+        ],
+    )
+
+    out = map_pass2_to_global([pass2], pass1)
+    speakers = [segment["speaker"] for segment in out[0]]
+
+    assert speakers.count("SPEAKER_00") == 1
+    assert speakers.count("SPEAKER_UNKNOWN") == 1
+
+
 def test_wespeaker_cache_keys_keep_pass1_and_pass2_labels_separate(monkeypatch):
     import types
     import torch
@@ -300,6 +360,24 @@ def test_worker_two_passes_both_use_batch_size_16_and_preserve_the_file(tmp_path
     assert output
     assert min(segment["start"] for segment in output) >= 0.0
     assert max(segment["end"] for segment in output) <= 48.0
+
+
+def test_model_pass_keeps_more_than_16_paths_in_one_batch_request():
+    import nemotron_worker
+
+    class FakeModel:
+        def __init__(self):
+            self.request = None
+
+        def diarize(self, *, audio, batch_size, **kwargs):
+            self.request = (list(audio), batch_size)
+            return [[] for _ in audio]
+
+    model = FakeModel()
+    paths = [f"chunk_{index:03d}.wav" for index in range(40)]
+
+    assert len(nemotron_worker._model_pass(model, paths, {})) == 40
+    assert model.request == (paths, 16)
 
 
 def test_legacy_one_pass_is_an_explicit_configurable_fallback():

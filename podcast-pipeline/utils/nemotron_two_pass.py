@@ -6,6 +6,7 @@ installed VAD model.
 """
 
 from dataclasses import dataclass
+import math
 from typing import Callable, Iterable, Optional
 
 
@@ -80,31 +81,50 @@ def build_vad_windows(
     if cursor < duration:
         gaps.append((cursor, duration))
 
-    windows = []
-    start = 0.0
-    while start < duration - 1e-9:
-        remaining = duration - start
-        if remaining <= max_seconds:
-            end = duration
+    if duration < min_seconds:
+        boundaries = [0.0, duration]
+    else:
+        min_chunks = max(1, int(math.ceil(duration / max_seconds - 1e-9)))
+        max_chunks = max(1, int(math.floor(duration / min_seconds + 1e-9)))
+        if min_chunks <= max_chunks:
+            count = min(max(int(round(duration / target_seconds)), min_chunks), max_chunks)
         else:
-            desired = min(duration, start + target_seconds)
-            candidates = [
-                (gap_end, abs(gap_end - desired))
-                for gap_start, gap_end in gaps
-                if gap_end >= start + min_seconds
-                and gap_end <= min(duration, start + max_seconds)
-                and gap_end > gap_start
-            ]
-            end = min(candidates, key=lambda item: item[1])[0] if candidates else desired
-        if end <= start:
-            raise RuntimeError("Nemotron window planner made no progress")
-        windows.append(AudioWindow(
-            core_start=start,
-            core_end=end,
-            context_start=max(0.0, start - context_seconds),
-            context_end=min(duration, end + context_seconds),
-        ))
-        start = end
+            # The constraints cannot both hold. Prefer the max-duration bound
+            # deterministically; this may produce short equal pieces, but never
+            # a surprising short tail after otherwise valid chunks.
+            count = min_chunks
+
+        boundaries = [0.0]
+        previous = 0.0
+        for index in range(1, count):
+            desired = duration * index / count
+            lower = max(previous + min_seconds,
+                        duration - (count - index) * max_seconds)
+            upper = min(previous + max_seconds,
+                        duration - (count - index) * min_seconds)
+            if lower > upper:
+                cut = desired
+            else:
+                candidates = []
+                for gap_start, gap_end in gaps:
+                    left = max(lower, gap_start)
+                    right = min(upper, gap_end)
+                    if left <= right:
+                        candidates.append(min(max(desired, left), right))
+                cut = min(candidates, key=lambda value: abs(value - desired)) \
+                    if candidates else min(max(desired, lower), upper)
+            if cut <= previous:
+                cut = desired
+            boundaries.append(cut)
+            previous = cut
+        boundaries.append(duration)
+
+    windows = [AudioWindow(
+        core_start=start,
+        core_end=end,
+        context_start=max(0.0, start - context_seconds),
+        context_end=min(duration, end + context_seconds),
+    ) for start, end in zip(boundaries, boundaries[1:])]
     return windows
 
 
@@ -468,36 +488,76 @@ def map_pass2_to_global(
     clean = clean_speech_seconds or {}
     output = []
     for chunk in sorted(chunks, key=lambda c: c.window.core_start):
+        local_segments = {}
+        for segment in chunk.segments:
+            local_segments.setdefault(str(segment["speaker"]), []).append(segment)
+        absolute_by_local = {}
+        for local, segments in local_segments.items():
+            absolute_by_local[local] = []
+            for segment in segments:
+                absolute = dict(segment)
+                absolute["start"] = chunk.window.context_start + float(segment["start"])
+                absolute["end"] = chunk.window.context_start + float(segment["end"])
+                absolute_by_local[local].append(absolute)
+
+        overlap_candidates = []
+        for local, segments in absolute_by_local.items():
+            local_duration = _union_duration(segments)
+            for label in {str(s["speaker"]) for s in pass1
+                          if str(s["speaker"]) != UNKNOWN_SPEAKER}:
+                score = sum(_overlap(segment, reference)
+                            for segment in segments
+                            for reference in pass1
+                            if str(reference["speaker"]) == label)
+                if (score >= min_overlap
+                        and score / max(local_duration, 1e-9) >= min_overlap_ratio):
+                    overlap_candidates.append((score, local, label, "pass1_overlap"))
+
         local_to_mapping = {}
+        used_targets = set()
+        for score, local, label, source in sorted(
+                overlap_candidates, key=lambda item: (-item[0], item[1], item[2])):
+            if local in local_to_mapping or label in used_targets:
+                continue
+            local_to_mapping[local] = (label, source, True)
+            used_targets.add(label)
+
+        wespeaker_candidates = []
+        if speaker_similarity is not None:
+            targets = {str(s["speaker"]) for s in pass1
+                       if str(s["speaker"]) != UNKNOWN_SPEAKER}
+            for local, segments in absolute_by_local.items():
+                if local in local_to_mapping:
+                    continue
+                local_clean = clean.get(("pass2", local),
+                                        _clean_duration(
+                                            [s for values in absolute_by_local.values()
+                                             for s in values], local))
+                if local_clean < min_clean_speech_seconds:
+                    continue
+                for label in sorted(targets - used_targets):
+                    target_clean = clean.get(("pass1", label),
+                                             _clean_duration(pass1, label))
+                    if target_clean < min_clean_speech_seconds:
+                        continue
+                    score = float(speaker_similarity(local, label))
+                    if score >= similarity_threshold:
+                        wespeaker_candidates.append((score, local, label, "wespeaker"))
+        for score, local, label, source in sorted(
+                wespeaker_candidates, key=lambda item: (-item[0], item[1], item[2])):
+            if local in local_to_mapping or label in used_targets:
+                continue
+            local_to_mapping[local] = (label, source, True)
+            used_targets.add(label)
+
+        for local in local_segments:
+            local_to_mapping.setdefault(
+                local, (UNKNOWN_SPEAKER, "insufficient_overlap", False))
         for segment in sorted(chunk.segments, key=lambda s: (s["start"], s["end"])):
             local = str(segment["speaker"])
             absolute = dict(segment)
             absolute["start"] = chunk.window.context_start + float(segment["start"])
             absolute["end"] = chunk.window.context_start + float(segment["end"])
-            if local not in local_to_mapping:
-                votes = {}
-                for reference in pass1:
-                    if str(reference["speaker"]) == UNKNOWN_SPEAKER:
-                        continue
-                    amount = _overlap(absolute, reference)
-                    if amount:
-                        label = str(reference["speaker"])
-                        votes[label] = votes.get(label, 0.0) + amount
-                best = max(votes, key=votes.get) if votes else None
-                if best is not None and votes[best] >= min_overlap and votes[best] / max(
-                        float(segment["end"]) - float(segment["start"]), 1e-9) >= min_overlap_ratio:
-                    local_to_mapping[local] = (best, "pass1_overlap", True)
-                else:
-                    local_to_mapping[local] = (UNKNOWN_SPEAKER, "insufficient_overlap", False)
-                    if speaker_similarity is not None and clean.get(("pass2", local), 0.0) >= min_clean_speech_seconds:
-                        candidates = [label for label in {str(s["speaker"]) for s in pass1}
-                                      if clean.get(("pass1", label), 0.0) >= min_clean_speech_seconds]
-                        scored = [(float(speaker_similarity(local, label)), label)
-                                  for label in candidates]
-                        if scored:
-                            score, label = max(scored)
-                            if score >= similarity_threshold:
-                                local_to_mapping[local] = (label, "wespeaker", True)
             speaker, source, confident = local_to_mapping[local]
             item = _copy_with_speaker(segment, speaker, source, confident)
             item["start"] = absolute["start"]
