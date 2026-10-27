@@ -349,3 +349,41 @@ def test_real_speech_level_is_still_caught_with_the_higher_threshold(tmp_path):
     item = _item_with_quiet_noise(tmp_path, amplitude=0.3)               # loud, a real voice
     res = _convert(item, coverage_rms_threshold=0.05)
     assert res.cut is None and res.reasons[0].startswith("coverage")
+
+
+def _add_clean_pair(item, amplitude=0.1):
+    data, _ = sf.read(os.path.join(item, "stereo_2ch.wav"), dtype="float32")
+    sf.write(os.path.join(item, "stereo_2ch_clean.wav"), data * amplitude, SR, subtype="PCM_16")
+    path = os.path.join(item, "conversation.json")
+    with open(path, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    meta["files"]["stereo_2ch_clean"] = "stereo_2ch_clean.wav"
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh, ensure_ascii=False)
+
+
+def test_the_manifest_points_at_the_clean_pair_when_there_is_one(tmp_path):
+    item = _make_item(tmp_path / "item", left="user")
+    _add_clean_pair(item)
+    cut = _convert(item).cut
+    assert cut["recording"]["sources"][0]["source"] == os.path.join(os.path.abspath(item), "stereo_2ch_clean.wav")
+
+
+def test_swapped_copy_is_made_from_the_clean_pair(tmp_path):
+    item = _make_item(tmp_path / "item", left="assistant")
+    _add_clean_pair(item, amplitude=0.1)
+    cut = _convert(item).cut
+    data, _ = sf.read(cut["recording"]["sources"][0]["source"])
+    assert np.abs(data).max() < 0.05          # the quiet clean copy, not the 0.3 original
+
+
+def test_a_missing_clean_file_falls_back_to_the_original(tmp_path):
+    item = _make_item(tmp_path / "item", left="user")
+    path = os.path.join(item, "conversation.json")
+    with open(path, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    meta["files"]["stereo_2ch_clean"] = "stereo_2ch_clean.wav"      # named, but never written
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh)
+    cut = _convert(item).cut
+    assert cut["recording"]["sources"][0]["source"].endswith("stereo_2ch.wav")

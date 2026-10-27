@@ -331,7 +331,12 @@ def _cand_view(seg: dict) -> dict:
 # -- audio --------------------------------------------------------------------------
 
 def _prepare_wav(item_dir: str, meta: dict, params: LhotseManifestParams) -> Tuple[str, sf.SoundFile]:
-    name = (meta.get("files") or {}).get("stereo_2ch") or "stereo_2ch.wav"
+    files = meta.get("files") or {}
+    name = files.get("stereo_2ch") or "stereo_2ch.wav"
+    # the cleaned pair (assistant channel through assistant_clean_chain) is the one the dataset ships when it was written
+    clean = files.get("stereo_2ch_clean")
+    if clean and os.path.isfile(os.path.join(item_dir, clean)):
+        name = clean
     path = os.path.abspath(os.path.join(item_dir, name))
     if not os.path.isfile(path):
         raise _Reject("missing_wav")
