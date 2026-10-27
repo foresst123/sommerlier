@@ -13,7 +13,7 @@
 # there is no CUDA_VISIBLE_DEVICES and the positions are the physical ids.
 #
 # Knobs (environment): AUDIO, OUT (required), JOBID, GPUS, CACHE, ENV_NAME=a100, CONDA_ENV=som,
-#   VARIANTS=tools/variants_placement.json, SESSION, DRY=1 (write scripts and print the table only),
+#   VARIANTS=tools/variants_production.json, SESSION, DRY=1 (write scripts and print the table only),
 #   NO_SRUN=1 (run without srun, e.g. on a machine with no Slurm), FORCE=1 (reuse a tmux session name).
 
 job_gpu_list() {
@@ -71,7 +71,7 @@ job_init() {
     done
     ENV_NAME=${ENV_NAME:-a100}
     CONDA_ENV=${CONDA_ENV:-som}
-    VARIANTS=${VARIANTS:-tools/variants_placement.json}
+    VARIANTS=${VARIANTS:-tools/variants_production.json}
     SESSION=${SESSION:-job_$JOB_NAME}
     DRY=${DRY:-0}
     FORCE=${FORCE:-0}

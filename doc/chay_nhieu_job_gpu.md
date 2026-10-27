@@ -43,7 +43,7 @@ Mỗi script mở một phiên tmux (`job_front`, `job_asr`, `job_llm`), một c
 `srun --jobid=<JOBID> --overlap --pty bash <script>`. Nếu máy không có Slurm, đặt `NO_SRUN=1`.
 
 Biến dùng chung: `AUDIO`, `OUT` (bắt buộc), `JOBID`, `GPUS="0 1"`, `CACHE` (mặc định `OUT/_resident/cache`),
-`ENV_NAME=a100`, `CONDA_ENV=som`, `VARIANTS=tools/variants_placement.json`, `SESSION`, `FORCE=1` (dùng lại tên phiên tmux).
+`ENV_NAME=a100`, `CONDA_ENV=som`, `VARIANTS=tools/variants_production.json`, `SESSION`, `FORCE=1` (dùng lại tên phiên tmux).
 
 Biến riêng của `job_front.sh`:
 

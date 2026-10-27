@@ -1,0 +1,10 @@
+{
+  "variants": [
+    {
+      "id": "prod",
+      "label": "production a100: rf_crowd>blend50 before diarization, nothing else filtered",
+      "group": "lab",
+      "chain": "rf_crowd>blend50"
+    }
+  ]
+}
