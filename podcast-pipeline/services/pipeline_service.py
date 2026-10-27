@@ -1584,7 +1584,8 @@ class PipelineService:
         # vẫn giữ được phần đã hoàn thành.
         stage_out = StageOutputService(
             output_dir, logger=self.logger,
-            enabled=not getattr(args, "no_stage_output", False))
+            enabled=not getattr(args, "no_stage_output", False),
+            audio=not getattr(args, "no_stage_audio", False))
 
         base_job = getattr(args, "job_id", "default_job")
         job_id = f"{base_job}_{os.path.splitext(os.path.basename(audio_path))[0]}"

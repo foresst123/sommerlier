@@ -212,3 +212,15 @@ def test_bad_gpus_and_missing_dirs_are_refused(tmp_path):
     assert r.returncode == 2 and "numbers" in r.stderr
     r, _ = run_job("front", tmp_path, out="b4", audio=False, env={"AUDIO": ""})
     assert r.returncode == 2 and "usage" in r.stderr
+
+
+def test_jobs_drop_the_stage_wavs_unless_asked(tmp_path):
+    import os, subprocess
+    env = {**os.environ, "DRY": "1", "NO_SRUN": "1", "AUDIO": str(tmp_path), "OUT": str(tmp_path / "o")}
+    for script in ("job_front", "job_asr", "job_llm"):
+        subprocess.run(["bash", f"tools/{script}.sh"], env=env, check=True, capture_output=True, text=True)
+        text = "".join(p.read_text() for p in (tmp_path / "o" / "_resident").glob("launch_*/*.sh"))
+        assert "--no-stage-audio" in text
+    keep = {**env, "STAGE_AUDIO": "1", "OUT": str(tmp_path / "o2")}
+    subprocess.run(["bash", "tools/job_asr.sh"], env=keep, check=True, capture_output=True, text=True)
+    assert "--no-stage-audio" not in "".join(p.read_text() for p in (tmp_path / "o2" / "_resident").glob("launch_*/*.sh"))

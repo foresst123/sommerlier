@@ -88,6 +88,8 @@ job_init() {
     CONDA_BASE=$(conda info --base 2>/dev/null || echo "$HOME/miniforge3")
     COMMON=(--audio-dir "$AUDIO" --variants "$VARIANTS" --out-root "$OUT" --env "$ENV_NAME"
             --layout default --skip-bootstrap --resume --per-file --cache-dir "$CACHE")
+    # The stage folders keep their JSON (the line reads denoise.json, selection.json) but no WAVs: STAGE_AUDIO=1 brings them back.
+    [ "${STAGE_AUDIO:-0}" = 1 ] || COMMON+=(--no-stage-audio)
     PROC_NAMES=()
     PROC_GPU=()
     PROC_STAGE=()

@@ -768,6 +768,8 @@ def build_argv(args, input_dir):
         argv += ["--cache_dir", str(args.cache_dir)]
     if args.skip_bootstrap:
         argv += ["--skip_bootstrap"]
+    if getattr(args, "no_stage_audio", False):
+        argv += ["--no_stage_audio"]
     # A comparison run is not a dataset export; layout, then the user's own sets (last wins).
     for item in ['outputs.clean_two_channel_dir=""', *layout_sets(args.layout), *args.global_set]:
         argv += ["--set", item]
@@ -826,6 +828,8 @@ def parse_args(argv=None):
     p.add_argument("--accept-degraded", action="store_true",
                    help="write .done for a degraded variant too (so --resume keeps it)")
     p.add_argument("--strict", action="store_true", help="exit 3 when any variant is degraded or failed")
+    p.add_argument("--no-stage-audio", action="store_true", dest="no_stage_audio",
+                   help="forward --no_stage_audio to main.py: stage folders keep their JSON, drop their WAVs")
     p.add_argument("--skip-bootstrap", action="store_true", help="forward --skip_bootstrap to main.py")
     p.add_argument("--reference-dir")
     p.add_argument("--reference", nargs="*", metavar="STEM=PATH")

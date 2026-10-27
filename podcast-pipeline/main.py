@@ -141,6 +141,10 @@ def _build_parser():
                         help="Do not mark files being processed in the audio directory. "
                              "By default several pipelines can share one --audio_dir "
                              "without picking the same file.")
+    parser.add_argument("--no_stage_audio", action="store_true",
+                        help="Keep the per-stage JSON/manifest files but write none of their WAVs "
+                             "(after_denoise.wav, diarization and separation clips). Checkpoints and "
+                             "the final exports are unaffected; this is what saves the disk.")
     parser.add_argument("--no_stage_output", action="store_true",
                         help="Skip the per-stage artifact directories (01_diarization/, "
                              "02_separation/, ...). They are written by default so a run "

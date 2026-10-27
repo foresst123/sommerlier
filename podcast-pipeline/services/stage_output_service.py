@@ -114,10 +114,13 @@ class StageOutputService:
         "conversation_exports": "09_conversation_exports",
     }
 
-    def __init__(self, output_dir: str, logger=None, enabled: bool = True):
+    def __init__(self, output_dir: str, logger=None, enabled: bool = True, audio: bool = True):
         self.output_dir = output_dir
         self.logger = logger
         self.enabled = enabled
+        # audio=False keeps every JSON/manifest (the line's verdicts read denoise.json and the like)
+        # and skips the WAVs, which are what takes the disk.
+        self.audio = audio
         self.manifest: Dict[str, Any] = {"stages": {}}
         self._warned_sf = False
 
@@ -336,7 +339,7 @@ class StageOutputService:
 
         # The trimmed recording itself, so the cuts and their joins can be
         # judged by ear rather than from counters.
-        if audio is not None and sample_rate:
+        if audio is not None and sample_rate and self.audio:
             try:
                 import soundfile as sf
                 sf.write(os.path.join(stage, "after_music.wav"), audio, sample_rate, subtype='PCM_16')
@@ -357,7 +360,7 @@ class StageOutputService:
             "stats": {k: info.get(k) for k in ("chain_id", "lag_samples",
                                                "noise_floor_db_before",
                                                "noise_floor_db_after")}}
-        if audio is not None and sample_rate:
+        if audio is not None and sample_rate and self.audio:
             try:
                 import soundfile as sf
                 sf.write(os.path.join(stage, "after_denoise.wav"), audio, sample_rate,
@@ -386,7 +389,7 @@ class StageOutputService:
                          extra={"segments_raw.json": [_as_dict(r) for r in raw_segments]}
                          if raw_segments else None)
 
-        if audio is None or sample_rate is None or not self.enabled:
+        if audio is None or sample_rate is None or not self.enabled or not self.audio:
             return d
 
         try:
@@ -685,7 +688,7 @@ class StageOutputService:
         judged.
         """
         counts = {"separated": 0, "failed": 0, "skipped": 0}
-        if not self.enabled:
+        if not self.enabled or not self.audio:
             return counts
         try:
             import soundfile as sf

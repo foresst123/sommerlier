@@ -357,3 +357,18 @@ def test_word_alignment_on_selected_segments_is_not_a_segment_loss(tmp_path):
     m = json.loads((tmp_path / "manifest.json").read_text())
     assert [f["stage"] for f in m["flow"]] == ["refinement", "word_alignment"]
     assert "warnings" not in m
+
+
+def test_audio_off_keeps_the_json_and_writes_no_wav(tmp_path):
+    import numpy as np
+    from services.stage_output_service import StageOutputService
+    out = StageOutputService(str(tmp_path), audio=False)
+    wav = np.zeros(16000, dtype=np.float32)
+    out.write_denoise({"chain": ["x"], "chain_id": "x"}, wav, 16000)
+    out.write_music(type("M", (), {"summary": lambda s: {}, "spans": []})(), None, wav, 16000)
+    assert (tmp_path / "01b_denoise" / "denoise.json").is_file()
+    assert not list(tmp_path.rglob("*.wav"))
+    assert out.write_separated_audio([], 16000) == {"separated": 0, "failed": 0, "skipped": 0}
+    on = StageOutputService(str(tmp_path / "on"))
+    on.write_denoise({"chain": ["x"], "chain_id": "x"}, wav, 16000)
+    assert (tmp_path / "on" / "01b_denoise" / "after_denoise.wav").is_file()
