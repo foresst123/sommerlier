@@ -306,6 +306,19 @@
       "models": {
         "diarization_backend": "nemotron",
         "nemotron": {
+          "two_pass": true,
+          "legacy_one_pass": false,
+          "batch_size": 16,
+          "vad_threshold": 0.35,
+          "vad_min_speech_ms": 80,
+          "vad_min_silence_ms": 180,
+          "vad_pad_ms": 160,
+          "chunk_target_seconds": 25.0,
+          "chunk_min_seconds": 20.0,
+          "chunk_max_seconds": 30.0,
+          "context_seconds": 2.0,
+          "wespeaker_fallback": true,
+          "wespeaker_min_clean_speech_seconds": 1.5,
           "postprocessing": {
             "onset": 0.53,
             "offset": 0.49,

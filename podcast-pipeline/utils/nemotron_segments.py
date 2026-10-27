@@ -28,6 +28,16 @@ def _parse_one(raw):
     return float(parts[0]), float(parts[1]), parts[2]
 
 
+def raw_to_segments(raw_segments):
+    """Normalize one model output list without renaming its local speakers."""
+    result = []
+    for raw in raw_segments or []:
+        start, end, speaker = _parse_one(raw)
+        if end > start:
+            result.append({"start": start, "end": end, "speaker": str(speaker)})
+    return sorted(result, key=lambda item: (item["start"], item["end"], item["speaker"]))
+
+
 def _speaker_index(label):
     """'speaker_3' / 3 / '3' -> 3."""
     match = re.search(r"\d+", str(label))

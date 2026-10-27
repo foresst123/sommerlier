@@ -8,8 +8,12 @@ on a Mac without a GPU or NeMo; it has never run against the real model.**
 
 - `podcast-pipeline/nemotron_worker.py`: JSON-lines worker (same protocol and
   segment shape as `diarizen_worker.py`). Loads
-  `SortformerEncLabelModel.from_pretrained("nvidia/Nemotron-3-Diarization")` and
-  calls `diarize(audio=[path], batch_size=1)`.
+  `SortformerEncLabelModel.from_pretrained("nvidia/Nemotron-3-Diarization")`.
+  The `a100` profile uses a two-pass path: Silero chooses contiguous 20–30s
+  cores without removing silence, both Nemotron passes use batch 16, pass-1
+  overlap establishes global identities, and pass-2 context is cropped back to
+  each core before export. A lazy WeSpeaker fallback is considered only after
+  both sides have enough non-overlapping clean speech.
 - `podcast-pipeline/utils/nemotron_segments.py`: pure conversion (no NeMo/torch):
   raw segments to `{start, end, speaker}`, speakers renamed `SPEAKER_00..` by
   first appearance, optional same-speaker gap merge and minimum duration.
@@ -36,6 +40,11 @@ name is untouched.
 
 Optional keys under `models.nemotron` in the profile: `chunk_len` (streaming
 parameter in 80 ms frames), `merge_gap`, `min_duration` (seconds, default 0).
+Two-pass keys are `two_pass`, `legacy_one_pass`, `batch_size`, the `vad_*`
+thresholds, `chunk_target_seconds`, `chunk_min_seconds`,
+`chunk_max_seconds`, `context_seconds`, `wespeaker_fallback`, and
+`wespeaker_min_clean_speech_seconds`. Set `legacy_one_pass: true` (or
+`two_pass: false`) to retain the original one-request behavior.
 
 ## Create the env and run on the DGX
 
