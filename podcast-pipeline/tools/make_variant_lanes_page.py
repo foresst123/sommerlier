@@ -309,7 +309,7 @@ DATA.variants.forEach((v, vi) => {
   speakers.forEach(spk => {
     const mine = v.segments.filter(s => s.spk === spk);
     if (pk) addLane("wave", `<i style="background:${colorOf[spk]}"></i>${esc(spk)}`, colorOf[spk], mine);
-    addLane("text", pk ? "chữ ASR" : `<i style="background:${colorOf[spk]}"></i>${esc(spk)}`, colorOf[spk], mine);
+    if (!DATA.no_text) addLane("text", pk ? "chữ ASR" : `<i style="background:${colorOf[spk]}"></i>${esc(spk)}`, colorOf[spk], mine);
   });
   // what the waveform holds outside every ASR segment: noise, music, or speech nobody was assigned
   if (pk) addLane("wave", `<i style="background:var(--warn)"></i>không thuộc ai`, null, v.segments || [], true);
