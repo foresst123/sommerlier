@@ -399,7 +399,8 @@
           "batch_size": 1024,
           "torch_dtype": "bfloat16",
           "prefix_cache": true,
-          "max_model_len": 49152
+          "max_model_len": 49152,
+          "thinking_budget": 16000
         },
         "relabel": {
           "window_tokens": 32000,
@@ -467,8 +468,8 @@
           "noise_max": 0.15,
           "music_patched_max": 0.15,
           "require_word_alignment": true,
-          "thinking": false,
-          "max_new_tokens": 16384
+          "thinking": true,
+          "max_new_tokens": 24576
         },
         "sidon": {
           "num_steps": 100
