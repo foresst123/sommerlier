@@ -17,7 +17,8 @@ The pipeline code and the progress ledger are not touched.
 --include_done also checks files the ledger marks done (their audio, outputs and cache are
 removed the same way). Those files usually have conversations in the final dataset: give
 --dataset_root to remove them too (their item folders, their rows in manifest.jsonl, their
-lhotse/<stem>.jsonl.gz and the swapped WAVs). Stop the pipeline first.
+lhotse/.parts/<stem>.jsonl.gz part and the swapped WAVs; lhotse/manifest.jsonl.gz is rebuilt
+without them). Stop the pipeline first.
 """
 import argparse
 import hashlib
@@ -139,9 +140,9 @@ def dataset_targets(root, stem):
                 swapped = os.path.join(root, "lhotse", "audio", f"{name}_{tag}.wav")
                 if os.path.isfile(swapped):
                     files.append(swapped)
-    manifest = os.path.join(root, "lhotse", f"{safe_name(stem)}.jsonl.gz")
-    if os.path.isfile(manifest):
-        files.append(manifest)
+    part = os.path.join(root, "lhotse", ".parts", f"{safe_name(stem)}.jsonl.gz")
+    if os.path.isfile(part):
+        files.append(part)
     return items, files
 
 
@@ -186,15 +187,23 @@ def _drop_manifest_rows(root, stem):
 
 
 def purge_dataset(root, stem):
-    """Delete recording `stem`'s items, swapped WAVs, lhotse manifest and manifest rows."""
+    """Delete recording `stem`'s items, swapped WAVs, its lhotse part and manifest rows.
+
+    The single lhotse/manifest.jsonl.gz is rebuilt from the remaining parts when a part was removed.
+    """
     items, files = dataset_targets(root, stem)
     for item in items:
         shutil.rmtree(item, ignore_errors=True)
+    removed_part = False
     for path in files:
         try:
             os.remove(path)
+            removed_part = removed_part or os.sep + ".parts" + os.sep in path
         except OSError:
             pass
+    if removed_part:
+        from services.lhotse_manifest_service import merge_manifests
+        merge_manifests(root)
     return len(items), _drop_manifest_rows(root, stem)
 
 

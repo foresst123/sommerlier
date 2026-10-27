@@ -135,12 +135,14 @@ def test_recording_manifest_only_current_recording_and_idempotent(tmp_path):
     _item(tmp_path, "interrupt", "b_1s", "b")
     _item(tmp_path, "_quarantine", "a_5s", "a")
     r1 = build_recording_manifest(str(tmp_path), "a")
-    assert r1.output_path == str(tmp_path / "lhotse" / "a.jsonl.gz") and r1.written == 2
+    assert r1.output_path == str(tmp_path / "lhotse" / "manifest.jsonl.gz") and r1.written == 2
+    assert r1.part_path == str(tmp_path / "lhotse" / ".parts" / "a.jsonl.gz")
     first = _cuts(r1.output_path)
     swapped = [c["recording"]["sources"][0]["source"] for c in first]
     assert any(os.path.dirname(s) == str(tmp_path / "lhotse" / "audio") for s in swapped)
     r2 = build_recording_manifest(str(tmp_path), "a")
     assert r2.written == 2 and len(_cuts(r2.output_path)) == 2
+    assert not (tmp_path / "lhotse" / "a.jsonl.gz").exists()          # no loose per-recording file
     assert not (tmp_path / "lhotse" / "b.jsonl.gz").exists()
     # the CLI-style scan ignores the lhotse folder and merges every recording
     full = build_manifest(str(tmp_path), str(tmp_path / "all.jsonl.gz"))
