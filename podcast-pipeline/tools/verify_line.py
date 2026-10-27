@@ -22,6 +22,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
+# The variants the production line runs (tools/job_common.sh uses the same file by default).
+DEFAULT_VARIANTS = ROOT / "tools" / "variants_production.json"
 STAGE_FILES = {"diarization": "02_diarization/segments.json",
                "separation": "03_separation/segments.json",
                "asr": "05_asr/transcripts.json"}
@@ -108,7 +110,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--audio-dir", required=True)
     ap.add_argument("--out-root", required=True)
-    ap.add_argument("--variants", default=str(ROOT / "tools" / "variants_placement.json"))
+    ap.add_argument("--variants", default=str(DEFAULT_VARIANTS))
     ap.add_argument("--music", choices=["off", "profile"], default="off")
     a = ap.parse_args(argv)
 

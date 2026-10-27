@@ -148,6 +148,25 @@ PIPELINE_STAGES = (
 )
 
 
+def pipeline_stop_points(pipeline_source=None) -> tuple:
+    """The --stop_after points PipelineService.run() honours, in pipeline order.
+
+    Read from `_STOP_ORDER` in services/pipeline_service.py by AST, because
+    importing that module pulls in torch. The command line builds its choices
+    from this, so a point added there is accepted without a second list.
+    """
+    import ast
+    if pipeline_source is None:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "services", "pipeline_service.py"), encoding="utf-8") as fh:
+            pipeline_source = fh.read()
+    for node in ast.walk(ast.parse(pipeline_source)):
+        if isinstance(node, ast.Assign) and any(
+                getattr(t, "id", None) == "_STOP_ORDER" for t in node.targets):
+            return tuple(ast.literal_eval(node.value))
+    raise ValueError("_STOP_ORDER not found in services/pipeline_service.py")
+
+
 def label_of(stage):
     return stage or "clean-data+export"
 
@@ -179,8 +198,10 @@ def run_batch_by_stage(pipeline, args, config, batch, logger=None, stages=PIPELI
     stop_inside_diarization = original_stop == "denoise"
     if stop_inside_diarization:
         stop_gate = "diarization"
-    # The other two filter points likewise run inside the separation / asr pass.
-    inside_pass = {"denoise_pre_separation": "separation", "denoise_pre_asr": "asr"}
+    # The other points likewise run inside a pass: separation_plan and music_removal
+    # come after the separation pass's own work and before the asr pass.
+    inside_pass = {"denoise_pre_separation": "separation", "separation_plan": "separation",
+                   "music_removal": "separation", "denoise_pre_asr": "asr"}
     if original_stop in inside_pass:
         stop_gate = inside_pass[original_stop]
 

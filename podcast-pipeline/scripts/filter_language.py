@@ -29,6 +29,12 @@ import shutil
 import sys
 import time
 
+# Run as a script, sys.path[0] is scripts/, which has no `services` package. Import the
+# lhotse merge here, at startup: a missing module must stop the run before anything is deleted.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+from services.lhotse_manifest_service import merge_manifests  # noqa: E402
+
 AUDIO_EXT = (".mp3", ".wav", ".m4a", ".flac", ".opus", ".ogg", ".aac")
 LEDGER_NAME = "_sommelier_progress.json"
 WINDOW_SECONDS = 30.0
@@ -202,7 +208,6 @@ def purge_dataset(root, stem):
         except OSError:
             pass
     if removed_part:
-        from services.lhotse_manifest_service import merge_manifests
         merge_manifests(root)
     return len(items), _drop_manifest_rows(root, stem)
 

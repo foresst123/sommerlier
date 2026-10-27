@@ -57,10 +57,14 @@ def test_stop_order_puts_the_plan_between_pre_separation_and_separation():
 
 
 def test_cli_accepts_the_plan_stop_point():
+    # main.py builds --stop_after choices from PipelineService._STOP_ORDER (see
+    # tests/test_stop_after_config.py for the parser check itself).
     with open(os.path.join(ROOT, "main.py"), encoding="utf-8") as fh:
         src = fh.read()
-    choices = re.search(r'"--stop_after".*?choices=\[(.*?)\]', src, re.S).group(1)
-    assert '"separation_plan"' in choices
+    assert "pipeline_stop_points()" in src
+    sys.path.insert(0, ROOT)
+    from utils.batch import pipeline_stop_points
+    assert "separation_plan" in pipeline_stop_points()
 
 
 def test_plan_stop_loads_no_separation_or_asr_model():

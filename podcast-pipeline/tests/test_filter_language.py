@@ -149,6 +149,73 @@ def test_apply_with_include_done_and_dataset_root_cleans_the_dataset(tmp_path):
     assert (root / "turn_by_turn" / "viet_100s").exists()
 
 
+# --- run as a script: `python -I scripts/filter_language.py` ----------------
+#
+# -I drops the cwd and PYTHON* variables from sys.path, which is what a script run gets
+# for sys.path[0] (scripts/). The launcher puts scripts/ there itself, imports the file as
+# a module and swaps in a fake detector, since faster-whisper is not needed to test deletion.
+
+_LAUNCHER = """
+import sys
+scripts, mode, script_args = sys.argv[1], sys.argv[2], sys.argv[3:]
+sys.path.insert(0, scripts)
+if mode == "block":                     # as if the lhotse merge module were missing
+    sys.modules["services.lhotse_manifest_service"] = None
+import filter_language as fl
+
+
+class _Detector:
+    def __init__(self, *a, **k):
+        pass
+
+    def __call__(self, path):
+        return [{"vi": 0.0, "en": 1.0}] if "english" in path else [{"vi": 0.95, "en": 0.05}]
+
+
+fl.WhisperLanguageId = _Detector
+sys.exit(fl.main(script_args))
+"""
+
+
+def _run_isolated(cwd, mode, *script_args):
+    import subprocess
+    import sys
+    return subprocess.run(
+        [sys.executable, "-I", "-c", _LAUNCHER, os.path.join(ROOT, "scripts"), mode, *script_args],
+        cwd=str(cwd), capture_output=True, text=True, timeout=300)
+
+
+def test_apply_with_dataset_root_works_from_another_cwd_with_isolated_python(tmp_path):
+    """The regression: purge_dataset imported services.lhotse_manifest_service only after it had
+    deleted the recording, and under a script run `services` was not importable -> the manifest
+    was left broken. The import now happens at startup."""
+    folder, cache = _setup(tmp_path)
+    root = _dataset(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    out = _run_isolated(elsewhere, "run", str(folder), "--apply", "--dataset_root", str(root),
+                        "--cache_dir", str(cache), "--log", str(tmp_path / "log.tsv"))
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert "ModuleNotFoundError" not in out.stderr
+    assert not (folder / "[Vlog] english.wav").exists()
+    assert not (root / "turn_by_turn" / "_Vlog_english_300s").exists()
+    with gzip.open(root / "lhotse" / "manifest.jsonl.gz", "rt", encoding="utf-8") as fh:
+        assert [json.loads(x)["id"] for x in fh] == ["viet-cut"], "manifest must be rebuilt"
+    left = [json.loads(l) for l in (root / "manifest.jsonl").read_text().splitlines()]
+    assert [r["source_stem"] for r in left] == ["viet"]
+
+
+def test_a_missing_merge_module_stops_the_run_before_anything_is_deleted(tmp_path):
+    folder, cache = _setup(tmp_path)
+    root = _dataset(tmp_path)
+    out = _run_isolated(tmp_path, "block", str(folder), "--apply", "--dataset_root", str(root),
+                        "--cache_dir", str(cache), "--log", str(tmp_path / "log.tsv"))
+    assert out.returncode != 0
+    assert (folder / "[Vlog] english.wav").exists()
+    assert (root / "turn_by_turn" / "_Vlog_english_300s").exists()
+    assert (cache / "default_[Vlog] english").exists()
+
+
 def test_a_done_file_is_left_alone_without_include_done(tmp_path):
     folder, cache = _setup(tmp_path)
     (folder / fl.LEDGER_NAME).write_text(json.dumps(
