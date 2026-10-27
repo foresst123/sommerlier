@@ -80,9 +80,8 @@ def _review(segments, llm, **kw):
 # --- contract constants --------------------------------------------------------
 
 def test_constants_match_the_contract():
-    assert REVIEW_PROMPT_VERSION == "review-v3"
-    assert FLAG_KINDS == ("speaker_phrase", "speaker_turn", "asr_hallucination", "asr_garbage",
-                          "not_vietnamese")
+    assert REVIEW_PROMPT_VERSION == "review-v4"
+    assert FLAG_KINDS == ("speaker_phrase", "speaker_turn", "asr_hallucination", "asr_garbage")
     assert HARD_FLAG_KINDS == ("speaker_phrase", "speaker_turn", "asr_hallucination", "asr_garbage")
 
 
@@ -183,7 +182,7 @@ def test_copying_the_prompt_example_is_refused():
     reply = example
     result = _review(_conversation(), FakeLLM(reply))
     assert not any(result.flags_by_index.values())
-    assert result.rejected.get("unknown_index") == 4      # the four example answers
+    assert result.rejected.get("unknown_index") == 3      # the three example answers
 
 
 # --- never changes data; locked may be flagged ------------------------------------
@@ -302,28 +301,30 @@ def test_find_phrase_returns_the_segments_own_spelling_for_decomposed_text():
     assert found is not None and found in text
 
 
-# --- not_vietnamese ------------------------------------------------------------
+# --- retired kind: not_vietnamese ------------------------------------------------
 
-def test_not_vietnamese_is_a_whole_line_flag_even_if_the_model_quotes_a_phrase():
+def test_a_reply_with_the_retired_not_vietnamese_kind_flags_nothing():
     segs = _conversation()
     segs[4].text = "Yeah I think that is really interesting, let me explain why"
     result = _review(segs, FakeLLM(_json(_flag(4, "not_vietnamese", phrase="really interesting"))))
-    assert result.flags_by_index[segs[4].index][0]["kind"] == "not_vietnamese"
-    assert result.flags_by_index[segs[4].index][0]["phrase"] is None
-    assert "not_vietnamese" not in HARD_FLAG_KINDS      # judged by share, not presence
-
-
-def test_not_vietnamese_still_requires_confidence_floor():
-    result = _review(_conversation(), FakeLLM(
-        _json(_flag(4, "not_vietnamese", conf=0.69))), min_confidence=0.7)
+    assert result.skipped is None
     assert result.flags_by_index["00004"] == []
-    assert result.rejected == {"low_confidence": 1}
+    assert result.rejected == {"unknown_kind": 1}
+    assert "not_vietnamese" not in FLAG_KINDS
 
 
-def test_the_prompt_asks_for_not_vietnamese_and_keeps_borrowed_words_unflagged():
+def test_a_retired_kind_does_not_hide_the_other_flags_in_the_same_reply():
+    result = _review(_conversation(), FakeLLM(
+        _json(_flag(4, "not_vietnamese"), _flag(2, "asr_garbage"))))
+    assert result.flags_by_index["00004"] == []
+    assert result.flags_by_index["00002"][0]["kind"] == "asr_garbage"
+
+
+def test_the_prompt_sent_to_the_model_has_four_kinds_and_keeps_borrowed_words_unflagged():
     llm = FakeLLM()
     _review(_conversation(), llm)
     prompt = llm.system_prompts[0]
-    assert "not_vietnamese" in prompt and "NĂM LOẠI CỜ" in prompt
+    assert "not_vietnamese" not in prompt
+    assert "BỐN LOẠI CỜ" in prompt and "NĂM LOẠI CỜ" not in prompt
     assert "BÌNH THƯỜNG" in prompt
     assert "một câu tiếng nước ngoài có nghĩa" in prompt
