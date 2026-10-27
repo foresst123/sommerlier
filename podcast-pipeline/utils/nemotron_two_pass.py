@@ -302,11 +302,6 @@ def globalize_pass1(
                 item["start"] = chunk.window.context_start + float(segment["start"])
                 item["end"] = chunk.window.context_start + float(segment["end"])
                 absolute_segments.append(item)
-            clean_duration = clean.get(("pass1", local_key),
-                                       _clean_duration(absolute_segments, local))
-            if clean_speech_seconds is not None and clean_duration < min_clean_speech_seconds:
-                local_to_global[local] = (UNKNOWN_SPEAKER, "insufficient_clean_speech", False)
-                continue
             votes = {}
             for segment in absolute_segments:
                 for previous in previous_segments:
@@ -367,7 +362,7 @@ def globalize_pass1(
                     continue
             local_clean = clean.get(("pass1", local_key),
                                     _clean_duration(absolute_segments, local))
-            if clean_speech_seconds is not None and local_clean < min_clean_speech_seconds:
+            if local_clean < min_clean_speech_seconds:
                 local_to_global[local] = (UNKNOWN_SPEAKER, "insufficient_clean_speech", False)
             else:
                 local_to_global[local] = (f"SPEAKER_{next_id:02d}",

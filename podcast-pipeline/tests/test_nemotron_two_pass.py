@@ -102,6 +102,27 @@ def test_pass1_overlap_gives_one_global_identity_across_chunk_local_labels():
     assert out[1][0]["speaker_source"] == "pass1_overlap"
 
 
+def test_short_pass1_backchannel_inherits_a_safe_temporal_overlap_identity():
+    first = ChunkResult(
+        _window(0.0, 20.0),
+        [{"start": 2.0, "end": 22.0, "speaker": "speaker_0"}],
+    )
+    second = ChunkResult(
+        _window(20.0, 40.0),
+        [{"start": 2.5, "end": 2.75, "speaker": "speaker_7"}],
+    )
+
+    out = globalize_pass1(
+        [first, second],
+        clean_speech_seconds={("pass1", "speaker_7"): 0.25},
+        min_clean_speech_seconds=1.5,
+    )
+
+    assert out[1][0]["speaker"] == "SPEAKER_00"
+    assert out[1][0]["speaker_source"] == "pass1_overlap"
+    assert out[1][0]["speaker_confidence"] is True
+
+
 def test_pass1_guides_pass2_context_around_a_boundary_speaker():
     windows = [_window(0.0, 20.0), _window(20.0, 40.0)]
     pass1 = [
@@ -360,6 +381,10 @@ def test_worker_two_passes_both_use_batch_size_16_and_preserve_the_file(tmp_path
     assert output
     assert min(segment["start"] for segment in output) >= 0.0
     assert max(segment["end"] for segment in output) <= 48.0
+    import json
+    json.dumps(output)
+    assert all(not any(key.startswith("_") for key in segment)
+               for segment in output)
 
 
 def test_model_pass_keeps_more_than_16_paths_in_one_batch_request():
