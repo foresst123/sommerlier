@@ -1,10 +1,14 @@
+import gzip
 import json
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "scripts"))
+sys.path.insert(0, ROOT)
 
 import filter_language as fl
+from services.lhotse_manifest_service import merge_manifests
 
 
 def _args(folder, cache, **over):
@@ -105,8 +109,12 @@ def _dataset(tmp_path, stem="[Vlog] english"):
         (item / "conversation.json").write_text(json.dumps({"source_stem": source}))
         (item / "stereo_2ch.wav").write_bytes(b"w" * 8)
     (root / "lhotse" / "audio").mkdir(parents=True)
-    (root / "lhotse" / f"{safe}.jsonl.gz").write_bytes(b"m")
-    (root / "lhotse" / f"{keep_stem}.jsonl.gz").write_bytes(b"m")
+    parts = root / "lhotse" / ".parts"
+    parts.mkdir(parents=True)
+    for part_stem in (safe, keep_stem):
+        with gzip.open(parts / f"{part_stem}.jsonl.gz", "wt", encoding="utf-8") as fh:
+            fh.write(json.dumps({"id": f"{part_stem}-cut"}) + "\n")
+    merge_manifests(str(root))
     rows = [{"source_stem": stem, "path": "a"}, {"source_stem": keep_stem, "path": "b"},
             {"source_stem": stem, "path": "c"}]
     (root / "manifest.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
@@ -120,8 +128,10 @@ def test_purge_dataset_removes_only_that_recordings_items_manifest_and_rows(tmp_
     assert fl.purge_dataset(str(root), "[Vlog] english") == (2, 2)
     assert not (root / "turn_by_turn" / "_Vlog_english_300s").exists()
     assert (root / "turn_by_turn" / "viet_100s").exists()
-    assert not (root / "lhotse" / "_Vlog_english.jsonl.gz").exists()
-    assert (root / "lhotse" / "viet.jsonl.gz").exists()
+    assert not (root / "lhotse" / ".parts" / "_Vlog_english.jsonl.gz").exists()
+    assert (root / "lhotse" / ".parts" / "viet.jsonl.gz").exists()
+    with gzip.open(root / "lhotse" / "manifest.jsonl.gz", "rt", encoding="utf-8") as fh:
+        assert [json.loads(x)["id"] for x in fh] == ["viet-cut"]     # the one dataset manifest, rebuilt
     left = [json.loads(l) for l in (root / "manifest.jsonl").read_text().splitlines()]
     assert [r["source_stem"] for r in left] == ["viet"]
 

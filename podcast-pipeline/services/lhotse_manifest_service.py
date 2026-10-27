@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import base64
 import dataclasses
+import fcntl
 import gzip
 import hashlib
 import importlib
 import json
+import logging
 import os
 import re
 import uuid
@@ -32,7 +34,10 @@ import soundfile as sf
 
 CONVERSATION_FILE = "conversation.json"
 QUARANTINE_DIR = "_quarantine"
-LHOTSE_DIR = "lhotse"             # per-recording manifests + swapped audio live under <root>/lhotse
+LHOTSE_DIR = "lhotse"             # merged manifest + swapped audio + .parts live under <root>/lhotse
+PARTS_DIR = ".parts"             # one gzip part per recording: <root>/lhotse/.parts/<stem>.jsonl.gz
+MERGED_FILE = "manifest.jsonl.gz"  # the single manifest of the whole dataset
+MERGE_LOCK = ".merge.lock"
 _SKIP_DIRS = (QUARANTINE_DIR, LHOTSE_DIR)
 STRICT_TRACKS = "strict_separation_tracks"
 DUPLEX_FILE = "stereo_duplex.wav"
@@ -40,6 +45,8 @@ CHANNEL_OF_ROLE = {"user": 0, "assistant": 1}
 ROUND = 6
 MAX_BACKCHANNEL_ROUNDS = 3
 SAME_CHANNEL_TRIM = 0.05          # same-channel overlap up to this is trimmed, more rejects
+
+log = logging.getLogger(__name__)
 
 _TAG = re.compile(r"\[[^\]]+\]|<[^>]+>")
 _STRIP = re.compile(r"[<>\[\]]")
@@ -79,6 +86,7 @@ class ManifestReport:
     skipped: List[dict]
     notes: List[dict]
     output_path: str
+    part_path: str = ""
 
 
 class _Reject(Exception):
@@ -583,25 +591,85 @@ def _is_recording_item(item_dir: str, stem: str) -> bool:
                         os.path.basename(item_dir)) is not None
 
 
+def _safe_stem(stem: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", stem)
+
+
+def lhotse_dir(root: str) -> str:
+    return os.path.join(os.path.abspath(root), LHOTSE_DIR)
+
+
+def merged_manifest_path(root: str) -> str:
+    return os.path.join(lhotse_dir(root), MERGED_FILE)
+
+
+def merge_manifests(root: str) -> str:
+    """Rebuild <root>/lhotse/manifest.jsonl.gz from every part in lhotse/.parts (one dataset file).
+
+    Parts are read in stem order; a cut id seen twice keeps its first line and logs a warning.
+    The merged file is written aside and moved in place, and the whole step runs under an
+    exclusive flock, so processes finishing together cannot interleave. Loose
+    `<stem>.jsonl.gz` files of the built stems (the old per-recording layout) are removed.
+    """
+    out_dir = lhotse_dir(root)
+    parts_dir = os.path.join(out_dir, PARTS_DIR)
+    merged = merged_manifest_path(root)
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, MERGE_LOCK), "a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        names = []
+        if os.path.isdir(parts_dir):
+            names = sorted(n for n in os.listdir(parts_dir)
+                           if n.endswith(".jsonl.gz") and not n.startswith("."))
+        tmp = os.path.join(out_dir, f".manifest-tmp-{uuid.uuid4().hex}.jsonl.gz")
+        seen: Dict[str, str] = {}
+        try:
+            with gzip.open(tmp, "wt", encoding="utf-8") as out:
+                for name in names:
+                    with gzip.open(os.path.join(parts_dir, name), "rt", encoding="utf-8") as fh:
+                        for line in fh:
+                            if not line.strip():
+                                continue
+                            cut_id = json.loads(line).get("id")
+                            if cut_id in seen:
+                                log.warning("[lhotse] duplicate cut id %r in %s (already from %s); "
+                                            "keeping the first", cut_id, name, seen[cut_id])
+                                continue
+                            seen[cut_id] = name
+                            out.write(line if line.endswith("\n") else line + "\n")
+            os.replace(tmp, merged)
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        for name in names:
+            loose = os.path.join(out_dir, name)
+            if name != MERGED_FILE and os.path.isfile(loose):
+                os.remove(loose)
+    return merged
+
+
 def build_recording_manifest(root: str, source_stem: str,
                              params: Optional[LhotseManifestParams] = None) -> ManifestReport:
-    """Rewrite <root>/lhotse/<stem>.jsonl.gz from this recording's items only (idempotent).
+    """Build this recording's part (idempotent) and rebuild the single dataset manifest.
 
-    Swapped WAVs go to <root>/lhotse/audio. The file is built aside and moved in place.
+    The part is <root>/lhotse/.parts/<stem>.jsonl.gz, built aside and moved in place. The
+    returned report's output_path is the merged lhotse/manifest.jsonl.gz.
     """
-    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", source_stem)
-    out_dir = os.path.join(os.path.abspath(root), LHOTSE_DIR)
-    final = os.path.join(out_dir, f"{safe}.jsonl.gz")
-    tmp = os.path.join(out_dir, f".tmp-{os.getpid()}-{safe}.jsonl.gz")
+    safe = _safe_stem(source_stem)
+    out_dir = lhotse_dir(root)
+    parts_dir = os.path.join(out_dir, PARTS_DIR)
+    part = os.path.join(parts_dir, f"{safe}.jsonl.gz")
+    tmp = os.path.join(parts_dir, f".tmp-{uuid.uuid4().hex}-{safe}.jsonl.gz")
     params = dataclasses.replace(params or LhotseManifestParams(),
                                  audio_dir=os.path.join(out_dir, "audio"))
-    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(parts_dir, exist_ok=True)
     try:
         report = build_manifest(root, tmp, params,
                                 item_filter=lambda d: _is_recording_item(d, source_stem))
-        os.replace(tmp, final)
+        os.replace(tmp, part)
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
-    report.output_path = final
+    report.output_path = merge_manifests(root)
+    report.part_path = part
     return report

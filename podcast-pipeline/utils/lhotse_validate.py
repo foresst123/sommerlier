@@ -478,7 +478,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     paths: List[str] = []
     for item in args.manifest:
         if os.path.isdir(item):
-            paths += sorted(os.path.join(item, n) for n in os.listdir(item) if n.endswith((".jsonl", ".jsonl.gz")))
+            # a dataset root or its lhotse/ folder: the single merged manifest, else the plain listing
+            merged = [os.path.join(d, "manifest.jsonl.gz") for d in (item, os.path.join(item, "lhotse"))]
+            found = [m for m in merged if os.path.isfile(m)]
+            paths += found or sorted(os.path.join(item, n) for n in os.listdir(item)
+                                     if n.endswith((".jsonl", ".jsonl.gz")))
         else:
             paths.append(item)
     cuts = [0]
