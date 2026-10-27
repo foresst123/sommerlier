@@ -260,7 +260,7 @@
         "word_alignment": true,
         "conversation_exports": true,
         "export": true,
-        "transcript_review": true,
+        "transcript_review": false,
         "persona_profile": false
       },
       "pipeline": {
