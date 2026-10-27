@@ -87,3 +87,35 @@ def test_hidden_folders_are_not_variants(tmp_path):
     for d in ("none", ".ipynb_checkpoints", ".manifest_abc123", "lanes", "_resident"):
         (tmp_path / d).mkdir()
     assert ls.variant_ids(tmp_path) == ["none"]
+
+
+def test_stuck_claims_failures_and_the_frozen_list_are_flagged(tmp_path):
+    import os
+    import socket
+    import subprocess
+    import sys
+    import time
+    audio = tmp_path / "audio"
+    audio.mkdir()
+    (audio / "a.wav").write_bytes(b"xx")
+    (audio / "b.wav").write_bytes(b"yyy")                      # added after the list was frozen
+    out = tmp_path / "out"
+    (out / "none").mkdir(parents=True)
+    (out / "variants_manifest.json").write_text(json.dumps({"variants": [{"id": "none"}]}))
+    (out / "_resident").mkdir()
+    (out / "_resident" / "files.json").write_text(json.dumps({"version": 1, "audio_dir": str(audio), "files": [
+        {"name": "a.wav", "stem": "a", "path": str(audio / "a.wav"), "size": 2, "mtime": 0, "mtime_ns": 0}]}))
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    (out / "none" / ".claim_separation.a").write_text(json.dumps({"host": socket.gethostname(), "pid": dead.pid}))
+    old_claim = out / "none" / ".claim_separation.x"
+    old_claim.write_text(json.dumps({"host": "job-b", "pid": 4}))
+    os.utime(old_claim, (time.time() - 3600, time.time() - 3600))
+    (out / "none" / ".failed_asr.a").write_text(json.dumps({"reason": "OOM"}))
+
+    text = ls.render(out)
+    assert "WARNING: audio-dir changed since files.json was frozen" in text and "added: b.wav" in text
+    assert f"pid {dead.pid}" in text and "pid gone on this host" in text
+    assert "no heartbeat for 60 min" in text
+    assert "asr a: OOM (failed" in text
+    assert "_resident" not in text.split("claims")[0]          # the hidden folder is not a variant

@@ -3,6 +3,7 @@ Chạy trong podcast-pipeline: python -m pytest tests/test_run_variants_resident
 import copy
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -120,10 +121,12 @@ def test_done_marker_resume_and_manifest(env):
     r2, _, _ = runner_for(env, fake2, "--resume")
     assert r2.runnable() == [] and fake2.calls == []
     assert {x["id"]: x["status"] for x in manifest(tmp)["variants"]}["dfn3"] == "ok"
-    # a changed file or setting invalidates the hash
+    # a file changed after the list was frozen keeps the hashes (a warning says so); --refresh-files applies it
     (env[1] / "a.wav").write_bytes(b"audio-changed!!")
     r3, _, _ = runner_for(env, FakeRun(), "--resume")
-    assert len(r3.runnable()) == 4
+    assert r3.runnable() == []
+    r5, _, _ = runner_for(env, FakeRun(), "--resume", "--refresh-files")
+    assert len(r5.runnable()) == 4
     r4, _, _ = runner_for(env, FakeRun(), "--resume", "--stop-after", "separation")
     assert len(r4.runnable()) == 4
 
@@ -1217,13 +1220,14 @@ def test_total_marker_is_written_only_when_every_file_is_ready(env):
 
 
 def test_a_file_that_failed_in_one_copy_is_not_rerun_by_the_other(env):
+    # both copies started before the failure: it belongs to this run, so the other copy adopts it
     clock = Clock()
     fa = FileFake(bad={("dfn3", "a")})
     ra, _, files = claim_copy(env, fa, clock)
-    schedule_stop(ra, files, "separation")
-    assert (env[0] / "out" / "dfn3" / ".failed_separation.a").is_file()
     fb = FakeRun()
     rb, _, files = claim_copy(env, fb, Clock())
+    schedule_stop(ra, files, "separation")
+    assert (env[0] / "out" / "dfn3" / ".failed_separation.a").is_file()
     schedule_stop(rb, files, "separation")
     assert ("dfn3", ["a.wav"]) not in [(vid, names) for vid, _, names in fb.calls]
     assert rb.status["dfn3"] == "failed"
@@ -1254,3 +1258,202 @@ def test_two_copies_of_one_stage_share_the_files_and_each_file_runs_once(env):
         assert (out / vid / ".ready_separation").is_file()
         assert all((out / vid / f".ready_separation.{s}").is_file() for s in ("a", "b"))
         assert (out / vid / ".claim_separation.a").is_file()
+
+
+
+# ------------------------------------------------------------------ claims that recover, degraded files, frozen list
+def dead_pid():
+    """The pid of a process that has exited: no process has it now."""
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    return p.pid
+
+
+def write_claim_as(env, vid, stem, host, pid):
+    p = env[0] / "out" / vid / f".claim_separation.{stem}"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"host": host, "pid": pid, "time": "x"}))
+    return p
+
+
+def test_dead_copy_claim_on_this_host_is_removed_at_start(env):
+    import socket
+    fake, msgs = FakeRun(), []
+    write_claim_as(env, "dfn3", "a", socket.gethostname(), dead_pid())   # reclaim-after 0: only this rule removes it
+    r, args, files = claim_copy(env, fake, Clock(), msgs=msgs)
+    schedule_stop(r, files, "separation")
+    assert ("dfn3", ["a.wav"]) in [(vid, names) for vid, _, names in fake.calls]
+    assert any("dead copy on this host removed" in m for m in msgs)
+    assert json.loads((env[0] / "out" / "dfn3" / ".claim_separation.a").read_text())["host"] == socket.gethostname()
+
+
+def test_other_hosts_and_live_claims_are_kept_at_start(env):
+    import socket
+    write_claim_as(env, "dfn3", "a", "job-a", dead_pid())            # another host: only --reclaim-after takes it
+    write_claim_as(env, "dfn3", "b", socket.gethostname(), os.getpid())   # this host, process alive
+    fake = FakeRun()
+    r, args, files = claim_copy(env, fake, Clock(), "--wait-timeout", "1")
+    schedule_stop(r, files, "separation")
+    calls = [(vid, names) for vid, _, names in fake.calls]
+    assert ("dfn3", ["a.wav"]) not in calls and ("dfn3", ["b.wav"]) not in calls
+    assert (env[0] / "out" / "dfn3" / ".claim_separation.a").is_file()
+    assert (env[0] / "out" / "dfn3" / ".claim_separation.b").is_file()
+
+
+def test_dead_local_claim_is_taken_during_the_run_without_reclaim_after(env):
+    import socket
+    r, args, files = claim_copy(env, FakeRun(), Clock())               # prepare has nothing to clean yet
+    path = write_claim_as(env, "dfn3", "a", socket.gethostname(), dead_pid())
+    assert r._take_claim("dfn3", "a", lambda m: None) is True
+    assert json.loads(path.read_text())["pid"] == os.getpid()
+
+
+def test_heartbeat_stamps_the_claim_while_the_file_runs(env):
+    import threading
+    import time as _time
+    seen = []
+
+    class Stamp(FakeRun):
+        def __call__(self, pipeline, args, config, batch, logger=None, stages=None):
+            if args.job_id == "exp-dfn3" and Path(batch[0]).stem == "a":
+                claim = env[0] / "out" / "dfn3" / ".claim_separation.a"
+                old = _time.time() - 3600              # as if nobody stamped it for an hour
+                os.utime(claim, (old, old))
+                _time.sleep(0.3)                        # the heartbeat runs meanwhile
+                seen.append(claim.stat().st_mtime - old)
+            return super().__call__(pipeline, args, config, batch, logger, stages)
+
+    r, args, files = claim_copy(env, Stamp(), Clock())
+    r.heartbeat_seconds = 0.02
+    schedule_stop(r, files, "separation")
+    assert seen and seen[0] > 1800
+    assert not [t for t in threading.enumerate() if t.name == "claim-heartbeat"]
+
+
+def test_claim_steal_by_rename_has_one_winner(env, monkeypatch):
+    import time as _time
+    clock = Clock()
+    clock.now = _time.time()
+    real_rename = os.rename
+    r, args, files = claim_copy(env, FakeRun(), clock, "--reclaim-after", "30")
+    path = write_claim(env, "dfn3", "a", now=clock.now, age_s=3600)
+    # another copy renamed the stale claim first: our rename finds nothing
+    def gone(src, dst):
+        raise FileNotFoundError(src)
+    monkeypatch.setattr(os, "rename", gone)
+    assert r._take_claim("dfn3", "a", lambda m: None) is False
+    monkeypatch.setattr(os, "rename", real_rename)
+    assert path.is_file()
+
+    def fresh_first(src, dst):
+        # between our look at the claim and our rename, another copy stole it and created a fresh one
+        Path(src).write_text(json.dumps({"host": "job-a", "pid": 9, "time": "x"}))
+        os.utime(src, (clock.now, clock.now))
+        return real_rename(src, dst)
+    write_claim(env, "dfn3", "a", now=clock.now, age_s=3600)
+    monkeypatch.setattr(os, "rename", fresh_first)
+    assert r._take_claim("dfn3", "a", lambda m: None) is False
+    monkeypatch.setattr(os, "rename", real_rename)
+    assert json.loads(path.read_text())["host"] == "job-a"            # the fresh claim is put back
+    assert not [p for p in path.parent.iterdir() if ".stale." in p.name]
+
+
+def test_failed_marker_of_an_earlier_run_does_not_stop_the_file(env):
+    import time as _time
+    fake, msgs = FakeRun(), []
+    r, args, files = claim_copy(env, fake, Clock(), msgs=msgs)
+    variants = {v["id"]: v for v in rr.resolve_plan(args)[0]}
+    d = env[0] / "out" / "dfn3"
+    d.mkdir(parents=True, exist_ok=True)
+    failed = d / ".failed_separation.a"
+    failed.write_text(json.dumps({"reason": "sidon: boom", "hash": rr.variant_hash(
+        variants["dfn3"], args, files, stop_after="separation")}))
+    old = r.started_at - 3600                                        # written by an earlier run
+    os.utime(failed, (old, old))
+    write_claim(env, "dfn3", "a", now=r.started_at, age_s=3600)
+    schedule_stop(r, files, "separation")
+    assert ("dfn3", ["a.wav"]) in [(vid, names) for vid, _, names in fake.calls]
+    assert any("failed marker of an earlier run" in m for m in msgs)
+    assert not failed.exists() and (d / ".ready_separation.a").is_file()
+
+
+class StemErrors(FakeRun):
+    """Reports an error in denoise.json for the (variant, file stem) pairs given: the filter fell back."""
+
+    def __init__(self, bad):
+        super().__init__()
+        self.bad = set(bad)
+
+    def __call__(self, pipeline, args, config, batch, logger=None, stages=None):
+        out = super().__call__(pipeline, args, config, batch, logger, stages)
+        vid = args.job_id[len("exp-"):]
+        for p in batch:
+            if (vid, Path(p).stem) in self.bad:
+                f = Path(args.save_path) / Path(p).stem / "01b_denoise" / "denoise.json"
+                info = json.loads(f.read_text())
+                info["errors"] = ["rf_crowd: boom"]
+                f.write_text(json.dumps(info))
+        return out
+
+
+@pytest.mark.parametrize("claim", [False, True])
+def test_degraded_file_is_failed_and_its_ok_neighbour_stays_ready(env, claim):
+    fake, clock = StemErrors({("dfn3", "a")}), Clock()
+    if claim:
+        r, args, files = claim_copy(env, fake, clock)
+    else:
+        r, args, files = line_runner(env, fake, clock, "--layout", "default", "--stop-after", "separation",
+                                     "--signal", "separation", "--per-file", "--only-ids", "dfn3")
+    schedule_stop(r, files, "separation")
+    d = env[0] / "out" / "dfn3"
+    failed = json.loads((d / ".failed_separation.a").read_text())
+    assert "degraded" in failed["reason"] and "rf_crowd: boom" in failed["reason"]
+    assert not (d / ".ready_separation.a").exists()
+    assert (d / ".ready_separation.b").is_file()
+    assert r.status["dfn3"] == "degraded"
+    assert not (d / ".done.separation").exists()
+
+
+def test_files_added_later_keep_the_hashes_and_markers_of_the_line(env, capsys):
+    tmp, audio, _ = env
+    r1, args1, files1 = producer_then_files(env)
+    frozen = json.loads((tmp / "out" / "_resident" / "files.json").read_text(encoding="utf-8"))
+    assert [e["name"] for e in frozen["files"]] == ["a.wav", "b.wav"]
+    assert {"size", "mtime", "mtime_ns", "path"} <= set(frozen["files"][0])
+    (audio / "c.wav").write_bytes(b"added after the first copy started")
+    capsys.readouterr()
+    r2, args2, files2 = line_runner(env, FakeRun(), None, "--layout", "default", "--stop-after", "asr",
+                                    "--wait-signal", "separation")
+    assert "audio-dir đã đổi" in capsys.readouterr().out
+    assert [f.name for f in files2] == ["a.wav", "b.wav"]
+    v = {x["id"]: x for x in r2.variants}["dfn3"]
+    assert rr.variant_hash(v, args2, files2, stop_after="separation") == \
+        rr.variant_hash({x["id"]: x for x in r1.variants}["dfn3"], args1, files1, stop_after="separation")
+    assert r2._marker_state(v, "separation") == ("ready", None)
+
+
+def test_refresh_files_rewrites_the_list_and_changes_the_hashes(env):
+    tmp, audio, _ = env
+    r1, args1, files1 = producer_then_files(env)
+    v = {x["id"]: x for x in r1.variants}["dfn3"]
+    before = rr.variant_hash(v, args1, files1, stop_after="separation")
+    (audio / "c.wav").write_bytes(b"added")
+    args2, _, files2, _ = make(env, "--refresh-files")
+    assert [f.name for f in files2] == ["a.wav", "b.wav", "c.wav"]
+    frozen = json.loads((tmp / "out" / "_resident" / "files.json").read_text(encoding="utf-8"))
+    assert len(frozen["files"]) == 3
+    assert rr.variant_hash(v, args2, files2, stop_after="separation") != before
+
+
+def test_frozen_file_removed_from_the_audio_dir_is_an_error(env):
+    _, audio, _ = env
+    producer_then_files(env)
+    (audio / "b.wav").unlink()
+    with pytest.raises(SystemExit, match="no longer in the audio dir"):
+        make(env)
+
+
+def test_dry_run_does_not_freeze_the_list(env):
+    tmp = env[0]
+    make(env, "--dry-run")
+    assert not (tmp / "out" / "_resident" / "files.json").exists()

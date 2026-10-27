@@ -19,6 +19,7 @@ variants_manifest.json are the same as the old runner's, so the compare / lanes 
 import argparse
 import contextlib
 import copy
+import hashlib
 import importlib.util
 import json
 import os
@@ -27,6 +28,7 @@ import shlex
 import socket
 import sys
 import tempfile
+import threading
 import uuid
 import time
 from datetime import datetime
@@ -92,6 +94,12 @@ LINE = ("denoise", "diarization", "denoise_pre_separation", "separation_plan", "
 FULL_STOPS = (None, "none", "all")
 MUSIC_KEYS = ("steps.music_analysis", "steps.music_removal")
 NOOP_NOTE = "nothing to do at this point"
+# Claims are stamped every HEARTBEAT_SECONDS while a copy works on the file (--reclaim-after counts from the last
+# stamp). A failed marker older than the start of this process is an earlier run's (file mtimes come from a coarse
+# kernel clock: a marker of this run written in the first tick after a start may look older, which only re-runs
+# that file). The frozen file list lives in <out-root>/_resident/files.json.
+HEARTBEAT_SECONDS = 60.0
+FILES_NAME = "files.json"
 
 # pipeline.* keys read while main() builds the services: they cannot change per variant.
 BUILD_TIME_PIPELINE_KEYS = frozenset({
@@ -232,7 +240,15 @@ def variant_hash(variant, args, files, stop_after=None):
     sig = {"id": variant["id"], "env": args.env,
            "overrides": variant_overrides(variant, stop),
            "global_set": [g for g in (args.global_set or []) if not g.startswith(HASH_IGNORED_SETS)]}
-    return rv().run_hash([json.dumps(sig, sort_keys=True)], files)
+    cmd = [json.dumps(sig, sort_keys=True)]
+    frozen = getattr(args, "frozen_files", None)
+    if frozen is None:                     # not through resolve_plan: the files as they are now
+        return rv().run_hash(cmd, files)
+    # the frozen list (path, size, mtime of the first copy's scan), hashed exactly as run_hash does
+    h = hashlib.sha256(json.dumps(cmd).encode())
+    for e in frozen:
+        h.update(f"{e['path']}|{e['size']}|{e['mtime']}".encode())
+    return h.hexdigest()
 
 
 def reset_between_variants(pipeline, paths=()):
@@ -262,6 +278,109 @@ def reset_between_variants(pipeline, paths=()):
             pipeline.timeline = type(timeline)()
         except Exception:
             pass
+
+
+# ------------------------------------------------------------------ claims on this host, frozen file list
+def pid_alive(pid):
+    """False only when no process has this pid; a pid we may not signal counts as alive, an unknown one too."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:                         # EPERM: the process exists
+        return True
+    return True
+
+
+def read_claim(path):
+    try:
+        data = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def dead_claim_here(path):
+    """A claim written by a copy on THIS host whose process is gone. (Another host's pid cannot be checked here.)"""
+    data = read_claim(path)
+    return data is not None and data.get("host") == socket.gethostname() and not pid_alive(data.get("pid"))
+
+
+def _mtime(path):
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return float("inf")
+
+
+def _file_entry(path):
+    st = path.stat()
+    return {"name": path.name, "stem": path.stem, "path": str(path), "size": st.st_size,
+            "mtime": int(st.st_mtime), "mtime_ns": st.st_mtime_ns}
+
+
+def _read_frozen(path):
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        entries = data["files"]
+        ok = isinstance(entries, list) and bool(entries) and all(
+            isinstance(e, dict) and {"name", "path", "size", "mtime"} <= set(e) for e in entries)
+    except (OSError, ValueError, KeyError, TypeError):
+        ok = False
+    if not ok:
+        raise SystemExit(f"{path} is not a frozen file list; delete it (or run with --refresh-files) and run again")
+    return entries
+
+
+def _write_frozen(path, entries, audio_dir, replace):
+    """Atomic write. Without `replace` only the first copy keeps its list (os.link fails for the others)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    tmp.write_text(json.dumps({"version": 1, "audio_dir": str(audio_dir or ""), "files": entries},
+                              indent=1, ensure_ascii=False), encoding="utf-8")
+    try:
+        if replace:
+            os.replace(tmp, path)
+        else:
+            try:
+                os.link(tmp, path)
+            except FileExistsError:
+                pass                        # another copy froze the list first: its list is the one used
+            except OSError:                 # no hard links on this disk
+                if not path.exists():
+                    os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def freeze_files(args, live, write=True):
+    """The files of the line, frozen by the first copy that starts: <out-root>/_resident/files.json.
+
+    Every copy works on the frozen names (live paths) and hashes the frozen size and mtime, so a file added to the
+    audio dir later changes neither the hashes nor the markers. A frozen file gone from the audio dir is an error.
+    --refresh-files writes the current scan again. Sets args.frozen_files; returns the paths to work on.
+    """
+    path = Path(args.out_root) / RESIDENT_DIR / FILES_NAME
+    refresh = bool(getattr(args, "refresh_files", False))
+    if write and (refresh or not path.is_file()):
+        _write_frozen(path, [_file_entry(p) for p in live], args.audio_dir, replace=refresh)
+    entries = _read_frozen(path) if path.is_file() else [_file_entry(p) for p in live]
+    by_name = {p.name: p for p in live}
+    frozen = {e["name"] for e in entries}
+    missing = sorted(frozen - set(by_name))
+    if missing:
+        raise SystemExit(f"{path} lists files no longer in the audio dir: {', '.join(missing)}; "
+                         "delete it or run with --refresh-files")
+    added = sorted(set(by_name) - frozen)
+    changed = sorted(e["name"] for e in entries if by_name[e["name"]].stat().st_size != e["size"])
+    if added or changed:
+        print(f"WARNING: audio-dir đã đổi so với files.json (thêm: {', '.join(added) or '-'}; khác kích thước: "
+              f"{', '.join(changed) or '-'}). Vẫn dùng danh sách đã đóng băng; xoá {path} và chạy lại cả ba job "
+              "để áp dụng.", flush=True)
+    args.frozen_files = entries
+    return [by_name[n] for n in sorted(frozen)]
 
 
 # --------------------------------------------------------------------------- runner
@@ -298,6 +417,8 @@ class ResidentRunner:
         self.notes = {}                  # short reasons shown in the manifest for variants that are fine
         # A producer's resume marker is its own, so it never makes the consumer think the variant is done.
         self.done_name = f"{rv().DONE_MARKER}.{args.stop_after}" if self.signal else rv().DONE_MARKER
+        self.started_at = time.time()    # a failed marker older than this belongs to an earlier run
+        self.heartbeat_seconds = HEARTBEAT_SECONDS
 
     # -- bookkeeping
     @contextlib.contextmanager
@@ -342,12 +463,21 @@ class ResidentRunner:
         return [v for v in self.variants if v["id"] in self.owned and v["id"] not in self.reasons
                 and v["id"] not in self.finalized]
 
+    def _report(self, variant):
+        """{stem: verdict} of every denoise point that ran before this process's stop (denoise.json)."""
+        r = rv()
+        variant = reached_variant(variant, self.args.stop_after)
+        return r.variant_report(variant, r.discover_dirs(self.out_root / variant["id"], set(self.stems)), self.stems)
+
+    def _file_degraded(self, variant, stem):
+        """The verdict of one file whose filter fell back (or has no denoise.json), else None."""
+        verdict = self._report(variant).get(stem)
+        return verdict if verdict and verdict.get("verdict") in ("fallback", "missing") else None
+
     def _assess(self, variant):
         """Read the denoise.json of every point that ran before the stop; "degraded" or "ok"."""
         r = rv()
-        variant = reached_variant(variant, self.args.stop_after)
-        report = r.variant_report(variant, r.discover_dirs(self.out_root / variant["id"],
-                                                           set(self.stems)), self.stems)
+        report = self._report(variant)
         counts = r.report_counts(report, len(self.stems))
         self.reports[variant["id"]] = {"denoise_report": report, **counts}
         if counts["suspect_files"]:
@@ -375,7 +505,8 @@ class ResidentRunner:
                                          "time": datetime.now().isoformat(timespec="seconds")}))
         else:
             ready.unlink(missing_ok=True)
-            failed.write_text(json.dumps({"reason": reason or "failed", "hash": digest}))
+            failed.write_text(json.dumps({"reason": reason or "failed", "hash": digest,
+                                          "time": datetime.now().isoformat(timespec="seconds")}))
 
     def _write_signals(self, v, ok, reason=None):
         for stem in (self.stems if self.per_file else [None]):
@@ -411,23 +542,66 @@ class ResidentRunner:
     def _claim_path(self, vid, stem):
         return self.out_root / vid / f".claim_{self.args.stop_after}.{stem}"
 
+    def _claim_age(self, path):
+        """Seconds since the claim was last stamped (created, or a heartbeat), None when it is gone."""
+        try:
+            return self.clock() - path.stat().st_mtime
+        except OSError:
+            return None
+
+    def _drop_claim(self, path, still_stale):
+        """Remove a claim, but only if it is still stale once we hold it. os.rename moves the name away and only one
+        copy can do that: the others get FileNotFoundError and give up. A fresh claim that got in first is put back
+        (a copy created it in the meantime: rare, and then that copy's claim is the one left).
+        True: the name is free and this copy may take it. False: someone else holds or took it."""
+        tomb = path.with_name(f"{path.name}.stale.{os.getpid()}.{time.time_ns()}")
+        try:
+            os.rename(path, tomb)
+        except FileNotFoundError:
+            return False
+        if still_stale(tomb):
+            tomb.unlink(missing_ok=True)
+            return True
+        try:
+            os.link(tomb, path)
+        except FileExistsError:
+            pass
+        except OSError:
+            os.rename(tomb, path)
+        tomb.unlink(missing_ok=True)
+        return False
+
+    def _clean_dead_claims(self):
+        """At start: this stage's claims left by a copy on THIS host whose process is gone are removed now."""
+        for path in sorted(self.out_root.glob(f"*/.claim_{self.args.stop_after}.*")):
+            if dead_claim_here(path) and self._drop_claim(path, dead_claim_here):
+                self.say(f"[{path.parent.name}] {path.name.split('.', 2)[2]}: "
+                         "claim of a dead copy on this host removed")
+
     def _take_claim(self, vid, stem, say):
         """Create the claim atomically (O_EXCL). True when this copy owns the file; another copy's claim gives False.
-        A claim older than --reclaim-after minutes with no ready/failed marker is taken over (logged)."""
+        A claim of a dead copy on this host is taken at once. Any other claim is taken only when its last stamp is
+        older than --reclaim-after minutes (0 = never)."""
         path = self._claim_path(vid, stem)
         path.parent.mkdir(parents=True, exist_ok=True)
         for attempt in (0, 1):
             try:
                 fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
             except FileExistsError:
-                try:
-                    age = self.clock() - path.stat().st_mtime
-                except OSError:
+                if attempt:
                     return False
-                if attempt or self.reclaim_after <= 0 or age < self.reclaim_after * 60:
+                if dead_claim_here(path):
+                    holder = _claim_holder(path)
+                    if not self._drop_claim(path, dead_claim_here):
+                        return False
+                    say(f"[{vid}] {stem}: claim by {holder} is a dead copy on this host; taking it over")
+                    continue
+                age = self._claim_age(path)
+                if age is None or self.reclaim_after <= 0 or age < self.reclaim_after * 60:
                     return False
-                holder = _claim_holder(path)
-                path.unlink(missing_ok=True)
+                holder, limit = _claim_holder(path), self.reclaim_after * 60
+                if not self._drop_claim(path, lambda p: (self._claim_age(p) or 0) >= limit):
+                    return False
                 say(f"[{vid}] {stem}: claim by {holder} is {age / 60:.0f} min old with no result; taking it over")
                 continue
             with os.fdopen(fd, "w") as f:
@@ -435,6 +609,42 @@ class ResidentRunner:
                                     "time": datetime.now().isoformat(timespec="seconds")}))
             return True
         return False
+
+    @contextlib.contextmanager
+    def _heartbeat(self, path):
+        """Stamp the claim every heartbeat_seconds while this copy works on the file, so --reclaim-after counts from
+        the last stamp and a run longer than the limit is not taken from the copy that is still running it."""
+        stop = threading.Event()
+
+        def beat():
+            while not stop.wait(self.heartbeat_seconds):
+                try:
+                    os.utime(path)
+                except OSError:
+                    pass
+
+        thread = threading.Thread(target=beat, name="claim-heartbeat", daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            thread.join(10)
+
+    def _forget_stale_failure(self, v, stem, say):
+        """A .failed_<stage>.<stem> older than this process is an earlier run's: the file runs again. Its marker
+        goes, and its claim too unless a copy of this run holds it. A failure of this run is still adopted."""
+        vid, limit = v["id"], self.started_at
+        failed = self._signal_path(vid, "failed", self.mark, stem)
+        try:
+            if failed.stat().st_mtime >= limit:
+                return False
+        except OSError:
+            return False
+        failed.unlink(missing_ok=True)
+        self._drop_claim(self._claim_path(vid, stem), lambda p: _mtime(p) < limit)
+        say(f"[{vid}] {stem}: failed marker of an earlier run; running it again")
+        return True
 
     def _adopt(self, v, unit, state, reason, say):
         """Another copy settled this file (its ready or failed marker is there): count it here, run nothing."""
@@ -460,6 +670,8 @@ class ResidentRunner:
         """Resume check per variant (our own markers, not main's ledger); first manifest."""
         r = rv()
         self.out_root.mkdir(parents=True, exist_ok=True)
+        if self.claim:
+            self._clean_dead_claims()
         for v in self.variants:
             vid = v["id"]
             if vid in self.reasons:
@@ -501,14 +713,9 @@ class ResidentRunner:
             (self.out_root / vid).mkdir(parents=True, exist_ok=True)     # a no-op stage ran nothing, so no dir yet
             (self.out_root / vid / self.done_name).write_text(json.dumps(
                 {"hash": variant_hash(v, self.args, self.files), "exit": 0, "status": state}))
-        if self.mark:
+        if self.mark and not self.per_file:       # per-file: each file's marker was written when it finished
             why = self.reasons.get(vid) or "degraded: the filter fell back to unfiltered audio"
-            if not self.per_file:
-                self._write_signal(v, kept, why)
-            elif state == "degraded" and not kept:    # per-file: ready markers went out as each file finished
-                for st in self.stems:                 # the filter did not run: nothing of this variant is handed on
-                    if not (self.claim and self._marker_state(v, self.mark, st)[0] == "ready"):  # not another copy's
-                        self._write_signal(v, False, why, st)
+            self._write_signal(v, kept, why)
         if self.claim and self.per_file and kept and self.mark:
             self._write_total_ready(v)
         self.status[vid] = state
@@ -608,10 +815,14 @@ class ResidentRunner:
         self.failures.setdefault(vid, []).extend(found)
         self.seen.setdefault(vid, set()).update(Path(p).stem for p in paths)
         if self.mark and self.per_file:
-            if found:
-                self._write_signal(v, False, str(found[0][1]), stem)
-            else:
-                self._write_signal(v, True, stem=stem)
+            bad = str(found[0][1]) if found else None
+            if bad is None and not self.args.accept_degraded:
+                verdict = self._file_degraded(v, stem)
+                if verdict is not None:
+                    bad = "degraded: " + ("; ".join(verdict.get("errors") or []) or
+                                          "the filter fell back to unfiltered audio")
+                    say(f"[{vid}] {stem}: DEGRADED, not handed on")
+            self._write_signal(v, bad is None, bad, stem)
         say(f"[{vid}] end of this {'file' if self.per_file else 'group'} after {time.time() - t0:.0f}s "
             f"({len(found)} failure(s))")
         if self.crashed.get(vid) or set(self.stems) <= self.seen[vid]:
@@ -651,6 +862,8 @@ class ResidentRunner:
                 stem = self._stem_of(unit)
                 if self.claim:
                     own, why = self._marker_state(v, self.mark, stem)
+                    if own == "failed" and self._forget_stale_failure(v, stem, say):
+                        own = None
                     if own is not None:
                         self._adopt(v, unit, own, why, say)
                         adopted = True
@@ -676,7 +889,10 @@ class ResidentRunner:
                 eff = effective_stage(v, self.wait_signal, self.music)
                 say(f"[{v['id']}] ready" + (f" (.ready_{eff})" if eff else " (nothing upstream)")
                     + (f" {Path(unit[0]).name}" if self.per_file else "") + "; starting")
-                failures += self._run_variant(v, pipeline, args, config, unit, logger, stages)
+                hold = self._heartbeat(self._claim_path(v["id"], self._stem_of(unit))) if self.claim \
+                    else contextlib.nullcontext()
+                with hold:
+                    failures += self._run_variant(v, pipeline, args, config, unit, logger, stages)
                 idle_since, announced = self.clock(), False
                 continue
             if adopted:
@@ -789,7 +1005,8 @@ def resolve_plan(args):
     r = rv()
     variants = r.filter_groups(r.load_variants(args.variants), args.groups.split(","))
     variants = r.pick_variants(variants, args.only_ids.split(","))
-    files = r.collect_files(args.audio_dir, args.files)
+    files = freeze_files(args, r.collect_files(args.audio_dir, args.files),
+                         write=not getattr(args, "dry_run", False))
     skipped = r.check_availability(variants) if args.only_available else {}
     if args.music == "off":
         for v in variants:
@@ -849,8 +1066,13 @@ def parse_args(argv=None):
                    help="with --per-file: several copies of this stage (same out-root, other GPU or job) share the "
                         "files: a copy works on a file only after it creates .claim_<stage>.<stem> first")
     p.add_argument("--reclaim-after", type=float, default=0.0, dest="reclaim_after", metavar="MINUTES",
-                   help="--claim: take over a claim older than this with no ready/failed marker (0 = never); "
-                        "set it above the longest file run")
+                   help="--claim: take over ANOTHER host's claim whose last heartbeat (a stamp every minute while its "
+                        "copy works on the file) is older than this, and that has no ready/failed marker. 0 (default) "
+                        "= never: then a dead copy on another host leaves its claim until someone removes it. A dead "
+                        "copy on THIS host is taken over at once (its pid is gone), whatever this is set to")
+    p.add_argument("--refresh-files", action="store_true", dest="refresh_files",
+                   help="write <out-root>/_resident/files.json again from the audio dir now. Default: the list the "
+                        "first copy froze is used; files added to the audio dir later are only warned about")
     p.add_argument("--minutes-per-file-run", type=float, default=20.0, help=argparse.SUPPRESS)
     args = p.parse_args(argv)
     if args.mode == "overlap":
