@@ -22,10 +22,12 @@ import copy
 import importlib.util
 import json
 import os
-import shlex
 import re
+import shlex
+import socket
 import sys
 import tempfile
+import uuid
 import time
 from datetime import datetime
 from pathlib import Path
@@ -69,11 +71,12 @@ MUSIC_OFF_SETS = ("steps.music_analysis=false", "steps.music_removal=false")
 NO_MUSIC_CACHE_DIR = "cache_nomusic"
 # --stop-after values that end before refinement; later ones put the LLM on both cards (main.py pins that).
 STOPS_BEFORE_REFINEMENT = frozenset({"input_quality", "music", "denoise", "diarization", "denoise_pre_separation",
-                                     "separation", "music_removal", "denoise_pre_asr", "asr", "captioning"})
+                                     "separation_plan", "separation", "music_removal", "denoise_pre_asr", "asr",
+                                     "captioning"})
 
 # Copy of PipelineService._STOP_ORDER (importing that needs torch); a test compares it with the source text.
 STAGE_ORDER = ("input_quality", "music", "denoise", "diarization",
-               "denoise_pre_separation", "separation", "music_removal",
+               "denoise_pre_separation", "separation_plan", "separation", "music_removal",
                "denoise_pre_asr", "asr", "captioning", "refinement", "speaker_relabel",
                "transcript_review", "persona_profile", "conversation_selection",
                "word_alignment", "conversation_exports")
@@ -81,8 +84,12 @@ STAGE_ORDER = ("input_quality", "music", "denoise", "diarization",
 POINT_STAGE = (("chain", "denoise"), ("chain_pre_separation", "denoise_pre_separation"),
                ("chain_pre_asr", "denoise_pre_asr"))
 
-# The 6-process line, in order. A stage with nothing to do for a variant is skipped (see is_noop).
-LINE = ("denoise", "diarization", "denoise_pre_separation", "separation", "denoise_pre_asr", "asr")
+# The processes of the line, in order: each hands its stage's files on by .ready_<stage>[.<stem>] markers. A stage
+# with nothing to do for a variant is skipped (see is_noop). "all" (--stop-after all) is the last process: no stop_after
+# for main.py, it runs everything after conversation_selection.
+LINE = ("denoise", "diarization", "denoise_pre_separation", "separation_plan", "separation", "denoise_pre_asr",
+        "asr", "conversation_selection")
+FULL_STOPS = (None, "none", "all")
 MUSIC_KEYS = ("steps.music_analysis", "steps.music_removal")
 NOOP_NOTE = "nothing to do at this point"
 
@@ -134,7 +141,7 @@ def variant_overrides(variant, stop_after=None, out_root=None):
             "denoise_pre_separation": variant.get("spec_pre_separation") or "none",
             "denoise_pre_asr": variant.get("spec_pre_asr") or "none",
             "job_id": f"exp-{variant['id']}",
-            "stop_after": None if stop_after in (None, "", "none") else stop_after}
+            "stop_after": None if stop_after in (None, "", "none", "all") else stop_after}
     if out_root is not None:
         over["save_path"] = str(Path(out_root) / variant["id"])
     for key, val in (variant.get("set") or {}).items():
@@ -159,7 +166,7 @@ def gate_problem(variant, config, env):
 
 def stage_rank(stop):
     """Position of a stop point; None / "none" runs everything, an unknown one sorts before all."""
-    if stop in (None, "none"):
+    if stop in FULL_STOPS:
         return len(STAGE_ORDER)
     return STAGE_ORDER.index(stop) if stop in STAGE_ORDER else -1
 
@@ -277,6 +284,11 @@ class ResidentRunner:
         self._prefetch_checked = False
         self.discard_partial = None      # main._discard_partial, set by run_sequential
         self.signal = getattr(args, "signal", None)
+        self.claim = bool(getattr(args, "claim", False))
+        self.reclaim_after = float(getattr(args, "reclaim_after", 0.0) or 0.0)
+        # what this copy hands over: its --signal, or (a claim copy without one) its stop point, so claims and
+        # per-file markers always have a stage name; the .done name below stays on --signal alone
+        self.mark = self.signal or (args.stop_after if self.claim else None)
         self.wait_signal = getattr(args, "wait_signal", None)
         self.poll_seconds = float(getattr(args, "poll_seconds", 15.0))
         self.wait_timeout = float(getattr(args, "wait_timeout", 0.0))
@@ -352,7 +364,7 @@ class ResidentRunner:
 
     def _write_signal(self, v, ok, reason=None, stem=None):
         """Producer: .ready_<stage>[.<stem>] (hash of the settings the consumer recomputes) or .failed_<stage>[.<stem>]."""
-        stage, vid = self.signal, v["id"]
+        stage, vid = self.mark, v["id"]
         digest = variant_hash(v, self.args, self.files, stop_after=stage)
         ready = self._signal_path(vid, "ready", stage, stem)
         failed = self._signal_path(vid, "failed", stage, stem)
@@ -369,15 +381,9 @@ class ResidentRunner:
         for stem in (self.stems if self.per_file else [None]):
             self._write_signal(v, ok, reason, stem)
 
-    def _signal_state(self, v, stem=None):
-        """Consumer: ("ready", None), ("failed", reason) or (None, None) for what the producer left.
-
-        The stage looked at is the nearest one before this process that is real work for the variant; when the
-        whole line up to here is a no-op the variant is ready at once.
-        """
-        stage, vid = effective_stage(v, self.wait_signal, self.music), v["id"]
-        if stage is None:
-            return "ready", None
+    def _marker_state(self, v, stage, stem=None):
+        """("ready", None), ("failed", reason) or (None, None): what the producer of `stage` left for v (or one file)."""
+        vid = v["id"]
         digest = variant_hash(v, self.args, self.files, stop_after=stage)
         for kind in ("failed", "ready"):
             try:
@@ -389,6 +395,66 @@ class ResidentRunner:
             if kind == "ready" and data.get("hash") == digest:   # a stale hash is no signal at all
                 return "ready", None
         return None, None
+
+    def _signal_state(self, v, stem=None):
+        """Consumer: ("ready", None), ("failed", reason) or (None, None) for what the producer left.
+
+        The stage looked at is the nearest one before this process that is real work for the variant; when the
+        whole line up to here is a no-op the variant is ready at once.
+        """
+        stage = effective_stage(v, self.wait_signal, self.music)
+        if stage is None:
+            return "ready", None
+        return self._marker_state(v, stage, stem)
+
+    # -- claims: copies of one stage share the files; the copy that creates a file's claim works on it
+    def _claim_path(self, vid, stem):
+        return self.out_root / vid / f".claim_{self.args.stop_after}.{stem}"
+
+    def _take_claim(self, vid, stem, say):
+        """Create the claim atomically (O_EXCL). True when this copy owns the file; another copy's claim gives False.
+        A claim older than --reclaim-after minutes with no ready/failed marker is taken over (logged)."""
+        path = self._claim_path(vid, stem)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        for attempt in (0, 1):
+            try:
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            except FileExistsError:
+                try:
+                    age = self.clock() - path.stat().st_mtime
+                except OSError:
+                    return False
+                if attempt or self.reclaim_after <= 0 or age < self.reclaim_after * 60:
+                    return False
+                holder = _claim_holder(path)
+                path.unlink(missing_ok=True)
+                say(f"[{vid}] {stem}: claim by {holder} is {age / 60:.0f} min old with no result; taking it over")
+                continue
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps({"host": socket.gethostname(), "pid": os.getpid(),
+                                    "time": datetime.now().isoformat(timespec="seconds")}))
+            return True
+        return False
+
+    def _adopt(self, v, unit, state, reason, say):
+        """Another copy settled this file (its ready or failed marker is there): count it here, run nothing."""
+        vid, stem = v["id"], Path(unit[0]).stem
+        self.seen.setdefault(vid, set()).add(stem)
+        if state == "failed":
+            self.failures.setdefault(vid, []).append((unit[0], f"[{vid}] {reason}"))
+        say(f"[{vid}] {Path(unit[0]).name}: {state} by another copy; not run here")
+        if set(self.stems) <= self.seen[vid]:
+            self._finish_variant(v)
+
+    def _write_total_ready(self, v):
+        """The stage's own .ready_<stage> once EVERY file is ready (identical content from every copy that gets here)."""
+        if not all(self._marker_state(v, self.mark, st)[0] == "ready" for st in self.stems):
+            return
+        path = self._signal_path(v["id"], "ready", self.mark)
+        tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+        tmp.write_text(json.dumps({"hash": variant_hash(v, self.args, self.files, stop_after=self.mark),
+                                   "stop_after": self.mark, "time": datetime.now().isoformat(timespec="seconds")}))
+        os.replace(tmp, path)
 
     def prepare(self):
         """Resume check per variant (our own markers, not main's ledger); first manifest."""
@@ -412,7 +478,7 @@ class ResidentRunner:
                         self.say(f"[{vid}] up to date, skipped")
                         self.status[vid] = self._assess(v)
                         self.finalized.add(vid)
-                        if self.signal and (self.status[vid] == "ok" or self.args.accept_degraded):
+                        if self.mark and (self.status[vid] == "ok" or self.args.accept_degraded):
                             self._write_signals(v, True)
                 except (ValueError, OSError):
                     pass
@@ -435,12 +501,16 @@ class ResidentRunner:
             (self.out_root / vid).mkdir(parents=True, exist_ok=True)     # a no-op stage ran nothing, so no dir yet
             (self.out_root / vid / self.done_name).write_text(json.dumps(
                 {"hash": variant_hash(v, self.args, self.files), "exit": 0, "status": state}))
-        if self.signal:
+        if self.mark:
             why = self.reasons.get(vid) or "degraded: the filter fell back to unfiltered audio"
             if not self.per_file:
                 self._write_signal(v, kept, why)
             elif state == "degraded" and not kept:    # per-file: ready markers went out as each file finished
-                self._write_signals(v, False, why)    # the filter did not run: nothing of this variant is handed on
+                for st in self.stems:                 # the filter did not run: nothing of this variant is handed on
+                    if not (self.claim and self._marker_state(v, self.mark, st)[0] == "ready"):  # not another copy's
+                        self._write_signal(v, False, why, st)
+        if self.claim and self.per_file and kept and self.mark:
+            self._write_total_ready(v)
         self.status[vid] = state
         self.finalized.add(vid)
         self.say(f"[{vid}] {state.upper() if state != 'ok' else 'ok'} "
@@ -500,12 +570,12 @@ class ResidentRunner:
         stem = self._stem_of(paths)
         if vid not in self.seen:           # first time this process starts it: drop what an earlier run left
             (self.out_root / vid / self.done_name).unlink(missing_ok=True)
-            if self.signal and not self.per_file:
+            if self.mark and not self.per_file:
                 for kind in ("ready", "failed"):
-                    self._signal_path(vid, kind, self.signal).unlink(missing_ok=True)
-        if self.signal and self.per_file:
+                    self._signal_path(vid, kind, self.mark).unlink(missing_ok=True)
+        if self.mark and self.per_file:
             for kind in ("ready", "failed"):
-                self._signal_path(vid, kind, self.signal, stem).unlink(missing_ok=True)
+                self._signal_path(vid, kind, self.mark, stem).unlink(missing_ok=True)
         vargs = copy.copy(args)
         for key, val in variant_overrides(v, self.args.stop_after, self.out_root).items():
             setattr(vargs, key, val)
@@ -537,7 +607,7 @@ class ResidentRunner:
         self.elapsed[vid] = self.elapsed.get(vid, 0) + time.time() - t0
         self.failures.setdefault(vid, []).extend(found)
         self.seen.setdefault(vid, set()).update(Path(p).stem for p in paths)
-        if self.signal and self.per_file:
+        if self.mark and self.per_file:
             if found:
                 self._write_signal(v, False, str(found[0][1]), stem)
             else:
@@ -560,14 +630,15 @@ class ResidentRunner:
         say(f"[{vid}] {Path(unit[0]).name}: {text}")
         self.failures.setdefault(vid, []).extend((p, f"[{vid}] {text}") for p in unit)
         self.seen.setdefault(vid, set()).update(Path(p).stem for p in unit)
-        if self.signal:
+        if self.mark:
             self._write_signal(v, False, text, self._stem_of(unit))
         if set(self.stems) <= self.seen[vid]:
             self._finish_variant(v)
         return [(p, f"[{vid}] {text}") for p in unit]
 
     def _consume(self, pipeline, args, config, group, logger, stages, say):
-        """Run units as their upstream stage signals them, not in plan order; wait while none is ready."""
+        """Run units as their upstream stage signals them (or, with --claim, as this copy claims them), not in plan
+        order; wait while none is ready. A file another copy holds is waited for, never failed here."""
         failures, announced = [], False
         idle_since = self.clock()
         while True:
@@ -575,19 +646,31 @@ class ResidentRunner:
                        for u in self._units(v, group)]
             if not pending:
                 break
-            pick, dead = None, []
+            ready, dead, adopted = [], [], False
             for v, unit in pending:
-                state, why = self._signal_state(v, self._stem_of(unit))
+                stem = self._stem_of(unit)
+                if self.claim:
+                    own, why = self._marker_state(v, self.mark, stem)
+                    if own is not None:
+                        self._adopt(v, unit, own, why, say)
+                        adopted = True
+                        continue
+                state, why = self._signal_state(v, stem) if self.wait_signal else ("ready", None)
                 if state == "failed":
                     dead.append((v, unit, why))
-                elif state == "ready" and pick is None:
-                    pick = (v, unit)
+                elif state == "ready":
+                    ready.append((v, unit))
             if dead:
                 for v, unit, why in dead:
                     if v["id"] not in self.finalized:
                         failures += self._unit_failed(v, unit, f"producer failed: {why}", say)
                 idle_since = self.clock()
                 continue
+            pick = None
+            for v, unit in ready:
+                if not self.claim or self._take_claim(v["id"], self._stem_of(unit), say):
+                    pick = (v, unit)
+                    break
             if pick is not None:
                 v, unit = pick
                 eff = effective_stage(v, self.wait_signal, self.music)
@@ -596,15 +679,22 @@ class ResidentRunner:
                 failures += self._run_variant(v, pipeline, args, config, unit, logger, stages)
                 idle_since, announced = self.clock(), False
                 continue
+            if adopted:
+                idle_since = self.clock()
+                continue
             if self.wait_timeout and self.clock() - idle_since >= self.wait_timeout * 60:
                 for v, unit in pending:
-                    if v["id"] not in self.finalized:
-                        say(f"[{v['id']}] producer never signalled (waited {self.wait_timeout:g} min)")
-                        failures += self._unit_failed(v, unit, "producer never signalled", say)
+                    if v["id"] in self.finalized:
+                        continue
+                    if any(unit is u for _, u in ready):     # upstream ready, another copy holds it: not ours to fail
+                        say(f"[{v['id']}] {Path(unit[0]).name}: still held by another copy; gave up waiting")
+                        continue
+                    say(f"[{v['id']}] producer never signalled (waited {self.wait_timeout:g} min)")
+                    failures += self._unit_failed(v, unit, "producer never signalled", say)
                 break
             if not announced:
                 names = sorted({v["id"] for v, _ in pending})
-                say(f"waiting for the upstream .ready_ marker of: " + ", ".join(names))
+                say("waiting for the upstream .ready_ marker or another copy's claim, of: " + ", ".join(names))
                 announced = True
             self.sleep(self.poll_seconds)
         return failures
@@ -634,7 +724,7 @@ class ResidentRunner:
                     self.reasons[v["id"]], self.status[v["id"]] = why, "skipped"
                     self.say(f"[{v['id']}] SKIPPED: {why}")
             self.gated = True
-        if self.wait_signal:
+        if self.wait_signal or self.claim:
             return self._consume(pipeline, args, config, group, logger, stages, say)
         failures = []
         for v in self.runnable():
@@ -670,7 +760,8 @@ def build_argv(args, input_dir):
     """The sys.argv main.py gets (argv[0] included)."""
     argv = [str(ROOT / "main.py"),
             "--audio_dir", str(input_dir), "--save_path", str(Path(args.out_root) / RESIDENT_DIR),
-            "--env", args.env, "--stop_after", args.stop_after, "--job_id", JOB_ID,
+            "--env", args.env, *(["--stop_after", args.stop_after] if args.stop_after != "all" else []),
+            "--job_id", JOB_ID,
             "--by_stage", "--keep_models", "--no_review_page",
             "--gpu_1", str(args.gpu_1), "--gpu_2", str(args.gpu_2)]
     if args.cache_dir:
@@ -712,7 +803,8 @@ def parse_args(argv=None):
     p.add_argument("--variants", help="variants JSON (default: baseline only)")
     p.add_argument("--out-root", required=True)
     p.add_argument("--env", default="a100")
-    p.add_argument("--stop-after", default="asr")
+    p.add_argument("--stop-after", default="asr",
+                   help="a STAGE, 'all' (the last process: main.py gets no stop_after, it runs to the end) or 'none'")
     p.add_argument("--cache-dir")
     p.add_argument("--resume", action="store_true")
     p.add_argument("--only-ids", default="", help="comma list of variant ids (baseline always runs)")
@@ -749,6 +841,12 @@ def parse_args(argv=None):
     p.add_argument("--per-file", action="store_true", dest="per_file",
                    help="hand over file by file: one run_batch call per (variant, file), small files first, markers "
                         ".ready_<stage>.<stem>; a long file no longer holds back the short ones")
+    p.add_argument("--claim", action="store_true",
+                   help="with --per-file: several copies of this stage (same out-root, other GPU or job) share the "
+                        "files: a copy works on a file only after it creates .claim_<stage>.<stem> first")
+    p.add_argument("--reclaim-after", type=float, default=0.0, dest="reclaim_after", metavar="MINUTES",
+                   help="--claim: take over a claim older than this with no ready/failed marker (0 = never); "
+                        "set it above the longest file run")
     p.add_argument("--minutes-per-file-run", type=float, default=20.0, help=argparse.SUPPRESS)
     args = p.parse_args(argv)
     if args.mode == "overlap":
@@ -759,8 +857,8 @@ def parse_args(argv=None):
     if not m or not 1 <= int(m.group(1)) <= int(m.group(2)):
         p.error(f"--shard expects K/N with 1 <= K <= N, got {args.shard!r}")
     args.shard = (int(m.group(1)), int(m.group(2)))
-    if args.stop_after != "none" and args.stop_after not in STAGE_ORDER:
-        p.error(f"--stop-after {args.stop_after!r} is not a stage; known: {', '.join(STAGE_ORDER)}, none")
+    if args.stop_after not in ("none", "all") and args.stop_after not in STAGE_ORDER:
+        p.error(f"--stop-after {args.stop_after!r} is not a stage; known: {', '.join(STAGE_ORDER)}, none, all")
     if args.signal and args.signal != args.stop_after:
         p.error(f"--signal {args.signal!r} must equal --stop-after {args.stop_after!r}")
     if args.wait_signal and (args.wait_signal not in STAGE_ORDER
@@ -768,6 +866,10 @@ def parse_args(argv=None):
         p.error(f"--wait-signal {args.wait_signal!r} must be a stage earlier than --stop-after {args.stop_after!r}")
     if args.poll_seconds <= 0 or args.wait_timeout < 0:
         p.error("--poll-seconds must be > 0 and --wait-timeout >= 0")
+    if args.claim and not args.per_file:
+        p.error("--claim needs --per-file (copies share files one at a time)")
+    if args.reclaim_after < 0:
+        p.error("--reclaim-after must be >= 0")
     args.out_root = str(Path(args.out_root).resolve())
     if args.music == "off":
         args.global_set = list(MUSIC_OFF_SETS) + list(args.global_set)
@@ -775,6 +877,14 @@ def parse_args(argv=None):
         # written with music removal on must never be read by a run with it off.
         args.cache_dir = args.cache_dir or NO_MUSIC_CACHE_DIR
     return args
+
+
+def _claim_holder(path):
+    try:
+        data = json.loads(path.read_text())
+        return f"{data.get('host', '?')} pid {data.get('pid', '?')}"
+    except (OSError, ValueError):
+        return "an unknown copy"
 
 
 def role_of(args):
@@ -789,7 +899,8 @@ def print_dry_run(args, variants, files, skipped):
     print(f"\nrole: {role_of(args)}   shard: {args.shard[0]}/{args.shard[1]}   "
           f"signal: {args.signal or '-'}   wait-signal: {args.wait_signal or '-'}"
           + (f" (poll {args.poll_seconds:g}s, timeout {args.wait_timeout:g} min)" if args.wait_signal else "")
-          + f"   per-file: {'yes' if args.per_file else 'no'}")
+          + f"   per-file: {'yes' if args.per_file else 'no'}"
+          + ("   claim" if args.claim else "") + (f" (reclaim after {args.reclaim_after:g} min)" if args.reclaim_after else ""))
     print("this process owns: " + (", ".join(v["id"] for v in variants if v["id"] in owned) or "nothing"))
     input_dir = Path(args.out_root) / RESIDENT_DIR / "input_<timestamp>"
     print("\nmain.py argv (one process, models kept):")

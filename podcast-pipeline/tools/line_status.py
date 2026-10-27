@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Where is each variant in the 6-process line?  python tools/line_status.py OUT_DIR
+"""Where is each variant in the line of processes?  python tools/line_status.py OUT_DIR
 
 One row per variant, one column per hand-over of the line (the .ready_<stage> files the processes write for
 each other); `ok` = handed over, `FAIL` = the stage failed (reason below the table), `.` = not yet, `-` = nothing
 to do for this variant at that stage (no filter chain there). With --per-file the markers are per file
-(.ready_<stage>.<stem>): `ok` when every file has it, `2/3` while only some do. The last line of each
-process's log is shown underneath, so a process that is waiting says what it waits for.
+(.ready_<stage>.<stem>): `ok` when every file has it, `2/3` while only some do. The last column `done` is the
+final process (--stop-after all) writing .done. Files a copy of a stage holds (--claim) are listed under `claims`
+with the host and pid of the copy. The last line of each process's log is shown underneath, so a process that is
+waiting says what it waits for.
 """
 import importlib.util
 import json
@@ -13,8 +15,10 @@ import sys
 import time
 from pathlib import Path
 
-STAGES = ("denoise", "diarization", "denoise_pre_separation", "separation", "denoise_pre_asr")
-HEAD = ("music+denoise1", "diarization", "denoise2", "separation", "denoise3", "asr")
+STAGES = ("denoise", "diarization", "denoise_pre_separation", "separation_plan", "separation", "denoise_pre_asr",
+          "asr", "conversation_selection")
+HEAD = ("music+denoise1", "diarization", "denoise2", "separation_plan", "separation", "denoise3", "asr", "llm",
+        "done")
 
 
 def age(path):
@@ -76,9 +80,35 @@ def _reason(path):
         return "?"
 
 
-def asr_cell(vdir):
+def asr_cell(vdir, stems=()):
+    """The asr process signals .ready_asr (per file or whole); a run that stopped at asr writes .done.asr."""
+    done = vdir / ".done.asr"
+    if done.is_file():
+        return f"ok {age(done)}", None
+    return cell(vdir, "asr", stems)
+
+
+def done_cell(vdir):
     done = vdir / ".done"
     return f"ok {age(done)}" if done.is_file() else "."
+
+
+def claims(out):
+    """(variant, stage, stem, holder text or None when finished) for every .claim_<stage>.<stem> file."""
+    rows = []
+    for vdir in sorted(p for p in out.iterdir() if p.is_dir() and not p.name.startswith(("_", ".", "lanes"))):
+        for c in sorted(vdir.glob(".claim_*")):
+            stage, _, stem = c.name[len(".claim_"):].partition(".")
+            if (vdir / f".ready_{stage}.{stem}").is_file() or (vdir / f".failed_{stage}.{stem}").is_file():
+                rows.append((vdir.name, stage, stem, None))
+                continue
+            try:
+                who = json.loads(c.read_text())
+                holder = f"{who.get('host', '?')} pid {who.get('pid', '?')}"
+            except (OSError, ValueError):
+                holder = "(writing)"
+            rows.append((vdir.name, stage, stem, f"held by {holder}, {age(c)} ago"))
+    return rows
 
 
 def last_lines(out):
@@ -111,18 +141,24 @@ def render(out):
         cells = []
         entry = entries.get(vid)
         for st in STAGES:
-            if entry is not None and "chain" in entry and rr.is_noop(entry, st, music):
-                cells.append("-")
-                continue
-            c, why = cell(vdir, st, stems)
+            if st == "asr":
+                c, why = asr_cell(vdir, stems)
+            elif entry is not None and "chain" in entry and rr.is_noop(entry, st, music):
+                c, why = "-", None
+            else:
+                c, why = cell(vdir, st, stems)
             cells.append(c)
             if why:
                 problems.append((vid, why))
-        cells.append(asr_cell(vdir))
+        cells.append(done_cell(vdir))
         lines.append(f"{vid:<{width}}  " + "  ".join(f"{c:<14}" for c in cells))
     if problems:
         lines.append("\nfailures:")
         lines += [f"  {v}: {why}" for v, why in problems]
+    held = [r for r in claims(out) if r[3]]
+    if held:
+        lines.append("\nclaims (file held by a copy of its stage):")
+        lines += [f"  {v:<{width}} {st:<14} {stem}: {who}" for v, st, stem, who in held]
     lines.append("\nlast log line of each process:")
     for name, when, text in last_lines(out):
         lines.append(f"  {name:<18} {when:<9} {text}")

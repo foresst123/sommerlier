@@ -73,3 +73,37 @@ def test_music_profile_keeps_raw_in_the_expected_set(tmp_path, capsys):
     audio, var, out = build(tmp_path)
     assert run(audio, var, out, "--music", "profile") == 1
     assert "NOT COMPLETE  raw" in capsys.readouterr().out
+
+
+def line_run(out, ids=("none", "p1", "p3"), stems=("a", "b")):
+    """Markers and .done of a line run that reached the final process, for every variant and file."""
+    for vid in ids:
+        vd = out / vid
+        vd.mkdir(parents=True, exist_ok=True)
+        (vd / ".done").write_text("{}")
+        for st in stems:
+            for stage in ("separation_plan", "conversation_selection"):
+                (vd / f".ready_{stage}.{st}").write_text("{}")
+            sel = vd / st / "07d_conversation_selection"
+            sel.mkdir(parents=True, exist_ok=True)
+            (sel / "selection.json").write_text(json.dumps([{"start": 0, "end": 1}]))
+
+
+def test_line_run_with_new_stages_is_complete(tmp_path, capsys):
+    audio, var, out = build(tmp_path)
+    line_run(out)
+    assert run(audio, var, out) == 0
+    assert "3/3 variants complete" in capsys.readouterr().out
+
+
+def test_missing_new_stage_handover_or_final_done_is_reported(tmp_path, capsys):
+    audio, var, out = build(tmp_path)
+    line_run(out)
+    (out / "p1" / ".ready_separation_plan.b").unlink()
+    (out / "p3" / ".done").unlink()
+    (out / "none" / ".failed_conversation_selection.a").write_text(json.dumps({"reason": "llm oom"}))
+    assert run(audio, var, out) == 1
+    text = capsys.readouterr().out
+    assert "b: separation_plan hand-over missing" in text
+    assert "final process did not finish" in text
+    assert "a: conversation_selection failed" in text
