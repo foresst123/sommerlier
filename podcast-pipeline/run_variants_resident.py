@@ -441,7 +441,7 @@ class ResidentRunner:
             old = {e["id"]: e for e in prior.get("variants") or [] if isinstance(e, dict) and "id" in e}
             # write_manifest only writes OUR_ROOT/variants_manifest.json: build the entries in a scratch dir
             # whose variant dirs link to the real ones, so out_dir and files point at the real output.
-            with tempfile.TemporaryDirectory(dir=out, prefix=".manifest_") as scratch:
+            with tempfile.TemporaryDirectory(dir=out, prefix=".manifest_", ignore_cleanup_errors=True) as scratch:
                 for v in mine:
                     os.symlink((out / v["id"]).resolve(), Path(scratch) / v["id"])
                 r.write_manifest(scratch, mine, set(self.stems), self.status, self.reference,
