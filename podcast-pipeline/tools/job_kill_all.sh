@@ -9,8 +9,8 @@
 set -uo pipefail
 PATTERN='run_variants_resident\.py|_worker\.py|VLLM::EngineCore|multiprocessing\.resource_tracker'
 list() {
-    ps -u "$(id -un)" -o pid=,ppid=,etime=,cmd= | awk -v me="$$" -v pat="$PATTERN" \
-        '$1 != me && $2 != me && $0 ~ pat && $0 !~ /job_kill_all/ {print}'
+    ps -u "$(id -un)" -o pid=,ppid=,etime=,cmd= | PAT="$PATTERN" awk -v me="$$" \
+        '$1 != me && $2 != me && $0 ~ ENVIRON["PAT"] && $0 !~ /job_kill_all/ {print}'
 }
 procs=$(list)
 if [ -z "$procs" ]; then echo "no pipeline processes of $(id -un) on $(hostname)"; exit 0; fi
