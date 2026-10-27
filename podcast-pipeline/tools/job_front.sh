@@ -16,6 +16,7 @@
 #         FINAL=$OUT/final    where the all processes write the final dataset: <FINAL>/lhotse/manifest.jsonl.gz (one
 #                             Lhotse manifest of the whole run) and the conversations of each recording in <FINAL>/
 #         VARIANTS, ENV_NAME=a100, CONDA_ENV=som, CACHE, DRY=1, FORCE=1 (stop the earlier processes first)
+#         AUDIO_SEPARATOR_MODEL_DIR: rf_crowd checkpoints; found by tools/denoise_env.sh when unset
 #         RECLAIM_AFTER, WAIT_TIMEOUT (minutes, 0 = off): see tools/job_common.sh
 set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -23,6 +24,14 @@ source "$HERE/tools/job_common.sh"
 SIDON_WORKERS=${SIDON_WORKERS:-2}
 PLAN_REPLICAS=${PLAN_REPLICAS:-1}
 job_init front
+# rf_crowd needs its checkpoint folder: without AUDIO_SEPARATOR_MODEL_DIR every file falls back and is marked failed
+if [ -z "${AUDIO_SEPARATOR_MODEL_DIR:-}" ]; then
+  set +u; pushd "$HERE" >/dev/null; source tools/denoise_env.sh || true; popd >/dev/null; set -u
+fi
+if [ -z "${AUDIO_SEPARATOR_MODEL_DIR:-}" ] && [ -z "${DRY:-}" ]; then
+  echo "AUDIO_SEPARATOR_MODEL_DIR is not set and tools/denoise_env.sh found no rf_crowd checkpoint; export it, or run: source tools/denoise_env.sh --download" >&2
+  exit 2
+fi
 FINAL=$(realpath -m "${FINAL:-$OUT/final}")
 case "$FINAL" in *\"*|*\\*) echo "FINAL must not contain a double quote or a backslash, got: $FINAL" >&2; exit 2 ;; esac
 # all writes the final root: --set outputs.clean_two_channel_dir (JSON string, shell-quoted) comes after the
