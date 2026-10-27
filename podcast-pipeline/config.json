@@ -292,7 +292,9 @@
         "min_cluster_size": 11,
         "clust_th": 0.5,
         "asr_models": [
-          "qwen3"
+          "qwen3",
+          "whisper",
+          "phowhisper"
         ]
       },
       "audio_quality": {
