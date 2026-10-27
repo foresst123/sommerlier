@@ -3,7 +3,7 @@
 The resident refinement LLM now finds semantic conversation stretches directly
 from large overlapping transcript windows. `utils.conversation_selection` no
 longer decides the blocks first; it validates and scores each range proposed by
-the model (duration, exactly two speakers, seams, noise, turns and quality), then
+the model (duration, exactly two speakers, break points, turns and quality), then
 this service writes the audio and JSON sidecars.
 
 The model is the semantic finder, not the final authority: it proposes line
@@ -79,7 +79,7 @@ from utils.conversation_events import (
     category_is_plausible,
     decide_roles, event_counts, label_events, tags_of)
 from utils.conversation_selection import (
-    Candidate, ConversationSelectionConfig, ConversationSelectionFinder,
+    BACKCHANNELS, Candidate, ConversationSelectionConfig, ConversationSelectionFinder,
     PASSTHROUGH_SIM, bad_separation_positions,
     has_complete_word_alignment, pick_non_overlapping, review_flags_of, shortlist)
 from utils.llm_batches import ask_in_batches, reply_budget
@@ -87,7 +87,7 @@ from utils.llm_json import clean_reply, is_cut_in_thought, is_readable, objects_
 from utils.transcript_windows import line_number
 
 # Bump when the prompt or the acceptance rules change.
-CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v15-no-howto"
+CONVERSATION_EXPORT_PROMPT_VERSION = "conversation-export-v16-lean"
 CONVERSATION_SELECTION_CHECKPOINT_VERSION = 1
 
 _TEMPLATE_SLACK_TOKENS = 64
@@ -115,7 +115,7 @@ _EXAMPLE_TOPICS = {_topic_key(_EXAMPLE_GOOD["topic"]), _topic_key(_EXAMPLE_BAD["
 # from the window, and is refused.
 _FINDER_EXAMPLE_TOPICS = {_topic_key(t) for t in (
     "nuôi mèo và chi phí", "chuyến xe đêm đi Đà Lạt", "tự học tiếng Anh",
-    "kể chuyện khởi nghiệp một chiều")}
+    "kể chuyện khởi nghiệp một chiều", "bàn về bài toán tài chính")}
 
 # Summaries of the worked examples in CONVERSATION_FINDER_SYSTEM_PROMPT. A kept region
 # whose summary is one of these was copied from the prompt, so it is stored as null.
@@ -128,10 +128,22 @@ _FINDER_EXAMPLE_SUMMARIES = (
 )
 _EXAMPLE_SUMMARY_KEYS = {_topic_key(t) for t in _FINDER_EXAMPLE_SUMMARIES}
 
+def _clock_seconds(clock: str) -> int:
+    minutes, seconds = clock.split(":")
+    return int(minutes) * 60 + int(seconds)
+
+
 def _example_lines(rows):
-    return "\n".join(
-        f"[{n}] {t} (d={d:.1f}s) {who} {{ov={ov:.2f}s flags={flags}}}: {text}"
-        for n, (t, d, who, ov, flags, text) in enumerate(rows, start=1)) + "\n"
+    """Example lines in the finder's own format; gap is the pause from the line before."""
+    out, previous_end = [], None
+    for n, (span, d, who, ov, hard, text) in enumerate(rows, start=1):
+        clock_a, clock_b = span.split("-")
+        gap = "" if previous_end is None else (
+            f" gap={_clock_seconds(clock_a) - previous_end:.2f}s")
+        mark = "" if hard == "-" else f" hard={hard}"
+        out.append(f"[{n}] {span} (d={d:.1f}s) {who} ov={ov:.2f}s{gap}{mark}: {text}")
+        previous_end = _clock_seconds(clock_b)
+    return "\n".join(out) + "\n"
 
 
 def _example_region(**fields):
@@ -158,7 +170,7 @@ _FINDER_EXAMPLES = (
     "Ví dụ 2 - backchannel: A giữ lượt, B chỉ đệm \"ừ\" chồng lên (dòng 3), không ai bị cắt:\n"
     + _example_lines([
         ("0:00-0:09", 9.0, "B", 0.0, "-", "bạn kể mình nghe lần đầu đi Đà Lạt đi"),
-        ("0:10-0:44", 34.0, "A", 0.0, "-", "lần đó mình đi xe khách đêm, tới nơi sáu giờ sáng trời lạnh lắm, phải mua vội cái áo"),
+        ("0:10-0:44", 34.0, "A", 0.8, "-", "lần đó mình đi xe khách đêm, tới nơi sáu giờ sáng trời lạnh lắm, phải mua vội cái áo"),
         ("0:25-0:26", 0.8, "B", 0.8, "-", "ừ"),
         ("0:45-0:51", 6.0, "B", 0.0, "-", "rồi sau đó bạn đi đâu"),
         ("0:52-1:12", 20.0, "A", 0.0, "-", "mình lên đồi chè ngắm mặt trời mọc, đẹp nhất chuyến đi"),
@@ -171,7 +183,7 @@ _FINDER_EXAMPLES = (
         role_conf=0.6, role_why="B hỏi, A kể", interruptions=[],
         summary=_FINDER_EXAMPLE_SUMMARIES[1]) + "]\n"
     "\n"
-    "Ví dụ 3 - turn_by_turn, và một dòng lỗi tách giọng (flags=bad_separation) là seam: loại dòng đó, mỗi bên là một vùng riêng:\n"
+    "Ví dụ 3 - turn_by_turn, và một dòng lỗi tách giọng (hard=bad_separation) là điểm ngắt: loại dòng đó, mỗi bên là một vùng riêng:\n"
     + _example_lines([
         ("0:00-0:08", 8.0, "A", 0.0, "-", "bạn tự học tiếng Anh bằng cách nào"),
         ("0:09-0:20", 11.0, "B", 0.0, "-", "mình xem phim phụ đề tiếng Anh mỗi tối"),
@@ -225,7 +237,7 @@ _FINDER_EXAMPLES = (
 )
 
 CONVERSATION_FINDER_SYSTEM_PROMPT = (
-    """Bạn là bộ PHÂN VÙNG + CHỌN đoạn hội thoại tiếng Việt để tạo dữ liệu huấn luyện full-duplex: một trợ lý (assistant) trò chuyện với một người dùng (user), có thể nói chen, ngắt lời, đệm lời. Bạn nhận một cửa sổ transcript dài (sau diarization + ASR), có thể có nhiều người nói, và chọn các đoạn HAI NGƯỜI trao đổi qua lại liền mạch, SẠCH về nhãn người nói và nội dung. Dữ liệu sạch quan trọng hơn số lượng.
+    """Bạn là bộ PHÂN VÙNG + CHỌN đoạn hội thoại tiếng Việt để tạo dữ liệu huấn luyện full-duplex: một trợ lý (assistant) trò chuyện với một người dùng (user), có thể nói chen, ngắt lời, đệm lời. Bạn nhận một cửa sổ transcript dài (sau diarization + ASR), có thể có nhiều người nói. Có HAI việc: (1) nhận ra nhãn người nói sai; (2) chọn đúng các đoạn HAI NGƯỜI trao đổi qua lại liền mạch. Dữ liệu sạch quan trọng hơn số lượng.
 
 ## NHIỆM VỤ
 Chia TOÀN BỘ dòng 1..N thành các vùng liên tiếp theo mạch hội thoại, mỗi vùng keep=true hoặc keep=false.
@@ -234,43 +246,50 @@ Chia TOÀN BỘ dòng 1..N thành các vùng liên tiếp theo mạch hội tho�
 - Chia theo mạch, không chia vụn từng dòng. Tách khi mạch đứt hoặc vùng dài hơn {max_seconds}s; gộp ý liền mạch để đạt {min_seconds}-{max_seconds}s.
 - Tối đa {max_proposals} vùng; nếu cần, gộp các vùng keep=false liền nhau.
 
-## DỮ LIỆU MỖI DÒNG
-[số dòng] start-end (d=giây của chính dòng đó) NGƯỜI {thông số}: nội dung
-NGƯỜI là nhãn A/B/C... chỉ để phân biệt người nói. Thông số đo từ pipeline:
-- gap (âm = overlap thời gian), ov (giây overlap với người khác).
-- noise (p90 gộp), ns/ne/nr (noise_speech/env/room), noisy (tỷ lệ frame vượt ngưỡng), run (chuỗi noise liên tục dài nhất), music (tỷ lệ bị music-patch): thấp là sạch.
-- bss=1: có dùng separation; unsep: tỷ lệ chưa tách được.
-- seam_before, seam_inside, flags: cảnh báo kỹ thuật. review: cờ rà soát transcript; không có review= là sạch.
-Validator đo lại chính xác (noise <= {noise_max}, ns <= {noise_speech_max}, ne <= {noise_env_max}, nr <= {noise_room_max}, music <= {music_patched_max}, noisy < {noisy_share_max}, run < {noisy_run_seconds}s). Bạn không tính lại từng dòng, chỉ tránh dòng vượt xa ngưỡng.
+## ĐỊNH NGHĨA HỘI THOẠI
+Hội thoại hợp lệ là một đoạn liên tục có ĐÚNG HAI người nói VỚI NHAU: hỏi và đáp, trao đổi hoặc phản hồi lẫn nhau về cùng một chủ đề, mỗi người ít nhất {min_turns_each} lượt thật. Đoạn mở ở đầu một ý (câu hỏi, câu mở chủ đề, lời chào) và kết ở cuối một ý (câu trả lời trọn, kết luận, chuyển sang chủ đề khác); người nghe hiểu được mà không cần ngữ cảnh ngoài đoạn.
+KHÔNG phải hội thoại: một người nói còn người kia chỉ đệm lời; hai người cùng nói với khán giả chứ không nói với nhau (lời dẫn, quảng cáo, intro, outro); hai đoạn không liên quan bị ghép; đoạn có người thứ ba.
 
-## CHỖ PHẢI NGẮT (đặt ngoài mọi vùng keep=true, tách vùng tại đó)
-- Cờ CỨNG: flags có bad_separation (lỗi tách giọng, không dùng được) hoặc review_flag_*; review=speaker_turn / speaker_phrase / asr_hallucination / asr_garbage. Dòng cờ cứng là seam: hai bên của nó là hai hội thoại riêng, không nối lại.
-- seam_before=1; seam_inside=1 (không được nằm trong vùng keep=true).
-- review=not_vietnamese; người thứ ba (tách tại đó hoặc co biên để cứu phần hai người); quảng cáo, intro, outro; độc thoại dài không ai đáp; mạch đứt hoặc hai đoạn không liên quan bị ghép.
-- Noise/music xấu nằm giữa: tách quanh chúng nếu còn giữ được mạch, không thì keep=false. Im lặng vài giây không làm hỏng hội thoại nếu cùng mạch.
-- Đổi chủ đề được phép khi một người chủ động đổi và người kia theo sang; không được khi do seam, music hoặc ghép hai đoạn không liên quan.
+## DỮ LIỆU MỖI DÒNG
+[số dòng] m:ss-m:ss (d=giây) NGƯỜI ov=giây gap=giây[ hard=lý do]: nội dung
+- m:ss-m:ss: mốc bắt đầu và kết thúc của dòng. d: độ dài của chính dòng đó (kết thúc trừ bắt đầu).
+- NGƯỜI: nhãn A/B/C... chỉ để phân biệt người nói.
+- ov: số giây dòng này chồng tiếng với người khác. gap: khoảng lặng từ dòng trước tới dòng này; số âm là hai dòng nói chồng nhau. Dòng đầu cửa sổ không có gap.
+- hard=...: dòng có lỗi cứng, là ĐIỂM NGẮT (mục dưới). Không có hard= là dòng sạch.
+
+## ĐIỂM NGẮT (đặt ngoài mọi vùng keep=true, tách vùng tại đó)
+- Dòng có hard=bad_separation (lỗi tách giọng, không dùng được), hard=review_flag_speaker_turn, hard=review_flag_speaker_phrase, hard=review_flag_asr_hallucination, hard=review_flag_asr_garbage hoặc hard=invalid_*: đó là điểm ngắt. Hai bên của nó là hai hội thoại riêng, không nối lại.
+- Quảng cáo, intro, outro; mạch đứt hoặc hai đoạn không liên quan bị ghép.
+- Đổi chủ đề được phép khi một người chủ động đổi và người kia theo sang; không được khi do hai đoạn không liên quan bị ghép.
 - Không đặt biên ngay tại chỗ ngắt lời: giữ ít nhất {context_turns} lượt trước và {context_turns} lượt sau chỗ ngắt lời trong cùng vùng.
 
 ## KIỂM TRA NGỮ NGHĨA (nhãn và chữ do máy tạo, đôi khi sai)
 Bạn không nghe được audio; hãy đọc như người hiểu hội thoại để tìm dòng NGHI NGỜ:
 - Nhãn sai: nội dung chỉ hợp với người kia (tự hỏi tự đáp; câu hỏi và câu đáp cùng nhãn; xưng hô đảo so với các lượt khác của cùng nhãn; lời đệm lẫn trong lượt dài của chính người đang nói).
 - Nhãn nhảy giữa câu: người kia nối tiếp câu dở của người trước là BÌNH THƯỜNG nếu hai dòng nói chồng nhau (ov>0 hoặc gap âm), hoặc người trước phản hồi sau đó (vâng, ừ, đúng rồi, cười, nói tiếp ý mình). Chỉ NGHI NGỜ khi các mảnh rất ngắn ("hình.", "rất là nhiều.") đảo nhãn liên tục trên cùng một câu, ov=0 và không ai phản hồi.
-- Chữ sai nặng: câu vô nghĩa, từ rời rạc; câu trôi chảy nhưng lạc chủ đề; văn mẫu (chào kênh, đăng ký, cảm ơn người xem); cả dòng ngoại ngữ.
+- Chữ sai nặng: câu vô nghĩa, từ rời rạc; câu trôi chảy nhưng lạc chủ đề; văn mẫu (chào kênh, đăng ký, cảm ơn người xem).
 - KHÔNG tính: sai một hai từ, chính tả, thiếu dấu, đồng âm mà vẫn hiểu, ngập ngừng, lặp từ, tiếng cười, tên riêng sai.
-Xử lý: một dòng nghi ngờ thì tách vùng tại đó như seam. Từ hai dòng nghi ngờ trở lên (hoặc nhãn sai/nhảy nhãn kéo dài nhiều lượt) trong một vùng thì không giữ vùng đó; chỉ giữ các đoạn sạch liền nhau nếu còn đủ dài, còn lại keep=false. Phân vân thì coi là nghi ngờ. reason ghi "nhãn nghi sai" hoặc "chữ vô nghĩa" kèm số dòng.
+Xử lý: một dòng nghi ngờ thì tách vùng tại đó như điểm ngắt. Từ hai dòng nghi ngờ trở lên (hoặc nhãn sai/nhảy nhãn kéo dài nhiều lượt) trong một vùng thì không giữ vùng đó; chỉ giữ các đoạn sạch liền nhau nếu còn đủ dài, còn lại keep=false. Phân vân thì coi là nghi ngờ. reason ghi "nhãn nghi sai" hoặc "chữ vô nghĩa" kèm số dòng.
+
+## LƯỢT VÀ LỜI ĐỆM
+Lượt = các dòng liền nhau của cùng một người; lời đệm của người kia chen giữa không cắt lượt. Lời đệm = dòng dưới 1 giây chỉ gồm {backchannels}: không tính là lượt.
+
+## NGƯỜI THỨ BA
+Số người đếm từ nhãn: thấy người thứ ba trong vùng (kể cả một tiếng "ừ") thì co biên hoặc tách, không giữ. Chỉ khi phân vân về độ dài mới nghiêng về keep=true.
+
+## ĐỘ DÀI
+Độ dài tốt nhất {plateau_min}-{plateau_max}s; vùng dài hơn thì tách theo chủ đề con. Bắt buộc {min_seconds}-{max_seconds}s. Thời lượng vùng = kết thúc của dòng cuối trừ bắt đầu của dòng đầu, lấy từ mốc thời gian, không ước lượng theo số dòng.
 
 ## keep=true KHI
-Vùng có tiềm năng làm mẫu hội thoại tốt (validator còn đo lại bằng số liệu, đừng quá bảo thủ vì noise/music hơi xấu):
-- đúng HAI người nói từ start_line đến end_line, mỗi người ít nhất {min_turns_each} lượt nói thật;
+Vùng có tiềm năng làm mẫu hội thoại tốt:
+- đúng HAI người nói từ start_line đến end_line, mỗi người ít nhất {min_turns_each} lượt thật;
 - dòng chảy liên tục, mỗi lượt đáp lại lượt trước; nghe độc lập vẫn hiểu, không bắt đầu giữa ý dở, kết thúc ở ý trọn hoặc cặp hỏi-đáp trọn;
 - nội dung thật (kiến thức, câu chuyện, trao đổi), không phải chào hỏi, quảng cáo, đọc kịch bản;
-- dài {min_seconds}-{max_seconds}s và sạch ngữ nghĩa (mục trên).
+- đúng độ dài ở mục ĐỘ DÀI và không chứa điểm ngắt.
 Ưu tiên vùng có tương tác full-duplex (ngắt lời, đệm lời, nói chồng tự nhiên), không bắt buộc.
-Thời lượng vùng = end của dòng cuối trừ start của dòng đầu, lấy từ mốc thời gian, KHÔNG ước lượng theo số dòng. Thời lượng nói của một người = tổng d các dòng của họ; một người chiếm gần hết thời lượng là độc thoại.
-Khi phân vân: về số người và độ dài thì nghiêng về keep=true (validator kiểm tra lại); về nhãn và nội dung thì LOẠI.
 
 ## keep=false KHI
-Vùng là cầu nối, intro, outro, quảng cáo; quá ngắn, hoặc quá dài không chia được; một người độc thoại; mạch đứt hoặc cụt; hơn hai người không tránh được; nhãn nghi sai hoặc chữ vô nghĩa từ hai dòng trở lên không tách ra được; chất lượng kỹ thuật rõ ràng quá xấu. reason nêu NGẮN GỌN nguyên nhân chính.
+Vùng là cầu nối, intro, outro, quảng cáo; quá ngắn, hoặc quá dài không chia được; mạch đứt hoặc cụt; hơn hai người không tránh được; nhãn nghi sai hoặc chữ vô nghĩa từ hai dòng trở lên không tách ra được; nội dung chỉ là một người nói còn người kia đệm lời. reason nêu NGẮN GỌN nguyên nhân chính.
 
 ## self_contained (chấm dòng chảy hội thoại)
 5 = mở và kết rất tự nhiên, nổi bật (hiếm). 4 = tốt, dùng được (mức thường gặp). 3 = theo dõi được nhưng cụt hoặc mơ hồ hoặc biên chưa đẹp. 1-2 = không dùng được. keep=true chỉ khi self_contained >= {min_semantic}; keep=false vẫn chấm để debug.
@@ -1289,26 +1308,17 @@ class ConversationExportService:
 
     # -- LLM candidate finder ------------------------------------------------------
     def _finder_system_prompt(self) -> str:
-        limits = {
-            "noise_max": self.cfg.noise_max,
-            "noise_speech_max": self.cfg.noise_speech_max,
-            "noise_env_max": self.cfg.noise_env_max,
-            "noise_room_max": self.cfg.noise_room_max,
-            "noisy_share_max": self.cfg.noisy_share_max,
-            "noisy_run_seconds": self.cfg.noisy_run_seconds,
-            "music_patched_max": self.cfg.music_patched_max,
-        }
-        prompt = (CONVERSATION_FINDER_SYSTEM_PROMPT
-                  .replace("{min_seconds}", f"{self.cfg.min_seconds:g}")
-                  .replace("{max_seconds}", f"{self.cfg.max_seconds:g}")
-                  .replace("{min_turns_each}", str(self.cfg.min_turns_each))
-                  .replace("{context_turns}", str(self.cfg.context_turns_around_interruption))
-                  .replace("{min_semantic}", str(self.cfg.min_semantic))
-                  .replace("{max_proposals}", str(self.cfg.finder_max_proposals_per_window))
-                  .replace("{emotion_labels}", ", ".join(EMOTION_LABELS)))
-        for key, value in limits.items():
-            prompt = prompt.replace("{" + key + "}", f"{value:g}")
-        return prompt
+        return (CONVERSATION_FINDER_SYSTEM_PROMPT
+                .replace("{min_seconds}", f"{self.cfg.min_seconds:g}")
+                .replace("{max_seconds}", f"{self.cfg.max_seconds:g}")
+                .replace("{plateau_min}", f"{self.cfg.plateau_min:g}")
+                .replace("{plateau_max}", f"{self.cfg.plateau_max:g}")
+                .replace("{min_turns_each}", str(self.cfg.min_turns_each))
+                .replace("{context_turns}", str(self.cfg.context_turns_around_interruption))
+                .replace("{min_semantic}", str(self.cfg.min_semantic))
+                .replace("{max_proposals}", str(self.cfg.finder_max_proposals_per_window))
+                .replace("{backchannels}", ", ".join(sorted(BACKCHANNELS)))
+                .replace("{emotion_labels}", ", ".join(EMOTION_LABELS)))
 
     @staticmethod
     def _speaker_labels(finder: ConversationSelectionFinder) -> Dict[str, str]:
@@ -1328,27 +1338,18 @@ class ConversationExportService:
         return f"{seconds // 60}:{seconds % 60:02d}"
 
     @staticmethod
-    def _fmt_metric(value, digits: int = 3) -> str:
-        if value is None:
-            return "na"
-        try:
-            return f"{float(value):.{digits}f}"
-        except (TypeError, ValueError):
-            return "na"
-
-    @staticmethod
-    def _review_text(seg) -> str:
-        """Review flags of one segment for the finder; '' when clean or never reviewed."""
+    def _hard_text(finder, pos: int) -> str:
+        """The reasons a line is a break point, e.g. 'bad_separation' or 'review_flag_speaker_phrase:"..."'."""
         parts = []
-        for flag in review_flags_of(seg):
-            kind = str(flag.get("kind"))
-            phrase = " ".join(str(flag.get("phrase") or "").split())
-            if kind == "speaker_phrase" and phrase:
-                if len(phrase) > 24:
-                    phrase = phrase[:23] + "…"
-                parts.append(f'{kind}:"{phrase}"')
-            else:
-                parts.append(kind)
+        for reason in finder.hard_reasons(pos):
+            if reason == "review_flag_speaker_phrase":
+                phrase = next((" ".join(str(f.get("phrase") or "").split())
+                               for f in review_flags_of(finder.segs[pos])
+                               if f.get("kind") == "speaker_phrase"), "")
+                if phrase:
+                    phrase = phrase if len(phrase) <= 24 else phrase[:23] + "…"
+                    reason = f'{reason}:"{phrase}"'
+            parts.append(reason)
         return ",".join(parts)
 
     def _finder_line(self, finder, pos: int, number: int, names: Dict[str, str]) -> str:
@@ -1356,30 +1357,14 @@ class ConversationExportService:
         q = finder.segment_quality(pos)
         text = " ".join(str(seg.text or "").split())
         who = names.get(str(seg.speaker), "?")
-        noise = q.get("noise") or {}
-        by_kind = noise.get("by_kind") or {}
-        flags = ",".join(q.get("hard_flags") or []) or "-"
-        gap = self._fmt_metric(q.get("gap_before"), 2)
-        ov = self._fmt_metric(q.get("cross_overlap_seconds"), 2)
-        music = self._fmt_metric(q.get("music_patched_share"), 3)
-        combined = self._fmt_metric(noise.get("combined_p90"), 3)
-        noisy = self._fmt_metric(noise.get("noisy_frame_share"), 3)
-        run = self._fmt_metric(noise.get("longest_noisy_run_seconds"), 2)
-        ns = self._fmt_metric(by_kind.get("noise_speech"), 3)
-        ne = self._fmt_metric(by_kind.get("noise_env"), 3)
-        nr = self._fmt_metric(by_kind.get("noise_room"), 3)
-        review = self._review_text(seg)
-        meta = (
-            f"gap={gap}s ov={ov}s noise={combined} ns={ns} ne={ne} nr={nr} "
-            f"noisy={noisy} run={run}s music={music} "
-            f"bss={int(bool(q.get('bss')))} unsep={self._fmt_metric(q.get('unseparated_share'), 3)} "
-            f"seam_before={int(bool(q.get('seam_before')))} "
-            f"seam_inside={int(bool(q.get('seam_inside')))} flags={flags}"
-            + (f" review={review}" if review else "")
-        )
         length = max(0.0, float(seg.end) - float(seg.start))
+        gap = q.get("gap_before")
+        gap_part = "" if gap is None else f" gap={float(gap):.2f}s"
+        hard = self._hard_text(finder, pos)
+        hard_part = f" hard={hard}" if hard else ""
         return (f"[{number}] {self._clock(float(seg.start))}-{self._clock(float(seg.end))} "
-                f"(d={length:.1f}s) {who} {{{meta}}}: {text}")
+                f"(d={length:.1f}s) {who} ov={float(q.get('cross_overlap_seconds') or 0.0):.2f}s"
+                f"{gap_part}{hard_part}: {text}")
 
     def _finder_windows(self, finder, names: Dict[str, str]) -> List[Tuple[int, int]]:
         """Token-aware overlapping windows; returns (start, stop) with stop exclusive."""
@@ -1421,20 +1406,13 @@ class ConversationExportService:
         start, stop = window
         lines = [self._finder_line(finder, pos, pos - start + 1, names)
                  for pos in range(start, stop)]
-        first = str(finder.segs[start].index)
-        last = str(finder.segs[stop - 1].index)
-        limits = finder.finder_limits()
         n = len(lines)
         return (
-            f"Cửa sổ transcript #{first}-#{last}, N={n} dòng. "
+            f"Cửa sổ transcript, N={n} dòng. "
             f"BẮT BUỘC phân vùng phủ đủ dòng 1..{n}; không được trả [] nếu N>0. "
-            f"Mỗi vùng phải có keep=true/false và reason.\n"
-            f"Giới hạn kỹ thuật để tham khảo khi đặt biên: noise<={limits['noise_combined_max']:g}, "
-            f"ns<={limits['noise_speech_max']:g}, ne<={limits['noise_env_max']:g}, "
-            f"nr<={limits['noise_room_max']:g}, music<={limits['music_patched_max']:g}, "
-            f"noisy_run<{limits['noisy_run_seconds']:g}s. Validator sẽ kiểm tra chính xác sau.\n\n"
+            f"Mỗi vùng phải có keep=true/false và reason.\n\n"
             + "\n".join(lines) +
-            f"\n\nHãy trả JSON array các vùng liên tiếp phủ chính xác 1..{n}:" )
+            f"\n\nHãy trả JSON array các vùng liên tiếp phủ chính xác 1..{n}:")
     def _finder_per_call(self, messages: List[str]) -> int:
         batch = max(1, int(getattr(self.llm, "batch_size", 1) or 1))
         limit = int(getattr(self.llm, "max_batch_tokens", 0) or 0)
@@ -2398,8 +2376,8 @@ class ConversationExportService:
         `replay_old_replies` on, those windows are re-judged instead of asked again.
         """
         cfg = self.cfg
-        # Segments whose voices were not pulled apart cleanly are dropped before any
-        # conversation is chosen: they act as a seam, so the model builds from clean parts.
+        # Segments whose voices were not pulled apart cleanly are break points: no
+        # conversation is chosen across them, so the model builds from clean parts.
         sorted_segs = sorted(transcripts, key=lambda x: (float(x.start), float(x.end)))
         bad = bad_separation_positions(
             sorted_segs, speech_segments, cfg.overlap_good_min_similarity,
@@ -2420,11 +2398,6 @@ class ConversationExportService:
         # finder no longer destroys context by pre-splitting on silence/third-speaker.
         # It is now the validator/scorer for each model-proposed range.
         report["finder"] = finder.report()   # diagnostics only; not a pre-filter
-        if cfg.require_noise and not finder.noise_measured:
-            # Not measured is not clean, and every proposal would be refused for it.
-            report["skipped"] = "noise_not_measured"
-            self._log(f"[conversation-exports] {base_name}: no noise labels, nothing selected")
-            return selection
         judged = self._find_with_llm(finder, report, replay)
         if report.get("llm_available") is False:
             report["skipped"] = "llm_unavailable"

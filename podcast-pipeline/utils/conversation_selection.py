@@ -1,32 +1,23 @@
 """Validate and score stretches proposed as two-person conversations.
 
-The current export path lets the resident LLM find semantic conversation
-boundaries first. This module then checks the proposed spans against transcript,
-timeline, noise/music and audio-quality constraints. The older rule-based scan
-is retained only for backward compatibility and diagnostics.
+The LLM finder proposes spans; this module validates and scores them against
+transcript constraints. The older rule-based scan is kept only for diagnostics.
 
 What makes a candidate:
 
   * Exactly two speakers, for the whole stretch. A third voice, even a "ừ",
     ends the block -- the corpus wants dialogue, not a panel.
-  * No join. The audio is cut from the recording with its music removed, so a
-    stretch that spans a cut is two pieces of the recording glued together.
-  * No lasting noise. The SSLAM noise track is read per group, and a group
-    staying over its level for `noisy_run_seconds` ends the block there, so a
-    conversation is split around a lawnmower instead of being thrown away whole.
-    Voices in the background are held to the strictest level: they are the ones
-    that break diarization and put words in the transcript nobody said.
+  * No break point inside it: a segment whose voice separation failed, or that
+    carries a transcript review flag, cannot be part of a candidate.
   * `min_seconds`-`max_seconds`, starting and ending on a turn or a pause.
 
-This module is a filter, not a repair: nothing is denoised, because a denoiser
-alters the recording (see utils/noise_map.py). What noise cannot be excluded is
-scored, so a cleaner stretch outranks a dirtier one.
+The pipeline no longer separates music or measures noise, so the noise, music
+and foreign-language settings are still accepted (old profiles load) but have
+no effect.
 
 Where the plan says 300 seconds and a duration score peaking at 90, this uses a
 240 second ceiling and a plateau over 90-180, because the target here is one to
-four minutes. The plan's total of 100 is kept: the SSLAM cleanliness term is
-paid for by lowering turn-taking, duration and interaction (and dropping the
-five points for transcript quality). Weights are configurable.
+four minutes. Weights are configurable and the score is normalised to their sum.
 """
 
 import bisect
@@ -38,7 +29,6 @@ from typing import Dict, List, Optional, Tuple
 
 from algorithms.asr.hallucination import is_hallucination
 from utils.excise import TimelineMap
-from utils.noise_map import dominant_kind
 
 NORMAL, BACKCHANNEL, INVALID = "NORMAL", "BACKCHANNEL", "INVALID"
 
@@ -59,14 +49,15 @@ DEFAULT_WEIGHTS = {
     "interaction": 10.0,
     "continuity": 10.0,
     "speaker_correctness": 20.0,
-    "cleanliness": 20.0,
 }
+# Accepted in old profiles and ignored: the noise term needed the SSLAM track, which is gone.
+LEGACY_WEIGHTS = frozenset({"cleanliness"})
 
 # Mirror transcript_review_service.HARD_FLAG_KINDS (not imported on purpose).
 HARD_REVIEW_KINDS = frozenset({"speaker_phrase", "speaker_turn", "asr_hallucination", "asr_garbage"})
 SOFT_REVIEW_KINDS: frozenset = frozenset()     # no soft kind now: every wrong-speaker flag rejects
-# Judged by share of the excerpt, not by presence: one short "OK"/"yeah" line must not
-# sink a Vietnamese conversation, a stretch of English must.
+# A "not_vietnamese" flag no longer rejects or counts anywhere in selection. The helper
+# stays for utils/persona-side readers (services/persona_profile_service.py).
 RATIO_REVIEW_KINDS = frozenset({"not_vietnamese"})
 MAX_SOFT_PENALTY_FLAGS = 4
 
@@ -85,7 +76,7 @@ def hard_review_kind(seg) -> Optional[str]:
 
 
 def foreign_seconds(seg) -> float:
-    """Seconds of `seg` flagged as not Vietnamese (the whole line), else 0."""
+    """Seconds of `seg` flagged as not Vietnamese (the whole line), else 0. Not used by selection."""
     if any(f.get("kind") in RATIO_REVIEW_KINDS for f in review_flags_of(seg)):
         return max(0.0, float(seg.end) - float(seg.start))
     return 0.0
@@ -135,8 +126,7 @@ class ConversationSelectionConfig:
     review_soft_penalty: float = 5.0
     review_hard_reject: bool = True
     max_soft_flags: int = 2              # more soft flags than this in a range rejects it
-    # Share of an excerpt's duration that review flagged as not Vietnamese
-    # (English or another Latin-script language). Over this the range is rejected.
+    # Accepted for old profiles, no effect: not_vietnamese is not checked any more.
     max_foreign_share: float = 0.10
     # Legacy scan knobs are kept for backward compatibility, but the normal
     # export path now asks the LLM to FIND conversation spans first and uses this
@@ -156,10 +146,9 @@ class ConversationSelectionConfig:
     thinking: bool = False
     max_new_tokens: int = 1536
 
-    # -- the SSLAM signals. Provisional: the levels below come from
-    # noise_map.NOTICEABLE, measured on three indoor recordings, and have not
-    # seen outdoor audio. Calibrate on a real batch before trusting them.
-    require_noise: bool = True           # unmeasured is not clean
+    # -- the SSLAM signals. Accepted so old profiles load, but NO EFFECT: the pipeline
+    # no longer separates music or measures noise, so nothing here gates or scores.
+    require_noise: bool = True
     noisy_run_seconds: float = 2.0
     noise_speech_max: float = 0.10
     noise_env_max: float = 0.15
@@ -210,7 +199,7 @@ class ConversationSelectionConfig:
     weights: Dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self):
-        unknown = set(self.weights) - set(DEFAULT_WEIGHTS)
+        unknown = set(self.weights) - set(DEFAULT_WEIGHTS) - LEGACY_WEIGHTS
         if unknown:
             raise ValueError(f"unknown conversation-export weight(s): {sorted(unknown)}")
         if self.min_seconds > self.max_seconds:
@@ -227,14 +216,8 @@ class ConversationSelectionConfig:
 
     @property
     def resolved_weights(self) -> Dict[str, float]:
-        return {**DEFAULT_WEIGHTS, **{k: float(v) for k, v in self.weights.items()}}
-
-    @property
-    def limits(self) -> Dict[str, float]:
-        """The level at which each noise group is worth noticing."""
-        return {"noise_speech": self.noise_speech_max,
-                "noise_env": self.noise_env_max,
-                "noise_room": self.noise_room_max}
+        return {**DEFAULT_WEIGHTS,
+                **{k: float(v) for k, v in self.weights.items() if k in DEFAULT_WEIGHTS}}
 
     @classmethod
     def from_settings(cls, settings: Optional[dict]) -> "ConversationSelectionConfig":
@@ -443,7 +426,7 @@ def bad_separation_positions(segs, speech_segments, min_similarity: float,
     "same speaker"), when a span it separated matched its speaker below
     `min_similarity`, or when it overlaps another speaker for `overlap_min` or
     more and less than `min_coverage` of that overlap was separated at all. Such a
-    segment is treated like a seam: no conversation is built across it. Without
+    segment is a break point: no conversation is built across it. Without
     separation output there is nothing to judge, so nothing is marked.
     """
     if not speech_segments:
@@ -505,37 +488,25 @@ def _merge_spans(spans):
 class ConversationSelectionFinder:
     """Blocks, candidates and their scores for one recording.
 
-    `segments` are the relabelled transcript segments in the cut timeline;
-    `timeline` is the TimelineMap that produced it; `noise` the NoiseTrack (in
-    the ORIGINAL timeline); `music_map` the MusicMap already expressed in the
-    cut timeline (or None if music was not analysed).
+    `segments` are the transcript segments; `timeline` is kept for callers that
+    still pass it (nothing is cut any more). `noise` and `music_map` are accepted
+    and ignored: the pipeline no longer produces them.
     """
 
     def __init__(self, segments, timeline, noise, music_map, config: ConversationSelectionConfig,
                  bad_separation=None):
         self.cfg = config
-        self.timeline = timeline or TimelineMap()   # nothing cut: an empty map
-        self.noise = noise
-        self.music_map = music_map
+        self.timeline = timeline or TimelineMap()
         self.segs = sorted(segments, key=lambda s: (float(s.start), float(s.end)))
         self.stats = {"segments": len(self.segs), "invalid": Counter(),
                       "breaks": Counter(), "blocks": 0, "blocks_two_speakers": 0,
                       "blocks_other_speaker_count": 0, "blocks_short": 0,
                       "candidates_generated": 0, "candidates_rejected": Counter()}
 
-        self.noise_measured = bool(noise) if noise is not None else False
-        if config.require_noise and not self.noise_measured:
-            self.stats["candidates_rejected"]["noise_not_measured"] += 1
-
-        self._sustained = (noise.sustained_spans(config.limits, config.noisy_run_seconds)
-                           if self.noise_measured else [])
-        self._sus_starts = [a for a, _ in self._sustained]
-        self._sus_ends = [b for _, b in self._sustained]
-        # Used by the LLM finder. Noise/music scoring is not free, and large
+        # Used by the LLM finder: one technical summary per segment, cached because
         # overlapping transcript windows may show the same segment several times.
-        # Cache one deterministic technical summary per segment.
         self._segment_quality_cache: Dict[int, dict] = {}
-        # Segments whose voice separation failed: a seam, nothing is built across them.
+        # Segments whose voice separation failed: a break point, nothing is built across them.
         self.bad_separation: set = set(bad_separation or ())
         self.stats["bad_separation"] = len(self.bad_separation)
 
@@ -550,41 +521,30 @@ class ConversationSelectionFinder:
         self.blocks: List[Tuple[int, int]] = []
         self._build_blocks()
 
-    # -- noise ----------------------------------------------------------------
-    def _originals(self, start, end):
-        return self.timeline.spans_to_original(start, end)
-
-    def _in_lasting_noise(self, start, end) -> bool:
-        """Whether [start, end) of the cut timeline touches a lasting noisy run."""
-        if not self._sustained:
-            return False
-        for a, b in self._originals(start, end):
-            k = bisect.bisect_right(self._sus_ends, a)
-            if k < len(self._sustained) and self._sus_starts[k] < b:
-                return True
-        return False
-
     def set_bad_separation(self, positions) -> None:
         self.bad_separation = set(positions)
         self._segment_quality_cache.clear()
         self.stats["bad_separation"] = len(self.bad_separation)
 
-    # -- blocks ---------------------------------------------------------------
-    def _ineligible(self, i) -> Optional[str]:
+    # -- break points ----------------------------------------------------------
+    def hard_reasons(self, i) -> List[str]:
+        """Every reason segment `i` cannot be part of a candidate; [] when it can."""
         seg = self.segs[i]
+        out = []
         if self.state[i] == INVALID:
-            return f"invalid_{self.reason[i]}"
+            out.append(f"invalid_{self.reason[i]}")
         if i in self.bad_separation:
-            return "bad_separation"
+            out.append("bad_separation")
         if self.cfg.review_hard_reject:
             kind = hard_review_kind(seg)
             if kind:
-                return f"review_flag_{kind}"
-        if self.timeline.crosses_cut(float(seg.start), float(seg.end)):
-            return "seam_inside_segment"
-        if self._in_lasting_noise(float(seg.start), float(seg.end)):
-            return "lasting_noise"
-        return None
+                out.append(f"review_flag_{kind}")
+        return out
+
+    # -- blocks ---------------------------------------------------------------
+    def _ineligible(self, i) -> Optional[str]:
+        reasons = self.hard_reasons(i)
+        return reasons[0] if reasons else None
 
     def _build_blocks(self):
         segs, cfg = self.segs, self.cfg
@@ -608,9 +568,7 @@ class ConversationSelectionFinder:
                 prev = segs[current[-1]]
                 gap = float(seg.start) - float(prev.end)
                 brk = None
-                if self.timeline.cut_between(float(prev.end), float(seg.start)):
-                    brk = "seam"
-                elif gap > cfg.max_silence:
+                if gap > cfg.max_silence:
                     brk = "silence"
                 elif seg.speaker not in speakers and len(speakers) >= 2:
                     brk = "third_speaker"
@@ -618,8 +576,6 @@ class ConversationSelectionFinder:
                       and seg.speaker == last_normal
                       and float(seg.end) - run_start > cfg.max_monologue):
                     brk = "monologue"
-                elif self._in_lasting_noise(float(prev.end), float(seg.start)) and gap > 0:
-                    brk = "lasting_noise_between"
                 if brk:
                     self.stats["breaks"][brk] += 1
                     close()
@@ -649,8 +605,7 @@ class ConversationSelectionFinder:
     def _padded(self, i, j) -> Tuple[float, float]:
         """The span to cut: the turns plus a little air, where that is safe.
 
-        Padding never steps into a neighbouring turn, never crosses a join, and
-        never reaches into a lasting noisy run -- the point of the pad is the
+        Padding never steps into a neighbouring turn -- the point of the pad is the
         breath before a word, not more of what surrounds it.
         """
         start, end = self._span(i, j)
@@ -660,15 +615,11 @@ class ConversationSelectionFinder:
             want = start - pad
             if i > 0:
                 want = max(want, float(self.segs[i - 1].end))
-            want = max(0.0, want)
-            if (want < start and not self.timeline.cut_between(want, start)
-                    and not self._in_lasting_noise(want, start)):
-                lo = want
+            lo = max(0.0, want) if want < start else start
             want = end + pad
             if j + 1 < len(self.segs):
                 want = min(want, float(self.segs[j + 1].start))
-            if (want > end and not self.timeline.cut_between(end, want)
-                    and not self._in_lasting_noise(end, want)):
+            if want > end:
                 hi = want
         return lo, hi
 
@@ -725,31 +676,6 @@ class ConversationSelectionFinder:
             "unseparated_share": round(unseparated / duration, 4) if duration > 0 else 0.0,
         }, speakers
 
-    # -- noise and music of one candidate -------------------------------------------
-    def _noise_of(self, lo, hi) -> Optional[dict]:
-        if not self.noise_measured:
-            return None
-        spans = self._originals(lo, hi)
-        combined = self.noise.score_spans(spans)
-        if combined is None:
-            return None
-        by_kind = self.noise.breakdown(spans)
-        limits = self.cfg.limits
-        return {
-            "combined_p90": combined,
-            "by_kind": by_kind,
-            "noisy_frame_share": self.noise.share_over(spans, limits),
-            "longest_noisy_run_seconds": self.noise.longest_run_over(spans, limits),
-            "dominant_kind": dominant_kind(by_kind),
-        }
-
-    def _patched_share(self, lo, hi) -> Optional[float]:
-        if self.music_map is None or hi <= lo:
-            return None
-        from utils.music_map import MUSIC
-        clean = sum(b - a for a, b in self.music_map.clean_parts(lo, hi, MUSIC))
-        return round(max(0.0, 1.0 - clean / (hi - lo)), 4)
-
     def _cross_speaker_overlap_seconds(self, pos: int) -> float:
         """How much of one segment overlaps any *other* speaker.
 
@@ -785,75 +711,23 @@ class ConversationSelectionFinder:
         duration = max(0.0, end - start)
         prev = self.segs[pos - 1] if pos > 0 else None
         gap_before = None if prev is None else start - float(prev.end)
-        seam_before = bool(prev is not None and
-                           self.timeline.cut_between(float(prev.end), start))
-        seam_inside = bool(self.timeline.crosses_cut(start, end))
-        noise = self._noise_of(start, end)
-        patched = self._patched_share(start, end)
         unseparated = (_unseparated_seconds(seg) / duration) if duration > 0 else 0.0
-
-        hard_flags = []
-        if self.state[pos] == INVALID:
-            hard_flags.append(f"invalid_{self.reason[pos]}")
-        if pos in self.bad_separation:
-            hard_flags.append("bad_separation")
-        if seam_before:
-            hard_flags.append("seam_before")
-        if seam_inside:
-            hard_flags.append("seam_inside")
-        if self._in_lasting_noise(start, end):
-            hard_flags.append("lasting_noise")
-        if noise is not None:
-            for kind, limit in self.cfg.limits.items():
-                value = noise["by_kind"].get(kind)
-                if value is not None and value > limit:
-                    hard_flags.append(kind)
-            if noise["combined_p90"] > self.cfg.noise_max:
-                hard_flags.append("noise_combined")
-            run = noise["longest_noisy_run_seconds"]
-            if run is not None and run >= self.cfg.noisy_run_seconds:
-                hard_flags.append("noisy_run")
-        elif self.cfg.require_noise:
-            hard_flags.append("noise_unmeasured")
-        if patched is not None and patched > self.cfg.music_patched_max:
-            hard_flags.append("music_patched")
-        if self.cfg.review_hard_reject:
-            kind = hard_review_kind(seg)
-            if kind:
-                hard_flags.append(f"review_flag_{kind}")
 
         out = {
             "duration": round(duration, 3),
             "gap_before": None if gap_before is None else round(gap_before, 3),
             "cross_overlap_seconds": self._cross_speaker_overlap_seconds(pos),
-            "seam_before": seam_before,
-            "seam_inside": seam_inside,
             "state": self.state[pos],
             "bss": bool(getattr(seg, "bss", False)),
             "unseparated_share": round(min(1.0, max(0.0, unseparated)), 4),
             "word_aligned": has_complete_word_alignment(seg),
-            "noise": noise,
-            "music_patched_share": patched,
-            "hard_flags": sorted(set(hard_flags)),
+            "hard_flags": self.hard_reasons(pos),
         }
         self._segment_quality_cache[pos] = out
         return out
 
-    def finder_limits(self) -> dict:
-        """Thresholds shown to the LLM so numeric hints are interpretable."""
-        return {
-            "noise_speech_max": self.cfg.noise_speech_max,
-            "noise_env_max": self.cfg.noise_env_max,
-            "noise_room_max": self.cfg.noise_room_max,
-            "noise_combined_max": self.cfg.noise_max,
-            "noisy_share_reference": self.cfg.noisy_share_max,
-            "noisy_run_seconds": self.cfg.noisy_run_seconds,
-            "music_patched_max": self.cfg.music_patched_max,
-            "max_foreign_share": self.cfg.max_foreign_share,
-        }
-
     # -- scoring -------------------------------------------------------------------------
-    def _components(self, metrics, noise, patched) -> Dict[str, float]:
+    def _components(self, metrics) -> Dict[str, float]:
         cfg = self.cfg
         latency = metrics["turn_latency_avg"]
         if latency is None:
@@ -875,15 +749,6 @@ class ConversationSelectionFinder:
             span = max(1e-9, cfg.max_seconds - cfg.plateau_max)
             duration = max(0.0, 1.0 - 0.3 * (d - cfg.plateau_max) / span)
 
-        if noise is None:
-            cleanliness = 0.0           # nobody measured it: not clean
-        else:
-            parts = [1.0 - min(1.0, noise["combined_p90"] / cfg.noise_max),
-                     1.0 - min(1.0, (noise["noisy_frame_share"] or 0.0) / cfg.noisy_share_max)]
-            if patched is not None:
-                parts.append(1.0 - min(1.0, patched / cfg.music_patched_max))
-            cleanliness = sum(parts) / len(parts)
-
         return {
             "turn_taking": turn_taking,
             "duration": duration,
@@ -892,7 +757,6 @@ class ConversationSelectionFinder:
                                      + metrics["backchannel_count"]) / 15.0),
             "continuity": max(0.0, 1.0 - metrics["silence_ratio"] / 0.5),
             "speaker_correctness": max(0.0, 1.0 - 10.0 * metrics["unseparated_share"]),
-            "cleanliness": cleanliness,
         }
 
     def _score(self, components) -> float:
@@ -911,16 +775,13 @@ class ConversationSelectionFinder:
         a monologue to close a block before the LLM ever saw the surrounding
         transcript. That could erase an otherwise good conversation completely.
 
-        The LLM now decides semantic boundaries. This method keeps only the hard
-        data constraints: real/valid segments, no cut seam inside the selected
-        audio, no lasting-noise run, duration, exactly two speakers, enough real
-        turns, acoustic quality and score.
+        The LLM decides semantic boundaries. This method keeps only the hard
+        data constraints: valid segments with no break point, duration, exactly
+        two speakers, enough real turns and score.
         """
         cfg = self.cfg
         if not (0 <= i <= j < len(self.segs)):
             return None, "out_of_range"
-        if cfg.require_noise and not self.noise_measured:
-            return None, "noise_not_measured"
 
         # Every selected segment itself must be usable. A bad segment rejects only
         # this proposed range; it no longer destroys a much larger pre-built block.
@@ -928,16 +789,6 @@ class ConversationSelectionFinder:
             why = self._ineligible(pos)
             if why:
                 return None, why
-
-        # A candidate may cross an ordinary silence or an old rule-block boundary,
-        # but never an edit seam or a sustained noisy region between two segments.
-        for pos in range(i, j):
-            left, right = self.segs[pos], self.segs[pos + 1]
-            a, b = float(left.end), float(right.start)
-            if self.timeline.cut_between(a, b):
-                return None, "seam"
-            if b > a and self._in_lasting_noise(a, b):
-                return None, "lasting_noise_between"
 
         start, end = self._span(i, j)
         if not cfg.min_seconds <= end - start <= cfg.max_seconds:
@@ -950,49 +801,11 @@ class ConversationSelectionFinder:
                     and metrics["turn_count"] < cfg.min_turns_total)):
             return None, "too_few_turns"
 
-        foreign_spans = [
-            (float(seg.start), float(seg.end))
-            for seg in self.segs[i:j + 1]
-            if foreign_seconds(seg) > 0.0
-        ]
-        # Full-duplex segments may overlap. Count wall-clock coverage once;
-        # summing per-speaker durations could exceed the excerpt duration and
-        # reject a mostly Vietnamese range merely because both speakers talked.
-        foreign = _union_seconds(foreign_spans)
-        # A zero-length candidate is normally rejected by the duration gate, but
-        # keep this metric total and deterministic for profiles that explicitly
-        # allow a zero-length range. It has no foreign *duration* to share.
-        duration = end - start
-        foreign_share = foreign / duration if duration > 0 else 0.0
-        # Keep the configured boundary inclusive. The ratio is made from
-        # floating-point timestamps, so an exact 10% span can be represented as
-        # 0.10000000000000002 on some inputs.
-        if foreign_share > cfg.max_foreign_share + 1e-9:
-            return None, "not_vietnamese"
-
         lo, hi = self._padded(i, j)
-        noise = self._noise_of(lo, hi)
-        if cfg.require_noise and noise is None:
-            return None, "noise_not_measured"
-        if noise is not None:
-            for kind, limit in cfg.limits.items():
-                value = noise["by_kind"].get(kind)
-                if value is not None and value > limit:
-                    return None, kind
-            if noise["combined_p90"] > cfg.noise_max:
-                return None, "noise_combined"
-            run = noise["longest_noisy_run_seconds"]
-            if run is not None and run >= cfg.noisy_run_seconds:
-                return None, "noisy_run"
-        patched = self._patched_share(lo, hi)
-        if patched is not None and patched > cfg.music_patched_max:
-            return None, "music_patched"
-
-        components = self._components(metrics, noise, patched)
+        components = self._components(metrics)
         score = self._score(components)
         soft = sum(soft_review_count(s) for s in self.segs[i:j + 1])
         metrics["review_soft_flags"] = soft
-        metrics["foreign_share"] = round(foreign_share, 4)
         if soft > cfg.max_soft_flags:
             return None, "too_many_soft_flags"
         if soft and cfg.review_soft_penalty > 0:
@@ -1003,7 +816,7 @@ class ConversationSelectionFinder:
         return Candidate(
             first=i, last=j, start=start, end=end, pad_start=lo, pad_end=hi,
             speakers=(speakers[0], speakers[1]), metrics=metrics,
-            noise=noise or {}, music_patched_share=patched,
+            noise={}, music_patched_share=None,
             components={k: round(v, 4) for k, v in components.items()},
             score=score, tier=tier_of(score)), None
 
@@ -1026,10 +839,6 @@ class ConversationSelectionFinder:
     def candidates(self) -> List[Candidate]:
         """Every window that passes the gates and clears `min_score`."""
         cfg = self.cfg
-        if cfg.require_noise and not self.noise_measured:
-            # Not checked is not clean; scanning would only reject every window
-            # for the same reason.
-            return []
         ideal = (cfg.plateau_min + cfg.plateau_max) / 2.0
         found: List[Candidate] = []
         for first, last in self.blocks:
@@ -1084,7 +893,7 @@ class ConversationSelectionFinder:
         through the same `evaluate` as any other candidate.
         """
         cfg = self.cfg
-        if not (0 <= i <= j < len(self.segs)) or (cfg.require_noise and not self.noise_measured):
+        if not (0 <= i <= j < len(self.segs)):
             return []
         ideal = (cfg.plateau_min + cfg.plateau_max) / 2.0
         found: List[Candidate] = []
@@ -1109,6 +918,4 @@ class ConversationSelectionFinder:
         out = dict(self.stats)
         for key in ("invalid", "breaks", "candidates_rejected"):
             out[key] = dict(self.stats[key])
-        out["noise_measured"] = self.noise_measured
-        out["lasting_noise_spans"] = len(self._sustained)
         return out

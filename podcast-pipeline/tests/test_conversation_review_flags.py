@@ -104,25 +104,32 @@ def test_word_alignment_no_longer_gates_selection():
 
 # --- the finder line ------------------------------------------------------------
 
-def _line(seg_flags):
+def _line(seg_flags, pos=0):
     segs = _talk()
     segs[0].review_flags = seg_flags
     svc = ConversationExportService(SimpleNamespace(count_tokens=lambda t: len(t.split())))
-    return svc._finder_line(_finder(segs), 0, 1, {A: "A", B: "B"})
+    return svc._finder_line(_finder(segs), pos, 1, {A: "A", B: "B"})
 
 
 def test_finder_line_shows_a_hard_flag_and_a_truncated_phrase():
-    assert "review=speaker_turn" in _line([flag("speaker_turn")])
+    assert "hard=review_flag_speaker_turn" in _line([flag("speaker_turn")])
     line = _line([flag("speaker_phrase", "đúng rồi")])
-    assert 'review=speaker_phrase:"đúng rồi"' in line
+    assert 'hard=review_flag_speaker_phrase:"đúng rồi"' in line
     long = _line([flag("speaker_phrase", "x" * 60)])
-    assert "x" * 60 not in long and 'speaker_phrase:"' in long
+    assert "x" * 60 not in long and 'review_flag_speaker_phrase:"' in long
 
 
-def test_finder_line_omits_review_when_clean():
-    assert "review=" not in _line(None)
-    assert "review=" not in _line([])
+def test_finder_line_omits_hard_when_clean_and_gap_on_the_first_line():
+    assert "hard=" not in _line(None)
+    assert _line(None).startswith("[1] 0:00-0:07 (d=7.0s) A ov=")
+    assert "gap=" not in _line(None)                       # first line has no gap
+    assert "gap=1.00s" in _line(None, pos=1)               # a pause of 1 s from the line before
 
+
+def test_finder_line_names_only_the_break_reasons_and_no_old_measurements():
+    line = _line([flag("speaker_turn")])
+    for word in ("seam", "noise", "music", "nas", "bss", "unsep", "review="):
+        assert word not in line, word
 
 # --- select / write ----------------------------------------------------------------
 
@@ -229,41 +236,23 @@ def test_conversation_json_rows_carry_nonempty_review_flags(tmp_path):
     assert "review_flags" not in rows["00004"]
 
 
-# --- not_vietnamese: rejected by share, not by presence ---------------------------
+# --- not_vietnamese: no longer a reason to refuse or to count ----------------------
 
-def test_a_short_foreign_line_does_not_sink_an_excerpt():
+def test_a_foreign_flag_neither_rejects_nor_is_counted():
     segs = _talk()
-    segs[10].review_flags = [flag("not_vietnamese")]       # 7 s of 120 s, about 6%
-    cand, why = _finder(segs).evaluate(5, 20)
-    assert cand is not None, why
-    assert cand.metrics["foreign_share"] == pytest.approx(7.0 / (cand.end - cand.start), abs=1e-3)
-
-
-def test_too_much_foreign_text_rejects_the_range():
-    segs = _talk()
-    for k in (8, 9, 10):                                   # 21 s of about 120 s, over 10 %
+    for k in (8, 9, 10):                                   # 21 s of about 120 s
         segs[k].review_flags = [flag("not_vietnamese")]
     cand, why = _finder(segs).evaluate(5, 20)
-    assert cand is None and why == "not_vietnamese"
+    assert cand is not None, why
+    assert "foreign_share" not in cand.metrics
 
 
-def test_the_foreign_share_limit_is_configurable():
+def test_the_old_foreign_share_setting_is_accepted_and_has_no_effect():
     segs = _talk()
     for k in (8, 9, 10):
         segs[k].review_flags = [flag("not_vietnamese")]
-    cand, why = _finder(segs, max_foreign_share=0.5).evaluate(5, 20)
+    cand, why = _finder(segs, max_foreign_share=0.0).evaluate(5, 20)
     assert cand is not None, why
-
-
-def test_foreign_share_at_the_limit_is_allowed():
-    segs = _talk()
-    # The selected span is 127 seconds; make the flagged duration exactly 10%.
-    # The gate is intentionally strict only above the configured maximum.
-    segs[5].end = segs[5].start + 12.7
-    segs[5].review_flags = [flag("not_vietnamese")]
-    cand, why = _finder(segs).evaluate(0, 15)
-    assert cand is not None, why
-    assert cand.metrics["foreign_share"] == pytest.approx(0.10)
 
 
 def test_zero_duration_foreign_segment_has_zero_share():
@@ -271,18 +260,6 @@ def test_zero_duration_foreign_segment_has_zero_share():
     segs[3].end = segs[3].start
     segs[3].review_flags = [flag("not_vietnamese")]
     assert foreign_seconds(segs[3]) == 0.0
-
-
-def test_overlapping_foreign_segments_count_wall_clock_time_once():
-    segs = _talk()
-    segs[10].start, segs[10].end = 80.0, 87.0
-    segs[11].start, segs[11].end = 82.0, 89.0
-    segs[10].review_flags = [flag("not_vietnamese")]
-    segs[11].review_flags = [flag("not_vietnamese")]
-    cand, why = _finder(segs).evaluate(5, 20)
-    assert cand is not None, why
-    assert cand.metrics["foreign_share"] == pytest.approx(
-        9.0 / (cand.end - cand.start), abs=1e-3)
 
 
 @pytest.mark.parametrize("value", [-0.01, 1.01, float("nan"), float("inf")])
@@ -296,9 +273,3 @@ def test_not_vietnamese_is_not_a_hard_flag():
     segs[3].review_flags = [flag("not_vietnamese")]
     assert _finder(segs).segment_quality(3)["hard_flags"] == []
 
-
-def test_finder_line_shows_not_vietnamese_and_the_prompt_no_longer_owns_language():
-    from services.conversation_export_service import CONVERSATION_FINDER_SYSTEM_PROMPT as P
-    assert "review=not_vietnamese" in _line([flag("not_vietnamese")])
-    assert "không phải hội thoại tiếng Việt" not in P
-    assert "review=not_vietnamese" in P
