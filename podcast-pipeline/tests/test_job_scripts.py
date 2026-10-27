@@ -205,7 +205,7 @@ def test_no_claim_flag_for_single_copy_stage(tmp_path):
 
 def test_bad_gpus_and_missing_dirs_are_refused(tmp_path):
     r, _ = run_job("front", tmp_path, env={"GPUS": "0"}, out="b1")
-    assert r.returncode == 2 and "two positions" in r.stderr
+    assert r.returncode == 2 and "two GPU ids" in r.stderr
     r, _ = run_job("asr", tmp_path, env={"GPUS": "0 1 2"}, out="b2")
     assert r.returncode == 2
     r, _ = run_job("llm", tmp_path, env={"GPUS": "a b"}, out="b3")
@@ -224,3 +224,24 @@ def test_jobs_drop_the_stage_wavs_unless_asked(tmp_path):
     keep = {**env, "STAGE_AUDIO": "1", "OUT": str(tmp_path / "o2")}
     subprocess.run(["bash", "tools/job_asr.sh"], env=keep, check=True, capture_output=True, text=True)
     assert "--no-stage-audio" not in "".join(p.read_text() for p in (tmp_path / "o2" / "_resident").glob("launch_*/*.sh"))
+
+
+def test_gpus_are_physical_ids_and_no_jobid_is_needed(tmp_path):
+    import os, re, subprocess
+    env = {k: v for k, v in os.environ.items() if k not in ("JOBID", "SLURM_JOB_ID", "CUDA_VISIBLE_DEVICES")}
+    env.update({"AUDIO": str(tmp_path), "OUT": str(tmp_path / "o"), "GPUS": "4 5", "DRY": "1"})   # no NO_SRUN, no JOBID
+    r = subprocess.run(["bash", "tools/job_front.sh"], env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "physical GPU ids" in r.stdout
+    seen = set()
+    for script in (tmp_path / "o" / "_resident").glob("launch_front/*.sh"):
+        text = script.read_text()
+        if "separation_plan" in script.name:
+            continue
+        assert "export JOB_GPU_MODE=physical" in text and "srun" not in text
+        line = next(l for l in text.splitlines() if l.startswith("job_set_gpus"))
+        out = subprocess.run(["bash", "-c", f'source tools/job_common.sh; export JOB_GPU_MODE=physical; '
+                              f'export CUDA_VISIBLE_DEVICES=0,1; {line.split("||")[0]} >/dev/null; printf %s "$CUDA_VISIBLE_DEVICES"'],
+                             capture_output=True, text=True).stdout
+        seen.add(out)
+    assert seen == {"4", "5"}          # one copy per card, the physical id, whatever CUDA_VISIBLE_DEVICES said

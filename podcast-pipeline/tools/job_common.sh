@@ -8,18 +8,23 @@
 #   job_start                           prints the process -> GPU -> stage table; DRY=1 stops there, else starts tmux
 #   job_set_gpus POS...                 used by the process scripts: CUDA_VISIBLE_DEVICES of the job at those positions
 #
-# Positions index the job's own GPU list (GPUS="0 1" by default). Inside srun, Slurm sets CUDA_VISIBLE_DEVICES
-# to the job's cards (maybe "4,5"), so position 1 is the job's second card whatever its number. Outside a job
-# there is no CUDA_VISIBLE_DEVICES and the positions are the physical ids.
+# Without JOBID (the usual way) GPUS are the PHYSICAL GPU ids you pick: GPUS="2 3" runs on cards 2 and 3, no srun.
+# With JOBID=<n> the script runs inside that Slurm job (srun --jobid) and GPUS are positions in the job's own card
+# list: Slurm sets CUDA_VISIBLE_DEVICES to the job's cards (maybe "4,5"), so position 1 is the second one.
 #
-# Knobs (environment): AUDIO, OUT (required), JOBID, GPUS, CACHE, ENV_NAME=a100, CONDA_ENV=som,
+# Knobs (environment): AUDIO, OUT (required), GPUS (physical ids), JOBID (optional, see above), CACHE, ENV_NAME=a100, CONDA_ENV=som,
 #   VARIANTS=tools/variants_production.json, SESSION, DRY=1 (write scripts and print the table only),
-#   NO_SRUN=1 (run without srun, e.g. on a machine with no Slurm), FORCE=1 (reuse a tmux session name).
+#   FORCE=1 (reuse a tmux session name). NO_SRUN is accepted and ignored: srun is only used when JOBID is given.
 
 job_gpu_list() {
     # prints the CUDA_VISIBLE_DEVICES value of the job's cards at the given positions
     local -a job=() out=()
     local p
+    if [ "${JOB_GPU_MODE:-}" = physical ]; then
+        local IFS=,
+        echo "$*"
+        return 0
+    fi
     if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
         IFS=, read -r -a job <<< "$CUDA_VISIBLE_DEVICES"
     fi
@@ -48,7 +53,7 @@ job_set_gpus() {
 job_init() {
     JOB_NAME=$1
     if [ -z "${AUDIO:-}" ] || [ -z "${OUT:-}" ]; then
-        echo "usage: AUDIO=<audio dir> OUT=<out dir> [JOBID=<slurm job id>] [GPUS=\"0 1\"] bash tools/job_${JOB_NAME}.sh" >&2
+        echo "usage: AUDIO=<audio dir> OUT=<out dir> [GPUS=\"0 1\"] [JOBID=<slurm job id>] bash tools/job_${JOB_NAME}.sh" >&2
         exit 2
     fi
     AUDIO=$(realpath -m "$AUDIO")
@@ -57,7 +62,7 @@ job_init() {
     GPUS=${GPUS:-0 1}
     read -r -a GPU_POS <<< "$GPUS"
     if [ "${#GPU_POS[@]}" -ne 2 ]; then
-        echo "GPUS needs two positions in the job (e.g. GPUS=\"0 1\"), got: $GPUS" >&2
+        echo "GPUS needs two GPU ids (e.g. GPUS=\"0 1\"), got: $GPUS" >&2
         exit 2
     fi
     local p
@@ -75,13 +80,8 @@ job_init() {
     SESSION=${SESSION:-job_$JOB_NAME}
     DRY=${DRY:-0}
     FORCE=${FORCE:-0}
-    JOBID=${JOBID:-${SLURM_JOB_ID:-}}
+    JOBID=${JOBID:-}      # only an explicit JOBID turns srun on; an inherited SLURM_JOB_ID does not
     case "$JOBID" in ''|*[!0-9]*) [ -z "$JOBID" ] || { echo "JOBID must be a number, got: $JOBID" >&2; exit 2; } ;; esac
-    if [ "$DRY" != 1 ] && [ -z "$JOBID" ] && [ "${NO_SRUN:-0}" != 1 ] && command -v srun >/dev/null 2>&1; then
-        # a shell outside the job may see other jobs' cards: name the job instead of guessing
-        echo "Slurm is here: say which job to run in.   JOBID=<slurm job id> bash tools/job_${JOB_NAME}.sh   (NO_SRUN=1 to skip)" >&2
-        exit 6
-    fi
     LAUNCH_DIR="$OUT/_resident/launch_$JOB_NAME"
     LOG_DIR="$OUT/_resident/logs"
     mkdir -p "$LAUNCH_DIR" "$LOG_DIR"
@@ -125,6 +125,7 @@ job_proc() {
         if [ "$denoise" = denoise ] || [ "$denoise" = 1 ]; then
             echo "source tools/denoise_env.sh"
         fi
+        if [ -z "$JOBID" ]; then echo 'export JOB_GPU_MODE=physical'; fi
         echo "$gpu_line"
         printf 'echo "[gpu] %s: %s, CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"\n' "$name" "$shown"
         if [ "$gpus" != none ]; then
@@ -181,7 +182,7 @@ job_window_cmd() {
 }
 
 job_start() {
-    echo "== job ${JOB_NAME}: JOBID=${JOBID:-none}  GPUS=\"$GPUS\" (positions in the job)  REPLICAS_PER_GPU=$REPLICAS_PER_GPU  OUT=$OUT"
+    echo "== job ${JOB_NAME}: JOBID=${JOBID:-none}  GPUS=\"$GPUS\" ($( [ -n "$JOBID" ] && echo "positions in job $JOBID" || echo "physical GPU ids"))  REPLICAS_PER_GPU=$REPLICAS_PER_GPU  OUT=$OUT"
     printf '  %-34s %-12s %s\n' process GPU stage
     local i
     for i in "${!PROC_NAMES[@]}"; do

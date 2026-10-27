@@ -31,18 +31,19 @@ Chạy trong `podcast-pipeline/`, mỗi script trong một shell có quyền và
 
 ```bash
 # xem bảng process -> GPU -> stage, không chạy gì
-DRY=1 AUDIO=/data/vi_podcasts_20 OUT=/data/run1 JOBID=18790 bash tools/job_front.sh
+DRY=1 AUDIO=/data/vi_podcasts_20 OUT=/data/run1 GPUS="0 1" bash tools/job_front.sh
 
 # chạy thật (mỗi lệnh một job)
-AUDIO=/data/vi_podcasts_20 OUT=/data/run1 JOBID=18790 bash tools/job_front.sh
-AUDIO=/data/vi_podcasts_20 OUT=/data/run1 JOBID=18791 bash tools/job_asr.sh
-AUDIO=/data/vi_podcasts_20 OUT=/data/run1 JOBID=18792 bash tools/job_llm.sh
+AUDIO=/data/vi_podcasts_20 OUT=/data/run1 GPUS="0 1" bash tools/job_front.sh
+AUDIO=/data/vi_podcasts_20 OUT=/data/run1 GPUS="2 3" bash tools/job_asr.sh
+AUDIO=/data/vi_podcasts_20 OUT=/data/run1 GPUS="4 5" bash tools/job_llm.sh
 ```
 
-Mỗi script mở một phiên tmux (`job_front`, `job_asr`, `job_llm`), một cửa sổ cho mỗi process. Cửa sổ chạy
-`srun --jobid=<JOBID> --overlap --pty bash <script>`. Nếu máy không có Slurm, đặt `NO_SRUN=1`.
+Mỗi script mở một phiên tmux (`job_front`, `job_asr`, `job_llm`), một cửa sổ cho mỗi process. Mặc định chạy
+thẳng trên máy này, **không cần JOBID, không srun**: bạn chỉ chọn GPU bằng `GPUS`. Nếu muốn chạy trong một job Slurm
+cụ thể thì thêm `JOBID=<n>`, khi đó mỗi cửa sổ chạy `srun --jobid=<n> --overlap --pty bash <script>`.
 
-Biến dùng chung: `AUDIO`, `OUT` (bắt buộc), `JOBID`, `GPUS="0 1"`, `CACHE` (mặc định `OUT/_resident/cache`),
+Biến dùng chung: `AUDIO`, `OUT` (bắt buộc), `GPUS="0 1"` (số card vật lý), `JOBID` (tuỳ chọn), `CACHE` (mặc định `OUT/_resident/cache`),
 `ENV_NAME=a100`, `CONDA_ENV=som`, `VARIANTS=tools/variants_production.json`, `SESSION`, `FORCE=1` (dùng lại tên phiên tmux).
 
 Biến riêng của `job_front.sh`:
@@ -57,9 +58,9 @@ Diarization chạy `workers=1` trong mỗi bản sao, vì mỗi bản sao đã c
 
 ## GPU của từng process
 
-`GPUS` là vị trí trong danh sách GPU của job, không phải số card vật lý. Trong srun, Slurm đặt
-`CUDA_VISIBLE_DEVICES` là các card của job (ví dụ `4,5`), và vị trí `1` là card thứ hai của job.
-Ngoài job, vị trí chính là số card. Đổi `GPUS="1 0"` thì bản sao trên vị trí 1 đổi card tương ứng.
+`GPUS` là **số card vật lý** bạn chọn: `GPUS="2 3"` chạy trên card 2 và card 3 (mỗi process được đặt
+`CUDA_VISIBLE_DEVICES` bằng đúng card đó, không phụ thuộc biến môi trường của shell đang đứng). Chỉ khi có `JOBID`
+thì `GPUS` mới là vị trí trong danh sách card của job Slurm đó.
 
 | job | process | bản sao | GPU (vị trí) | stage |
 |---|---|---|---|---|

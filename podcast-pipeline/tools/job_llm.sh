@@ -3,9 +3,9 @@
 # The refinement placement of the profile ("pipelined", split 0.5) puts the model over gpu_1 and gpu_2.
 # It waits for the asr signal of tools/job_asr.sh and writes the conversation_selection signal for tools/job_front.sh.
 #
-#   AUDIO=/data/vi_podcasts_20 OUT=/data/run1 JOBID=18792 bash tools/job_llm.sh
+#   AUDIO=/data/vi_podcasts_20 OUT=/data/run1 GPUS="4 5" bash tools/job_llm.sh
 #
-# Knobs:  GPUS="0 1"  positions in the job's GPU list (gpu_1 = first, gpu_2 = second)
+# Knobs:  GPUS="4 5"  physical GPU ids (JOBID optional: positions in that job) (gpu_1 = first, gpu_2 = second)
 #         VARIANTS, ENV_NAME=a100, CONDA_ENV=som, CACHE, SESSION, DRY=1, NO_SRUN=1, FORCE=1
 set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

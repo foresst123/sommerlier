@@ -3,12 +3,12 @@
 # Each GPU stage has one copy per GPU of the job (copy i sees only GPU i); the copies share the files with --claim.
 # separation_plan is CPU only and builds the windows between diarization and separation.
 #
-#   AUDIO=/data/vi_podcasts_20 OUT=/data/run1 JOBID=18790 bash tools/job_front.sh
+#   AUDIO=/data/vi_podcasts_20 OUT=/data/run1 GPUS="0 1" bash tools/job_front.sh
 #
 # Chain:  denoise -> diarization -> separation_plan -> separation -> all
 #         all waits conversation_selection (tools/job_llm.sh); tools/job_asr.sh waits separation.
 #
-# Knobs:  GPUS="0 1"          positions in the job's GPU list, one copy per position
+# Knobs:  GPUS="0 1"          PHYSICAL GPU ids to use (no srun, no JOBID), one copy per GPU; JOBID=<n> optional: then positions in that Slurm job
 #         REPLICAS_PER_GPU=1  copies per GPU per stage (raise only when VRAM is spare)
 #         PLAN_REPLICAS=1     copies of separation_plan (CPU); more than 1 uses --claim
 #         SIDON_WORKERS=2     Sidon workers per copy (performance.stages.separation.workers_per_gpu)
