@@ -221,6 +221,31 @@ job_start() {
         return 0
     fi
     local pids="$LOG_DIR/${JOB_NAME}.pids" pid name alive=0
+    if [ -n "${ONLY:-}" ]; then
+        # restart only the processes whose name matches the regex ONLY (e.g. ONLY='^all_'); the others keep running
+        local kept="" started=0
+        if [ -f "$pids" ]; then
+            while read -r pid name; do
+                [ -n "$pid" ] || continue
+                if [[ $name =~ $ONLY ]]; then
+                    kill -TERM -- "-$pid" 2>/dev/null && echo "stopped $name (process group $pid)"
+                else
+                    kept+="$pid $name"$'\n'
+                fi
+            done < "$pids"
+            sleep 2
+        fi
+        printf '%s' "$kept" > "$pids"
+        for i in "${!PROC_NAMES[@]}"; do
+            if [[ ${PROC_NAMES[i]} =~ $ONLY ]]; then
+                pid=$(job_run_bg "${PROC_FILES[i]}")
+                echo "$pid ${PROC_NAMES[i]}" >> "$pids"
+                started=$((started + 1))
+            fi
+        done
+        echo "restarted $started process(es) matching ONLY=$ONLY; the others were left running"
+        return 0
+    fi
     if [ -f "$pids" ]; then
         while read -r pid name; do
             if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then alive=$((alive + 1)); fi

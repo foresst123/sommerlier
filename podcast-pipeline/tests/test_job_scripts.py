@@ -372,3 +372,34 @@ def test_run_variants_dry_run_takes_the_final_set_after_the_empty_one(tmp_path):
                          capture_output=True, text=True)
     assert dry.returncode == 0, dry.stderr
     assert dry.stdout.index('outputs.clean_two_channel_dir=""') < dry.stdout.index(f'outputs.clean_two_channel_dir="{final}"')
+
+
+def test_only_restarts_the_matching_processes(tmp_path):
+    out = tmp_path / "out"
+    logs = out / "_resident" / "logs"
+    logs.mkdir(parents=True)
+    audio = tmp_path / "audio"
+    audio.mkdir()
+    (audio / "a.wav").write_bytes(b"x")
+    keep = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    gone = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    (logs / "front.pids").write_text(f"{keep.pid} denoise_gpu0\n{gone.pid} all_gpu0\n")
+    env = dict(os.environ, AUDIO=str(audio), OUT=str(out), GPUS="0 1", ONLY="^all_", CONDA_ENV="",
+               AUDIO_SEPARATOR_MODEL_DIR=str(tmp_path))
+    script = Path(__file__).resolve().parents[1] / "tools" / "job_front.sh"
+    r = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True, timeout=60)
+    try:
+        assert "restarted 2 process(es)" in r.stdout, r.stdout + r.stderr
+        lines = (logs / "front.pids").read_text().splitlines()
+        assert any(l.endswith("denoise_gpu0") and l.startswith(str(keep.pid)) for l in lines)
+        assert sum(" all_gpu" in l for l in lines) == 2
+        assert keep.poll() is None            # not touched
+        gone.wait(timeout=5)                   # stopped
+    finally:
+        for pid_line in (logs / "front.pids").read_text().splitlines():
+            try:
+                os.killpg(int(pid_line.split()[0]), 15)
+            except (OSError, ValueError):
+                pass
+        keep.kill()
+        gone.kill()

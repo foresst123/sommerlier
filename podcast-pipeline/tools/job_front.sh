@@ -15,6 +15,7 @@
 #         diarization          workers=1 per copy (each copy is on its own card)
 #         FINAL=$OUT/final    where the all processes write the final dataset: <FINAL>/lhotse/manifest.jsonl.gz (one
 #                             Lhotse manifest of the whole run) and the conversations of each recording in <FINAL>/
+#         ONLY='^all_'        restart only the processes whose name matches (the others keep running)
 #         VARIANTS, ENV_NAME=a100, CONDA_ENV=som, CACHE, DRY=1, FORCE=1 (stop the earlier processes first)
 #         AUDIO_SEPARATOR_MODEL_DIR: rf_crowd checkpoints; found by tools/denoise_env.sh when unset
 #         RECLAIM_AFTER, WAIT_TIMEOUT (minutes, 0 = off): see tools/job_common.sh
