@@ -108,7 +108,7 @@ def _line(seg_flags, pos=0):
     segs = _talk()
     segs[0].review_flags = seg_flags
     svc = ConversationExportService(SimpleNamespace(count_tokens=lambda t: len(t.split())))
-    return svc._finder_line(_finder(segs), pos, 1, {A: "A", B: "B"})
+    return svc._finder_line(_finder(segs), pos, pos + 1, {A: "A", B: "B"})
 
 
 def test_finder_line_shows_a_hard_flag_and_a_truncated_phrase():

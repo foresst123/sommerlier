@@ -622,8 +622,7 @@ class StageOutputService:
         (`interrupt/<name>/`, `backchannel/<name>/`, `turn_by_turn/<name>/`, `_quarantine/<name>/`)
         with a `manifest.jsonl`; this directory holds the accounting:
         `exports.json` is one row per item written, `report.json` carries the finder's counts (how many blocks
-        each rule ended, how many windows each noise or music gate refused, how
-        many the model turned down), which is where to look when a recording
+        each rule ended, how many the model turned down), which is where to look when a recording
         gives nothing and the thresholds need moving. `replies.json` holds the
         model's raw answer for every candidate it was asked about, with the
         verdict made of it.
@@ -637,7 +636,6 @@ class StageOutputService:
             "skipped": report.get("skipped"),
             "blocks": finder.get("blocks"),
             "blocks_short": finder.get("blocks_short"),
-            "noise_measured": finder.get("noise_measured"),
             "word_alignment_missing": (finder.get("breaks") or {}).get(
                 "word_alignment_missing", 0),
             "categories": report.get("categories"),
@@ -645,11 +643,6 @@ class StageOutputService:
             "verification_failed": report.get("verification_failed"),
         }
         warnings = []
-        if report.get("skipped") == "noise_not_measured":
-            warnings.append(
-                "no noise labels for this file, so no conversation item was exported; turn on "
-                "music_analysis (SSLAM) or set models.conversation_selection.require_noise "
-                "to false")
         if report.get("skipped") == "llm_unavailable":
             warnings.append("the LLM was not available for the semantic check")
         if report.get("unanswered"):

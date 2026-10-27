@@ -205,11 +205,12 @@ def test_the_clip_report_is_written_with_its_counts(tmp_path):
     assert json.loads((folder / "stats.json").read_text(encoding="utf-8"))["exported"] == 1
 
 
-def test_a_skipped_pass_leaves_a_warning_saying_why(tmp_path):
+def test_an_old_report_with_the_retired_noise_keys_still_writes_and_warns_nothing_about_noise(tmp_path):
     out = StageOutputService(str(tmp_path))
-    out.write_conversation_exports({"skipped": "noise_not_measured", "finder": {}}, [])
+    out.write_conversation_exports(
+        {"skipped": "noise_not_measured", "finder": {"noise_measured": 3}}, [])
     stats = json.loads((tmp_path / "09_conversation_exports" / "stats.json").read_text(encoding="utf-8"))
-    assert any("noise" in w for w in stats["warnings"])
+    assert not any("noise" in w for w in stats.get("warnings", []))
 
 
 def test_raw_replies_go_to_their_own_file_not_into_the_report(tmp_path):

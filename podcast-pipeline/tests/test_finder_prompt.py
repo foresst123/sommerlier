@@ -18,6 +18,32 @@ def _prompt():
     return _service()._finder_system_prompt()
 
 
+def _ov_and_gap(lines):
+    """Per line: (ov, gap) recomputed from the timestamps alone, as the finder does.
+
+    ov is the time a line shares with lines of the other speaker; gap is from the end of the
+    line before it in the list (negative when they overlap). The first line has no gap.
+    """
+    spans = []
+    for line in lines:
+        m1, s1, m2, s2 = re.match(r"\[\d+\] (\d+):(\d\d)-(\d+):(\d\d)", line).groups()
+        spans.append(((int(m1) * 60 + int(s1)), (int(m2) * 60 + int(s2))))
+    speakers = [re.search(r"\) ([A-Z]) ov=", line).group(1) for line in lines]
+    out = []
+    for i, (a, b) in enumerate(spans):
+        other = sorted((max(a, c), min(b, d)) for k, (c, d) in enumerate(spans)
+                       if speakers[k] != speakers[i] and min(b, d) > max(a, c))
+        ov, reach = 0.0, None
+        for lo, hi in other:                     # union of the other speaker's overlaps
+            lo = lo if reach is None else max(lo, reach)
+            if hi > lo:
+                ov += hi - lo
+                reach = hi
+        gap = None if i == 0 else a - spans[i - 1][1]
+        out.append((ov, gap))
+    return out
+
+
 def _examples(prompt):
     """[(example lines, answer regions)] read back out of the prompt text."""
     blocks = re.split(r"\nVí dụ \d+ - [^\n]*\n", "\n" + prompt)[1:]
@@ -78,6 +104,18 @@ def test_the_examples_show_each_category_a_break_point_and_a_one_sided_region():
     assert [r["category"] for r in three if r["keep"]] == ["turn_by_turn", "turn_by_turn"]
     assert [r["keep"] for r in four] == [False]
     assert [r["keep"] for r in five] == [False]
+
+
+def test_the_ov_and_gap_in_the_examples_match_their_timestamps():
+    for lines, _ in _examples(_prompt()):
+        for line, (ov, gap) in zip(lines, _ov_and_gap(lines)):
+            shown_ov = float(re.search(r" ov=([\d.]+)s", line).group(1))
+            assert abs(shown_ov - ov) <= 0.01, (line, ov)
+            shown_gap = re.search(r" gap=(-?[\d.]+)s", line)
+            if gap is None:
+                assert shown_gap is None, line       # the first line of an example has no gap
+            else:
+                assert shown_gap and abs(float(shown_gap.group(1)) - gap) <= 0.01, (line, gap)
 
 
 def test_the_examples_line_up_with_the_format_the_finder_really_prints():
@@ -143,3 +181,13 @@ def test_the_finder_line_marks_a_break_point_as_hard_and_nothing_else():
     assert "hard=" not in service._finder_line(finder, 0, 1, names)
     message = service._finder_message(finder, (0, 3), names)
     assert "#" not in message and "SPEAKER_" not in message
+
+
+def test_the_first_line_of_a_window_has_no_gap_even_mid_record():
+    segs = base._talk(3, seg=7.0)
+    finder = ConversationSelectionFinder(
+        segs, TimelineMap(), base._quiet(), None, ConversationSelectionConfig())
+    service = _service()
+    names = {base.A: "A", base.B: "B"}
+    assert "gap=" in service._finder_line(finder, 1, 2, names)
+    assert "gap=" not in service._finder_line(finder, 1, 1, names)

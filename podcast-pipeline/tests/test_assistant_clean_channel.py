@@ -47,7 +47,7 @@ class HalfBackend:
 
 @pytest.fixture
 def fake_filter(monkeypatch):
-    from models.denoise import chain_id, parse_chain
+    from models.denoise import BACKENDS, chain_id, parse_chain
 
     def get_backend(name, cfg=None, logger=None):
         if name not in ("half", "boom"):
@@ -56,6 +56,9 @@ def fake_filter(monkeypatch):
 
     monkeypatch.setattr(denoise_service, "_load_api",
                         lambda: (get_backend, parse_chain, chain_id))
+    # The service checks chain names against the registry, so the fakes are listed there too.
+    monkeypatch.setitem(BACKENDS, "half", HalfBackend)
+    monkeypatch.setitem(BACKENDS, "boom", HalfBackend)
 
 
 def _export(tmp_path, **settings):
@@ -126,6 +129,13 @@ def test_a_malformed_chain_fails_when_the_service_is_built(fake_filter):
 def test_a_pseudo_step_cannot_lead_the_clean_chain(fake_filter):
     with pytest.raises(ValueError):
         ConversationExportService(FinderLLM([]), assistant_clean_chain="blend50>half")
+
+
+def test_an_unknown_backend_name_fails_when_the_service_is_built():
+    with pytest.raises(ValueError, match="nonexist"):
+        ConversationExportService(FinderLLM([]),
+                                  assistant_clean_chain="rf_vocals_resurrection>nonexist")
+    ConversationExportService(FinderLLM([]), assistant_clean_chain="rf_vocals_resurrection>blend50")
 
 
 # --- profiles -----------------------------------------------------------------------

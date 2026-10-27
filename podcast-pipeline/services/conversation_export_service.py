@@ -156,7 +156,7 @@ _FINDER_EXAMPLES = (
     "Ví dụ 1 - interrupt: dòng 3 chen vào lúc B còn đang nói dở (ov=1.00s), B dừng ngay và A chuyển sang chuyện khác:\n"
     + _example_lines([
         ("0:00-0:10", 10.0, "A", 0.0, "-", "bạn nuôi mèo từ bao giờ"),
-        ("0:11-0:35", 24.0, "B", 0.0, "-", "mình nhận một bé mèo hoang năm ngoái, ban đầu nó sợ người lắm, phải"),
+        ("0:11-0:35", 24.0, "B", 1.0, "-", "mình nhận một bé mèo hoang năm ngoái, ban đầu nó sợ người lắm, phải"),
         ("0:34-0:44", 10.0, "A", 1.0, "-", "khoan, mỗi tháng tiền ăn hết bao nhiêu"),
         ("0:45-0:58", 13.0, "B", 0.0, "-", "khoảng ba trăm nghìn, mình mua hạt bao lớn cho rẻ"),
         ("0:59-1:06", 7.0, "A", 0.0, "-", "còn đi khám thú y thì sao"),
@@ -172,8 +172,8 @@ _FINDER_EXAMPLES = (
     "Ví dụ 2 - backchannel: A giữ lượt, B chỉ đệm \"ừ\" chồng lên (dòng 3), không ai bị cắt:\n"
     + _example_lines([
         ("0:00-0:09", 9.0, "B", 0.0, "-", "bạn kể mình nghe lần đầu đi Đà Lạt đi"),
-        ("0:10-0:44", 34.0, "A", 0.8, "-", "lần đó mình đi xe khách đêm, tới nơi sáu giờ sáng trời lạnh lắm, phải mua vội cái áo"),
-        ("0:25-0:26", 0.8, "B", 0.8, "-", "ừ"),
+        ("0:10-0:44", 34.0, "A", 1.0, "-", "lần đó mình đi xe khách đêm, tới nơi sáu giờ sáng trời lạnh lắm, phải mua vội cái áo"),
+        ("0:43-0:44", 1.0, "B", 1.0, "-", "ừ"),
         ("0:45-0:51", 6.0, "B", 0.0, "-", "rồi sau đó bạn đi đâu"),
         ("0:52-1:12", 20.0, "A", 0.0, "-", "mình lên đồi chè ngắm mặt trời mọc, đẹp nhất chuyến đi"),
         ("1:13-1:19", 6.0, "B", 0.0, "-", "nghe thích thật, ở lại mấy ngày"),
@@ -193,7 +193,7 @@ _FINDER_EXAMPLES = (
         ("0:28-0:40", 12.0, "B", 0.0, "-", "sau ba tháng mình nghe hiểu được một nửa"),
         ("0:41-0:47", 6.0, "A", 0.0, "-", "còn từ mới thì sao"),
         ("0:48-1:00", 12.0, "B", 0.0, "-", "mình ghi vào sổ rồi ôn mỗi cuối tuần"),
-        ("1:01-1:05", 4.0, "A", 1.5, "bad_separation", "ừ thế à"),
+        ("1:01-1:05", 4.0, "A", 0.0, "bad_separation", "ừ thế à"),
         ("1:06-1:14", 8.0, "A", 0.0, "-", "vậy bạn luyện nghe mỗi ngày bao lâu"),
         ("1:15-1:30", 15.0, "B", 0.0, "-", "khoảng một tiếng, chia hai buổi sáng và tối"),
         ("1:31-1:38", 7.0, "A", 0.0, "-", "nghe cũng không quá nặng"),
@@ -557,7 +557,7 @@ FINDER_CATEGORIES = ("interrupt", "backchannel", "turn_by_turn")
 
 
 # Not about the span's own content: a smaller span cannot fix these.
-_NOT_RESCUABLE = {"out_of_range", "noise_not_measured"}
+_NOT_RESCUABLE = {"out_of_range"}
 
 
 def _clean_category(value) -> Optional[str]:
@@ -1037,8 +1037,15 @@ class ConversationExportService:
             "none" if is_none(assistant_clean_chain) else str(assistant_clean_chain).strip())
         self.denoise_cfg = denoise_cfg if isinstance(denoise_cfg, dict) else None
         if self.assistant_clean_chain != "none":
-            from models.denoise.pseudo import validate_chain_tokens
-            validate_chain_tokens(parse_spec(self.assistant_clean_chain))
+            from models.denoise import BACKENDS
+            from models.denoise.pseudo import backend_tokens, validate_chain_tokens
+            tokens = parse_spec(self.assistant_clean_chain)
+            validate_chain_tokens(tokens)
+            unknown = [t for t in backend_tokens(tokens) if t not in BACKENDS]
+            if unknown:
+                raise ValueError(
+                    f"unknown denoise backend {', '.join(map(repr, unknown))} in assistant_clean_chain "
+                    f"{self.assistant_clean_chain!r}; known: {', '.join(sorted(BACKENDS))}")
         # Excerpts are written from render_workers threads; one filter run at a time keeps
         # a single backend model on the GPU.
         self._clean_lock = threading.Lock()
@@ -1377,7 +1384,8 @@ class ConversationExportService:
         who = names.get(str(seg.speaker), "?")
         length = max(0.0, float(seg.end) - float(seg.start))
         gap = q.get("gap_before")
-        gap_part = "" if gap is None else f" gap={float(gap):.2f}s"
+        # The prompt says the first line of the window has no gap.
+        gap_part = "" if gap is None or number == 1 else f" gap={float(gap):.2f}s"
         hard = self._hard_text(finder, pos)
         hard_part = f" hard={hard}" if hard else ""
         return (f"[{number}] {self._clock(float(seg.start))}-{self._clock(float(seg.end))} "
@@ -2231,8 +2239,8 @@ class ConversationExportService:
             audio_start=origin, audio_end=render.hi / float(sample_rate),
             two_channel=render.method, speech_segments=speech_segments,
             folder=folder, files=files,
-            verification=self._verify(directory, audio_files, sample_rate, len(render.mixture),
-                                      self.cfg.assistant_channel),
+            verification=self._verify(directory, {**audio_files, **clean_files}, sample_rate,
+                                      len(render.mixture), self.cfg.assistant_channel),
             sample_rate=int(sample_rate), num_samples=int(len(render.mixture)),
             source_stem=base_name)
         if clean is not None:
