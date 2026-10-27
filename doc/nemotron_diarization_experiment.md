@@ -154,3 +154,7 @@ Our own clean-up after the model (not part of NeMo):
 Each parameter set needs its own `--audio_dir` and `--cache_dir`: neither the folder name
 nor the diarization checkpoint records these values.
 
+
+## Kết quả tối ưu trên ViYT-Diar
+
+Số liệu thử nghiệm 4 và 5 (DER, Miss, FA, số người nói, bảng theo từng file) nằm ở [nemotron_toi_uu_viyt_diar.md](nemotron_toi_uu_viyt_diar.md).
