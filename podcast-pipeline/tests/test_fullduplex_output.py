@@ -242,7 +242,7 @@ def _prompt(**settings):
 
 
 def test_the_prompt_version_is_bumped():
-    assert CONVERSATION_EXPORT_PROMPT_VERSION == "conversation-export-v15-no-howto"
+    assert CONVERSATION_EXPORT_PROMPT_VERSION == "conversation-export-v16-lean"
 
 
 def test_the_prompt_asks_for_the_new_fields_and_fills_the_new_placeholder():
@@ -683,7 +683,8 @@ def test_kept_example_regions_obey_the_prompts_own_rules_for_the_a100_values():
     from utils.conversation_selection import BACKCHANNELS, _fold
     prompt = _prompt(min_turns_each=3, min_seconds=30, max_seconds=120)
     blocks = re.split(r"\nVí dụ \d+ - [^\n]*\n", "\n" + prompt)[1:]
-    pat = re.compile(r"\[(\d+)\] (\d+):(\d\d)-(\d+):(\d\d) \(d=([\d.]+)s\) ([A-Z]) \{[^}]*\}: (.*)")
+    pat = re.compile(r"\[(\d+)\] (\d+):(\d\d)-(\d+):(\d\d) \(d=([\d.]+)s\) ([A-Z]) ov=[\d.]+s"
+                     r"(?: gap=-?[\d.]+s)?(?: hard=\w+)?: (.*)")
     checked = 0
     for block in blocks:
         rows = {int(m[1]): (int(m[2]) * 60 + int(m[3]), int(m[4]) * 60 + int(m[5]),

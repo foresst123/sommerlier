@@ -120,14 +120,13 @@ def test_a_finished_file_is_cut_into_the_output_folder(tmp_path):
     assert out.calls and out.calls[0][1] == result.exports
 
 
-def test_without_a_noise_track_nothing_is_cut_and_it_says_so(tmp_path):
+def test_without_a_noise_track_the_pass_still_runs(tmp_path):
+    """No noise track is measured any more, so a missing one is not a reason to skip the pass."""
     out = _StageOut()
     pipe = _pipeline(ConversationExportService(_LLM()), noise=None)
-    result = pipe._export_conversation_exports(out, _talk(30), _audio(), MusicMap(),
-                                 str(tmp_path), "ep.mp3")
-    assert result.exports == []
-    assert out.calls[0][0]["skipped"] == "noise_not_measured"
-    assert not list((tmp_path / "conversation_exports").glob("*/*"))
+    pipe._export_conversation_exports(out, _talk(30), _audio(), MusicMap(),
+                                      str(tmp_path), "ep.mp3")
+    assert out.calls[0][0]["skipped"] != "noise_not_measured"
 
 
 def test_the_music_map_is_moved_into_the_cut_timeline_before_it_is_used(tmp_path):

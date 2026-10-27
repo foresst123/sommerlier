@@ -1,9 +1,9 @@
 """Picking two-person conversation excerpts out of a transcript.
 
 The rules come from conversation_dataset_plan.md; what is pinned here is the
-part the plan cannot say on its own: that an excerpt is exactly two people, is never
-glued across a cut, is split around lasting noise rather than thrown away whole
-or (worse) kept, and that "not measured" is never read as "clean".
+part the plan cannot say on its own: that an excerpt is exactly two people, that a
+break point (a failed separation or a review flag) is never inside an excerpt, and
+that noise and music, no longer measured, neither gate nor score a clip.
 
 Run:  python -m pytest tests/test_conversation_selection.py -q     (from podcast-pipeline/)
 """
@@ -263,31 +263,14 @@ def test_speech_that_could_not_be_separated_costs_points_but_is_not_a_reason_to_
 
 # --- joins -----------------------------------------------------------------------
 
-def test_a_join_inside_the_silence_between_two_turns_ends_the_block():
+def test_a_cut_in_the_timeline_no_longer_breaks_a_block():
+    """Music is no longer cut out, so a join is not a break point: the block runs across it."""
     timeline = TimelineMap(kept=[(0, 95.5, 0), (200, 500, 95.5)])
     finder = _finder(_talk(30), timeline=timeline)
     cands = finder.candidates()
-    assert finder.stats["breaks"]["seam"] >= 1
-    assert cands
-    assert not any(c.pad_start < 95.5 < c.pad_end for c in cands)
-
-
-def test_a_segment_glued_from_two_pieces_is_left_out_altogether():
-    timeline = TimelineMap(kept=[(0, 100, 0), (160, 500, 100)])   # join at 100
-    finder = _finder(_talk(30), timeline=timeline)    # segment 12 spans 96-103
-    finder.candidates()
-    assert finder.stats["breaks"]["seam_inside_segment"] >= 1
-    assert finder.block_of[12] == -1
-
-
-def test_padding_does_not_reach_across_a_join():
-    segs = _talk(12) + _talk(14, start=95.3, first=12)
-    segs[11].end = 95.0
-    timeline = TimelineMap(kept=[(0, 95.1, 0), (300, 600, 95.1)])
-    finder = _finder(segs, timeline=timeline)
-    cand, why = finder.evaluate(12, 25)
-    assert cand is not None, why
-    assert cand.pad_start == cand.start
+    assert "seam" not in finder.stats["breaks"]
+    assert "seam_inside_segment" not in finder.stats["breaks"]
+    assert any(c.pad_start < 95.5 < c.pad_end for c in cands)
 
 
 # --- padding -----------------------------------------------------------------------
@@ -315,115 +298,32 @@ def test_padding_is_not_added_when_the_neighbour_overlaps():
     assert cand.pad_start == cand.start
 
 
-def test_padding_does_not_reach_into_lasting_noise():
-    segs = _talk(6, seg=7.0, gap=1.0) + _talk(14, start=100.0, first=6)
-    segs[5].end = 97.0
-    noise = _track(noise_env=[(97.5, 99.9, 0.3)])
-    finder = _finder(segs, noise=noise, noise_env_max=0.15)
-    cand, why = finder.evaluate(6, 19)
-    assert cand is not None, why
-    assert cand.pad_start == cand.start
 
 
-# --- SSLAM: noise -------------------------------------------------------------------
+# --- noise and music are no longer inputs -------------------------------------------------
 
-def test_unmeasured_noise_is_never_treated_as_clean():
+def test_a_noisy_track_no_longer_changes_which_clips_are_found():
+    quiet = _finder(_talk(16), noise=_track()).candidates()
+    loud = _finder(_talk(16), noise=_track(noise_speech=[(0, 600, 0.9)],
+                                           noise_env=[(0, 600, 0.9)])).candidates()
+    assert quiet and [(c.first, c.last) for c in loud] == [(c.first, c.last) for c in quiet]
+    assert all(c.noise == {} for c in loud)
+
+
+def test_an_unmeasured_track_is_not_a_reason_to_refuse():
     finder = _finder(_talk(16), noise="none")
-    assert finder.candidates() == []
-    assert finder.report()["noise_measured"] is False
+    assert finder.candidates()
+    assert "noise_measured" not in finder.report()
+    assert "lasting_noise_spans" not in finder.report()
 
 
-def test_with_the_requirement_off_an_unmeasured_clip_scores_zero_for_cleanliness():
-    measured = _finder(_talk(16)).candidates()
-    unmeasured = _finder(_talk(16), noise="none", require_noise=False).candidates()
-    assert unmeasured and measured
-    assert all(c.components["cleanliness"] == 0.0 for c in unmeasured)
-    assert max(c.score for c in unmeasured) < max(c.score for c in measured)
-
-
-def test_lasting_voices_split_the_block_around_them():
-    noise = _track(noise_speech=[(100.0, 103.0, 0.3)])      # under segment 12 (96-103)
-    finder = _finder(_talk(30), noise=noise)
-    cands = finder.candidates()
-    assert finder.block_of[12] == -1
-    assert finder.stats["breaks"]["lasting_noise"] >= 1
-    assert cands
-    assert not any(c.first <= 12 <= c.last for c in cands)
-    assert any(c.last < 12 for c in cands) and any(c.first > 12 for c in cands)
-
-
-def test_a_brief_burst_does_not_split_anything():
-    noise = _track(noise_speech=[(100.0, 101.0, 0.3)])      # 1s, under noisy_run_seconds
-    finder = _finder(_talk(30), noise=noise)
-    cands = finder.candidates()
-    assert finder.block_of[12] != -1
-    assert any(c.first <= 12 <= c.last for c in cands)
-
-
-def test_noise_in_the_pause_between_two_turns_also_splits_the_block():
-    segs = _talk(30, gap=2.5)                               # period 9.5s
-    noise = _track(noise_env=[(121.1, 123.4, 0.3)], )       # inside the gap after 12
-    finder = _finder(segs, noise=noise, noise_env_max=0.15)
-    cands = finder.candidates()
-    assert finder.stats["breaks"]["lasting_noise_between"] == 1
-    assert cands and not any(c.first <= 12 < c.last for c in cands)
-
-
-def test_noise_is_read_in_the_original_timeline_not_the_cut_one():
-    """A burst at original 130-133 is cut-time 100-103 once 30s were removed."""
-    timeline = TimelineMap(kept=[(0, 47.5, 0), (77.5, 600, 47.5)])
-    noise = _track(noise_speech=[(130.0, 133.0, 0.3)])
-    finder = _finder(_talk(30), noise=noise, timeline=timeline)
-    finder.candidates()
-    assert finder.block_of[12] == -1        # cut 96-103 holds the burst
-    assert finder.block_of[16] != -1        # cut 128-135 would, if misread
-
-
-def test_voices_are_held_to_a_stricter_level_than_the_environment():
-    steady = 0.12       # over voices' 0.10, under the environment's 0.15
-    assert _finder(_talk(16), noise=_track(base=0.001, noise_env=[(0, 600, steady)])
-                   ).candidates()
-    assert _finder(_talk(16), noise=_track(base=0.001, noise_speech=[(0, 600, steady)])
-                   ).candidates() == []
-
-
-def test_a_dirty_clip_over_the_combined_ceiling_is_refused_with_a_reason():
-    finder = _finder(_talk(16), noise=_track(noise_env=[(0, 600, 0.10)]),
-                     noise_env_max=0.5, noise_max=0.05)
-    assert finder.candidates() == []
-    assert finder.report()["candidates_rejected"]["noise_combined"] >= 1
-
-
-def test_a_cleaner_clip_outranks_a_dirtier_one():
-    clean = _finder(_talk(16), noise=_track()).candidates()
-    dirty = _finder(_talk(16), noise=_track(noise_env=[(0, 600, 0.10)])).candidates()
-    assert clean and dirty
-    assert max(c.score for c in clean) > max(c.score for c in dirty)
-
-
-def test_the_noise_that_justified_a_clip_travels_with_it():
-    (cand, *_), = [_finder(_talk(16)).candidates()[:1]]
-    assert set(cand.noise) >= {"combined_p90", "by_kind", "noisy_frame_share",
-                               "longest_noisy_run_seconds", "dominant_kind"}
-    assert cand.noise["dominant_kind"] == "clean"
-
-
-# --- SSLAM: music that was replaced -----------------------------------------------------
-
-def test_a_clip_that_is_mostly_replaced_music_is_refused():
-    music = MusicMap([(0.0, 40.0, MUSIC)])          # cut-timeline seconds
+def test_the_music_map_is_ignored_and_no_share_is_reported():
+    music = MusicMap([(0.0, 40.0, MUSIC)])
     finder = _finder(_talk(30), music=music)
     cands = finder.candidates()
     assert cands
-    assert all(c.music_patched_share <= 0.15 for c in cands)
-    assert all(c.pad_start > 0 for c in cands)
-    assert finder.report()["candidates_rejected"]["music_patched"] >= 1
-
-
-def test_no_music_map_means_the_share_is_unknown_not_zero():
-    (cand, *_) = _finder(_talk(16), music=None).candidates()
-    assert cand.music_patched_share is None
-
+    assert all(c.music_patched_share is None for c in cands)
+    assert "music_patched" not in finder.report()["candidates_rejected"]
 
 # --- scoring -----------------------------------------------------------------------------
 
@@ -432,9 +332,7 @@ def _components(**metrics):
             "switch_count": 20, "backchannel_count": 0, "silence_ratio": 0.0,
             "unseparated_share": 0.0}
     base.update(metrics)
-    finder = _finder(_talk(2))
-    noise = {"combined_p90": 0.0, "noisy_frame_share": 0.0}
-    return finder._components(base, noise, None)
+    return _finder(_talk(2))._components(base)
 
 
 def test_a_natural_turn_gap_scores_full_and_a_slow_or_interrupting_one_less():
@@ -458,15 +356,25 @@ def test_tiers():
 
 
 def test_weights_are_normalised_so_a_score_never_passes_100():
-    finder = _finder(_talk(2), weights={"cleanliness": 1000.0})
+    finder = _finder(_talk(2))
     comps = {k: 1.0 for k in ("turn_taking", "duration", "balance", "interaction",
-                              "continuity", "speaker_correctness", "cleanliness")}
+                              "continuity", "speaker_correctness")}
     assert finder._score(comps) == 100.0
+
+
+def test_an_old_cleanliness_weight_is_accepted_and_ignored():
+    """Old profiles still load; the cleanliness term is gone, so its weight changes nothing."""
+    comps = {k: 1.0 for k in ("turn_taking", "duration", "balance", "interaction",
+                              "continuity", "speaker_correctness")}
+    plain = _finder(_talk(2))._score(comps)
+    old = _finder(_talk(2), weights={"cleanliness": 1000.0})
+    assert old._score(comps) == plain == 100.0
+    assert "cleanliness" not in old.cfg.resolved_weights
 
 
 def test_low_interaction_is_soft_penalized_when_its_weight_is_increased():
     comps = {k: 1.0 for k in ("turn_taking", "duration", "balance", "interaction",
-                              "continuity", "speaker_correctness", "cleanliness")}
+                              "continuity", "speaker_correctness")}
     comps["interaction"] = 0.0
     baseline = _finder(_talk(2))._score(comps)
     tuned = _finder(_talk(2), weights={"interaction": 25.0})._score(comps)
@@ -549,7 +457,7 @@ def test_the_report_says_why_a_recording_gave_few_clips():
     finder.candidates()
     report = finder.report()
     assert report["segments"] == 6 and report["blocks"] == 1
-    assert report["blocks_short"] == 1 and report["noise_measured"] is True
+    assert report["blocks_short"] == 1 and "noise_measured" not in report
 
 
 # --- rescue: clean spans inside a region the validator rejected whole ----------

@@ -197,9 +197,9 @@ def test_the_model_sees_numbered_turns_as_a_and_b_without_raw_labels_or_segment_
     assert llm.messages
     message = llm.messages[0]
     assert "SPEAKER_" not in message and "#0" not in message
-    assert re.search(r"^\[1\] 0:00 [AB]: ", message, re.M)
-    assert re.search(r"^\[2\] \d+:\d{2} [AB]: ", message, re.M)
-    assert re.search(r"dài \d+ giây, \d+ dòng", message)
+    assert re.search(r"^\[1\] 0:00-\d+:\d{2} \(d=[\d.]+s\) [AB] ov=", message, re.M)
+    assert re.search(r"^\[2\] \d+:\d{2}-\d+:\d{2} \(d=[\d.]+s\) [AB] ov=", message, re.M)
+    assert re.search(r"N=\d+ dòng", message)
     numbers = [int(n) for n in re.findall(r"^\[(\d+)\] ", message, re.M)]
     assert numbers == list(range(1, len(numbers) + 1))
 
@@ -231,7 +231,7 @@ def test_a_self_contained_clip_is_written_as_a_folder_of_audio_and_metadata(tmp_
     assert info.duration == pytest.approx(doc["duration"], abs=0.01)
     assert doc["conversation"][0]["start"] >= 0.0
     assert {row["role"] for row in doc["conversation"]} == {"assistant", "user"}
-    assert doc["noise"]["dominant_kind"] == "clean"
+    assert doc["noise"] == {}           # no noise track any more: nothing to describe
     assert doc["orig_spans"]
 
 
@@ -287,11 +287,12 @@ def test_an_unavailable_model_skips_the_pass_or_passes_unjudged_if_allowed(tmp_p
     assert lax.exports
 
 
-def test_unmeasured_noise_writes_nothing_and_never_asks_the_model(tmp_path):
+def test_an_unmeasured_track_is_no_reason_to_skip_the_model(tmp_path):
+    """Noise is no longer measured, so a missing track neither blocks the pass nor the export."""
     llm = FakeLLM(_good())
     _, result, _ = _run(tmp_path, llm, noise="none")
-    assert result.exports == [] and llm.messages == []
-    assert result.report["skipped"] == "noise_not_measured"
+    assert llm.messages and result.report["skipped"] is None
+    assert result.exports
 
 
 def test_clips_that_are_kept_do_not_overlap_each_other(tmp_path):
@@ -503,7 +504,7 @@ def test_the_report_names_the_prompt_version_and_counts(tmp_path):
     assert report["prompt_version"] == CONVERSATION_EXPORT_PROMPT_VERSION
     assert report["exported"] == len(result.exports)
     assert report["accepted"] >= report["exported"]
-    assert "finder" in report and report["finder"]["noise_measured"] is True
+    assert "finder" in report and "noise_measured" not in report["finder"]
 
 
 # --- the two-channel file ---------------------------------------------------------

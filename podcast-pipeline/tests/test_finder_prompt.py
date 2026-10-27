@@ -1,14 +1,12 @@
-"""The finder prompt: per-line durations, and the worked examples it carries."""
+"""The finder prompt and the finder's line format: what the model is told, and what it is shown."""
 
 import json
 import re
 
 import test_conversation_export_service as base
-from services.conversation_export_service import (
-    ConversationExportService, parse_finder_reply)
+from services.conversation_export_service import ConversationExportService, parse_finder_reply
 from utils.conversation_selection import ConversationSelectionConfig, ConversationSelectionFinder
 from utils.excise import TimelineMap
-from utils.noise_map import NoiseTrack
 from utils.transcript_windows import line_number  # noqa: F401  (keeps the import path honest)
 
 
@@ -36,20 +34,20 @@ def test_a_finder_line_carries_its_own_duration():
     finder = ConversationSelectionFinder(
         segs, TimelineMap(), base._quiet(), None, ConversationSelectionConfig())
     line = _service()._finder_line(finder, 0, 1, {base.A: "A", base.B: "B"})
-    assert line.startswith("[1] 0:00-0:07 (d=7.0s) A {")
+    assert line.startswith("[1] 0:00-0:07 (d=7.0s) A ov=")
 
 
 def test_the_prompt_says_to_take_durations_from_the_timestamps():
     prompt = _prompt()
-    assert "(d=thời lượng)" in prompt and "TÍNH THỜI LƯỢNG" in prompt
-    assert "không ước lượng theo số dòng" in prompt.replace("TUYỆT ĐỐI ", "")
+    assert "(d=giây)" in prompt and "m:ss-m:ss" in prompt
+    assert "không ước lượng theo số dòng" in prompt
     assert not re.search(r"\{[a-z_]+\}", prompt), "an unfilled {placeholder} is left in the prompt"
 
 
-def test_the_prompt_carries_four_worked_examples():
+def test_the_prompt_carries_five_worked_examples():
     examples = _examples(_prompt())
-    assert len(examples) == 4
-    assert [len(lines) for lines, _ in examples] == [6, 7, 13, 3]
+    assert len(examples) == 5
+    assert [len(lines) for lines, _ in examples] == [6, 7, 13, 3, 6]
 
 
 def test_each_example_answer_covers_its_lines_exactly_and_is_valid_json_of_the_right_shape():
@@ -71,14 +69,24 @@ def test_the_durations_in_the_examples_match_their_timestamps():
             assert abs(float(d) - span) <= 1.0, line
 
 
-def test_the_examples_show_each_category_a_failed_separation_seam_and_a_monologue():
-    (one, two, three, four) = [regions for _, regions in _examples(_prompt())]
+def test_the_examples_show_each_category_a_break_point_and_a_one_sided_region():
+    (one, two, three, four, five) = [regions for _, regions in _examples(_prompt())]
     assert [r["category"] for r in one] == ["interrupt"]
     assert [r["category"] for r in two] == ["backchannel"]
     assert [(r["start_line"], r["end_line"], r["keep"]) for r in three] == [
         (1, 6, True), (7, 7, False), (8, 13, True)]
     assert [r["category"] for r in three if r["keep"]] == ["turn_by_turn", "turn_by_turn"]
     assert [r["keep"] for r in four] == [False]
+    assert [r["keep"] for r in five] == [False]
+
+
+def test_the_examples_line_up_with_the_format_the_finder_really_prints():
+    lines = [l for lines, _ in _examples(_prompt()) for l in lines]
+    assert lines and all(re.match(
+        r"\[\d+\] \d+:\d\d-\d+:\d\d \(d=[\d.]+s\) [A-Z] ov=[\d.]+s( gap=-?[\d.]+s)?( hard=\w+)?: ",
+        l) for l in lines)
+    assert any("hard=bad_separation" in l for l in lines)
+    assert not any(re.search(r"seam|noise|music|flags=", l) for l in lines)
 
 
 def _reply_for(topic):
@@ -107,3 +115,31 @@ def test_the_same_region_with_its_own_topic_is_not_refused(tmp_path):
 def test_the_prompt_has_no_scratch_steps_the_json_only_reply_cannot_hold():
     prompt = _prompt()
     assert "CÁCH LÀM" not in prompt and "Ghi số dòng của các chỗ phải ngắt" not in prompt
+
+
+def test_the_prompt_has_no_seam_noise_music_or_language_rules_left():
+    prompt = _prompt().lower()
+    for word in ("seam", "noise", "noisy", "music", "not_vietnamese", "ngoại", "bss", "unsep"):
+        assert word not in prompt, word
+
+
+def test_the_prompt_states_the_definition_the_thresholds_and_the_backchannels():
+    prompt = _prompt()
+    assert "ĐỊNH NGHĨA HỘI THOẠI" in prompt and "LƯỢT VÀ LỜI ĐỆM" in prompt
+    assert "Bắt buộc 60-240s" in prompt                  # the config defaults
+    assert "Độ dài tốt nhất 90-180s" in prompt
+    assert "ừm" in prompt and "đúng rồi" in prompt and "dạ" in prompt
+    assert "Số người đếm từ nhãn" in prompt
+
+
+def test_the_finder_line_marks_a_break_point_as_hard_and_nothing_else():
+    segs = base._talk(3, seg=7.0)
+    finder = ConversationSelectionFinder(
+        segs, TimelineMap(), base._quiet(), None, ConversationSelectionConfig(),
+        bad_separation={1})
+    service = _service()
+    names = {base.A: "A", base.B: "B"}
+    assert "hard=bad_separation" in service._finder_line(finder, 1, 2, names)
+    assert "hard=" not in service._finder_line(finder, 0, 1, names)
+    message = service._finder_message(finder, (0, 3), names)
+    assert "#" not in message and "SPEAKER_" not in message
