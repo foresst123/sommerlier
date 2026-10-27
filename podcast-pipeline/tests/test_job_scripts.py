@@ -5,13 +5,16 @@ which card it sees, since that value comes from the job at run time.
 """
 import os
 import re
+import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parents[1] / "tools"
 COMMON = TOOLS / "job_common.sh"
 KNOBS = ("CUDA_VISIBLE_DEVICES", "JOBID", "SLURM_JOB_ID", "GPUS", "REPLICAS_PER_GPU", "PLAN_REPLICAS",
-         "SIDON_WORKERS", "DIAR_WORKERS", "AUDIO", "OUT", "CACHE", "FORCE", "SESSION")
+         "SIDON_WORKERS", "DIAR_WORKERS", "AUDIO", "OUT", "CACHE", "FORCE", "SESSION",
+         "FINAL", "RECLAIM_AFTER", "WAIT_TIMEOUT")
 
 
 def run_job(job, tmp_path, *, env=None, out="out", audio=True):
@@ -55,6 +58,11 @@ def cvd_of(script, cvd=None):
                        capture_output=True, text=True, env=env)
     assert r.returncode == 0, r.stderr
     return r.stdout.rsplit("\n", 1)[-1]          # job_set_gpus echoes a [gpu] line before the value
+
+
+def clean_sets(cmd):
+    """The `outputs.clean_two_channel_dir=...` words of a command, in order (shell-unquoted)."""
+    return [w for w in shlex.split(cmd) if w.startswith("outputs.clean_two_channel_dir=")]
 
 
 def stage_of(name):
@@ -228,7 +236,7 @@ def test_jobs_drop_the_stage_wavs_unless_asked(tmp_path):
 
 def test_gpus_are_physical_ids_and_no_jobid_is_needed(tmp_path):
     import os, re, subprocess
-    env = {k: v for k, v in os.environ.items() if k not in ("JOBID", "SLURM_JOB_ID", "CUDA_VISIBLE_DEVICES")}
+    env = {k: v for k, v in os.environ.items() if k not in ("JOBID", "SLURM_JOB_ID", "CUDA_VISIBLE_DEVICES", *KNOBS)}
     env.update({"AUDIO": str(tmp_path), "OUT": str(tmp_path / "o"), "GPUS": "4 5", "DRY": "1"})   # no NO_SRUN, no JOBID
     r = subprocess.run(["bash", "tools/job_front.sh"], env=env, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
@@ -280,3 +288,87 @@ def test_start_runs_nohup_processes_and_never_touches_tmux(tmp_path):
     for line in (logs / "t.pids").read_text().splitlines():
         state = subprocess.run(["ps", "-o", "stat=", "-p", line.split()[0]], capture_output=True, text=True).stdout.strip()
         assert state == "" or state.startswith("Z")                       # ended (a zombie nobody reaped counts)
+
+
+# -- final root (FINAL) and the flags of the claim / wait --------------------------------
+
+def test_final_root_is_set_on_the_all_processes_only(tmp_path):
+    r, d = run_job("front", tmp_path)
+    assert r.returncode == 0, r.stderr
+    final = str((tmp_path / "out" / "final").resolve())
+    for name, path in scripts_of(d).items():
+        sets = clean_sets(command_of(path))
+        if stage_of(name) == "all":
+            assert sets == [f'outputs.clean_two_channel_dir="{final}"'], name
+        else:
+            assert sets == [], name
+
+
+def test_final_knob_sets_the_root_and_keeps_spaces_in_one_word(tmp_path):
+    final = tmp_path / "data disk" / "final set"
+    r, d = run_job("front", tmp_path, env={"FINAL": str(final)})
+    assert r.returncode == 0, r.stderr
+    for name, path in scripts_of(d).items():
+        if stage_of(name) == "all":
+            assert clean_sets(command_of(path)) == [f'outputs.clean_two_channel_dir="{final}"'], name
+
+
+def test_final_refuses_quotes_and_backslashes(tmp_path):
+    r, _ = run_job("front", tmp_path, env={"FINAL": str(tmp_path / 'a"b')}, out="q1")
+    assert r.returncode == 2 and "FINAL" in r.stderr
+    r, _ = run_job("front", tmp_path, env={"FINAL": str(tmp_path / "a\\b")}, out="q2")
+    assert r.returncode == 2 and "FINAL" in r.stderr
+
+
+def test_default_commands_have_no_reclaim_or_wait_flags(tmp_path):
+    r, d = run_job("front", tmp_path, out="dflt")
+    assert r.returncode == 0, r.stderr
+    for script in d.glob("*.sh"):
+        cmd = command_of(script)
+        assert "--reclaim-after" not in cmd and "--wait-timeout" not in cmd, script.name
+
+
+def test_reclaim_and_wait_flags_go_to_the_right_processes(tmp_path):
+    env = {"RECLAIM_AFTER": "30", "WAIT_TIMEOUT": "60", "PLAN_REPLICAS": "2"}
+    r, d = run_job("front", tmp_path, env=env, out="rw")
+    assert r.returncode == 0, r.stderr
+    for name, path in scripts_of(d).items():
+        cmd = command_of(path)
+        assert opt(cmd, "--reclaim-after") == ("30" if "--claim" in cmd else None), name
+        assert opt(cmd, "--wait-timeout") == ("60" if "--wait-signal" in cmd else None), name
+    assert opt(command_of(scripts_of(d)["denoise_gpu0"]), "--wait-timeout") is None
+
+
+def test_reclaim_and_wait_flags_on_the_other_jobs(tmp_path):
+    env = {"RECLAIM_AFTER": "5", "WAIT_TIMEOUT": "0.5"}
+    r, d = run_job("asr", tmp_path, env=env, out="rwa")
+    assert r.returncode == 0, r.stderr
+    cmd = command_of(scripts_of(d)["asr"])
+    assert opt(cmd, "--wait-timeout") == "0.5" and "--reclaim-after" not in cmd
+    r, d = run_job("llm", tmp_path, env=env, out="rwl")
+    cmd = command_of(scripts_of(d)["conversation_selection"])
+    assert opt(cmd, "--wait-timeout") == "0.5" and "--reclaim-after" not in cmd
+
+
+def test_zero_and_bad_reclaim_or_wait_values(tmp_path):
+    r, d = run_job("front", tmp_path, env={"RECLAIM_AFTER": "0", "WAIT_TIMEOUT": "0.0"}, out="z")
+    assert r.returncode == 0, r.stderr
+    assert all("--reclaim-after" not in command_of(p) and "--wait-timeout" not in command_of(p) for p in d.glob("*.sh"))
+    for bad in ("-1", "abc", "1.2.3"):
+        r, _ = run_job("llm", tmp_path, env={"WAIT_TIMEOUT": bad}, out=f"bad{len(bad)}")
+        assert r.returncode == 2 and "RECLAIM_AFTER and WAIT_TIMEOUT" in r.stderr, bad
+
+
+def test_run_variants_dry_run_takes_the_final_set_after_the_empty_one(tmp_path):
+    """run_variants_resident.py puts "" first and the job's FINAL after it, so FINAL wins in main.py's argv."""
+    audio = tmp_path / "audio"
+    audio.mkdir(exist_ok=True)
+    (audio / "rec01.wav").write_bytes(b"")
+    final = tmp_path / "final root"
+    r, d = run_job("front", tmp_path, env={"FINAL": str(final)}, out="dr")
+    assert r.returncode == 0, r.stderr
+    args = shlex.split(command_of(scripts_of(d)["all_gpu0"]))[2:]   # drop "python run_variants_resident.py"
+    dry = subprocess.run([sys.executable, "run_variants_resident.py", *args, "--dry-run"], cwd=TOOLS.parent,
+                         capture_output=True, text=True)
+    assert dry.returncode == 0, dry.stderr
+    assert dry.stdout.index('outputs.clean_two_channel_dir=""') < dry.stdout.index(f'outputs.clean_two_channel_dir="{final}"')

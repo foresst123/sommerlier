@@ -13,16 +13,24 @@
 #         PLAN_REPLICAS=1     copies of separation_plan (CPU); more than 1 uses --claim
 #         SIDON_WORKERS=2     Sidon workers per copy (performance.stages.separation.workers_per_gpu)
 #         diarization          workers=1 per copy (each copy is on its own card)
+#         FINAL=$OUT/final    where the all processes write the final dataset: <FINAL>/lhotse/manifest.jsonl.gz (one
+#                             Lhotse manifest of the whole run) and the conversations of each recording in <FINAL>/
 #         VARIANTS, ENV_NAME=a100, CONDA_ENV=som, CACHE, DRY=1, FORCE=1 (stop the earlier processes first)
+#         RECLAIM_AFTER, WAIT_TIMEOUT (minutes, 0 = off): see tools/job_common.sh
 set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$HERE/tools/job_common.sh"
 SIDON_WORKERS=${SIDON_WORKERS:-2}
 PLAN_REPLICAS=${PLAN_REPLICAS:-1}
 job_init front
+FINAL=$(realpath -m "${FINAL:-$OUT/final}")
+case "$FINAL" in *\"*|*\\*) echo "FINAL must not contain a double quote or a backslash, got: $FINAL" >&2; exit 2 ;; esac
+# all writes the final root: --set outputs.clean_two_channel_dir (JSON string, shell-quoted) comes after the
+# run's own "" (run_variants_resident.py build_argv), so it wins. Only all gets it: a comparison run keeps "".
+FINAL_SET=$(printf '%q' "outputs.clean_two_channel_dir=\"$FINAL\"")
 job_copies denoise "--stop-after denoise --signal denoise" denoise
 job_copies diarization "--stop-after diarization --wait-signal denoise --signal diarization --set performance.stages.diarization.workers=1"
 job_plan separation_plan "--stop-after separation_plan --wait-signal diarization --signal separation_plan"
 job_copies separation "--stop-after separation --wait-signal separation_plan --signal separation --set performance.stages.separation.workers_per_gpu=$SIDON_WORKERS"
-job_copies all "--stop-after all --wait-signal conversation_selection" denoise
+job_copies all "--stop-after all --wait-signal conversation_selection --set $FINAL_SET" denoise
 job_start

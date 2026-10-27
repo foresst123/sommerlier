@@ -19,7 +19,7 @@ JOB 3 (tools/job_llm.sh, 2 GPU)
         │ signal conversation_selection
         ▼
 JOB 1 (cùng job, process cuối)
-  all (word_alignment, conversation_exports, lọc kênh assistant)
+  all (word_alignment, conversation_exports, lọc kênh assistant) ──► $FINAL (xem "Kết quả cuối")
 ```
 
 `×2` nghĩa là hai bản sao của cùng stage, mỗi bản gắn một GPU của job. Hai bản sao chia file với nhau bằng
@@ -42,7 +42,7 @@ AUDIO=/data/vi_podcasts_20 OUT=/data/run1 GPUS="4 5" bash tools/job_llm.sh
 Các script **không mở tmux**: bạn tự mở terminal (tmux của bạn) rồi chạy script, mỗi process của job được bật nền bằng
 `nohup` (mỗi process một nhóm tiến trình riêng, không phụ thuộc terminal). Mặc định chạy thẳng trên máy này, **không cần
 JOBID, không srun**: bạn chỉ chọn GPU bằng `GPUS`. Nếu muốn chạy trong một job Slurm cụ thể thì thêm `JOBID=<n>`, khi đó
-mỗi process chạy `srun --jobid=<n> --overlap bash <script>`.
+mỗi process chạy `srun --jobid=<n> --overlap bash <script>` (nền bằng nohup, không dùng `--pty`).
 
 - PID từng process ghi ở `<OUT>/_resident/logs/<front|asr|llm>.pids`, log ở `<OUT>/_resident/logs/<job>_<số>_<tên>.log`
   (`tail -f` để xem).
@@ -50,7 +50,9 @@ mỗi process chạy `srun --jobid=<n> --overlap bash <script>`.
 - Chạy script lần nữa khi process cũ còn sống sẽ bị từ chối; `FORCE=1` dừng các process cũ rồi chạy lại.
 
 Biến dùng chung: `AUDIO`, `OUT` (bắt buộc), `GPUS="0 1"` (số card vật lý), `JOBID` (tuỳ chọn), `CACHE` (mặc định `OUT/_resident/cache`),
-`ENV_NAME=a100`, `CONDA_ENV=som`, `VARIANTS=tools/variants_production.json`, `FORCE=1` (dừng process cũ của job rồi chạy lại).
+`ENV_NAME=a100`, `CONDA_ENV=som`, `VARIANTS=tools/variants_production.json`, `FORCE=1` (dừng process cũ của job rồi chạy lại),
+`RECLAIM_AFTER=0` và `WAIT_TIMEOUT=0` (phút; 0 = tắt: claim không bao giờ bị nhận lại, chờ tín hiệu vô hạn; khác 0 thì
+script truyền `--reclaim-after` / `--wait-timeout` cho các process liên quan).
 
 Biến riêng của `job_front.sh`:
 
@@ -59,6 +61,7 @@ Biến riêng của `job_front.sh`:
 | `REPLICAS_PER_GPU` | 1 | số bản sao mỗi stage trên mỗi GPU (tăng khi VRAM còn dư) |
 | `PLAN_REPLICAS` | 1 | số bản sao của `separation_plan` (CPU); lớn hơn 1 thì dùng `--claim` |
 | `SIDON_WORKERS` | 2 | `performance.stages.separation.workers_per_gpu` |
+| `FINAL` | `OUT/final` | thư mục kết quả cuối; các process `all` ghi vào đó (xem "Kết quả cuối") |
 
 Diarization chạy `workers=1` trong mỗi bản sao, vì mỗi bản sao đã có một GPU riêng.
 
@@ -74,12 +77,33 @@ thì `GPUS` mới là vị trí trong danh sách card của job Slurm đó.
 | JOB 1 | diarization | 2 | 0, 1 | `--stop-after diarization` (Nemotron, workers=1 mỗi bản) |
 | JOB 1 | separation_plan | 1 | không (CPU) | `--stop-after separation_plan` |
 | JOB 1 | separation | 2 | 0, 1 | `--stop-after separation` (Sidon) |
-| JOB 1 | all | 2 | 0, 1 | `--stop-after all` (word_alignment, exports, lọc kênh assistant) |
+| JOB 1 | all | 2 | 0, 1 | `--stop-after all` (word_alignment, exports vào `FINAL`, lọc kênh assistant) |
 | JOB 2 | asr | 1 | 0 và 1 | `--stop-after asr` (Qwen3 trên gpu_1, Whisper và PhoWhisper trên gpu_2) |
 | JOB 3 | conversation_selection | 1 | 0 và 1 | `--stop-after conversation_selection` (refinement pipelined, speaker_relabel) |
 
 Chuỗi chờ: denoise → diarization → separation_plan → separation → (asr chờ separation) → (conversation_selection
 chờ asr) → all chờ conversation_selection.
+
+## Kết quả cuối
+
+Kết quả cuối nằm ở `FINAL` (mặc định `OUT/final`), không nằm trong `OUT/prod/`. Process `all` nhận
+`--set outputs.clean_two_channel_dir=<FINAL>` nên mọi hội thoại của mọi ghi âm vào cùng một thư mục gốc. Việc ghi
+manifest Lhotse cần `steps.conversation_exports` bật.
+
+```
+<FINAL>/
+  lhotse/manifest.jsonl.gz          FILE JSONL CUỐI: manifest Lhotse của cả lần chạy (một file)
+  lhotse/.parts/<stem>.jsonl.gz     phần của từng ghi âm, gộp lại vào manifest.jsonl.gz
+  manifest.jsonl                    danh sách hội thoại (một dòng mỗi hội thoại)
+  manifest_quarantine.jsonl         hội thoại cần xem lại, không dùng để train
+  interrupt/  backchannel/  turn_by_turn/
+    <stem>_<giây>s/                 một hội thoại: mixture.wav, user.wav, assistant.wav, stereo_2ch.wav,
+                                    conversation.json, transcript.txt (có thể có thêm file)
+  _quarantine/<stem>_<giây>s/       hội thoại trong hàng đợi xem lại
+```
+
+`<stem>` là tên file ghi âm, `<giây>` là lúc bắt đầu hội thoại trong ghi âm. `OUT/prod/` chỉ chứa kết quả trung gian và
+marker (`.claim_*`, `.ready_*`), không chứa manifest cuối.
 
 ## Kiểm tra
 
@@ -94,14 +118,23 @@ Script của từng process nằm ở `OUT/_resident/launch_<job>/<thứ tự>_<
 ## Khi một job chết
 
 1. Xem log của process đó trong `OUT/_resident/logs/`.
-2. Nếu process chết giữa chừng một file, marker `.claim_<stage>.<stem>` của file đó còn lại và bản sao khác sẽ
-   không nhận file. Xoá marker đó, hoặc dùng `--reclaim-after MINUTES` (cờ của `run_variants_resident.py`, do
-   nhánh H2 thêm; nhánh này chưa có cờ đó) để bản sao còn sống nhận lại marker cũ.
-3. Chạy lại script của process đó trong job còn sống (hoặc job mới với `JOBID` khác).
+2. Nếu process chết giữa chừng một file, claim `OUT/prod/.claim_<stage>.<stem>` của file đó còn lại và bản sao khác
+   sẽ bỏ qua file. Xem các claim còn lại bằng `ls OUT/prod/.claim_*`; xoá đúng claim của file đó bằng `rm`. Hoặc đặt
+   `RECLAIM_AFTER=<phút>` khi chạy lại script: bản sao còn sống nhận lại claim cũ sau số phút đó, khi claim chưa có
+   marker `.ready_`/`.failed_`.
+3. Chạy lại script của process đó trong job còn sống (hoặc job mới với `JOBID` khác). `--resume` bỏ qua file đã xong.
+   Marker `.failed_` cũ: sau khi W-B hoàn thành, chạy lại với `--resume` sẽ tự chạy lại file đó.
 
 ## Lưu ý
 
 - Hai bản sao cùng stage chạy trên hai card khác nhau. Stage không có cờ `--claim` (job 2, job 3) dùng cả hai card.
-- Chưa có trên nhánh này: stage `separation_plan`, `all`, cờ `--claim` và `--reclaim-after`. Ba script viết đúng
-  tên trong thiết kế; `run_variants_resident.py` phải có các stage và cờ đó trước khi chạy thật.
+- Các stage `separation_plan`, `all` và các cờ `--claim`, `--reclaim-after`, `--wait-timeout` đã có trong
+  `run_variants_resident.py` của nhánh này.
+- `RECLAIM_AFTER` chỉ đặt khi `run_variants_resident.py` có heartbeat (việc của W-B). Không có heartbeat, một claim của
+  bản sao đang chạy chậm có thể bị bản sao khác nhận lại.
+- Danh sách file của một lần chạy được đóng băng ở `OUT/_resident/files.json` (cách W-B thực hiện; câu này sẽ được chỉnh
+  khi W-B gộp xong). Thêm file mới vào `AUDIO` thì phải dừng và chạy lại cả ba job, hoặc xoá `files.json` / dùng
+  `--refresh-files`. `AUDIO` phải là cùng một đường dẫn thật trên mọi máy, vì danh sách ghi theo đường dẫn.
 - Tín hiệu của stage nhiều bản sao do cờ `--signal` của từng bản ghi; bản sao nào xong trước sẽ ghi tín hiệu trước.
+- Plan của `separation` lưu trong `CACHE` chưa được xoá sau khi separation xong. Đây là việc còn lại, chưa làm; chưa
+  xoá tay khi chưa có lệnh dọn.

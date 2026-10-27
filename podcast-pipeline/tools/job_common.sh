@@ -15,6 +15,10 @@
 # Knobs (environment): AUDIO, OUT (required), GPUS (physical ids), JOBID (optional, see above), CACHE, ENV_NAME=a100, CONDA_ENV=som,
 #   VARIANTS=tools/variants_production.json, DRY=1 (write scripts and print the table only),
 #   FORCE=1 (stop this job's earlier background processes first). NO_SRUN is accepted and ignored: srun is only used when JOBID is given.
+#   RECLAIM_AFTER=0     minutes; a --claim older than this with no ready/failed marker is taken over (0 = never). Passed as
+#                       --reclaim-after to every --claim process, only when not 0.
+#   WAIT_TIMEOUT=0      minutes; a process waiting for a --wait-signal gives up after this (0 = waits forever). Passed as
+#                       --wait-timeout to every process that waits, only when not 0.
 
 job_gpu_list() {
     # prints the CUDA_VISIBLE_DEVICES value of the job's cards at the given positions
@@ -74,6 +78,11 @@ job_init() {
     for p in "$REPLICAS_PER_GPU" "$PLAN_REPLICAS"; do
         case "$p" in ''|*[!0-9]*|0) echo "REPLICAS_PER_GPU and PLAN_REPLICAS must be whole numbers >= 1" >&2; exit 2 ;; esac
     done
+    RECLAIM_AFTER=${RECLAIM_AFTER:-0}
+    WAIT_TIMEOUT=${WAIT_TIMEOUT:-0}
+    for p in "$RECLAIM_AFTER" "$WAIT_TIMEOUT"; do
+        case "$p" in ''|*[!0-9.]*|*.*.*|.) echo "RECLAIM_AFTER and WAIT_TIMEOUT must be minutes (a number, 0 = off), got: $p" >&2; exit 2 ;; esac
+    done
     ENV_NAME=${ENV_NAME:-a100}
     CONDA_ENV=${CONDA_ENV:-som}
     VARIANTS=${VARIANTS:-tools/variants_production.json}
@@ -95,10 +104,17 @@ job_init() {
     PROC_FILES=()
 }
 
+job_nonzero() {
+    awk -v v="$1" 'BEGIN { exit !(v + 0 > 0) }'
+}
+
 job_proc() {
     # NAME GPUS "ARGS" [denoise]: writes <launch>/<n>_<NAME>.sh and records it for the table
     local name=$1 gpus=$2 args=$3 denoise=${4:-0}
     local index=$(( ${#PROC_NAMES[@]} + 1 ))
+    # --reclaim-after / --wait-timeout only when the knob is set (the default command line stays the same)
+    case " $args " in *" --claim "*) if job_nonzero "$RECLAIM_AFTER"; then args="$args --reclaim-after $RECLAIM_AFTER"; fi ;; esac
+    case " $args " in *" --wait-signal "*) if job_nonzero "$WAIT_TIMEOUT"; then args="$args --wait-timeout $WAIT_TIMEOUT"; fi ;; esac
     local script="$LAUNCH_DIR/${index}_${name}.sh"
     local log="$LOG_DIR/${JOB_NAME}_${index}_${name}.log"
     local gpu_line shown gpu_args=""
