@@ -6,6 +6,11 @@ Checks, per (variant, file), from what is on disk:
   - every denoise point the variant uses has its denoise.json, with no errors (an error means that filter fell back
     to the unfiltered audio, so the variant says nothing about the filter)
   - the variant's status in variants_manifest.json is ok
+For a variant the line has run through (it has any .ready_ marker or the final .done):
+  - the hand-over of the new stages exists for every file: separation_plan and conversation_selection
+    (.ready_<stage>.<stem>, or the stage's whole .ready_<stage>), and no .failed_ marker is left behind
+  - 07d_conversation_selection/selection.json exists and holds the selection
+  - the final process (--stop-after all) wrote .done
 Exit code 0 only when all of it holds; otherwise the problems are listed. A variant dropped on purpose
 (--music off makes `raw` a copy of `none`) is reported as skipped, not as missing.
 """
@@ -20,6 +25,10 @@ ROOT = HERE.parent
 STAGE_FILES = {"diarization": "02_diarization/segments.json",
                "separation": "03_separation/segments.json",
                "asr": "05_asr/transcripts.json"}
+# outputs of the stages after asr, checked for a variant the line has run through
+LATE_FILES = {"conversation_selection": "07d_conversation_selection/selection.json"}
+# stages whose hand-over (markers) the line must show for every file
+HANDOVER_STAGES = ("separation_plan", "conversation_selection")
 POINTS = (("chain", "01b_denoise", "pre_diarization"),
           ("chain_pre_separation", "02b_denoise_pre_separation", "pre_separation"),
           ("chain_pre_asr", "04b_denoise_pre_asr", "pre_asr"))
@@ -42,7 +51,7 @@ def read_json(path):
 
 def n_rows(data):
     if isinstance(data, dict):
-        data = data.get("segments", data.get("transcripts"))
+        data = data.get("segments", data.get("transcripts", data.get("selections")))
     return len(data) if isinstance(data, list) else 0
 
 
@@ -69,6 +78,30 @@ def check_file(fdir, variant):
         elif (info.get("corr_with_input") or 0) >= NOOP_CORR and (info.get("steps") or True):
             warnings.append(f"{point}: output identical to the input (corr {info['corr_with_input']:.6f})")
     return problems, warnings
+
+
+def line_has_run(vdir):
+    """A variant the line has touched: a hand-over marker or the final .done is on disk."""
+    return (vdir / ".done").is_file() or any(vdir.glob(".ready_*"))
+
+
+def check_line(vdir, stems):
+    """Problems of the line's hand-overs for one variant (only for a variant the line has run through)."""
+    problems = []
+    if not (vdir / ".done").is_file():
+        problems.append("final process did not finish: .done (--stop-after all) is missing")
+    for stage in HANDOVER_STAGES:
+        total = (vdir / f".ready_{stage}").is_file()
+        for stem in stems:
+            if (vdir / f".failed_{stage}.{stem}").is_file() or (vdir / f".failed_{stage}").is_file():
+                problems.append(f"{stem}: {stage} failed")
+            elif not (total or (vdir / f".ready_{stage}.{stem}").is_file()):
+                problems.append(f"{stem}: {stage} hand-over missing (no .ready_{stage}.{stem})")
+    for stem in stems:
+        for stage, rel in LATE_FILES.items():
+            if read_json(vdir / stem / rel) is None:
+                problems.append(f"{stem}: {stage}: {rel} missing or unreadable")
+    return problems
 
 
 def main(argv=None):
@@ -100,6 +133,8 @@ def main(argv=None):
             p, w = check_file(out / vid / stem, v)
             problems += [f"{stem}: {x}" for x in p]
             warned.setdefault(vid, []).extend(f"{stem}: {x}" for x in w)
+        if line_has_run(out / vid):
+            problems += check_line(out / vid, stems)
         if problems:
             bad[vid] = problems
         else:

@@ -628,7 +628,11 @@ def test_stage_order_matches_pipeline_service_source():
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == "_STOP_ORDER" for t in node.targets):
             found = tuple(ast.literal_eval(node.value))
-    assert found == rr.STAGE_ORDER
+    # separation_plan is added to _STOP_ORDER by the H1 branch: until it is there, the rest must match exactly
+    assert tuple(s for s in rr.STAGE_ORDER if s != "separation_plan") == tuple(
+        s for s in found if s != "separation_plan")
+    if "separation_plan" in found:
+        assert found == rr.STAGE_ORDER
 
 
 def test_input_dir_name_has_the_pid():
@@ -1069,3 +1073,184 @@ def test_window_prefetch_stays_on_when_this_process_runs_separation(env):
         sep = _FakeSeparation()
         _run_scheduler(env, stop, sep)
         assert sep.prefetch_overlap_plan("segments") == "built" and sep.calls == [("segments",)], stop
+
+
+# ------------------------------------------- separation_plan, conversation_selection, --stop-after all, claims
+def test_line_and_stage_order_have_the_new_stages_in_place():
+    order = rr.STAGE_ORDER
+    assert order.index("denoise_pre_separation") < order.index("separation_plan") < order.index("separation")
+    assert order.index("asr") < order.index("conversation_selection") < order.index("word_alignment")
+    assert rr.LINE == ("denoise", "diarization", "denoise_pre_separation", "separation_plan", "separation",
+                       "denoise_pre_asr", "asr", "conversation_selection")
+    assert [s for s in rr.LINE] == sorted(rr.LINE, key=order.index)
+    none = {"chain": [], "chain_pre_separation": [], "chain_pre_asr": [], "set": {}}
+    assert not rr.is_noop(none, "separation_plan") and not rr.is_noop(none, "conversation_selection")
+    assert rr.effective_stage(none, "separation") == "separation"
+    assert "separation_plan" in rr.STOPS_BEFORE_REFINEMENT
+
+
+def test_stop_after_all_gives_main_no_stop_after(env):
+    args, variants, files, skipped = make(env, "--layout", "default", "--stop-after", "all")
+    argv = rr.build_argv(args, env[0] / "in")
+    assert "--stop_after" not in argv and "--job_id" in argv
+    assert all(rr.variant_overrides(v, args.stop_after)["stop_after"] is None for v in variants)
+    args2, _, _, _ = make(env, "--layout", "default", "--stop-after", "conversation_selection")
+    argv2 = rr.build_argv(args2, env[0] / "in")
+    assert argv2[argv2.index("--stop_after") + 1] == "conversation_selection"
+
+
+def test_stop_after_new_values_and_wait_rules(env):
+    base = ["--audio-dir", str(env[1]), "--variants", str(env[2]), "--out-root", str(env[0] / "out")]
+    assert rr.parse_args(base + ["--stop-after", "separation_plan", "--signal", "separation_plan"]).stop_after \
+        == "separation_plan"
+    ok = rr.parse_args(base + ["--stop-after", "all", "--wait-signal", "conversation_selection"])
+    assert ok.stop_after == "all" and ok.wait_signal == "conversation_selection"
+    with pytest.raises(SystemExit):
+        rr.parse_args(base + ["--stop-after", "asr", "--wait-signal", "conversation_selection"])
+    with pytest.raises(SystemExit):
+        rr.parse_args(base + ["--stop-after", "not_a_stage"])
+
+
+def test_claim_needs_per_file(env):
+    base = ["--audio-dir", str(env[1]), "--variants", str(env[2]), "--out-root", str(env[0] / "out")]
+    with pytest.raises(SystemExit):
+        rr.parse_args(base + ["--claim"])
+    args = rr.parse_args(base + ["--per-file", "--claim", "--reclaim-after", "30"])
+    assert args.claim and args.reclaim_after == 30
+
+
+def claim_copy(env, fake, clock, *extra, msgs=None, sleep=None, now=None):
+    """One copy of the stage `separation` (per-file, --claim): its own runner, same out-root."""
+    args, variants, files, skipped = make(env, "--layout", "default", "--stop-after", "separation",
+                                          "--signal", "separation", "--per-file", "--claim",
+                                          "--only-ids", "dfn3,p3", *extra)
+    say = msgs.append if msgs is not None else (lambda m: None)
+    r = rr.ResidentRunner(args, variants, files, run_batch=fake, skipped=skipped, say=say,
+                          sleep=sleep or clock.sleep, clock=now or clock.time)
+    r.prepare()
+    return r, args, files
+
+
+def other_copy_finishes(env, args, files, stem):
+    """What the other copy leaves for dfn3 / one file: its denoise.json and its ready marker."""
+    d = env[0] / "out" / "dfn3" / stem / "01b_denoise"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "denoise.json").write_text(json.dumps({"chain_id": "dfn3", "errors": [], "corr_with_input": 0.9,
+                                                "lag_samples": 0}))
+    mark_ready(env, args, files, "dfn3", "separation", stem)
+
+
+def write_claim(env, vid, stem, age_s=0.0, now=None):
+    p = env[0] / "out" / vid / f".claim_separation.{stem}"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"host": "job-a", "pid": 7, "time": "x"}))
+    if now is not None:
+        import os as _os
+        _os.utime(p, (now - age_s, now - age_s))
+    return p
+
+
+def test_copy_waits_for_a_file_another_copy_holds_and_adopts_its_result(env):
+    import time as _time
+    clock = Clock()
+    clock.now = _time.time()
+    write_claim(env, "dfn3", "a", now=clock.now, age_s=0)     # the other copy holds it: no result yet
+    fake, msgs = FakeRun(), []
+    r, args, files = claim_copy(env, fake, clock, msgs=msgs)
+    clock.hook = lambda n: other_copy_finishes(env, args, files, "a") if n == 3 else None
+    schedule_stop(r, files, "separation")
+    calls = [(vid, names) for vid, _, names in fake.calls]
+    assert ("dfn3", ["a.wav"]) not in calls and ("dfn3", ["b.wav"]) in calls
+    assert "dfn3" in r.finalized
+    assert any("by another copy" in m for m in msgs)
+    assert not (env[0] / "out" / "dfn3" / ".failed_separation.a").exists()
+
+
+def test_stale_claim_is_taken_over_only_with_reclaim_after(env):
+    import socket
+    import time as _time
+    clock = Clock()
+    clock.now = _time.time()
+    write_claim(env, "dfn3", "a", now=clock.now, age_s=3600)     # an hour old, no result: its copy died
+    fake, msgs = FakeRun(), []
+    r, args, files = claim_copy(env, fake, clock, "--reclaim-after", "30", msgs=msgs)
+    schedule_stop(r, files, "separation")
+    assert ("dfn3", ["a.wav"]) in [(vid, names) for vid, _, names in fake.calls]
+    assert any("taking it over" in m for m in msgs)
+    assert json.loads((env[0] / "out" / "dfn3" / ".claim_separation.a").read_text())["host"] == socket.gethostname()
+
+
+def test_without_reclaim_after_a_dead_claim_is_never_taken(env):
+    import time as _time
+    clock = Clock()
+    clock.now = _time.time()
+    write_claim(env, "dfn3", "a", now=clock.now, age_s=10 ** 6)
+    fake, msgs = FakeRun(), []
+    r, args, files = claim_copy(env, fake, clock, "--wait-timeout", "2", msgs=msgs)
+    schedule_stop(r, files, "separation")
+    assert ("dfn3", ["a.wav"]) not in [(vid, names) for vid, _, names in fake.calls]
+    assert any("gave up waiting" in m for m in msgs)
+    out = env[0] / "out" / "dfn3"
+    assert not (out / ".failed_separation.a").exists() and not (out / ".ready_separation.a").exists()
+
+
+def test_total_marker_is_written_only_when_every_file_is_ready(env):
+    import time as _time
+    clock = Clock()
+    clock.now = _time.time()
+    write_claim(env, "dfn3", "b", now=clock.now, age_s=0)
+    seen_at_first_wait = []
+    fake = FakeRun()
+    r, args, files = claim_copy(env, fake, clock)
+
+    def hook(n):
+        if n == 1:
+            seen_at_first_wait.append((env[0] / "out" / "dfn3" / ".ready_separation").exists())
+        if n == 3:
+            other_copy_finishes(env, args, files, "b")
+    clock.hook = hook
+    schedule_stop(r, files, "separation")
+    assert seen_at_first_wait == [False]
+    total = json.loads((env[0] / "out" / "dfn3" / ".ready_separation").read_text())
+    assert total["hash"] == rr.variant_hash(
+        {v["id"]: v for v in rr.resolve_plan(args)[0]}["dfn3"], args, files, stop_after="separation")
+
+
+def test_a_file_that_failed_in_one_copy_is_not_rerun_by_the_other(env):
+    clock = Clock()
+    fa = FileFake(bad={("dfn3", "a")})
+    ra, _, files = claim_copy(env, fa, clock)
+    schedule_stop(ra, files, "separation")
+    assert (env[0] / "out" / "dfn3" / ".failed_separation.a").is_file()
+    fb = FakeRun()
+    rb, _, files = claim_copy(env, fb, Clock())
+    schedule_stop(rb, files, "separation")
+    assert ("dfn3", ["a.wav"]) not in [(vid, names) for vid, _, names in fb.calls]
+    assert rb.status["dfn3"] == "failed"
+
+
+def test_two_copies_of_one_stage_share_the_files_and_each_file_runs_once(env):
+    import threading
+    import time as _time
+
+    class Slow(FakeRun):
+        def __call__(self, pipeline, args, config, batch, logger=None, stages=None):
+            _time.sleep(0.02)                 # the copies overlap
+            return super().__call__(pipeline, args, config, batch, logger, stages)
+
+    fake = Slow()
+    copies = [claim_copy(env, fake, None, sleep=lambda s: _time.sleep(0.003), now=_time.time)
+              for _ in range(2)]
+    expected = {(v["id"], n) for v in copies[0][0].runnable() for n in ("a.wav", "b.wav")}
+    threads = [threading.Thread(target=schedule_stop, args=(r, f, "separation")) for r, _, f in copies]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(120)
+    runs = [(vid, n) for vid, _, names in fake.calls for n in names]
+    assert sorted(runs) == sorted(expected)            # every file of every variant exactly once
+    out = env[0] / "out"
+    for vid in {v for v, _ in expected}:
+        assert (out / vid / ".ready_separation").is_file()
+        assert all((out / vid / f".ready_separation.{s}").is_file() for s in ("a", "b"))
+        assert (out / vid / ".claim_separation.a").is_file()

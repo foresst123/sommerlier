@@ -52,12 +52,35 @@ def test_per_file_cells_partial_failed_and_noop(tmp_path):
     (out / "p3" / ".failed_separation.b").write_text(json.dumps({"reason": "Sidon OOM"}))
     text = ls.render(out)
     lines = {l.split()[0]: l for l in text.splitlines() if l.split() and l.split()[0] in ("none", "p3")}
-    cols = lambda line: [line[9 + i * 16: 9 + (i + 1) * 16].split(" ")[0] for i in range(6)]
+    cols = lambda line: [line[9 + i * 16: 9 + (i + 1) * 16].split(" ")[0] for i in range(9)]
     none = cols(lines["none"])
     assert none[0] == "-"                                   # music off, no chain: denoise is a no-op
-    assert none[1] == "ok" and none[2] == "-" and none[3] == "2/3" and none[4] == "-"
+    assert none[1] == "ok" and none[2] == "-" and none[3] == "."   # separation_plan: nothing handed over yet
+    assert none[4] == "2/3" and none[5] == "-" and none[8] == "."
     rows = lines
     assert "FAIL" in rows["p3"] and "p3: separation b: Sidon OOM" in text
+
+
+def test_new_stages_and_claims_are_shown(tmp_path):
+    out = tmp_path
+    (out / "variants_manifest.json").write_text(json.dumps({"variants": [{"id": "none"}]}))
+    (out / "none").mkdir()
+    inp = out / "_resident" / "input_20260101_000000_1"
+    inp.mkdir(parents=True)
+    (inp / "a.wav").write_bytes(b"x")
+    (out / "none" / ".ready_separation_plan.a").write_text("{}")
+    (out / "none" / ".ready_asr").write_text("{}")
+    (out / "none" / ".ready_conversation_selection").write_text("{}")
+    (out / "none" / ".done").write_text("{}")
+    (out / "none" / ".claim_separation.a.wav").write_text(json.dumps({"host": "gpu-job-b", "pid": 42}))
+    (out / "none" / ".claim_asr.b.wav").write_text(json.dumps({"host": "gpu-job-c", "pid": 9}))
+    (out / "none" / ".ready_asr.b.wav").write_text("{}")          # finished: not listed as held
+    text = ls.render(out)
+    row = [l for l in text.splitlines() if l.split() and l.split()[0] == "none"][0]
+    assert row.split().count("ok") >= 4                          # separation_plan, asr, llm, done
+    assert "claims (file held by a copy of its stage):" in text
+    assert "separation" in text and "a.wav: held by gpu-job-b pid 42" in text
+    assert "gpu-job-c" not in text
 
 
 def test_hidden_folders_are_not_variants(tmp_path):
