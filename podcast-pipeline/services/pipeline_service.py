@@ -627,7 +627,7 @@ class PipelineService:
 
     # Thứ tự các điểm dừng của run(); None (chạy hết) tới được mọi bước.
     _STOP_ORDER = ("input_quality", "music", "denoise", "diarization",
-                   "denoise_pre_separation", "separation", "music_removal",
+                   "denoise_pre_separation", "separation_plan", "separation", "music_removal",
                    "denoise_pre_asr", "asr", "captioning", "refinement", "speaker_relabel",
                    "transcript_review", "persona_profile", "conversation_selection",
                    "word_alignment", "conversation_exports")
@@ -983,6 +983,76 @@ class PipelineService:
             drop = getattr(self.separation_svc, "drop_prefetched_plan", None)
             if callable(drop) and audio_path:
                 drop(audio_path)
+
+    def _separation_plan_key(self, checkpoint, segments) -> str:
+        """Namespace of this file's saved window plan, and the key it is checked
+        against on load. A plan is reused only when the window policy, the
+        diarization segments, the waveform it cuts (processed audio and the
+        pre-separation denoised audio) and the music/seam state all match."""
+        svc = self.separation_svc
+        music = getattr(svc, "music_map", None)
+        seams = svc.seams() if hasattr(svc, "seams") else []
+        material = {
+            "window": getattr(svc, "checkpoint_version", None),
+            "segments": [[round(float(s.start), 6), round(float(s.end), 6),
+                          str(s.speaker), str(s.index)] for s in segments],
+            "audio": [checkpoint.namespaces.get("processed_audio"),
+                      checkpoint.namespaces.get("denoised_audio_pre_separation")],
+            "music": music.summary() if music is not None else None,
+            "seams": seams,
+        }
+        digest = hashlib.sha1(
+            json.dumps(material, ensure_ascii=True, sort_keys=True,
+                       separators=(",", ":"), default=str).encode("utf-8")
+        ).hexdigest()[:20]
+        key = f"plan-v1-{digest}"
+        checkpoint.namespaces["separation_plan"] = key
+        return key
+
+    def _save_separation_plan(self, checkpoint, segments, audio_data, audio_path) -> bool:
+        """--stop_after separation_plan: build this file's window plan on the CPU
+        and checkpoint it, so the GPU separation run can start from it."""
+        name = os.path.basename(audio_path)
+        key = self._separation_plan_key(checkpoint, segments)
+        svc = self.separation_svc
+        plan = svc.build_plan_now(segments, audio_data)
+        if not svc.plan_is_savable(plan):
+            if self.logger:
+                self.logger.info(
+                    f"[TSE] {name}: lazy windows (performance.lazy_windows) cannot be "
+                    "saved; separation will build its windows itself")
+            return False
+        try:
+            checkpoint.save("separation_plan", {"key": key, "plan": plan})
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(
+                    f"[TSE] could not save separation plan for {name} "
+                    f"({type(exc).__name__}: {exc}); separation will build it itself")
+            return False
+        if self.logger:
+            self.logger.info(f"[TSE] saved separation plan for {name}")
+        return True
+
+    def _restore_separation_plan(self, checkpoint, segments, audio_path) -> bool:
+        """Hand a saved, key-matching plan to the separation service. Any miss or
+        read error returns False and separation builds the plan as it always did."""
+        key = self._separation_plan_key(checkpoint, segments)
+        try:
+            if not checkpoint.exists("separation_plan", verify_digest=False):
+                return False
+            payload = checkpoint.load("separation_plan")
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(
+                    f"[TSE] saved separation plan unreadable ({type(exc).__name__}: "
+                    f"{exc}); building it now")
+            return False
+        if not isinstance(payload, dict) or payload.get("key") != key:
+            return False
+        adopt = getattr(self.separation_svc, "adopt_saved_plan", None)
+        return bool(callable(adopt) and payload.get("plan") is not None
+                    and adopt(audio_path, payload["plan"]))
 
     @staticmethod
     def _pre_asr_base_ns(args, checkpoint) -> str:
@@ -1884,6 +1954,25 @@ class PipelineService:
                     self.logger.warning(
                         f"Separation checkpoint predates a rename ({exc}); "
                         "recomputing this stage")
+        # --stop_after separation_plan: the CPU-only point before GPU separation.
+        # Builds and checkpoints the window plan unless a valid one is saved.
+        if getattr(args, "stop_after", None) == "separation_plan":
+            if (diarization_result is not None and cached_separation is None
+                    and self.step_enabled(args, "separation")):
+                self._separation_plan_key(checkpoint, diarization_result.segments)
+                if not checkpoint.exists("separation_plan", verify_digest=False):
+                    self._save_separation_plan(
+                        checkpoint, diarization_result.segments, audio_data, audio_path)
+                elif self.logger:
+                    self.logger.info("A valid saved separation plan already exists; "
+                                     "not rebuilding it")
+            if self.logger:
+                self.logger.info("Stopping after the separation window plan as "
+                                 "requested by --stop_after.")
+            stage_out.write_manifest({"audio_file": os.path.basename(audio_path),
+                                      "stopped_after": "separation_plan"})
+            return None
+
         if not self.step_enabled(args, "separation"):
             if self.logger:
                 self.logger.info("Step 'separation' is off in the profile; skipping")
@@ -1903,6 +1992,9 @@ class PipelineService:
             if self.logger: self.logger.info("Loading Separation from checkpoint")
             speech_segments = cached_separation
         else:
+            if diarization_result is not None:
+                self._restore_separation_plan(
+                    checkpoint, diarization_result.segments, audio_path)
             self._load("separation")
             self.separation_svc.dump_dir = os.path.join(
                 output_dir, "03_separation", "audio", "raw")

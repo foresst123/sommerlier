@@ -55,12 +55,23 @@ def opt_in_step_enabled(args, name: str) -> bool:
     return getattr(args, f"step_{name}", None) is True
 
 
+# Stages that come after the CPU-only --stop_after separation_plan point. A run
+# that stops there never reaches them, so their GPU models are not loaded.
+_AFTER_SEPARATION_PLAN = frozenset({
+    "separation", "music_removal", "denoise_pre_asr", "asr", "captioning",
+    "refinement", "speaker_relabel", "transcript_review", "persona_profile",
+    "word_alignment", "conversation_exports",
+})
+
+
 def will_run(args, name: str) -> bool:
     """Whether this run actually reaches `name`.
 
-    Now simplified: a step runs if and only if it is enabled in the config.
-    There is no longer a concept of "load-bearing" stages that block everything
-    downstream -- each stage independently checks its own `step_enabled` flag
-    and whether its prerequisite data is available.
+    A step runs if and only if it is enabled in the config, and the run was not
+    stopped before it: --stop_after separation_plan stops before every stage in
+    _AFTER_SEPARATION_PLAN. Each stage still checks its own prerequisites.
     """
+    if (getattr(args, "stop_after", None) == "separation_plan"
+            and name in _AFTER_SEPARATION_PLAN):
+        return False
     return step_enabled(args, name)

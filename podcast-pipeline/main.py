@@ -198,7 +198,7 @@ def _build_parser():
     parser.add_argument(
         "--stop_after", type=str,
         choices=["input_quality", "music", "denoise", "diarization",
-                 "denoise_pre_separation", "separation",
+                 "denoise_pre_separation", "separation_plan", "separation",
                  "music_removal", "denoise_pre_asr", "asr",
                  "captioning", "refinement", "speaker_relabel", "transcript_review",
                  "persona_profile", "word_alignment", "conversation_exports", "none"],

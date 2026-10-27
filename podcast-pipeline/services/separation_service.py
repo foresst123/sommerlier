@@ -457,6 +457,33 @@ class SeparationService:
         with self._prefetch_lock:
             self._prefetch_cache.pop(audio_path, None)
 
+    def build_plan_now(self, segments: List[Segment], audio: AudioData) -> "_OverlapPlan":
+        """Synchronous, CPU-only build of this file's overlap plan, for the
+        --stop_after separation_plan point. The same plan process_overlaps would
+        build for itself, returned to the caller instead of consumed here."""
+        return self._build_overlap_plan(segments, audio)
+
+    @staticmethod
+    def plan_is_savable(plan: "_OverlapPlan") -> bool:
+        """A lazy plan (performance.lazy_windows) keeps a callable that cannot be
+        pickled; only an eager plan can be written to disk."""
+        return getattr(plan, "job_factory", None) is None
+
+    def adopt_saved_plan(self, audio_path: str, plan: "_OverlapPlan") -> bool:
+        """Install a plan restored from disk as a finished prefetch, so that
+        process_overlaps takes it through the same path a prefetch takes. An
+        existing prefetch for this path wins: it was built from this run's audio."""
+        future = Future()
+        future.set_result(plan)
+        with self._prefetch_lock:
+            if audio_path in self._prefetch_cache:
+                return False
+            self._prefetch_cache[audio_path] = future
+        if self.logger:
+            self.logger.info(
+                f"[TSE] using saved separation plan for {os.path.basename(audio_path)}")
+        return True
+
     def close_prefetch_pool(self) -> None:
         """Shut down the background coordinator pool, once, at the end of
         the 'separation' stage's batch-wide scope -- not the 'diarization'
