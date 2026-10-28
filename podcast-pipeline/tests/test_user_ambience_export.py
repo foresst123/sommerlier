@@ -6,6 +6,8 @@ tests are about what the exporter passes them, what it does with the answer, and
 import json
 import os
 import sys
+import threading
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -215,3 +217,65 @@ def test_conversation_json_records_the_user_ambience_only_when_it_is_on(tmp_path
         assert "user_ambience" not in meta
         assert calls == {}
     json.dumps(meta)                       # still plain JSON
+
+
+def test_the_safe_mask_gets_the_reverb_tail_cap_of_the_params(monkeypatch):
+    calls = {}
+    _install(monkeypatch, calls)
+    svc = _svc("raw_mask")
+    _render(svc, roles=_roles())
+    (_, _, _, _, _, _, _, _), kw = calls["safe_mask"][0]
+    assert kw["tail_ms"] == svc.user_ambience.reverb_tail_max_ms == 400.0
+
+
+def test_an_assistant_span_the_speech_list_lacks_still_makes_the_user_channel_unsafe(monkeypatch):
+    calls = {}
+    _install(monkeypatch, calls)
+    # The separation stage left the assistant out of speech_segments; the ASR segments still have it.
+    speech = [_speech(A, 10.0, 13.0), _speech(C, 16.0, 17.0), _speech(A, 18.0, 19.0)]
+    _render(_svc("raw_mask"), roles=_roles(), speech=speech)
+    (_, _, _, other, third, _, _, _), _ = calls["safe_mask"][0]
+    assert other == [(12.0, 15.0)], "the assistant's ASR span, once"
+    assert third == [(16.0, 17.0)]
+
+
+def test_a_third_speaker_only_the_asr_segments_know_of_is_a_third_span(monkeypatch):
+    calls = {}
+    _install(monkeypatch, calls)
+    speech = [_speech(A, 10.0, 13.0), _speech(B, 12.0, 15.0), _speech(A, 18.0, 19.0)]
+    _render(_svc("raw_mask"), roles=_roles(), speech=speech)
+    (_, _, _, other, third, _, _, _), _ = calls["safe_mask"][0]
+    assert other == [(12.0, 15.0)]
+    assert third == [(16.0, 17.0)], "the ASR segment of speaker C, which speech_segments lacks"
+
+
+def test_four_render_workers_find_the_quiet_gaps_once(monkeypatch):
+    import utils.ambience_bed as ab
+    calls = []
+
+    def slow_gaps(spans, lo, hi, params, waveform=None, sr=None):
+        calls.append(threading.get_ident())
+        time.sleep(0.2)                    # long enough that the other threads arrive while it runs
+        return [GAP]
+
+    monkeypatch.setattr(ab, "find_quiet_gaps", slow_gaps)
+    svc = _svc("raw_mask")
+    speech = _segments()
+    spans = [(float(s.start), float(s.end)) for s in speech]
+    barrier = threading.Barrier(4)
+    results = [None] * 4
+
+    def work(i):
+        barrier.wait()
+        results[i] = svc._quiet_gaps(speech, spans, WAVE, SR)
+
+    threads = [threading.Thread(target=work, args=(i,)) for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    assert len(calls) == 1, "one computation for the recording, the others wait for it"
+    assert all(r is results[0] for r in results) and results[0] == [GAP]
+    # The cache still holds one entry, and a later call is a hit too.
+    assert svc._quiet_gaps(speech, spans, WAVE, SR) is results[0]
+    assert len(calls) == 1
