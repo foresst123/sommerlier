@@ -159,11 +159,14 @@ def test_a100_filters_once_before_diarization_and_runs_no_music_step():
 def test_a100_clean_chain_is_configured_and_valid():
     from models.denoise import BACKENDS, parse_chain
     from models.denoise.pseudo import validate_chain_tokens
-    chain = _config()["a100"]["conversation_exports"]["assistant_clean_chain"]
-    assert chain == "rf_vocals_resurrection>mpsenet_dns"
+    exports = _config()["a100"]["conversation_exports"]
+    chain = exports["assistant_clean_chain"]
+    # MP-SENet is lightened with dry50: half its output, half of what it was given (not the raw, noisy audio)
+    assert chain == "rf_vocals_resurrection>mpsenet_dns>dry50"
+    assert exports["user_clean_chain"] == chain
     tokens = parse_chain(chain)
     validate_chain_tokens(tokens)
-    assert all(t in BACKENDS for t in tokens)
+    assert all(t in BACKENDS or t.startswith(("blend", "dry")) for t in tokens)
     for spec in (_config()["a100"]["pipeline"]["denoise"], chain):
         validate_chain_tokens(parse_chain(spec))
 
