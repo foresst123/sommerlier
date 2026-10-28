@@ -277,12 +277,12 @@ tick();setInterval(tick,5000);
 </script></body></html>"""
 
 
-def make_handler(out, final):
+def make_handler(out, final, ctx=None):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             parts = urlsplit(self.path)
             path = parts.path.rstrip("/")
-            if job_listen.handle(self, path, parse_qs(parts.query), final):
+            if job_listen.handle(self, path, parse_qs(parts.query), final, ctx):
                 return
             if path in ("", "/index.html"):
                 body, kind = PAGE.encode(), "text/html; charset=utf-8"
@@ -298,6 +298,12 @@ def make_handler(out, final):
             self.end_headers()
             self.wfile.write(body)
 
+        def do_POST(self):
+            path = urlsplit(self.path).path.rstrip("/")
+            if job_listen.handle_post(self, path, final):
+                return
+            self.send_error(404)
+
         def log_message(self, *args):
             pass
     return Handler
@@ -307,6 +313,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("out", type=Path)
     ap.add_argument("--final", type=Path, default=None, help="default OUT/final")
+    ap.add_argument("--audio-dir", type=Path, default=None,
+                    help="the original recordings: the listening tab then shows the input hours and the output/input ratio")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--host", default="127.0.0.1", help="0.0.0.0 to open it to the network")
     ap.add_argument("--agent", action="store_true",
@@ -334,7 +342,7 @@ def main(argv=None):
     if args.once:
         print(json.dumps(collect(args.out, final), indent=2, ensure_ascii=False))
         return 0
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(args.out, final))
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(args.out, final, {"audio_dir": args.audio_dir, "total_recordings": len(ls.file_stems(args.out)) or None}))
     print(f"http://{args.host}:{args.port}/   (Ctrl+C to stop; the jobs are not touched)", flush=True)
     try:
         server.serve_forever()

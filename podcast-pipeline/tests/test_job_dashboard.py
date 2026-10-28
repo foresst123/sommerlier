@@ -130,3 +130,33 @@ def test_category_is_read_from_the_recording_id_when_the_audio_is_a_swapped_copy
         f.write(json.dumps(cut) + "\n")
     data = jd.final_state(out / "final")["data"]
     assert data["by_category"] == {"backchannel": {"cuts": 1, "hours": 1.0}}
+
+
+def test_the_listening_routes_and_the_review_post_work_through_the_dashboard(tmp_path):
+    import urllib.request
+    out = make_out(tmp_path)
+    folder = out / "final" / "interrupt" / "xxxxxxxxxxx_Phim A - Tập 1_10s"
+    folder.mkdir(parents=True)
+    (folder / "conversation.json").write_text(json.dumps(
+        {"topic": "t", "duration": 12, "source_stem": "xxxxxxxxxxx_Phim A - Tập 1", "conversation": []}))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), jd.make_handler(out, out / "final", {"audio_dir": None, "total_recordings": 3}))
+    Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        listing = json.loads(urllib.request.urlopen(base + "/api/conversations").read())
+        assert listing["total"] == 1
+        cid = listing["items"][0]["id"]
+        sample = json.loads(urllib.request.urlopen(base + "/api/sample?n=5").read())
+        assert sample["n"] == 1 and sample["items"][0]["film"]
+        req = urllib.request.Request(base + "/api/review", data=json.dumps({"id": cid, "verdict": "bad", "tags": ["nhiễu"]}).encode(),
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        assert json.loads(urllib.request.urlopen(req).read())["summary"]["bad"] == 1
+        stats = json.loads(urllib.request.urlopen(base + "/api/stats").read())
+        assert stats["input"]["recordings_total"] == 3 and stats["output"]["conversations"] == 1
+        try:
+            urllib.request.urlopen(urllib.request.Request(base + "/nope", data=b"{}", method="POST"))
+            assert False, "an unknown POST must be a 404"
+        except urllib.error.HTTPError as e:
+            assert e.code == 404
+    finally:
+        server.shutdown()
