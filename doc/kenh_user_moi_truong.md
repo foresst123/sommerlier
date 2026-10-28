@@ -6,7 +6,7 @@ Mã nằm ở `podcast-pipeline/utils/ambience_bed.py` (hợp đồng và tham s
 
 Trạng thái: module đã cài đủ (hợp đồng, thân hàm và các số đo trong `ambience_bed.py`), nhưng chưa chạy thử
 trên bản ghi thật. Profile `a100` trong `config.json` để `conversation_exports.user_ambience.mode = "none"`:
-không gọi module nào, hành vi cũ. Mode `raw_mask` chỉ bật sau mục 8.
+không gọi module nào, hành vi cũ. Profile a100 đang bật `raw_mask`; nên làm mục 8 trên vài bản ghi thật trước khi xuất hàng loạt.
 Nếu module lỗi khi chạy, `_clean_assistant` ghi lỗi vào `assistant_clean.postprocess.error` và vẫn ghi file đã lọc;
 lỗi trong phần kênh user giữ track cũ và ghi lý do vào `user_ambience`.
 
@@ -53,7 +53,7 @@ còn kênh assistant có số 0 giữa các câu sau khi lọc. Hai kênh đều
 }
 ```
 
-Profile `a100` đặt `mode` là `none`. `mode` nhận `none` (mặc định, hành vi cũ, không gọi module nào), `raw_mask` (M1), `bed_only` (M2).
+Profile `a100` đặt `mode` là `raw_mask` (M1). Đặt lại `none` để về hành vi cũ. `mode` nhận `none` (mặc định, hành vi cũ, không gọi module nào), `raw_mask` (M1), `bed_only` (M2).
 Giá trị khác bị từ chối khi dựng service, không phải lúc từng đoạn.
 
 Các tham số khác trong `AmbienceParams` (đặt trong cùng khối `user_ambience`, khóa không biết sẽ bị bỏ qua):
@@ -89,7 +89,7 @@ Các tham số khác trong `AmbienceParams` (đặt trong cùng khối `user_amb
   - `longest_zero_run_s`: đoạn số 0 liên tục dài nhất của file user, tính trên cả file (chưa tách theo lời nói). Mục tiêu 0 khi kênh user không có khoảng im kỹ thuật.
   - `assistant_floor_dbfs`: phân vị 10% mức khung 20 ms của assistant, trên cả file. Khung số 0 nằm ở mức chặn −120 dBFS, nên khi expander đã đưa khoảng im về 0 giá trị này đọc ra −120; đó là dấu hiệu, không phải lỗi.
   - `assistant_zero_frame_share`: tỉ lệ khung số 0 của assistant, để giải thích số trên.
-  - Chưa có số đo bước RMS của kênh user (`user_max_rms_step_db` không có trong code). Mục 8 dùng các số đang có.
+  - `verification.quality.user_max_rms_step_db` là bước nhảy mức lớn nhất (dB, cửa sổ 50 ms) của kênh user; nên nhỏ hơn khoảng 6 dB.
 - `user_ambience` (chỉ có khi `mode` khác `none`):
   - `mode`, `applied`. Khi `applied` là `false`, `reason` nêu lý do: `not_separated_tracks`, `no_roles`, `no_speech_segments`, hoặc một lỗi đã bắt (kênh user giữ nguyên).
   - Khi `applied` là `true`: `bed_tier` (`local`, `file`, `synthetic` hoặc `pink`), `bed_pieces` (số đoạn nền dùng), `bed_repeats` (số lần dùng lại một đoạn mẫu, mục tiêu 0), `safe_fraction` (tỉ lệ mẫu nằm trong vùng an toàn, giữ nguyên raw).
