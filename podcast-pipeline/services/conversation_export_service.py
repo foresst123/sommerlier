@@ -678,6 +678,7 @@ USER_FILE = "user.wav"
 STEREO_FILE = "stereo_2ch.wav"
 # Written beside the originals only when a clean chain ran cleanly (see _clean_assistant).
 ASSISTANT_CLEAN_FILE = "assistant_clean.wav"
+USER_CLEAN_FILE = "user_clean.wav"
 STEREO_CLEAN_FILE = "stereo_2ch_clean.wav"
 ALIGNMENTS_FILE = "stereo_2ch.json"      # moshi-finetune: assistant words, next to the wav
 JSON_FILE = "conversation.json"
@@ -1034,7 +1035,8 @@ class ConversationExportService:
     def __init__(self, llm, logger=None, render_workers: int = 1,
                  reuse_render: bool = False, replay_old_replies: bool = False,
                  assistant_clean_chain: str = "none", denoise_cfg: Optional[dict] = None,
-                 user_ambience: Optional[dict] = None, **settings):
+                 user_ambience: Optional[dict] = None, user_clean_chain: str = "none",
+                 clean_postprocess: bool = False, **settings):
         self.llm = llm
         self.logger = logger
         # How the two channels are laid out (utils/ambience_bed.py): mode "none" is the old tracks of zeros.
@@ -1045,17 +1047,25 @@ class ConversationExportService:
         # here, not once per excerpt; the filter itself never raises (see _clean_assistant).
         self.assistant_clean_chain = (
             "none" if is_none(assistant_clean_chain) else str(assistant_clean_chain).strip())
+        # The same chain (or another) for the user track: with it both channels of the clean pair are filtered.
+        self.user_clean_chain = (
+            "none" if is_none(user_clean_chain) else str(user_clean_chain).strip())
+        # Soft mask, expander and level match after each filtered channel (utils/ambience_bed.postprocess_assistant).
+        self.clean_postprocess = bool(clean_postprocess)
         self.denoise_cfg = denoise_cfg if isinstance(denoise_cfg, dict) else None
-        if self.assistant_clean_chain != "none":
+        for name, chain in (("assistant_clean_chain", self.assistant_clean_chain),
+                            ("user_clean_chain", self.user_clean_chain)):
+            if chain == "none":
+                continue
             from models.denoise import BACKENDS
             from models.denoise.pseudo import backend_tokens, validate_chain_tokens
-            tokens = parse_spec(self.assistant_clean_chain)
+            tokens = parse_spec(chain)
             validate_chain_tokens(tokens)
             unknown = [t for t in backend_tokens(tokens) if t not in BACKENDS]
             if unknown:
                 raise ValueError(
-                    f"unknown denoise backend {', '.join(map(repr, unknown))} in assistant_clean_chain "
-                    f"{self.assistant_clean_chain!r}; known: {', '.join(sorted(BACKENDS))}")
+                    f"unknown denoise backend {', '.join(map(repr, unknown))} in {name} "
+                    f"{chain!r}; known: {', '.join(sorted(BACKENDS))}")
         # Excerpts are written from render_workers threads; one filter run at a time keeps
         # a single backend model on the GPU.
         self._clean_lock = threading.Lock()
@@ -2262,9 +2272,10 @@ class ConversationExportService:
             checks["stereo_clean_assistant_channel_is_assistant_clean"] = bool(
                 clean_stereo.shape[1] == 2
                 and np.array_equal(clean_stereo[:, mine], data["assistant_clean"][:, 0]))
+            user_ref = "user_clean" if "user_clean" in data else "user"
             checks["stereo_clean_user_channel_is_user"] = bool(
-                "user" in data and clean_stereo.shape[1] == 2
-                and np.array_equal(clean_stereo[:, other], data["user"][:, 0]))
+                user_ref in data and clean_stereo.shape[1] == 2
+                and np.array_equal(clean_stereo[:, other], data[user_ref][:, 0]))
         result = {"ok": all(checks.values()), "sample_rate": sample_rate,
                   "num_samples": num_samples,
                   "duration": round(num_samples / float(sample_rate), 6),
@@ -2319,36 +2330,32 @@ class ConversationExportService:
                 "assistant_zero_frame_share": zero_share,
                 "user_max_rms_step_db": step}
 
-    def _clean_assistant(self, directory: str, assistant, user, sample_rate: int):
-        """Filter the assistant track with assistant_clean_chain and write the clean pair.
+    def _filter_channel(self, track, sample_rate: int, chain: str, label: str):
+        """(clean track or None, record) for one channel run through `chain`; never raises.
 
-        Returns (record for conversation.json, files to add to the item's file map). The
-        clean files are written only when the chain ran over the whole track without an
-        error: a failed filter keeps the original audio, and writing that under the
-        clean name would pass it off as filtered. The filter never raises.
+        Written only when the chain ran over the whole track without an error: a failed filter keeps the
+        original audio and nothing is passed off as filtered. With clean_postprocess (or a user_ambience mode)
+        the soft mask, expander and level match follow; their failure keeps the filtered track as it is.
         """
-        import soundfile as sf
-        mono = np.asarray(assistant, dtype=np.float32)
+        mono = np.asarray(track, dtype=np.float32)
         if mono.ndim == 2:
             mono = mono[:, 0]
         # One track per excerpt for now: apply_many loads the backend per call. Batching a
         # whole source file would need the renders held back until all of them are cut.
         with self._clean_lock:
             outs, info = DenoiseService().apply_many(
-                [mono], int(sample_rate), self.assistant_clean_chain, self.denoise_cfg, self.logger)
-        record = {"chain": self.assistant_clean_chain, "chain_id": info["chain_id"],
+                [mono], int(sample_rate), chain, self.denoise_cfg, self.logger)
+        record = {"chain": chain, "chain_id": info["chain_id"],
                   "steps": [step["token"] for step in info["steps"]],
                   "errors": list(info["errors"]), "written": False}
         if info["errors"]:
             record["reason"] = "filter_failed"
-            return record, {}
+            return None, record
         if not info.get("filtered"):
             record["reason"] = "too_short"
-            return record, {}
+            return None, record
         clean = np.asarray(outs[0], dtype=np.float32)
-        if self.user_ambience.enabled:
-            # The soft mask, expander and level match (utils/ambience_bed.py). Its failure keeps the
-            # filtered track as it is and says so in the record; the files are written either way.
+        if self.user_ambience.enabled or self.clean_postprocess:
             try:
                 from utils import ambience_bed
                 audio, report = ambience_bed.postprocess_assistant(
@@ -2362,16 +2369,44 @@ class ConversationExportService:
                 record["postprocess"] = {"error": f"{type(exc).__name__}: {exc}"}
                 if self.logger:
                     self.logger.warning(
-                        f"[conversation-exports] assistant postprocess failed, "
+                        f"[conversation-exports] {label} postprocess failed, "
                         f"the filtered track is kept as it is: {exc}")
-        pair = (clean, user) if self.cfg.assistant_channel == "left" else (user, clean)
+        return clean, record
+
+    def _clean_assistant(self, directory: str, assistant, user, sample_rate: int):
+        """Filter the assistant track (assistant_clean_chain) and, when user_clean_chain is set, the user track
+        too, and write the clean pair.
+
+        Returns (record for conversation.json, files to add to the item's file map). The clean files are
+        written only when every configured chain ran without an error: a pair with one channel that failed
+        would pass an unfiltered track off as clean, so then nothing is written and the record says which
+        channel failed. The filter never raises.
+        """
+        import soundfile as sf
+        clean, record = self._filter_channel(assistant, sample_rate, self.assistant_clean_chain, "assistant")
+        user_clean, user_record = None, None
+        if self.user_clean_chain != "none":
+            user_clean, user_record = self._filter_channel(user, sample_rate, self.user_clean_chain, "user")
+            record["user"] = user_record
+        if clean is None:
+            return record, {}
+        if user_record is not None and user_clean is None:
+            record["written"] = False
+            record["reason"] = f"user_{user_record.get('reason', 'filter_failed')}"
+            return record, {}
+        user_out = user if user_clean is None else user_clean
+        pair = (clean, user_out) if self.cfg.assistant_channel == "left" else (user_out, clean)
         sf.write(os.path.join(directory, ASSISTANT_CLEAN_FILE), clean,
                  sample_rate, subtype="PCM_16")
+        files = {"assistant_clean": ASSISTANT_CLEAN_FILE, "stereo_2ch_clean": STEREO_CLEAN_FILE}
+        if user_clean is not None:
+            sf.write(os.path.join(directory, USER_CLEAN_FILE), user_clean, sample_rate, subtype="PCM_16")
+            files["user_clean"] = USER_CLEAN_FILE
+            user_record["written"] = True
         sf.write(os.path.join(directory, STEREO_CLEAN_FILE), np.column_stack(pair),
                  sample_rate, subtype="PCM_16")
         record["written"] = True
-        return record, {"assistant_clean": ASSISTANT_CLEAN_FILE,
-                        "stereo_2ch_clean": STEREO_CLEAN_FILE}
+        return record, files
 
     def _alignments(self, finder, plan: _Plan, origin: float) -> dict:
         """moshi-finetune sidecar: the assistant's words, timed from the start of the audio."""

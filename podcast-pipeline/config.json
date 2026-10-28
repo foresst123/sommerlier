@@ -246,8 +246,10 @@
       },
       "conversation_exports": {
         "assistant_clean_chain": "rf_vocals_resurrection>mpsenet_dns",
+        "user_clean_chain": "rf_vocals_resurrection>mpsenet_dns",
+        "clean_postprocess": true,
         "user_ambience": {
-          "mode": "raw_mask"
+          "mode": "none"
         }
       },
       "steps": {
