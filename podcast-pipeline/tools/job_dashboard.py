@@ -25,9 +25,11 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
+from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import line_status as ls  # noqa: E402
+import job_listen  # noqa: E402
 
 STAGES = ("denoise", "diarization", "separation_plan", "separation", "asr", "conversation_selection")
 RATE_WINDOW = 600
@@ -230,7 +232,16 @@ main{max-width:1100px;margin:0 auto;padding:16px}h1{font-size:18px;margin:0 0 4p
 th{color:var(--mute);font-weight:500;border-top:0}.bad{color:var(--bad)}.ok{color:var(--ok)}.warn{color:var(--warn)}
 .log{font:12px ui-monospace,monospace;word-break:break-all}.g{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}
 @media(max-width:640px){.row{grid-template-columns:1fr}.num{text-align:left}}
-</style></head><body><main>
+.tabs{display:flex;gap:4px;max-width:1100px;margin:0 auto;padding:10px 16px 0}
+.tabs button{font:inherit;background:transparent;color:var(--mute);border:1px solid var(--line);border-bottom:0;border-radius:8px 8px 0 0;padding:7px 16px;cursor:pointer}
+.tabs button[aria-selected=true]{background:var(--card);color:var(--ink);font-weight:600}
+.tabs button:focus-visible{outline:2px solid var(--run);outline-offset:-2px}
+#tab-listen{max-width:1400px;margin:0 auto;padding:0 8px}
+#listenFrame{display:block;width:100%;height:calc(100vh - 62px);border:1px solid var(--line);border-radius:0 8px 8px 8px;background:var(--card)}
+</style></head><body>
+<nav class="tabs" role="tablist"><button role="tab" id="t-prog" aria-selected="true" aria-controls="tab-prog">Tiến độ job</button><button role="tab" id="t-listen" aria-selected="false" aria-controls="tab-listen">Nghe hội thoại</button></nav>
+<section id="tab-listen" hidden><iframe id="listenFrame" title="Nghe hội thoại" allow="autoplay"></iframe></section>
+<main id="tab-prog">
 <h1>Tiến độ job</h1><div class="sub" id="sub">đang tải…</div><div id="warn" class="warn"></div>
 <div class="card"><h2>Các stage</h2><div id="stages"></div></div>
 <div class="card"><h2>Kết quả cuối</h2><div id="final"></div></div>
@@ -255,6 +266,13 @@ async function tick(){
  $('proc').innerHTML=['front','asr','llm'].map(j=>{const ps=d.processes.filter(p=>p.name.startsWith(j+'_'));return `<div class="mute" style="margin:8px 0 2px"><b>${jn[j]}</b> · ${ps.length?ps.length+' tiến trình':'chưa có log'}</div>`+(ps.length?`<table>${ps.map(p=>`<tr><td>${p.name.replace(/^[a-z]+_[0-9]+_/,'')}</td><td class="${p.age_s>600?'warn':'mute'}">${p.age}</td><td class="log">${esc(p.line)}</td></tr>`).join('')}</table>`:'')}).join('');
  $('claims').innerHTML=d.claims.length?`<table>${d.claims.map(c=>`<tr><td>${c.stage}</td><td>${esc(c.file)}</td><td class="mute">${esc(c.who)}</td></tr>`).join('')}</table>`:'<span class="mute">không có</span>';
 }
+function showTab(name){const L=name==='listen';
+ $('tab-prog').hidden=L;$('tab-listen').hidden=!L;
+ $('t-prog').setAttribute('aria-selected',String(!L));$('t-listen').setAttribute('aria-selected',String(L));
+ if(L&&!$('listenFrame').getAttribute('src'))$('listenFrame').setAttribute('src','listen');   // loaded once, then kept: playback survives a tab switch
+ try{history.replaceState(null,'',L?'#nghe':'#')}catch(e){}}
+$('t-prog').onclick=()=>showTab('prog');$('t-listen').onclick=()=>showTab('listen');
+if(location.hash==='#nghe')showTab('listen');
 tick();setInterval(tick,5000);
 </script></body></html>"""
 
@@ -262,7 +280,10 @@ tick();setInterval(tick,5000);
 def make_handler(out, final):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            path = self.path.split("?")[0].rstrip("/")
+            parts = urlsplit(self.path)
+            path = parts.path.rstrip("/")
+            if job_listen.handle(self, path, parse_qs(parts.query), final):
+                return
             if path in ("", "/index.html"):
                 body, kind = PAGE.encode(), "text/html; charset=utf-8"
             elif path == "/api":
