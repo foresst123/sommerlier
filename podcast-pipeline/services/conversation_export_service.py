@@ -2242,10 +2242,45 @@ class ConversationExportService:
                 stereo.shape[1] == 2 and np.array_equal(stereo[:, mine], data["assistant"][:, 0]))
             checks["stereo_user_channel_is_user"] = bool(
                 stereo.shape[1] == 2 and np.array_equal(stereo[:, other], data["user"][:, 0]))
-        return {"ok": all(checks.values()), "sample_rate": sample_rate,
-                "num_samples": num_samples,
-                "duration": round(num_samples / float(sample_rate), 6),
-                "files": info, "checks": checks}
+        result = {"ok": all(checks.values()), "sample_rate": sample_rate,
+                  "num_samples": num_samples,
+                  "duration": round(num_samples / float(sample_rate), 6),
+                  "files": info, "checks": checks}
+        if "user" in data and "assistant" in data:
+            try:
+                # Audit numbers, not checks: they never change "ok".
+                result["quality"] = self._quality_numbers(
+                    data["user"][:, 0], data["assistant"][:, 0], sample_rate)
+            except Exception:
+                pass
+        return result
+
+    @staticmethod
+    def _quality_numbers(user: np.ndarray, assistant: np.ndarray, sample_rate: int) -> dict:
+        """Audit numbers of a written pair, from the 16-bit samples as they were written.
+
+        longest_zero_run_s: the longest run of exact zeros in the whole user file (no speech spans here,
+        so a stretch of the user's own speech that is digital zero counts too).
+        assistant_floor_dbfs: 10th percentile of the 20 ms frame levels of the whole assistant file. Frames
+        of exact zero sit at the -120 dBFS clamp, so once the expander has zeroed the gaps this reads that
+        clamp; assistant_zero_frame_share says how many frames that is.
+        """
+        user_zero = np.concatenate([[False], np.asarray(user) == 0, [False]]).astype(np.int8)
+        edges = np.flatnonzero(np.diff(user_zero))
+        runs = edges[1::2] - edges[::2]          # rising edge, falling edge: the run's length in samples
+        longest = int(runs.max()) if runs.size else 0
+        frame = max(1, int(round(0.02 * sample_rate)))
+        scaled = np.asarray(assistant, dtype=np.float64) / 32768.0
+        n = len(scaled) // frame
+        floor, zero_share = None, None
+        if n:
+            rms = np.sqrt(np.mean(scaled[:n * frame].reshape(n, frame) ** 2, axis=1))
+            db = 20.0 * np.log10(np.maximum(rms, 1e-6))
+            floor = round(float(np.percentile(db, 10)), 2)
+            zero_share = round(float(np.mean(rms == 0)), 4)
+        return {"longest_zero_run_s": round(longest / float(sample_rate), 6),
+                "assistant_floor_dbfs": floor,
+                "assistant_zero_frame_share": zero_share}
 
     def _clean_assistant(self, directory: str, assistant, user, sample_rate: int):
         """Filter the assistant track with assistant_clean_chain and write the clean pair.
@@ -2274,6 +2309,24 @@ class ConversationExportService:
             record["reason"] = "too_short"
             return record, {}
         clean = np.asarray(outs[0], dtype=np.float32)
+        if self.user_ambience.enabled:
+            # The soft mask, expander and level match (utils/ambience_bed.py). Its failure keeps the
+            # filtered track as it is and says so in the record; the files are written either way.
+            try:
+                from utils import ambience_bed
+                audio, report = ambience_bed.postprocess_assistant(
+                    clean, mono, int(sample_rate), self.user_ambience)
+                audio = np.asarray(audio, dtype=np.float32)
+                if audio.shape != clean.shape:
+                    raise ValueError(f"returned {audio.shape}, expected {clean.shape}")
+                clean = audio
+                record["postprocess"] = dict(report)
+            except Exception as exc:
+                record["postprocess"] = {"error": f"{type(exc).__name__}: {exc}"}
+                if self.logger:
+                    self.logger.warning(
+                        f"[conversation-exports] assistant postprocess failed, "
+                        f"the filtered track is kept as it is: {exc}")
         pair = (clean, user) if self.cfg.assistant_channel == "left" else (user, clean)
         sf.write(os.path.join(directory, ASSISTANT_CLEAN_FILE), clean,
                  sample_rate, subtype="PCM_16")
