@@ -1,0 +1,952 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:,">
+<title>Nghe hội thoại</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--ink:#1c2330;--mute:#667085;--line:#e3e6ec;--ok:#1a7f4b;--run:#2563eb;--bad:#c0392b;--warn:#b7791f;--sel:#e8effd;--hover:#eef1f6;--on:#fff;--name:76px}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#10141b;--card:#171c25;--ink:#e6e9ef;--mute:#8b94a5;--line:#273041;--ok:#4cc38a;--run:#6ea0ff;--bad:#ff7a6b;--warn:#e0b24d;--sel:#1d2a44;--hover:#202836;--on:#0b1020}}
+:root[data-theme="dark"]{--bg:#10141b;--card:#171c25;--ink:#e6e9ef;--mute:#8b94a5;--line:#273041;--ok:#4cc38a;--run:#6ea0ff;--bad:#ff7a6b;--warn:#e0b24d;--sel:#1d2a44;--hover:#202836;--on:#0b1020}
+[hidden]{display:none !important}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:1280px;margin:0 auto;padding:12px 16px}
+body.embedded #top{display:none}
+body.embedded main{padding-top:8px}
+a{color:var(--run)}
+h1{font-size:17px;margin:0}
+h2{font-size:15px;margin:0;overflow-wrap:anywhere;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+input,select,button{font:inherit;color:inherit}
+input[type=search],select{padding:6px 9px;border:1px solid var(--line);border-radius:8px;background:var(--card);min-height:34px}
+button:focus-visible,input:focus-visible,select:focus-visible,.turn:focus-visible,.row:focus-visible,a:focus-visible,canvas:focus-visible{outline:2px solid var(--run);outline-offset:2px}
+.top{display:flex;flex-wrap:wrap;gap:6px 16px;align-items:baseline;justify-content:space-between;margin-bottom:8px}
+.bar{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 6px}
+.bar input{flex:1 1 200px;min-width:0}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.chip,.btn,.seg button{border:1px solid var(--line);background:var(--card);border-radius:999px;padding:3px 11px;cursor:pointer;min-height:30px}
+.chip[aria-pressed="true"]{background:var(--run);border-color:var(--run);color:var(--on)}
+.chip .n{opacity:.75;margin-left:3px;font-variant-numeric:tabular-nums}
+.btn{border-radius:8px}
+.btn.primary{background:var(--run);border-color:var(--run);color:var(--on);min-width:96px}
+.btn.wide{width:100%;margin-top:6px}
+.seg{display:inline-flex;flex-wrap:wrap;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg button{border:0;border-radius:0;min-height:30px}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button[aria-pressed="true"]{background:var(--sel);color:var(--run);font-weight:600}
+.seg button:disabled{opacity:.45;cursor:not-allowed}
+.layout{display:grid;grid-template-columns:minmax(250px,340px) minmax(0,1fr);gap:12px;align-items:start}
+.layout>*{min-width:0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px}
+.list{max-height:calc(100vh - 150px);min-height:120px;overflow:auto}
+.row{display:block;width:100%;text-align:left;border:1px solid transparent;background:none;border-radius:7px;padding:4px 8px;cursor:pointer;margin-bottom:2px}
+.row:hover{background:var(--hover)}
+.row[aria-current="true"]{background:var(--sel);border-color:var(--run)}
+.t1{display:flex;align-items:center;gap:6px;min-width:0}
+.title{flex:1;min-width:0;font-weight:600;font-size:13px;line-height:17px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--ok);flex:none}
+.meta{display:flex;flex-wrap:wrap;gap:0 8px;align-items:center;color:var(--mute);font-size:11px;line-height:15px}
+.badge{font-size:10px;line-height:14px;border:1px solid currentColor;border-radius:999px;padding:0 6px;white-space:nowrap}
+.cat-interrupt{color:var(--warn)}.cat-backchannel{color:var(--run)}.cat-turn_by_turn{color:var(--ok)}
+.note{color:var(--mute);font-size:12px}
+.err{color:var(--bad);font-size:12px;min-height:1em}
+.ctrls{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px}
+.btn.sm{min-height:28px;padding:2px 9px}
+#psum{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+audio{display:block;width:100%;height:32px;margin-top:6px}
+/* lanes */
+.lanes{margin-top:6px;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--card);user-select:none}
+.lrow{display:flex;align-items:stretch;border-top:1px dashed var(--line)}
+.lrow:first-child{border-top:0}
+.lname{width:var(--name);flex:none;font-size:11px;color:var(--mute);display:flex;align-items:center;gap:4px;padding:0 6px;overflow:hidden;white-space:nowrap}
+.sw{display:inline-block;width:8px;height:8px;border-radius:2px;flex:none}
+.lrow canvas{flex:1;min-width:0;display:block;cursor:pointer}
+.c-ruler{height:18px}.c-wave{height:40px}.c-text{height:20px}.c-ev{height:14px}
+.hrow{display:flex;border-top:1px solid var(--line)}
+#hscroll{flex:1;min-width:0;height:14px;overflow-x:auto;overflow-y:hidden}
+#hspacer{height:1px}
+#lanetip{min-height:16px;margin-top:4px;font-size:12px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.tr{height:160px;overflow:auto;margin-top:4px;border:1px solid var(--line);border-radius:8px;padding:2px}
+.turn{display:block;width:100%;height:20px;line-height:20px;text-align:left;border:0;background:none;padding:0 6px;border-radius:4px;cursor:pointer;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:12px}
+.turn:hover{background:var(--hover)}
+.turn.on{background:var(--sel)}
+.ts{color:var(--mute);font-variant-numeric:tabular-nums;margin-right:4px}
+.who{font-weight:600;margin-right:4px}
+.ca{color:var(--run)}.cu{color:var(--ok)}
+.dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:2px 10px;margin:8px 0 0;font-size:12px}
+.dl dt{color:var(--mute)}
+.dl dd{margin:0;overflow-wrap:anywhere}
+@media(max-width:820px){.layout{grid-template-columns:minmax(0,1fr)}.list{max-height:300px}}
+@media(max-width:600px){:root{--name:58px}}
+</style>
+</head>
+<body>
+<main>
+<header class="top" id="top"><h1>Nghe hội thoại</h1><a href="./">← Theo dõi job</a></header>
+<div class="bar">
+  <input type="search" id="q" placeholder="Tìm chủ đề, tóm tắt, tên thư mục…" aria-label="Tìm hội thoại" autocomplete="off">
+  <select id="sort" aria-label="Sắp xếp">
+    <option value="new">Mới nhất</option>
+    <option value="long">Dài nhất</option>
+    <option value="short">Ngắn nhất</option>
+    <option value="name">Tên</option>
+  </select>
+</div>
+<div class="chips" id="chips" role="group" aria-label="Lọc theo loại"></div>
+<div class="layout">
+  <section class="card" aria-label="Danh sách hội thoại">
+    <div class="list" id="list"><div class="note">đang tải…</div></div>
+    <div id="more-wrap"></div>
+    <div class="err" id="lstatus" role="status"></div>
+  </section>
+  <section class="card" aria-label="Trình phát">
+    <div class="note" id="empty">Chọn một hội thoại ở danh sách bên trái.</div>
+    <div id="pbody" hidden>
+      <h2 id="ptitle"></h2>
+      <div class="note" id="psum"></div>
+      <div class="ctrls">
+        <button type="button" class="btn primary" id="play">▶ Phát</button>
+        <button type="button" class="btn sm" id="back">−5 s</button>
+        <button type="button" class="btn sm" id="fwd">+5 s</button>
+        <span class="note" id="tcur">0:00 / –</span>
+        <select id="rate" aria-label="Tốc độ">
+          <option value="0.75">0.75×</option><option value="1">1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option>
+        </select>
+      </div>
+      <div class="ctrls">
+        <div class="seg" id="srcs" role="group" aria-label="Nguồn âm thanh"></div>
+        <div class="seg" id="chans" role="group" aria-label="Kênh nghe"></div>
+        <button type="button" class="btn sm" id="zout" aria-label="Thu nhỏ thời gian">−</button>
+        <button type="button" class="btn sm" id="zin" aria-label="Phóng to thời gian">+</button>
+        <button type="button" class="btn sm" id="zfit">Vừa khung</button>
+      </div>
+      <audio id="aud" controls preload="metadata"></audio>
+      <div class="lanes" id="lanes">
+        <div class="lrow"><div class="lname">mốc</div><canvas class="c-ruler" id="cv-ruler" aria-label="Thước thời gian"></canvas></div>
+        <div class="lrow"><div class="lname"><i class="sw" style="background:var(--run)"></i>assistant</div><canvas class="c-wave" id="cv-wa" aria-label="Sóng assistant"></canvas></div>
+        <div class="lrow"><div class="lname"></div><canvas class="c-text" id="cv-ta" aria-label="Lời assistant"></canvas></div>
+        <div class="lrow"><div class="lname"><i class="sw" style="background:var(--ok)"></i>user</div><canvas class="c-wave" id="cv-wu" aria-label="Sóng user"></canvas></div>
+        <div class="lrow"><div class="lname"></div><canvas class="c-text" id="cv-tu" aria-label="Lời user"></canvas></div>
+        <div class="lrow" id="row-e" hidden><div class="lname">sự kiện</div><canvas class="c-ev" id="cv-ev" aria-label="Sự kiện"></canvas></div>
+        <div class="hrow"><div class="lname"></div><div id="hscroll" aria-label="Thanh cuộn thời gian"><div id="hspacer"></div></div></div>
+      </div>
+      <div class="err" id="anote" role="alert"></div>
+      <div class="note" id="wmsg" role="status"></div>
+      <div id="lanetip"></div>
+      <div class="tr" id="tr"></div>
+      <dl class="dl" id="pinfo"></dl>
+    </div>
+  </section>
+</div>
+</main>
+<script>
+(function () {
+'use strict';
+const $ = id => document.getElementById(id);
+const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+const CAT = {interrupt: 'Cắt ngang', backchannel: 'Backchannel', turn_by_turn: 'Lượt lời'};
+const CATS = ['interrupt', 'backchannel', 'turn_by_turn'];
+const EVT = {backchannel: 'backchannel', merged_backchannel: 'backchannel gộp', interruption: 'cắt ngang', competitive_overlap: 'overlap'};
+const SRC = {clean: ['Đã lọc', 'stereo_clean'], orig: ['Gốc', 'stereo'], mix: ['Hỗn hợp', 'mixture']};
+const SRC_ORDER = ['clean', 'orig', 'mix'];
+const CHAN = [['both', 'Cả hai'], ['assistant', 'Chỉ assistant'], ['user', 'Chỉ user']];
+const SORTS = ['new', 'long', 'short', 'name'];
+const RATES = [0.75, 1, 1.25, 1.5, 2];
+const QUALITY = [['longest_zero_run_s', 'khoảng lặng dài nhất', 's'], ['assistant_floor_dbfs', 'sàn assistant', 'dBFS'], ['user_max_rms_step_db', 'bước RMS lớn nhất của user', 'dB']];
+const LIMIT = 200, BIG = 60 * 1024 * 1024, BPS = 200, KEY = 'listen.prefs';
+const TXT = '11px system-ui,sans-serif', LBL = '10px system-ui,sans-serif';
+
+const st = {cat: '', q: '', sort: 'new', src: 'clean', chan: 'both', rate: 1, selId: '',
+  items: [], total: 0, counts: null, loaded: false, listBusy: false, listTok: 0, listScrollAt: 0,
+  detail: null, turns: [], detailTok: 0, audioUrl: '', waveTok: 0, wave: null, waveMsg: '',
+  activeTurn: -1, manualUntil: 0, evMarks: []};
+let pps = 50, t0 = 0, fitMode = true;
+
+const aud = $('aud');
+const cvR = $('cv-ruler'), cvWA = $('cv-wa'), cvTA = $('cv-ta'), cvWU = $('cv-wu'), cvTU = $('cv-tu'), cvEV = $('cv-ev');
+const hs = $('hscroll'), hsp = $('hspacer'), lanesEl = $('lanes');
+let metaHandler = null, graph = 'none', actx = null, gains = null, waveAbort = null, raf = 0;
+const peakCache = new Map();
+
+/* ---------- helpers ---------- */
+function store() { try { return window.localStorage; } catch (e) { return null; } }
+function loadPrefs() {
+  try {
+    const s = store(); if (!s) return;
+    const p = JSON.parse(s.getItem(KEY) || '{}') || {};
+    if (p.cat === '' || CATS.indexOf(p.cat) >= 0) st.cat = p.cat;
+    if (SORTS.indexOf(p.sort) >= 0) st.sort = p.sort;
+    if (typeof p.src === 'string' && has(SRC, p.src)) st.src = p.src;
+    if (CHAN.some(c => c[0] === p.chan)) st.chan = p.chan;
+    if (RATES.indexOf(Number(p.rate)) >= 0) st.rate = Number(p.rate);
+    if (typeof p.id === 'string') st.selId = p.id;
+  } catch (e) { /* defaults */ }
+}
+function savePrefs() {
+  try {
+    const s = store();
+    if (s) s.setItem(KEY, JSON.stringify({cat: st.cat, sort: st.sort, src: st.src, chan: st.chan, rate: st.rate, id: st.selId}));
+  } catch (e) { /* ignore */ }
+}
+async function getJSON(url) {
+  const r = await fetch(url, {cache: 'no-store'});
+  if (!r.ok) { const e = new Error('HTTP ' + r.status); e.status = r.status; throw e; }
+  return r.json();
+}
+function fmtTime(s) {
+  const n = Number(s);
+  if (s == null || !isFinite(n) || n < 0) return '–';
+  const t = Math.floor(n), h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60), x = t % 60;
+  const p = v => String(v).padStart(2, '0');
+  return h ? h + ':' + p(m) + ':' + p(x) : m + ':' + p(x);
+}
+function fmtVal(v) {
+  if (v == null) return '';
+  if (typeof v === 'object') return Object.entries(v).map(([k, x]) => k + '=' + (x && typeof x === 'object' ? JSON.stringify(x) : x)).join(' · ').slice(0, 300);
+  return String(v);
+}
+function assistantIdx() {
+  const ch = st.detail && st.detail.meta && st.detail.meta.channels;
+  return ch && ch.left === 'user' ? 1 : 0;
+}
+function effSrc() {
+  const f = (st.detail && st.detail.files) || {};
+  for (const k of [st.src].concat(SRC_ORDER)) if (f[SRC[k][1]]) return k;
+  return null;
+}
+function durationSec() {
+  if (st.wave && st.wave.dur > 0) return st.wave.dur;
+  const d = aud.duration;
+  return isFinite(d) && d > 0 ? d : 0;
+}
+function totalDur() {
+  let d = Math.max(durationSec(), 1);
+  const m = (st.detail && st.detail.meta) || {};
+  if (Number(m.duration) > d) d = Number(m.duration);
+  for (const t of st.turns) if (Number(t.end) > d) d = Number(t.end);
+  return d;
+}
+function trackW() { return cvR.clientWidth; }
+function fitPps() { return Math.max(trackW(), 1) / totalDur(); }
+function fitText(g, s, maxW) {
+  s = String(s || '');
+  if (maxW <= 0) return '';
+  if (g.measureText(s).width <= maxW) return s;
+  let lo = 0, hi = s.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (g.measureText(s.slice(0, mid) + '…').width <= maxW) lo = mid; else hi = mid - 1;
+  }
+  return lo ? s.slice(0, lo) + '…' : '';
+}
+
+/* ---------- list ---------- */
+function listQuery(offset, limit) {
+  const p = new URLSearchParams();
+  if (st.cat) p.set('category', st.cat);
+  if (st.q) p.set('q', st.q);
+  p.set('sort', st.sort);
+  p.set('limit', String(limit));
+  p.set('offset', String(offset));
+  return 'api/conversations?' + p.toString();
+}
+async function loadList(reset, quiet) {
+  const tok = ++st.listTok;
+  st.listBusy = true;
+  const limit = reset && quiet ? Math.max(LIMIT, st.items.length) : LIMIT;
+  const offset = reset ? 0 : st.items.length;
+  if (!quiet) $('lstatus').textContent = reset ? 'đang tải…' : '';
+  let d;
+  try {
+    d = await getJSON(listQuery(offset, limit));
+  } catch (e) {
+    if (tok !== st.listTok) return;
+    st.listBusy = false;
+    if (!quiet) $('lstatus').innerHTML = 'mất kết nối, thử lại <button type="button" class="btn sm" id="lretry">Thử lại</button>';
+    return;
+  }
+  if (tok !== st.listTok) return;
+  st.listBusy = false;
+  st.loaded = true;
+  st.total = Number(d.total) || 0;
+  st.counts = d.counts || {};
+  const fresh = Array.isArray(d.items) ? d.items : [];
+  if (reset) st.items = fresh;
+  else {
+    const seen = new Set(st.items.map(i => i.id));
+    st.items = st.items.concat(fresh.filter(i => !seen.has(i.id)));
+  }
+  $('lstatus').textContent = '';
+  renderChips();
+  renderList();
+}
+function rowHtml(it) {
+  const name = it.topic || it.folder || it.id;
+  const cat = CAT[it.category] ? it.category : '';
+  return '<button type="button" class="row" data-id="' + esc(it.id) + '" aria-current="' + (it.id === st.selId) + '">' +
+    '<span class="t1"><span class="title">' + esc(name) + '</span>' +
+    (it.has_clean ? '<span class="dot" title="có bản đã lọc" aria-label="có bản đã lọc"></span>' : '') + '</span>' +
+    '<span class="meta"><span class="badge cat-' + esc(cat) + '">' + esc(CAT[cat] || it.category || '') + '</span>' +
+    '<span>' + fmtTime(it.duration) + '</span><span>' + esc(it.turns != null ? it.turns : '–') + ' lượt</span></span></button>';
+}
+function renderList() {
+  const list = $('list');
+  const top = list.scrollTop;
+  list.innerHTML = st.items.length ? st.items.map(rowHtml).join('') :
+    '<div class="note">' + (st.cat || st.q ? 'Không có hội thoại khớp bộ lọc.' : 'Chưa có hội thoại nào xuất xong.') + '</div>';
+  list.scrollTop = top;
+  $('more-wrap').innerHTML = st.items.length < st.total
+    ? '<button type="button" class="btn wide" id="more">Tải thêm (' + st.items.length + '/' + st.total + ')</button>' : '';
+  markRows();
+}
+function markRows() {
+  document.querySelectorAll('#list .row').forEach(r => r.setAttribute('aria-current', r.dataset.id === st.selId ? 'true' : 'false'));
+}
+function renderChips() {
+  const c = st.counts || {}, have = !!st.counts;
+  const all = CATS.reduce((s, k) => s + (c[k] || 0), 0);
+  const defs = [['', 'Tất cả', have ? all : ''], ['interrupt', CAT.interrupt, have ? c.interrupt || 0 : ''],
+    ['backchannel', CAT.backchannel, have ? c.backchannel || 0 : ''], ['turn_by_turn', CAT.turn_by_turn, have ? c.turn_by_turn || 0 : '']];
+  $('chips').innerHTML = defs.map(([v, l, n]) => '<button type="button" class="chip" data-cat="' + v + '" aria-pressed="' + (st.cat === v) + '">' +
+    esc(l) + (n !== '' ? ' <span class="n">' + n + '</span>' : '') + '</button>').join('');
+}
+function refresh() {
+  if (document.hidden || st.q || st.listBusy || !st.loaded) return;
+  if (Date.now() - st.listScrollAt < 3000) return;
+  loadList(true, true);
+}
+function stepConv(dir) {
+  const i = st.items.findIndex(x => x.id === st.selId);
+  const j = i < 0 ? (dir > 0 ? 0 : st.items.length - 1) : i + dir;
+  if (j < 0 || j >= st.items.length) return;
+  selectConv(st.items[j].id);
+  const row = document.querySelector('#list .row[data-id="' + CSS.escape(st.items[j].id) + '"]');
+  if (row) row.scrollIntoView({block: 'nearest'});
+}
+
+/* ---------- detail ---------- */
+function setEmpty(msg, retry) {
+  $('pbody').hidden = true;
+  const el = $('empty');
+  el.hidden = false;
+  el.innerHTML = esc(msg) + (retry ? ' <button type="button" class="btn sm" id="retry">Thử lại</button>' : '');
+}
+async function selectConv(id) {
+  if (!id) return;
+  const wasPlaying = !aud.paused;
+  const tok = ++st.detailTok;
+  st.selId = id;
+  savePrefs();
+  markRows();
+  if (!st.detail) setEmpty('Đang tải hội thoại…', false);
+  let d;
+  try {
+    d = await getJSON('api/conversation?id=' + encodeURIComponent(id));
+  } catch (e) {
+    if (tok !== st.detailTok) return;
+    aud.pause();
+    st.detail = null; st.turns = []; st.wave = null; st.audioUrl = '';
+    setEmpty(e.status === 404 ? 'Không tìm thấy hội thoại này.' : 'mất kết nối, thử lại', e.status !== 404);
+    return;
+  }
+  if (tok !== st.detailTok) return;
+  showDetail(d, wasPlaying);
+}
+function showDetail(d, play) {
+  const same = !!st.detail && st.detail.id === d.id;
+  st.detail = d;
+  const m = d.meta || {};
+  st.turns = Array.isArray(m.conversation) ? m.conversation : [];
+  const it = st.items.find(x => x.id === d.id) || {};
+  $('empty').hidden = true;
+  $('pbody').hidden = false;
+  $('ptitle').textContent = m.topic || it.topic || it.folder || d.id;
+  $('psum').textContent = m.summary || it.summary || '';
+  renderInfo(d, it);
+  renderTranscript();
+  renderChannels();
+  applyChannel();
+  aud.playbackRate = st.rate;
+  if (!same) {
+    st.wave = null;
+    st.audioUrl = '';
+    fitMode = true;
+    t0 = 0;
+    loadAudio({t: 0, play: play});
+  }
+  $('lanetip').textContent = '';
+  refit();
+  markRows();
+  kick();
+}
+function renderInfo(d, it) {
+  const m = d.meta || {}, q = (m.verification && m.verification.quality) || {}, ac = m.assistant_clean || {};
+  const cat = m.category || it.category || '';
+  const rows = [];
+  const add = (k, v) => { if (v) rows.push('<dt>' + esc(k) + '</dt><dd>' + v + '</dd>'); };
+  add('loại', esc(CAT[cat] || cat));
+  const dur = m.duration != null ? m.duration : it.duration;
+  if (dur != null) add('thời lượng', esc(fmtTime(dur)));
+  const nTurns = st.turns.length || it.turns;
+  if (nTurns != null) add('số lượt', esc(nTurns));
+  add('nguồn', esc(m.source_stem || it.source_stem || ''));
+  add('thư mục', esc(it.folder || ''));
+  add('chất lượng overlap', esc(fmtVal(it.overlap_quality != null ? it.overlap_quality : m.overlap_quality)));
+  QUALITY.forEach(([k, label, unit]) => {
+    const x = q[k];
+    if (typeof x === 'number' && isFinite(x)) add(label, esc(x.toFixed(2) + ' ' + unit));
+  });
+  if (ac.reason || ac.written != null) {
+    const w = ac.written == null ? '' : 'ghi: ' + (ac.written === true ? 'có' : ac.written === false ? 'không' : ac.written);
+    add('làm sạch assistant', esc([ac.reason, w].filter(Boolean).join(' · ')));
+  }
+  if (m.user_ambience) add('môi trường user', esc(fmtVal(m.user_ambience)));
+  $('pinfo').innerHTML = rows.join('');
+}
+function renderTranscript() {
+  const m = (st.detail && st.detail.meta) || {};
+  const ev = {};
+  (Array.isArray(m.events) ? m.events : []).forEach(e => {
+    if (!e || e.segment == null) return;
+    const k = String(e.segment);
+    (ev[k] = ev[k] || []).push(EVT[e.type] || String(e.type || 'sự kiện'));
+  });
+  st.activeTurn = -1;
+  laneSegs = {assistant: turnsOf('assistant'), user: turnsOf('user')};
+  $('tr').innerHTML = st.turns.length ? st.turns.map((t, i) => {
+    const role = t.role === 'user' ? 'user' : 'assistant';
+    const labels = t.index == null ? [] : (ev[String(t.index)] || []);
+    return '<button type="button" class="turn" data-i="' + i + '"><span class="ts">' + fmtTime(t.start) + '</span>' +
+      '<span class="who ' + (role === 'user' ? 'cu' : 'ca') + '">' + role + ':</span>' + esc(t.text || '') +
+      (labels.length ? ' <span class="note">[' + esc(labels.join(', ')) + ']</span>' : '') + '</button>';
+  }).join('') : '<div class="note" style="padding:6px">Không có bản ghi lời.</div>';
+  $('tr').scrollTop = 0;
+  // event marks on the lane: placed at the start of the turn whose index equals event.segment
+  const byIdx = {};
+  st.turns.forEach(t => { if (t.index != null) byIdx[String(t.index)] = t; });
+  st.evMarks = [];
+  (Array.isArray(m.events) ? m.events : []).forEach(e => {
+    const t = e && e.segment != null ? byIdx[String(e.segment)] : null;
+    if (!t || !isFinite(Number(t.start))) return;
+    st.evMarks.push({t: Number(t.start), label: EVT[e.type] || String(e.type || ''), type: e.type});
+  });
+  $('row-e').hidden = !st.evMarks.length;
+}
+function updateActive() {
+  const turns = st.turns;
+  if (!turns.length) return;
+  const t = aud.currentTime || 0;
+  let idx = -1, best = -Infinity;
+  for (let i = 0; i < turns.length; i++) {
+    const s = Number(turns[i].start);
+    if (isFinite(s) && s <= t && s >= best) { best = s; idx = i; }
+  }
+  if (idx === st.activeTurn) return;
+  st.activeTurn = idx;
+  const tr = $('tr');
+  const old = tr.querySelector('.turn.on');
+  if (old) old.classList.remove('on');
+  if (idx < 0) return;
+  const el = tr.querySelector('.turn[data-i="' + idx + '"]');
+  if (!el) return;
+  el.classList.add('on');
+  if (Date.now() > st.manualUntil) tr.scrollTop = el.offsetTop - tr.clientHeight / 2 + el.offsetHeight / 2;
+}
+
+/* ---------- audio source ---------- */
+function renderSources() {
+  const f = (st.detail && st.detail.files) || {};
+  const cur = effSrc();
+  $('srcs').innerHTML = SRC_ORDER.map(k => '<button type="button" data-k="' + k + '" aria-pressed="' + (cur === k) +
+    '"' + (f[SRC[k][1]] ? '' : ' disabled') + '>' + SRC[k][0] + '</button>').join('');
+}
+function loadAudio(keep) {
+  const f = (st.detail && st.detail.files) || {};
+  const k = effSrc();
+  renderSources();
+  if (!k) {
+    st.audioUrl = '';
+    if (metaHandler) aud.removeEventListener('loadedmetadata', metaHandler);
+    metaHandler = null;
+    aud.removeAttribute('src');
+    aud.load();
+    st.wave = null;
+    setWaveMsg('Hội thoại này không có file âm thanh.');
+    kick();
+    return;
+  }
+  const url = f[SRC[k][1]];
+  if (url === st.audioUrl) return;
+  st.audioUrl = url;
+  if (metaHandler) aud.removeEventListener('loadedmetadata', metaHandler);
+  const t = keep.t || 0, play = !!keep.play;
+  metaHandler = function () {
+    metaHandler = null;
+    try { if (t > 0) aud.currentTime = Math.min(t, aud.duration || t); } catch (e) { /* ignore */ }
+    aud.playbackRate = st.rate;
+    if (play) aud.play().catch(playErr);
+    refit();
+    kick();
+  };
+  aud.addEventListener('loadedmetadata', metaHandler);
+  $('anote').textContent = '';
+  aud.src = url;
+  loadWave(url);
+}
+function pickSource(k) {
+  if (!st.detail || !has(SRC, k) || k === effSrc()) return;
+  if (!(st.detail.files || {})[SRC[k][1]]) return;
+  st.src = k;
+  savePrefs();
+  loadAudio({t: aud.currentTime || 0, play: !aud.paused});
+}
+function playErr(err) {
+  if (err && err.name === 'AbortError') return;
+  $('anote').textContent = 'Không phát được: ' + (err && err.message ? err.message : 'lỗi không rõ');
+}
+function togglePlay() {
+  if (!aud.getAttribute('src')) { $('anote').textContent = 'Chưa có âm thanh để phát.'; return; }
+  ensureGraph();
+  if (aud.paused) aud.play().catch(playErr);
+  else aud.pause();
+}
+function seek(t) {
+  let v = Math.max(0, Number(t) || 0);
+  if (durationSec()) v = Math.min(v, durationSec());
+  try { aud.currentTime = v; } catch (e) { /* no media yet */ }
+  kick();
+}
+function seekBy(delta) { seek((aud.currentTime || 0) + delta); }
+function syncPlayBtn() { $('play').textContent = aud.paused ? '▶ Phát' : '❚❚ Tạm dừng'; }
+
+/* ---------- channels (Web Audio) ---------- */
+function ensureGraph() {
+  if (graph !== 'none') {
+    if (actx && actx.state !== 'running') actx.resume().catch(() => {});
+    return graph === 'ok';
+  }
+  const Ctor = window.AudioContext || window.webkitAudioContext;
+  if (!Ctor) { graph = 'nosupport'; renderChannels(); return false; }
+  try {
+    actx = new Ctor();
+    const src = actx.createMediaElementSource(aud);
+    const split = actx.createChannelSplitter(2);
+    const merge = actx.createChannelMerger(2);
+    gains = [[null, null], [null, null]];
+    for (let i = 0; i < 2; i++) {
+      for (let e = 0; e < 2; e++) {
+        const g = actx.createGain();
+        gains[i][e] = g;
+        split.connect(g, i);
+        g.connect(merge, 0, e);
+      }
+    }
+    src.connect(split);
+    merge.connect(actx.destination);
+    graph = 'ok';
+    applyChannel();
+    actx.resume().catch(() => {});
+  } catch (err) {
+    graph = 'fail';
+  }
+  renderChannels();
+  return graph === 'ok';
+}
+function applyChannel() {
+  if (!gains) return;
+  const aIdx = assistantIdx();
+  for (let i = 0; i < 2; i++) {
+    const role = i === aIdx ? 'assistant' : 'user';
+    for (let e = 0; e < 2; e++) {
+      gains[i][e].gain.value = st.chan === 'both' ? (i === e ? 1 : 0) : (role === st.chan ? 1 : 0);
+    }
+  }
+}
+function renderChannels() {
+  const wrap = $('chans'), note = $('chnote');
+  if (graph === 'nosupport' || graph === 'fail') {
+    wrap.hidden = true;
+    wrap.innerHTML = '';
+    $('anote').textContent = 'Trình duyệt này không chọn được kênh (không có AudioContext); vẫn nghe cả hai kênh.';
+    return;
+  }
+  wrap.hidden = false;
+  wrap.innerHTML = CHAN.map(([k, l]) => '<button type="button" data-k="' + k + '" aria-pressed="' + (st.chan === k) + '">' + l + '</button>').join('');
+}
+function pickChan(k) {
+  if (!CHAN.some(c => c[0] === k)) return;
+  st.chan = k;
+  savePrefs();
+  ensureGraph();
+  applyChannel();
+  renderChannels();
+}
+
+/* ---------- waveform ---------- */
+function setWaveMsg(msg) { st.waveMsg = msg; $('wmsg').textContent = msg; }
+function envelope(data, rate) {
+  const step = rate / BPS, n = Math.ceil(data.length / step);
+  const mn = new Float32Array(n), mx = new Float32Array(n);
+  for (let b = 0; b < n; b++) {
+    const s = Math.floor(b * step), e = Math.min(data.length, Math.max(s + 1, Math.floor((b + 1) * step)));
+    let lo = 0, hi = 0;
+    for (let i = s; i < e; i++) { const v = data[i]; if (v < lo) lo = v; if (v > hi) hi = v; }
+    mn[b] = lo; mx[b] = hi;
+  }
+  return {mn, mx};
+}
+async function loadWave(url) {
+  const tok = ++st.waveTok;
+  st.wave = null;
+  if (waveAbort) { waveAbort.abort(); waveAbort = null; }
+  if (peakCache.has(url)) { st.wave = peakCache.get(url); setWaveMsg(''); refit(); return; }
+  setWaveMsg('đang tải sóng…');
+  const ctrl = new AbortController();
+  waveAbort = ctrl;
+  const chIdx = assistantIdx();
+  const bigMsg = 'File lớn hơn 60 MB nên bỏ qua sóng âm; vẫn nghe bình thường.';
+  try {
+    const r = await fetch(url, {signal: ctrl.signal});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    if (Number(r.headers.get('content-length') || 0) > BIG) {
+      ctrl.abort();
+      if (tok === st.waveTok) setWaveMsg(bigMsg);
+      return;
+    }
+    const buf = await r.arrayBuffer();
+    if (tok !== st.waveTok) return;
+    if (buf.byteLength > BIG) { setWaveMsg(bigMsg); return; }
+    const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    if (!OAC) { setWaveMsg('Trình duyệt không giải mã được sóng âm; vẫn nghe bình thường.'); return; }
+    const audio = await new OAC(1, 1, 44100).decodeAudioData(buf);
+    if (tok !== st.waveTok) return;
+    const pick = audio.numberOfChannels >= 2 ? [chIdx, 1 - chIdx] : [0, 0];
+    const a = envelope(audio.getChannelData(pick[0]), audio.sampleRate);
+    const u = pick[0] === pick[1] ? a : envelope(audio.getChannelData(pick[1]), audio.sampleRate);
+    const p = {dur: audio.duration, a: a, u: u};
+    if (peakCache.size >= 4) peakCache.delete(peakCache.keys().next().value);
+    peakCache.set(url, p);
+    st.wave = p;
+    setWaveMsg('');
+    refit();
+  } catch (err) {
+    if (tok !== st.waveTok || (err && err.name === 'AbortError')) return;
+    setWaveMsg('Không vẽ được sóng âm (' + (err && err.message ? err.message : 'lỗi') + '); vẫn nghe bình thường.');
+  }
+}
+
+/* ---------- lanes: view, drawing ---------- */
+function setSpacer() { hsp.style.width = Math.ceil(totalDur() * pps) + 'px'; }
+function clampT0(t) { return Math.max(0, Math.min(t, Math.max(0, totalDur() - trackW() / pps))); }
+function panTo(t) {
+  t0 = clampT0(t);
+  hs.scrollLeft = t0 * pps;
+  kick();
+}
+function refit() {
+  if (!trackW()) return;
+  const fit = fitPps();
+  if (fitMode) { pps = fit; t0 = 0; }
+  else pps = Math.max(pps, fit);
+  setSpacer();
+  t0 = clampT0(t0);
+  hs.scrollLeft = t0 * pps;
+  kick();
+}
+function zoomTo(newPps, anchorT, anchorX) {
+  const fit = fitPps(), hi = Math.max(400, fit);
+  pps = Math.min(hi, Math.max(fit, newPps));
+  fitMode = pps <= fit * 1.0001;
+  setSpacer();
+  t0 = clampT0(anchorT - anchorX / pps);
+  hs.scrollLeft = t0 * pps;
+  kick();
+}
+function zoomCenter(factor) {
+  const W = trackW();
+  zoomTo(pps * factor, t0 + W / 2 / pps, W / 2);
+}
+function niceStep(p) {
+  for (const s of [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200, 3600]) if (s * p >= 60) return s;
+  return 3600;
+}
+function sizeCv(cv) {
+  const W = cv.clientWidth, H = cv.clientHeight;
+  const dpr = window.devicePixelRatio || 1;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) {
+    cv.width = Math.round(W * dpr);
+    cv.height = Math.round(H * dpr);
+  }
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+  return {g: g, W: W, H: H};
+}
+function colors() {
+  const css = getComputedStyle(document.documentElement);
+  const v = n => css.getPropertyValue(n).trim() || '#888';
+  return {A: v('--run'), U: v('--ok'), line: v('--line'), ink: v('--ink'), mute: v('--mute'), card: v('--card'), bad: v('--bad'), warn: v('--warn'), sel: v('--sel')};
+}
+function drawRuler(g, W, H, c) {
+  const step = niceStep(pps);
+  g.font = LBL;
+  g.textBaseline = 'top';
+  g.strokeStyle = c.line;
+  g.fillStyle = c.mute;
+  g.beginPath();
+  g.moveTo(0, H - 0.5); g.lineTo(W, H - 0.5); g.stroke();
+  for (let t = Math.ceil(t0 / step) * step, guard = 0; (t - t0) * pps < W && guard < 5000; t += step, guard++) {
+    const x = Math.round((t - t0) * pps) + 0.5;
+    g.beginPath(); g.moveTo(x, H - 5); g.lineTo(x, H); g.stroke();
+    g.fillText(fmtTime(t), x + 3, 3);
+  }
+}
+function drawWaveLane(g, W, H, env, color, c, msg) {
+  const mid = H / 2, amp = mid - 3;
+  g.fillStyle = c.line;
+  g.fillRect(0, mid, W, 0.5);
+  if (!env) {
+    if (msg) { g.font = TXT; g.fillStyle = c.mute; g.textBaseline = 'middle'; g.fillText(msg, 8, mid); }
+    return;
+  }
+  g.fillStyle = color;
+  const n = env.mx.length;
+  for (let x = 0; x < W; x++) {
+    const ta = t0 + x / pps, tb = ta + 1 / pps;
+    const i0 = Math.floor(ta * BPS);
+    if (i0 >= n) break;
+    const i1 = Math.max(i0 + 1, Math.ceil(tb * BPS));
+    let lo = 0, hi = 0;
+    for (let i = Math.max(0, i0); i < i1 && i < n; i++) {
+      if (env.mn[i] < lo) lo = env.mn[i];
+      if (env.mx[i] > hi) hi = env.mx[i];
+    }
+    g.fillRect(x, mid - hi * amp, 1, Math.max(1, (hi - lo) * amp));
+  }
+}
+function turnsOf(role) {
+  const out = [];
+  st.turns.forEach((t, i) => { if ((t.role === 'user' ? 'user' : 'assistant') === role) out.push({t: t, i: i}); });
+  return out;
+}
+let laneSegs = {assistant: [], user: []};
+function drawTextLane(g, W, H, role, c) {
+  const color = role === 'user' ? c.U : c.A;
+  const cy = H / 2, t1 = t0 + W / pps;
+  for (const seg of laneSegs[role]) {
+    const s = Number(seg.t.start), e = Number(seg.t.end);
+    if (!isFinite(s) || !isFinite(e) || e < t0 || s > t1) continue;
+    const x = (s - t0) * pps, bw = Math.max(2, (e - s) * pps);
+    const on = seg.i === st.activeTurn;
+    g.globalAlpha = on ? 0.32 : 0.13;
+    g.fillStyle = color;
+    g.fillRect(x, 1, bw, H - 2);
+    g.globalAlpha = 1;
+    g.fillRect(x, 1, 2, H - 2);
+    if (bw < 22) continue;
+    const xl = Math.max(x, 0) + 5;
+    const xr = x + bw - 3;
+    g.font = LBL;
+    g.textBaseline = 'middle';
+    g.fillStyle = c.mute;
+    const label = fmtTime(s);
+    g.fillText(label, xl, cy);
+    const tx = xl + g.measureText(label).width + 5;
+    g.font = TXT;
+    g.fillStyle = c.ink;
+    g.fillText(fitText(g, seg.t.text || '', xr - tx), tx, cy);
+  }
+}
+function drawEvents(g, W, H, c) {
+  const cy = H / 2;
+  g.textBaseline = 'middle';
+  for (const m of st.evMarks) {
+    const x = (m.t - t0) * pps;
+    if (x < -60 || x > W) continue;
+    const col = m.type === 'interruption' ? c.bad : m.type === 'competitive_overlap' ? c.warn : c.A;
+    g.fillStyle = col;
+    g.fillRect(x, 0, 1.5, H);
+    g.font = LBL;
+    g.fillText(fitText(g, m.label, 110), x + 4, cy);
+  }
+}
+function drawPlayhead(g, W, H, c) {
+  const px = ((aud.currentTime || 0) - t0) * pps;
+  if (px >= 0 && px <= W) { g.fillStyle = c.ink; g.fillRect(px, 0, 1.5, H); }
+}
+function draw() {
+  if (!trackW()) return;
+  const c = colors();
+  let s = sizeCv(cvR); drawRuler(s.g, s.W, s.H, c); drawPlayhead(s.g, s.W, s.H, c);
+  s = sizeCv(cvWA); drawWaveLane(s.g, s.W, s.H, st.wave && st.wave.a, c.A, c, st.waveMsg); drawPlayhead(s.g, s.W, s.H, c);
+  s = sizeCv(cvTA); drawTextLane(s.g, s.W, s.H, 'assistant', c); drawPlayhead(s.g, s.W, s.H, c);
+  s = sizeCv(cvWU); drawWaveLane(s.g, s.W, s.H, st.wave && st.wave.u, c.U, c, ''); drawPlayhead(s.g, s.W, s.H, c);
+  s = sizeCv(cvTU); drawTextLane(s.g, s.W, s.H, 'user', c); drawPlayhead(s.g, s.W, s.H, c);
+  if (!$('row-e').hidden) { s = sizeCv(cvEV); drawEvents(s.g, s.W, s.H, c); drawPlayhead(s.g, s.W, s.H, c); }
+  $('zfit').textContent = fitMode ? 'Vừa khung' : Math.round(pps) + ' px/s';
+}
+function updateTime() {
+  const d = durationSec();
+  $('tcur').textContent = fmtTime(aud.currentTime || 0) + ' / ' + (d ? fmtTime(d) : '–');
+}
+function frame() {
+  raf = 0;
+  const now = aud.currentTime || 0;
+  if (!aud.paused && Date.now() > st.manualUntil && trackW()) {
+    const x = (now - t0) * pps, W = trackW();
+    if (x < 0 || x > W * 0.92) panTo(now - 0.15 * W / pps);
+  }
+  draw();
+  updateTime();
+  updateActive();
+  if (!aud.paused && !aud.ended) raf = requestAnimationFrame(frame);
+}
+function kick() { if (!raf) raf = requestAnimationFrame(frame); }
+
+/* ---------- wiring ---------- */
+function bindEvents() {
+  let qTimer = 0;
+  $('q').addEventListener('input', () => {
+    clearTimeout(qTimer);
+    qTimer = setTimeout(() => {
+      const v = $('q').value.trim();
+      if (v === st.q) return;
+      st.q = v;
+      loadList(true, false);
+    }, 250);
+  });
+  $('sort').addEventListener('change', () => { st.sort = $('sort').value; savePrefs(); loadList(true, false); });
+  $('chips').addEventListener('click', e => {
+    const b = e.target.closest('.chip');
+    if (!b) return;
+    st.cat = b.dataset.cat;
+    savePrefs();
+    renderChips();
+    loadList(true, false);
+  });
+  $('list').addEventListener('scroll', () => { st.listScrollAt = Date.now(); }, {passive: true});
+  $('list').addEventListener('click', e => {
+    const r = e.target.closest('.row');
+    if (r) selectConv(r.dataset.id);
+  });
+  $('more-wrap').addEventListener('click', e => { if (e.target.closest('#more')) loadList(false, false); });
+  $('lstatus').addEventListener('click', e => { if (e.target.closest('#lretry')) loadList(true, false); });
+  $('empty').addEventListener('click', e => { if (e.target.closest('#retry')) selectConv(st.selId); });
+  $('srcs').addEventListener('click', e => { const b = e.target.closest('button[data-k]'); if (b) pickSource(b.dataset.k); });
+  $('chans').addEventListener('click', e => { const b = e.target.closest('button[data-k]'); if (b) pickChan(b.dataset.k); });
+  $('play').addEventListener('click', togglePlay);
+  $('back').addEventListener('click', () => seekBy(-5));
+  $('fwd').addEventListener('click', () => seekBy(5));
+  $('zin').addEventListener('click', () => zoomCenter(1.5));
+  $('zout').addEventListener('click', () => zoomCenter(1 / 1.5));
+  $('zfit').addEventListener('click', () => { fitMode = true; refit(); });
+  $('rate').addEventListener('change', () => {
+    st.rate = Number($('rate').value) || 1;
+    aud.playbackRate = st.rate;
+    savePrefs();
+  });
+  $('rate').value = String(st.rate);
+
+  // one click or tap on any lane seeks to that time; a text lane also shows the full line below
+  [cvR, cvWA, cvTA, cvWU, cvTU, cvEV].forEach(cv => {
+    cv.addEventListener('click', e => {
+      const r = cv.getBoundingClientRect();
+      const x = e.clientX - r.left;
+      seek(t0 + x / pps);
+      if (cv === cvTA || cv === cvTU) {
+        const t = t0 + x / pps;
+        const hit = laneSegs[cv === cvTA ? 'assistant' : 'user'].find(s => t >= Number(s.t.start) && t <= Number(s.t.end));
+        if (hit) $('lanetip').textContent = fmtTime(hit.t.start) + ' ' + (cv === cvTA ? 'assistant' : 'user') + ': ' + (hit.t.text || '');
+      }
+    });
+    cv.addEventListener('pointermove', e => {
+      const r = cv.getBoundingClientRect();
+      const t = t0 + (e.clientX - r.left) / pps;
+      if (cv === cvTA || cv === cvTU) {
+        const hit = laneSegs[cv === cvTA ? 'assistant' : 'user'].find(s => t >= Number(s.t.start) && t <= Number(s.t.end));
+        const tip = hit ? fmtTime(hit.t.start) + ' ' + (hit.t.role || '') + ': ' + (hit.t.text || '') : '';
+        if (cv.title !== tip) cv.title = tip;
+      }
+    });
+  });
+  // Ctrl/Cmd + wheel zooms the lanes around the pointer; plain horizontal wheel pans; vertical wheel scrolls the page
+  lanesEl.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const r = cvR.getBoundingClientRect();
+      const x = Math.min(Math.max(e.clientX - r.left, 0), trackW());
+      const dy = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY;
+      zoomTo(pps * Math.exp(-dy * 0.0015), t0 + x / pps, x);
+    } else if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+      e.preventDefault();
+      hs.scrollLeft += e.deltaX;
+      st.manualUntil = Date.now() + 4000;
+    }
+  }, {passive: false});
+  hs.addEventListener('scroll', () => { t0 = hs.scrollLeft / pps; kick(); }, {passive: true});
+  hs.addEventListener('pointerdown', () => { st.manualUntil = Date.now() + 4000; });
+  const tr = $('tr');
+  tr.addEventListener('click', e => {
+    const b = e.target.closest('.turn');
+    if (!b) return;
+    const t = st.turns[Number(b.dataset.i)];
+    if (!t) return;
+    seek(Number(t.start) || 0);
+    if (aud.paused) aud.play().catch(playErr);
+  });
+  tr.addEventListener('wheel', () => { st.manualUntil = Date.now() + 5000; }, {passive: true});
+  tr.addEventListener('touchmove', () => { st.manualUntil = Date.now() + 5000; }, {passive: true});
+
+  aud.addEventListener('play', () => { ensureGraph(); if (actx && actx.state !== 'running') actx.resume().catch(() => {}); syncPlayBtn(); kick(); });
+  aud.addEventListener('pause', () => { syncPlayBtn(); kick(); });
+  aud.addEventListener('ended', () => { syncPlayBtn(); kick(); });
+  aud.addEventListener('seeked', kick);
+  aud.addEventListener('timeupdate', kick);
+  aud.addEventListener('loadedmetadata', kick);
+  aud.addEventListener('error', () => {
+    if (aud.error && st.audioUrl) $('anote').textContent = 'Không tải được file âm thanh này.';
+    kick();
+  });
+
+  document.addEventListener('keydown', e => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const t = e.target;
+    if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT|AUDIO)$/.test(t.tagName))) return;
+    if (e.key === ' ') {
+      if (t && (t.tagName === 'BUTTON' || t.tagName === 'A')) return;
+      e.preventDefault();
+      togglePlay();
+    } else if (e.key === 'ArrowLeft') { e.preventDefault(); seekBy(-5); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); seekBy(5); }
+    else if (e.key === 'j') { stepConv(-1); }
+    else if (e.key === 'k') { stepConv(1); }
+    else if (e.key === '+' || e.key === '=') { zoomCenter(1.5); }
+    else if (e.key === '-' || e.key === '_') { zoomCenter(1 / 1.5); }
+  });
+  window.addEventListener('resize', refit);
+  const mq = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)');
+  if (mq && mq.addEventListener) mq.addEventListener('change', kick);
+}
+function init() {
+  let inFrame = false;
+  try { inFrame = window.self !== window.top; } catch (e) { inFrame = true; }
+  if (inFrame) document.body.classList.add('embedded');
+  loadPrefs();
+  $('sort').value = st.sort;
+  $('rate').value = String(st.rate);
+  aud.playbackRate = st.rate;
+  renderChips();
+  renderChannels();
+  bindEvents();
+  loadList(true, false);
+  if (st.selId) selectConv(st.selId);
+  setInterval(refresh, 20000);
+  kick();
+}
+init();
+})();
+</script>
+</body>
+</html>
