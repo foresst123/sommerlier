@@ -73,6 +73,8 @@ def build_library(final):
 def fresh_caches(monkeypatch):
     monkeypatch.setattr(job_listen, "_scan_cache", {})
     monkeypatch.setattr(job_listen, "_meta_cache", {})
+    monkeypatch.setattr(job_listen, "_audio_scan", {})
+    monkeypatch.setattr(job_listen, "_dur_cache", {})
 
 
 @pytest.fixture
@@ -81,11 +83,21 @@ def server(tmp_path):
     final.mkdir()
     root = str(final)
 
+    ctx = {}
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             parts = urllib.parse.urlsplit(self.path)
             path = parts.path.rstrip("/") or "/"
-            if not job_listen.handle(self, path, urllib.parse.parse_qs(parts.query), root):
+            if not job_listen.handle(self, path, urllib.parse.parse_qs(parts.query), root, ctx):
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        def do_POST(self):
+            parts = urllib.parse.urlsplit(self.path)
+            path = parts.path.rstrip("/") or "/"
+            if not job_listen.handle_post(self, path, root):
                 self.send_response(404)
                 self.send_header("Content-Length", "0")
                 self.end_headers()
@@ -96,7 +108,8 @@ def server(tmp_path):
     srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
-    yield SimpleNamespace(base=f"http://127.0.0.1:{srv.server_port}", final=final, root=tmp_path)
+    yield SimpleNamespace(base=f"http://127.0.0.1:{srv.server_port}", final=final, root=tmp_path,
+                          ctx=ctx)
     srv.shutdown()
     srv.server_close()
 
@@ -113,6 +126,17 @@ def get(base, url, headers=None):
 def get_json(base, url):
     status, headers, body = get(base, url)
     return status, json.loads(body.decode("utf-8"))
+
+
+def post(base, url, body):
+    data = body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(base + url, data=data, method="POST",
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8") or "null")
 
 
 def list_url(**params):
@@ -440,3 +464,320 @@ def test_fold_drops_tone_marks_and_d_stroke():
     assert job_listen._fold("Xin Chào") == "xin chao"
     assert job_listen._fold("Đường Đi") == "duong di"
     assert job_listen._fold("  nấu   canh ") == "nau canh"
+
+
+def test_handle_ctx_is_optional(server):
+    build_library(server.final)
+    assert job_listen.handle(object(), "/nope", {}, str(server.final), {"audio_dir": None}) is False
+    status, data = get_json(server.base, list_url())
+    assert status == 200 and data["total"] == 5
+
+
+# -- three films for sample, review and stats --------------------------------------------
+FILMS = {
+    "dQw4w9WgXcQ_Camera Công Sở Tập 12": [("interrupt", "a1", 100), ("backchannel", "a2", 50),
+                                          ("turn_by_turn", "a3", 20)],
+    "dQw4w9WgXcQ_Camera Công Sở - Tập 13": [("interrupt", "b1", 100), ("backchannel", "b2", 50)],
+    "‎Cooking Show | Tập 1": [("interrupt", "c1", 30), ("backchannel", "c2", 40)],
+    "cooking show #2": [("turn_by_turn", "c3", 10)],
+    "Phim Việt Nam: Tập 5": [("interrupt", "d1", 60), ("turn_by_turn", "d2", 70)],
+}
+
+
+def build_films(final):
+    mtime = 1000
+    for source, convs in FILMS.items():
+        for cat, name, dur in convs:
+            mtime += 1
+            write_conv(final, f"{cat}/{name}", topic=f"{source[-6:]} {name}", duration=float(dur),
+                       source_stem=source, mtime=mtime)
+    write_conv(final, "_quarantine/q1", topic="q", duration=5.0, source_stem="Cooking Show | Tập 1")
+
+
+def sample(base, **params):
+    status, data = get_json(base, "/api/sample?" + urllib.parse.urlencode(params))
+    assert status == 200
+    return data
+
+
+@pytest.mark.parametrize("stem, film", [
+    ("dQw4w9WgXcQ_Camera Công Sở Tập 12", "Camera Công Sở"),
+    ("dQw4w9WgXcQ_Camera Công Sở - Tập 13", "Camera Công Sở"),
+    ("‎‪Cooking Show | Tập 1‬", "Cooking Show"),
+    ("cooking show #2", "cooking show"),
+    ("Phim Việt Nam: Tập 5", "Phim Việt Nam"),
+    ("Abc｜x", "Abc"), ("Abc ： x", "Abc"), ("Phim — tập 2", "Phim"),
+    ("Show Ep 3", "Show"), ("Show EP 3", "Show"), ("Show Episode 4", "Show"), ("Show Tap 5", "Show"),
+    ("plain title", "plain title"),
+    ("", job_listen.FILM_UNKNOWN), (None, job_listen.FILM_UNKNOWN), (": x", job_listen.FILM_UNKNOWN),
+])
+def test_film_name_from_source_stem(stem, film):
+    assert job_listen._film_name(stem) == film
+
+
+def test_sample_covers_every_film_when_n_allows(server):
+    build_films(server.final)
+    data = sample(server.base, n=3, seed=5)
+    assert data["n"] == 3 and data["films"] == 3
+    assert {i["film"] for i in data["items"]} == {"Camera Công Sở", "Cooking Show", "Phim Việt Nam"}
+
+
+def test_sample_takes_every_conversation_when_n_is_large_and_skips_quarantine(server):
+    build_films(server.final)
+    data = sample(server.base, n=500)
+    assert data["n"] == 10 and data["films"] == 3
+    assert not any(i["category"] == "_quarantine" for i in data["items"])
+    assert sum(i["film"] == "Camera Công Sở" for i in data["items"]) == 5
+    assert sum(i["film"] == "Cooking Show" for i in data["items"]) == 3
+
+
+def test_sample_is_deterministic_per_seed_and_varies_between_seeds(server):
+    build_films(server.final)
+    first = sample(server.base, n=10, seed=7)
+    again = sample(server.base, n=10, seed=7)
+    assert ids(first) == ids(again)
+    assert ids(sample(server.base, n=10, seed=1)) != ids(sample(server.base, n=10, seed=2))
+
+
+def test_sample_round_robin_gives_each_film_its_share(server):
+    build_films(server.final)
+    for seed in range(4):
+        data = sample(server.base, n=6, seed=seed)
+        counts = {}
+        for item in data["items"]:
+            counts[item["film"]] = counts.get(item["film"], 0) + 1
+        assert counts == {"Camera Công Sở": 2, "Cooking Show": 2, "Phim Việt Nam": 2}
+
+
+def test_sample_prefers_unused_recordings_within_a_film(server):
+    write_conv(server.final, "interrupt/s_a1", topic="x", duration=1.0,
+               source_stem="Solo Show Tập 1", mtime=1)
+    write_conv(server.final, "interrupt/s_a2", topic="x", duration=1.0,
+               source_stem="Solo Show Tập 1", mtime=2)
+    write_conv(server.final, "interrupt/s_b1", topic="x", duration=1.0,
+               source_stem="Solo Show Tập 2", mtime=3)
+    for seed in range(3):
+        data = sample(server.base, n=2, seed=seed)
+        assert len({i["source_stem"] for i in data["items"]}) == 2
+
+
+def test_sample_rotates_categories(server):
+    for rec in ("Rot Show Tập 1", "Rot Show Tập 2", "Rot Show Tập 3"):
+        for cat in ("interrupt", "backchannel", "turn_by_turn"):
+            write_conv(server.final, f"{cat}/{rec.replace(' ', '_')}_{cat}", topic="x", duration=1.0,
+                       source_stem=rec, mtime=1)
+    data = sample(server.base, n=3, seed=3)
+    assert {i["category"] for i in data["items"]} == {"interrupt", "backchannel", "turn_by_turn"}
+    assert len({i["source_stem"] for i in data["items"]}) == 3
+
+
+def test_sample_category_filter_and_labeled_flag(server):
+    build_films(server.final)
+    data = sample(server.base, n=500, category="backchannel")
+    assert data["n"] == 3 and all(i["category"] == "backchannel" for i in data["items"])
+    assert all(i["labeled"] is None for i in data["items"])
+    post(server.base, "/api/review", {"id": "backchannel/a2", "verdict": "bad", "tags": ["x"]})
+    data = sample(server.base, n=500, category="backchannel")
+    labeled = {i["id"]: i["labeled"] for i in data["items"]}
+    assert labeled == {"backchannel/a2": "bad", "backchannel/b2": None, "backchannel/c2": None}
+
+
+def test_sample_clamps_n_and_handles_empty_library(server):
+    build_films(server.final)
+    assert sample(server.base, n=0)["n"] == 1
+    assert sample(server.base, n=99999)["n"] == 10
+    empty = sample(server.base, n=5, category="nope")
+    assert empty == {"n": 0, "films": 0, "seed": 0, "items": []}
+
+
+# -- /api/review -------------------------------------------------------------------------
+def test_review_empty_summary(server):
+    status, data = get_json(server.base, "/api/review")
+    assert status == 200
+    assert data == {"labels": {}, "summary": {"total": 0, "ok": 0, "bad": 0,
+                                              "bad_rate": None, "by_tag": {}}}
+
+
+def test_post_sets_and_clears_a_label(server):
+    build_library(server.final)
+    status, data = post(server.base, "/api/review", {
+        "id": "interrupt/a_ca", "verdict": "bad", "tags": ["ngắt lời", "ngắt lời", "  nhiễu "],
+        "note": "lệch pha"})
+    assert status == 200
+    label = data["labels"]["interrupt/a_ca"]
+    assert label["verdict"] == "bad" and label["tags"] == ["ngắt lời", "nhiễu"]
+    assert label["note"] == "lệch pha" and isinstance(label["time"], (int, float))
+    _, stored = get_json(server.base, "/api/review")
+    assert stored["labels"] == data["labels"]
+    assert (server.final / "_review" / "labels.json").is_file()
+
+    status, cleared = post(server.base, "/api/review", {"id": "interrupt/a_ca", "verdict": None})
+    assert status == 200 and cleared["labels"] == {}
+    assert cleared["summary"]["total"] == 0
+
+
+def test_tags_and_note_are_cut(server):
+    build_library(server.final)
+    tags = [f"t{i}-" + "x" * 50 for i in range(10)]
+    status, data = post(server.base, "/api/review", {
+        "id": "backchannel/c_sang", "verdict": "ok", "tags": tags, "note": "n" * 600})
+    assert status == 200
+    label = data["labels"]["backchannel/c_sang"]
+    assert len(label["tags"]) == 8
+    assert all(len(t) <= 40 for t in label["tags"])
+    assert label["tags"][0] == tags[0][:40]
+    assert len(label["note"]) == 500
+
+
+def test_unknown_or_invalid_ids_are_404_and_write_nothing(server):
+    build_library(server.final)
+    for bad in ("interrupt/missing", "../final", "_review/labels", ".hidden/x", "lhotse/y",
+                "", "interrupt", "/etc", "interrupt/../interrupt/a_ca"):
+        status, data = post(server.base, "/api/review", {"id": bad, "verdict": "ok"})
+        assert status == 404, bad
+        assert "error" in data
+    assert not (server.final / "_review" / "labels.json").exists()
+
+
+def test_bad_bodies_are_400_and_too_large_is_413(server):
+    build_library(server.final)
+    cases = [
+        b"{not json",
+        b"[]",
+        b"",
+        {"id": 5, "verdict": "ok"},
+        {"id": "interrupt/a_ca", "verdict": "maybe"},
+        {"id": "interrupt/a_ca", "verdict": "ok", "tags": "x"},
+        {"id": "interrupt/a_ca", "verdict": "ok", "tags": [1]},
+        {"id": "interrupt/a_ca", "verdict": "ok", "note": ["x"]},
+    ]
+    for body in cases:
+        status, data = post(server.base, "/api/review", body)
+        assert status == 400, body
+        assert "error" in data
+    status, data = post(server.base, "/api/review",
+                        {"id": "interrupt/a_ca", "verdict": "ok", "note": "x" * 70000})
+    assert status == 413
+    assert "error" in data
+    assert not (server.final / "_review" / "labels.json").exists()
+
+
+def test_summary_bad_rate_and_by_tag(server):
+    build_library(server.final)
+    post(server.base, "/api/review", {"id": "interrupt/a_ca", "verdict": "bad", "tags": ["x", "y"]})
+    post(server.base, "/api/review", {"id": "interrupt/b_nau", "verdict": "bad", "tags": ["x"]})
+    status, data = post(server.base, "/api/review", {"id": "backchannel/c_sang", "verdict": "ok",
+                                                     "tags": ["z"]})
+    summary = data["summary"]
+    assert summary["total"] == 3 and summary["ok"] == 1 and summary["bad"] == 2
+    assert summary["bad_rate"] == pytest.approx(2 / 3)
+    assert summary["by_tag"] == {"x": 2, "y": 1}
+
+
+def test_damaged_labels_file_is_kept_not_deleted(server):
+    build_library(server.final)
+    folder = server.final / "_review"
+    folder.mkdir()
+    (folder / "labels.json").write_text("{broken", encoding="utf-8")
+    status, data = get_json(server.base, "/api/review")
+    assert status == 200 and data["summary"]["total"] == 0
+    assert (folder / "labels.json").read_text(encoding="utf-8") == "{broken"
+
+    status, data = post(server.base, "/api/review", {"id": "interrupt/a_ca", "verdict": "ok"})
+    assert status == 200 and set(data["labels"]) == {"interrupt/a_ca"}
+    kept = list(folder.glob("labels.json.bad-*"))
+    assert len(kept) == 1 and kept[0].read_text(encoding="utf-8") == "{broken"
+    assert json.loads((folder / "labels.json").read_text(encoding="utf-8")).keys() == {"interrupt/a_ca"}
+
+
+def test_review_folder_is_never_a_category(server):
+    build_library(server.final)
+    write_conv(server.final, "_review/fake", topic="fake", duration=1.0, mtime=1)
+    post(server.base, "/api/review", {"id": "interrupt/a_ca", "verdict": "ok"})
+    _, data = get_json(server.base, list_url())
+    assert data["total"] == 5
+    assert "_review" not in data["counts"]
+    assert not any(i.startswith("_review") for i in ids(data))
+    assert get_json(server.base, "/api/conversation?" + urllib.parse.urlencode({"id": "_review/fake"}))[0] == 404
+    sampled = sample(server.base, n=500)
+    assert not any(i["id"].startswith("_review") for i in sampled["items"])
+
+
+# -- /api/stats --------------------------------------------------------------------------
+def build_stats(final, audio):
+    write_conv(final, "interrupt/s1", topic="x", duration=1800.0,
+               source_stem="dQw4w9WgXcQ_Camera Công Sở Tập 12", mtime=1000)
+    write_conv(final, "interrupt/s2", topic="x", duration=1800.0,
+               source_stem="dQw4w9WgXcQ_Camera Công Sở Tập 12", mtime=1001)
+    write_conv(final, "backchannel/s3", topic="x", duration=900.0,
+               source_stem="Cooking Show | Tập 1", mtime=1002)
+    write_conv(final, "turn_by_turn/s4", topic="x", duration=50.0,
+               source_stem="Phim Việt Nam: Tập 5", mtime=1003)
+    write_conv(final, "_quarantine/s5", topic="x", duration=999.0,
+               source_stem="Phim Việt Nam: Tập 5", mtime=1004)
+    audio.mkdir(parents=True, exist_ok=True)
+    write_wav(audio / "dQw4w9WgXcQ_Camera Công Sở Tập 12.wav", frames=16000)   # 2 s
+    write_wav(audio / "Cooking_Show___T_p_1.wav", frames=24000)                # 3 s, sanitized name
+    write_wav(audio / "unmatched.wav", frames=40000)                           # 5 s
+    (audio / "notes.txt").write_text("not audio", encoding="utf-8")
+
+
+def test_stats_without_audio_dir_gives_nulls_for_input_hours(server):
+    build_stats(server.final, server.root / "audio")
+    _, data = get_json(server.base, "/api/stats")
+    assert data["input"] == {"recordings_total": None, "recordings_with_conversations": 3,
+                             "hours_with_conversations": None, "hours_total": None}
+    assert data["yield"] == {"hours_ratio": None,
+                             "conversations_per_recording": pytest.approx(4 / 3)}
+    assert data["output"]["conversations"] == 4 and data["output"]["films"] == 3
+
+
+def test_stats_numbers_with_audio_dir(server):
+    audio = server.root / "audio"
+    build_stats(server.final, audio)
+    server.ctx.update({"audio_dir": str(audio), "total_recordings": 4})
+    _, data = get_json(server.base, "/api/stats")
+    assert data["input"]["recordings_total"] == 4
+    assert data["input"]["recordings_with_conversations"] == 3
+    assert data["input"]["hours_with_conversations"] == pytest.approx(5 / 3600)
+    assert data["input"]["hours_total"] == pytest.approx(10 / 3600)
+    out = data["output"]
+    assert out["conversations"] == 4 and out["films"] == 3
+    assert out["hours"] == pytest.approx(4550 / 3600)
+    assert out["by_category"]["interrupt"]["n"] == 2
+    assert out["by_category"]["interrupt"]["hours"] == pytest.approx(1.0)
+    assert out["by_category"]["backchannel"]["hours"] == pytest.approx(900 / 3600)
+    assert out["by_category"]["turn_by_turn"]["n"] == 1
+    assert data["yield"]["hours_ratio"] == pytest.approx(455.0)
+    assert data["yield"]["conversations_per_recording"] == pytest.approx(4 / 3)
+    films = data["films"]
+    assert [f["film"] for f in films] == ["Camera Công Sở", "Cooking Show", "Phim Việt Nam"]
+    assert films[0]["recordings"] == 1 and films[0]["conversations"] == 2
+    assert films[0]["hours"] == pytest.approx(1.0)
+
+
+def test_stats_missing_audio_dir_is_null_not_an_error(server):
+    build_stats(server.final, server.root / "audio")
+    server.ctx.update({"audio_dir": str(server.root / "missing")})
+    _, data = get_json(server.base, "/api/stats")
+    assert data["input"]["hours_total"] is None
+    assert data["input"]["hours_with_conversations"] is None
+    assert data["yield"]["hours_ratio"] is None
+
+
+def test_stats_reads_each_audio_file_once_within_the_cache_window(server, monkeypatch):
+    audio = server.root / "audio"
+    build_stats(server.final, audio)
+    reads = []
+    real = job_listen._read_seconds
+
+    def counting(path):
+        reads.append(path)
+        return real(path)
+
+    monkeypatch.setattr(job_listen, "_read_seconds", counting)
+    index = job_listen._audio_index(str(audio))
+    assert index is not None and index["hours"] == pytest.approx(10 / 3600)
+    assert len(reads) == 3
+    job_listen._audio_index(str(audio))
+    assert len(reads) == 3
