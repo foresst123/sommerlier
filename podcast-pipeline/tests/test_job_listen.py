@@ -5,8 +5,12 @@ built in tmp_path; WAV files written with the stdlib wave module.
 
 Run:  python -m pytest tests/test_job_listen.py -q -p no:cacheprovider     (from podcast-pipeline/)
 """
+import csv
+import io
 import json
 import os
+import re
+import shutil
 import threading
 import urllib.error
 import urllib.parse
@@ -97,7 +101,7 @@ def server(tmp_path):
         def do_POST(self):
             parts = urllib.parse.urlsplit(self.path)
             path = parts.path.rstrip("/") or "/"
-            if not job_listen.handle_post(self, path, root):
+            if not job_listen.handle_post(self, path, root, ctx):
                 self.send_response(404)
                 self.send_header("Content-Length", "0")
                 self.end_headers()
@@ -594,8 +598,8 @@ def test_sample_clamps_n_and_handles_empty_library(server):
 def test_review_empty_summary(server):
     status, data = get_json(server.base, "/api/review")
     assert status == 200
-    assert data == {"labels": {}, "summary": {"total": 0, "ok": 0, "bad": 0,
-                                              "bad_rate": None, "by_tag": {}}}
+    assert data == {"set": "default", "labels": {}, "summary": {"total": 0, "ok": 0, "bad": 0,
+                                                                 "bad_rate": None, "by_tag": {}}}
 
 
 def test_post_sets_and_clears_a_label(server):
@@ -609,7 +613,8 @@ def test_post_sets_and_clears_a_label(server):
     assert label["note"] == "lệch pha" and isinstance(label["time"], (int, float))
     _, stored = get_json(server.base, "/api/review")
     assert stored["labels"] == data["labels"]
-    assert (server.final / "_review" / "labels.json").is_file()
+    assert (server.root / "review_sets" / "default.json").is_file()
+    assert not (server.final / "_review").exists()
 
     status, cleared = post(server.base, "/api/review", {"id": "interrupt/a_ca", "verdict": None})
     assert status == 200 and cleared["labels"] == {}
@@ -636,7 +641,7 @@ def test_unknown_or_invalid_ids_are_404_and_write_nothing(server):
         status, data = post(server.base, "/api/review", {"id": bad, "verdict": "ok"})
         assert status == 404, bad
         assert "error" in data
-    assert not (server.final / "_review" / "labels.json").exists()
+    assert not (server.root / "review_sets" / "default.json").exists()
 
 
 def test_bad_bodies_are_400_and_too_large_is_413(server):
@@ -659,7 +664,7 @@ def test_bad_bodies_are_400_and_too_large_is_413(server):
                         {"id": "interrupt/a_ca", "verdict": "ok", "note": "x" * 70000})
     assert status == 413
     assert "error" in data
-    assert not (server.final / "_review" / "labels.json").exists()
+    assert not (server.root / "review_sets" / "default.json").exists()
 
 
 def test_summary_bad_rate_and_by_tag(server):
@@ -674,20 +679,21 @@ def test_summary_bad_rate_and_by_tag(server):
     assert summary["by_tag"] == {"x": 2, "y": 1}
 
 
-def test_damaged_labels_file_is_kept_not_deleted(server):
+def test_damaged_set_file_is_kept_not_deleted(server):
     build_library(server.final)
-    folder = server.final / "_review"
-    folder.mkdir()
-    (folder / "labels.json").write_text("{broken", encoding="utf-8")
+    rdir = server.root / "review_sets"
+    rdir.mkdir()
+    (rdir / "default.json").write_text("{broken", encoding="utf-8")
     status, data = get_json(server.base, "/api/review")
     assert status == 200 and data["summary"]["total"] == 0
-    assert (folder / "labels.json").read_text(encoding="utf-8") == "{broken"
+    assert (rdir / "default.json").read_text(encoding="utf-8") == "{broken"
 
     status, data = post(server.base, "/api/review", {"id": "interrupt/a_ca", "verdict": "ok"})
     assert status == 200 and set(data["labels"]) == {"interrupt/a_ca"}
-    kept = list(folder.glob("labels.json.bad-*"))
+    kept = list(rdir.glob("default.json.bad-*"))
     assert len(kept) == 1 and kept[0].read_text(encoding="utf-8") == "{broken"
-    assert json.loads((folder / "labels.json").read_text(encoding="utf-8")).keys() == {"interrupt/a_ca"}
+    stored = json.loads((rdir / "default.json").read_text(encoding="utf-8"))
+    assert set(stored["labels"]) == {"interrupt/a_ca"}
 
 
 def test_review_folder_is_never_a_category(server):
@@ -793,3 +799,253 @@ def test_the_page_frame_loop_never_schedules_two_frames_per_frame():
     assert "panTo(now - 0.15 * W / pps, true)" in frame          # the pan inside the loop is quiet
     assert "!fitMode" in frame                                   # and does nothing while the whole file fits
     assert "!raf) raf = requestAnimationFrame(frame)" in frame   # at most one pending frame
+
+
+# -- review sets -------------------------------------------------------------------------
+def sample_url(**params):
+    return "/api/sample?" + urllib.parse.urlencode(params)
+
+
+def set_names(base):
+    return [s["name"] for s in get_json(base, "/api/review_sets")[1]["sets"]]
+
+
+def rescan():
+    job_listen._scan_cache.clear()
+    job_listen._meta_cache.clear()
+
+
+def test_labels_survive_clearing_the_export_folder(server):
+    build_library(server.final)
+    post(server.base, "/api/review", {"id": "interrupt/a_ca", "verdict": "bad", "tags": ["x"]})
+    shutil.rmtree(server.final)
+    server.final.mkdir()
+    build_library(server.final)
+    rescan()
+    status, data = get_json(server.base, "/api/review?set=default")
+    assert status == 200 and data["labels"]["interrupt/a_ca"]["verdict"] == "bad"
+    assert (server.root / "review_sets" / "default.json").is_file()
+
+
+def test_create_list_and_delete_sets(server):
+    build_library(server.final)
+    status, data = get_json(server.base, "/api/review_sets")
+    assert status == 200
+    assert data["dir"] == str(server.root / "review_sets")
+    assert [s["name"] for s in data["sets"]] == ["default"]
+    assert data["sets"][0]["labeled"] == 0 and data["sets"][0]["n_sample"] == 0
+
+    status, row = post(server.base, "/api/review_sets", {"name": "bo_1"})
+    assert status == 201 and row["name"] == "bo_1" and row["labeled"] == 0
+    assert row["created"] and row["updated"]
+    assert post(server.base, "/api/review_sets", {"name": "bo_1"})[0] == 409
+    assert post(server.base, "/api/review_sets", {"name": "default"})[0] == 409
+    assert (server.root / "review_sets" / "bo_1.json").is_file()
+
+    post(server.base, "/api/review", {"id": "interrupt/a_ca", "verdict": "ok", "set": "bo_1"})
+    status, data = post(server.base, "/api/review_sets", {"name": "bo_1", "delete": True})
+    assert status == 409 and data["labeled"] == 1
+    status, data = post(server.base, "/api/review_sets",
+                        {"name": "bo_1", "delete": True, "confirm": True})
+    assert status == 200 and data == {"deleted": "bo_1"}
+    assert not (server.root / "review_sets" / "bo_1.json").exists()
+    assert post(server.base, "/api/review_sets", {"name": "bo_1", "delete": True})[0] == 404
+    assert post(server.base, "/api/review_sets", {"name": "default", "delete": True,
+                                                  "confirm": True})[0] == 400
+    assert set_names(server.base) == ["default"]
+
+
+def test_sets_are_listed_newest_first_with_counts(server):
+    build_library(server.final)
+    post(server.base, "/api/review_sets", {"name": "older"})
+    post(server.base, "/api/review_sets", {"name": "newer"})
+    path = server.root / "review_sets" / "older.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["updated"] = "2001-01-01T00:00:00+00:00"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    post(server.base, "/api/review", {"id": "interrupt/a_ca", "verdict": "bad", "set": "newer"})
+    post(server.base, "/api/review", {"id": "interrupt/b_nau", "verdict": "ok", "set": "newer"})
+    sets = get_json(server.base, "/api/review_sets")[1]["sets"]
+    assert [s["name"] for s in sets] == ["newer", "older", "default"]
+    newer = sets[0]
+    assert (newer["labeled"], newer["ok"], newer["bad"]) == (2, 1, 1)
+    assert newer["bad_rate"] == pytest.approx(0.5)
+
+
+def test_invalid_set_names_are_400(server):
+    build_library(server.final)
+    for bad in ("", "   ", "x" * 41, None, 5):
+        status, data = post(server.base, "/api/review_sets", {"name": bad})
+        assert status == 400 and "error" in data, bad
+    assert post(server.base, "/api/review", {"id": "interrupt/a_ca", "verdict": "ok",
+                                             "set": ""})[0] == 400
+    assert get_json(server.base, "/api/review?set=" + urllib.parse.quote("  "))[0] == 400
+
+
+def test_vietnamese_names_lose_their_marks(server):
+    status, row = post(server.base, "/api/review_sets", {"name": "Bộ chấm đầu!"})
+    assert status == 201 and row["name"] == "Bo_cham_dau_"
+    assert (server.root / "review_sets" / "Bo_cham_dau_.json").is_file()
+    assert post(server.base, "/api/review_sets", {"name": "x" * 40})[0] == 201
+
+
+def test_unknown_set_is_404_for_labels_and_reads(server):
+    build_library(server.final)
+    assert get_json(server.base, "/api/review?set=nope")[0] == 404
+    status, data = post(server.base, "/api/review", {"id": "interrupt/a_ca", "verdict": "ok",
+                                                     "set": "nope"})
+    assert status == 404 and "error" in data
+    assert not (server.root / "review_sets" / "nope.json").exists()
+
+
+def test_labels_are_separate_between_sets(server):
+    build_library(server.final)
+    post(server.base, "/api/review_sets", {"name": "a"})
+    post(server.base, "/api/review_sets", {"name": "b"})
+    post(server.base, "/api/review", {"id": "interrupt/a_ca", "verdict": "ok", "set": "a"})
+    post(server.base, "/api/review", {"id": "interrupt/b_nau", "verdict": "bad", "set": "b"})
+    _, a = get_json(server.base, "/api/review?set=a")
+    _, b = get_json(server.base, "/api/review?set=b")
+    _, d = get_json(server.base, "/api/review")
+    assert a["set"] == "a" and set(a["labels"]) == {"interrupt/a_ca"}
+    assert set(b["labels"]) == {"interrupt/b_nau"} and d["labels"] == {}
+
+
+def test_create_from_copies_the_sample_not_the_labels(server):
+    build_films(server.final)
+    get_json(server.base, sample_url(set="src", new=1, n=4, seed=3))
+    src_ids = get_json(server.base, sample_url(set="src"))[1]["items"]
+    post(server.base, "/api/review", {"id": src_ids[0]["id"], "verdict": "bad", "set": "src"})
+    status, row = post(server.base, "/api/review_sets", {"name": "again", "from": "src"})
+    assert status == 201 and row["labeled"] == 0 and row["n_sample"] == 4
+    copied = get_json(server.base, sample_url(set="again"))[1]
+    assert ids(copied) == ids({"items": src_ids})
+    assert all(i["labeled"] is None for i in copied["items"])
+    assert post(server.base, "/api/review_sets", {"name": "x", "from": "missing"})[0] == 404
+
+
+def test_saved_sample_is_restored_in_order_and_counts_missing(server):
+    build_films(server.final)
+    first = get_json(server.base, sample_url(set="s", new=1, n=6, seed=2))[1]
+    assert first["set"] == "s" and len(first["items"]) == 6
+    shutil.rmtree(server.final / first["items"][0]["id"])
+    rescan()
+    again = get_json(server.base, sample_url(set="s"))[1]
+    assert again["missing"] == 1 and ids(again) == ids(first)[1:]
+    assert "restored_from_labels" not in again
+
+
+def test_sample_repeats_exactly_when_final_grows_and_only_new_redraws(server):
+    build_films(server.final)
+    saved = get_json(server.base, sample_url(set="fixed", new=1, n=10, seed=7))[1]
+    for i in range(20):
+        write_conv(server.final, f"interrupt/extra{i}", topic="x", duration=1.0,
+                   source_stem=f"Extra Show {i % 4} Tập 1", mtime=50 + i)
+    rescan()
+    repeated = get_json(server.base, sample_url(set="fixed", n=10, seed=7))[1]
+    assert repeated["items"] == saved["items"] and repeated["missing"] == 0
+    assert repeated["set"] == "fixed"
+    redrawn = get_json(server.base, sample_url(set="fixed", new=1, n=10, seed=7))[1]
+    assert ids(redrawn) != ids(saved)
+    assert ids(get_json(server.base, sample_url(set="fixed"))[1]) == ids(redrawn)
+
+
+def test_new_sample_keeps_labels_and_a_label_never_edits_the_sample(server):
+    build_films(server.final)
+    get_json(server.base, sample_url(set="k", new=1, n=3, seed=1))
+    path = server.root / "review_sets" / "k.json"
+    before = json.loads(path.read_text("utf-8"))["sample"]
+    outside = next(i for i in ("interrupt/d1", "turn_by_turn/c3") if i not in before["ids"])
+    status, _ = post(server.base, "/api/review", {"id": outside, "verdict": "ok", "set": "k"})
+    assert status == 200
+    doc = json.loads(path.read_text("utf-8"))
+    assert doc["sample"] == before and outside in doc["labels"]
+    post(server.base, "/api/review", {"id": before["ids"][0], "verdict": "bad", "set": "k"})
+    get_json(server.base, sample_url(set="k", new=1, n=3, seed=1))
+    doc = json.loads(path.read_text("utf-8"))
+    assert doc["labels"][before["ids"][0]]["verdict"] == "bad"
+
+
+def test_set_without_sample_and_without_labels_is_409(server):
+    build_films(server.final)
+    post(server.base, "/api/review_sets", {"name": "empty"})
+    assert get_json(server.base, sample_url(set="empty"))[0] == 409
+    assert get_json(server.base, sample_url(set="nope"))[0] == 404
+
+
+def test_labelled_set_without_sample_restores_its_labelled_ids_in_order(server):
+    build_films(server.final)
+    raw = {"backchannel/a2": {"verdict": "bad", "tags": [], "note": "", "time": 300.0},
+           "interrupt/a1": {"verdict": "ok", "tags": [], "note": "", "time": 100.0}}
+    rdir = server.root / "review_sets"
+    rdir.mkdir()
+    (rdir / "old.json").write_text(json.dumps({"name": "old", "created": None, "updated": None,
+                                               "sample": None, "labels": raw}), encoding="utf-8")
+    status, data = get_json(server.base, sample_url(set="old"))
+    assert status == 200 and data["restored_from_labels"] is True
+    assert ids(data) == ["interrupt/a1", "backchannel/a2"]
+    stored = json.loads((rdir / "old.json").read_text("utf-8"))
+    assert stored["sample"]["ids"] == ["interrupt/a1", "backchannel/a2"]
+    again = get_json(server.base, sample_url(set="old"))[1]
+    assert "restored_from_labels" not in again and ids(again) == ids(data)
+
+
+def test_default_set_takes_over_the_old_labels_file(server):
+    build_library(server.final)
+    folder = server.final / "_review"
+    folder.mkdir()
+    legacy = {"interrupt/a_ca": {"verdict": "bad", "tags": ["old"], "note": "", "time": 5.0}}
+    (folder / "labels.json").write_text(json.dumps(legacy), encoding="utf-8")
+    _, data = get_json(server.base, "/api/review")
+    assert set(data["labels"]) == {"interrupt/a_ca"}
+    status, data = post(server.base, "/api/review", {"id": "interrupt/b_nau", "verdict": "ok"})
+    assert status == 200 and set(data["labels"]) == {"interrupt/a_ca", "interrupt/b_nau"}
+    assert json.loads((folder / "labels.json").read_text("utf-8")) == legacy
+    stored = json.loads((server.root / "review_sets" / "default.json").read_text("utf-8"))
+    assert set(stored["labels"]) == {"interrupt/a_ca", "interrupt/b_nau"}
+    assert stored["labels"]["interrupt/a_ca"]["tags"] == ["old"]
+
+
+def read_csv(base, url):
+    status, headers, body = get(base, url)
+    assert status == 200
+    assert headers["Content-Type"] == "text/csv; charset=utf-8"
+    assert body.startswith(b"\xef\xbb\xbf")
+    return headers, list(csv.reader(io.StringIO(body[3:].decode("utf-8"))))
+
+
+def test_csv_has_bom_columns_escapes_and_unlabelled_rows(server):
+    build_films(server.final)
+    get_json(server.base, sample_url(set="out", new=1, n=3, seed=0))
+    rel = get_json(server.base, sample_url(set="out"))[1]["items"][0]["id"]
+    post(server.base, "/api/review", {
+        "id": rel, "verdict": "bad", "set": "out",
+        "tags": ["a,b", 'q"z', "=HYPERLINK(1)"], "note": '=1+2, "q"\nline2'})
+    headers, rows = read_csv(server.base, "/api/review.csv?set=out")
+    assert headers["Content-Disposition"] == 'attachment; filename="review_out.csv"'
+    assert rows[0] == ["id", "film", "category", "verdict", "tags", "note", "time",
+                       "source_stem", "duration"]
+    assert len(rows) == 4
+    by_id = {r[0]: r for r in rows[1:]}
+    row = by_id[rel]
+    assert row[3] == "bad"
+    assert row[4] == 'a,b;q"z;=HYPERLINK(1)'
+    assert row[5] == '\'=1+2, "q"\nline2'
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00", row[6])
+    assert row[7] and row[8]
+    unlabelled = [r for r in rows[1:] if r[0] != rel]
+    assert len(unlabelled) == 2 and all(r[3] == "" and r[5] == "" for r in unlabelled)
+    assert all(r[7] for r in rows[1:])
+
+
+def test_csv_without_sample_lists_labels_and_flags_formula_text(server):
+    build_library(server.final)
+    post(server.base, "/api/review", {"id": "interrupt/a_ca", "verdict": "ok",
+                                      "note": "@SUM(1)"})
+    post(server.base, "/api/review", {"id": "backchannel/c_sang", "verdict": "bad",
+                                      "note": "-1"})
+    _, rows = read_csv(server.base, "/api/review.csv")
+    assert [r[0] for r in rows[1:]] == ["backchannel/c_sang", "interrupt/a_ca"]
+    notes = {r[0]: r[5] for r in rows[1:]}
+    assert notes == {"backchannel/c_sang": "'-1", "interrupt/a_ca": "'@SUM(1)"}
+    assert get_json(server.base, "/api/review.csv?set=nope")[0] == 404
