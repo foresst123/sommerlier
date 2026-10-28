@@ -97,7 +97,7 @@ input[type=number],input[type=text]{padding:5px 8px;border:1px solid var(--line)
 .sctl input[type=number]{width:76px}
 .prog{margin-bottom:8px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
 #pline{font-weight:600;font-size:12px}
-#smeta,#preason{font-size:11px;color:var(--mute);line-height:15px}
+#smeta,#preason,#srest{font-size:11px;color:var(--mute);line-height:15px}
 #preason{margin-top:2px}
 .idx{color:var(--mute);font-variant-numeric:tabular-nums;flex:none;min-width:24px;font-size:11px}
 .gd{width:9px;height:9px;border-radius:50%;flex:none;border:1.5px solid var(--mute)}
@@ -116,6 +116,19 @@ input[type=number],input[type=text]{padding:5px 8px;border:1px solid var(--line)
 .gmsg.bad{color:var(--bad)}
 #g-tags{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px}
 #g-tags .chip{min-height:22px;padding:1px 8px;font-size:11.5px}
+/* review sets: which set the grades and the sample belong to */
+a.btn{text-decoration:none;display:inline-flex;align-items:center;color:var(--ink)}
+.setrow{display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-bottom:4px;font-size:12px}
+.setlbl{color:var(--mute);flex:none}
+.setsel{flex:1 1 60px;max-width:100%;min-width:0;min-height:28px;padding:2px 4px;font-size:12px;border:1px solid var(--line);border-radius:8px;background:var(--card)}
+.setrow .btn.sm{min-height:28px;padding:2px 6px;font-size:12px}
+.setdir{font-size:11px;line-height:15px;color:var(--mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:4px}
+#setnote{font-size:11px;color:var(--mute);margin-bottom:6px}
+.setform{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:6px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+.setform input[type=text]{flex:1 1 160px}
+.fmsg{flex:1 1 100%;font-size:12px;color:var(--mute);line-height:16px}
+.fmsg.bad{color:var(--bad)}
+.btn.danger{color:var(--bad);border-color:var(--bad)}
 @media(max-width:820px){.layout{grid-template-columns:minmax(0,1fr)}.list{max-height:300px}}
 @media(max-width:600px){:root{--name:58px}}
 </style>
@@ -160,6 +173,33 @@ input[type=number],input[type=text]{padding:5px 8px;border:1px solid var(--line)
       <button type="button" data-m="list" aria-pressed="true">Danh sách</button>
       <button type="button" data-m="sample" aria-pressed="false">Mẫu nghe thử</button>
     </div>
+    <div class="setrow" id="setrow" hidden>
+      <span class="setlbl" id="setlbl">Bộ chấm:</span>
+      <select id="setsel" class="setsel" aria-label="Bộ chấm"></select>
+      <button type="button" class="btn sm" id="setnew">Tạo bộ…</button>
+      <a class="btn sm" id="setcsv" href="api/review.csv" download>Tải CSV</a>
+      <button type="button" class="btn sm" id="setdel">Xóa bộ</button>
+    </div>
+    <div class="setdir" id="setdir" hidden></div>
+    <div class="setform" id="newform" hidden>
+      <input type="text" id="newname" maxlength="60" placeholder="Tên bộ, ví dụ: vòng 2" aria-label="Tên bộ mới" autocomplete="off">
+      <label class="note"><input type="checkbox" id="newcopy"> chép 50 mẫu của bộ hiện tại để chấm lại</label>
+      <button type="button" class="btn sm primary" id="newok">Tạo</button>
+      <button type="button" class="btn sm" id="newcancel">Hủy</button>
+      <div class="fmsg" id="newmsg" role="status"></div>
+    </div>
+    <div class="setform" id="delform" hidden>
+      <div class="fmsg" id="delmsg" role="alert"></div>
+      <button type="button" class="btn sm danger" id="delok">Xóa hẳn</button>
+      <button type="button" class="btn sm" id="delcancel">Hủy</button>
+    </div>
+    <div class="setform" id="sconfirm" hidden>
+      <div class="fmsg" id="sconmsg" role="alert"></div>
+      <button type="button" class="btn sm primary" id="sconok">Tiếp tục</button>
+      <button type="button" class="btn sm" id="sconnew">Tạo bộ mới</button>
+      <button type="button" class="btn sm" id="sconcancel">Hủy</button>
+    </div>
+    <div id="setnote" hidden></div>
     <div class="sctl" id="sctl" hidden>
       <label class="note">Số lượng <input type="number" id="sn" min="1" max="500" value="50" aria-label="Số lượng mẫu"></label>
       <label class="note">Seed <input type="number" id="sseed" min="0" value="0" aria-label="Seed"></label>
@@ -168,6 +208,7 @@ input[type=number],input[type=text]{padding:5px 8px;border:1px solid var(--line)
     </div>
     <div class="prog" id="prog" hidden>
       <div id="smeta"></div>
+      <div id="srest" hidden>mẫu khôi phục từ các mục đã chấm trước đây</div>
       <div id="pline"></div>
       <div id="preason"></div>
     </div>
@@ -268,9 +309,10 @@ const st = {cat: '', q: '', sort: 'new', src: 'clean', chan: 'both', rate: 1, se
   detail: null, turns: [], detailTok: 0, audioUrl: '', waveTok: 0, wave: null, waveMsg: '',
   activeTurn: -1, manualUntil: 0, evMarks: [],
   mode: 'list', sn: 50, seed: 0, auto: true, io: null, sample: [], sampleMeta: null, sampleTok: 0,
-  labels: {}, summary: null, dirty: {}, revSeq: 0};
+  labels: {}, summary: null, dirty: {}, revSeq: 0,
+  set: 'default', setsOn: null, sets: [], setsDir: '', setTok: 0, setNoSample: false, lastSampleMode: 'saved'};
 let pps = 50, t0 = 0, fitMode = true;
-let noteTimer = 0, pendingNote = null, statsAt = 0, statsTok = 0;
+let noteTimer = 0, pendingNote = null, statsAt = 0, statsTok = 0, setsReady = null, setCntTimer = 0, pendShuffle = false;
 
 const aud = $('aud');
 const cvR = $('cv-ruler'), cvWA = $('cv-wa'), cvTA = $('cv-ta'), cvWU = $('cv-wu'), cvTU = $('cv-tu'), cvEV = $('cv-ev');
@@ -295,13 +337,14 @@ function loadPrefs() {
     if (Number.isInteger(p.seed) && p.seed >= 0 && p.seed <= 2147483647) st.seed = p.seed;
     if (typeof p.auto === 'boolean') st.auto = p.auto;
     if (typeof p.io === 'boolean') st.io = p.io;
+    if (typeof p.set === 'string' && p.set.length >= 1 && p.set.length <= 60) st.set = p.set;
   } catch (e) { /* defaults */ }
 }
 function savePrefs() {
   try {
     const s = store();
     if (s) s.setItem(KEY, JSON.stringify({cat: st.cat, sort: st.sort, src: st.src, chan: st.chan, rate: st.rate, id: st.selId,
-      mode: st.mode, sn: st.sn, seed: st.seed, auto: st.auto, io: st.io}));
+      mode: st.mode, sn: st.sn, seed: st.seed, auto: st.auto, io: st.io, set: st.set}));
   } catch (e) { /* ignore */ }
 }
 async function getJSON(url) {
@@ -409,8 +452,9 @@ function renderList() {
   const list = $('list');
   const top = list.scrollTop;
   if (st.mode === 'sample') {
-    list.innerHTML = st.sample.length ? st.sample.map((it, i) => sampleRowHtml(it, i)).join('') :
-      '<div class="note">' + (st.sampleMeta ? 'Không có hội thoại nào trong mẫu này.' : 'Chưa có mẫu, bấm “Lấy mẫu”.') + '</div>';
+    const emptyMsg = st.setNoSample && st.setsOn === true ? 'bộ này chưa có mẫu: bấm “Lấy mẫu”.' :
+      (st.sampleMeta ? 'Không có hội thoại nào trong mẫu này.' : 'Chưa có mẫu, bấm “Lấy mẫu”.');
+    list.innerHTML = st.sample.length ? st.sample.map((it, i) => sampleRowHtml(it, i)).join('') : '<div class="note">' + emptyMsg + '</div>';
     $('more-wrap').innerHTML = '';
   } else {
     list.innerHTML = st.items.length ? st.items.map(rowHtml).join('') :
@@ -480,12 +524,20 @@ function sampleRowHtml(it, i) {
     '<span class="meta"><span class="badge cat-' + esc(cat) + '">' + esc(CAT[cat] || it.category || '') + '</span>' +
     '<span>' + fmtTime(it.duration) + '</span><span>' + esc(it.turns != null ? it.turns : '–') + ' lượt</span></span></button>';
 }
-async function loadSample() {
+/* 'saved': the set's own sample, as it was saved; 'new': draw a new sample and save it into the set */
+async function loadSample(mode) {
   const tok = ++st.sampleTok;
   readSampleInputs();
-  const p = new URLSearchParams({n: String(st.sn), seed: String(st.seed)});
-  if (st.cat) p.set('category', st.cat);
-  $('lstatus').textContent = 'đang lấy mẫu…';
+  st.lastSampleMode = mode === 'new' ? 'new' : 'saved';
+  const on = st.setsOn === true, saved = on && mode !== 'new';
+  const p = new URLSearchParams();
+  if (on) { p.set('set', st.set); if (!saved) p.set('new', '1'); }
+  if (!saved) {
+    p.set('n', String(st.sn));
+    p.set('seed', String(st.seed));
+    if (st.cat) p.set('category', st.cat);
+  }
+  $('lstatus').textContent = saved ? 'đang tải mẫu của bộ…' : 'đang lấy mẫu…';
   let d;
   try {
     d = await getJSON('api/sample?' + p.toString());
@@ -496,7 +548,11 @@ async function loadSample() {
   }
   if (tok !== st.sampleTok) return;
   st.sample = Array.isArray(d.items) ? d.items : [];
-  st.sampleMeta = {n: num(d.n), films: cnt(d.films), seed: num(d.seed)};
+  st.setNoSample = saved && !st.sample.length;
+  const setInfo = st.sets.find(s => s.name === st.set) || {};
+  st.sampleMeta = st.setNoSample ? null : {n: num(d.n), films: cnt(d.films), seed: num(d.seed), missing: num(d.missing),
+    restored: d.restored_from_labels === true,
+    created: (typeof d.created === 'string' && d.created) || (typeof d.sample_created === 'string' && d.sample_created) || setInfo.created || ''};
   $('lstatus').textContent = '';
   renderList();
   renderProgress();
@@ -508,7 +564,7 @@ function setMode(m) {
   st.mode = m;
   savePrefs();
   applyModeUi();
-  if (m === 'sample') loadSample();
+  if (m === 'sample') (setsReady || Promise.resolve()).then(() => loadSample('saved'));
   else loadList(true, st.loaded);
   loadStats(false);     // the collapsed header shows the totals too
 }
@@ -523,12 +579,14 @@ function applyModeUi() {
   renderIoOpen();
   renderList();
   renderProgress();
+  renderSets();
   updateGradePanel(true);
 }
 /* review state: GET/POST api/review; the server's labels replace the local map except ids whose save failed */
 async function loadReview() {
-  try { applyReview(await getJSON('api/review')); }
-  catch (e) { gMsg('không tải được nhãn đã chấm', true); }
+  const tok = st.setTok;
+  try { const d = await getJSON(setUrl('api/review')); if (tok === st.setTok) applyReview(d); }
+  catch (e) { if (tok === st.setTok) gMsg('không tải được nhãn đã chấm', true); }
 }
 function applyReview(d) {
   const keep = {};
@@ -553,18 +611,23 @@ function saveLabel(id, verdict, tags, note) {
   postReview(id, verdict, tags, note);
 }
 async function postReview(id, verdict, tags, note) {
-  const seq = ++st.revSeq;
+  const seq = ++st.revSeq, set = st.set;
   gMsg('đang lưu…');
+  const body = {id: id, verdict: verdict, tags: tags || [], note: note || ''};
+  if (st.setsOn === true) body.set = set;
   try {
     const r = await fetch('api/review', {method: 'POST', headers: {'Content-Type': 'application/json'}, cache: 'no-store',
-      body: JSON.stringify({id: id, verdict: verdict, tags: tags || [], note: note || ''})});
+      body: JSON.stringify(body)});
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
+    if (set !== st.set) return;          // saved into a set that is no longer shown
     delete st.dirty[id];
     if (seq !== st.revSeq) return;
     applyReview(d);
     gMsg('đã lưu');
+    refreshSetCounts();
   } catch (e) {
+    if (set !== st.set) return;
     st.dirty[id] = true;
     if (seq !== st.revSeq) return;
     gMsg('chưa lưu (mất kết nối?), giữ nhãn trên màn hình', true);
@@ -642,13 +705,159 @@ function renderProgress() {
   st.sample.forEach(it => { const v = labelOf(it.id); if (v === 'ok') ok++; else if (v === 'bad') bad++; });
   const done = ok + bad, n = st.sample.length;
   const m = st.sampleMeta || {};
-  $('smeta').textContent = 'Mẫu ' + (m.n == null ? n : m.n) + ' hội thoại · ' + show(m.films) + ' phim · seed ' + show(m.seed);
+  const miss = num(m.missing) > 0 ? ' · ' + m.missing + ' mục không còn' : '';
+  if (st.setsOn === true) {
+    // a set's sample is fixed: say which set, how many items, how many graded and when it was drawn
+    const done = st.sample.filter(it => labelOf(it.id)).length;
+    const made = m.created ? ' · tạo ngày ' + String(m.created).slice(0, 10) : '';
+    $('smeta').textContent = 'Bộ ' + st.set + ' · mẫu cố định gồm ' + n + ' mục, đã chấm ' + done + made + miss;
+  } else {
+    $('smeta').textContent = 'Mẫu ' + (m.n == null ? n : m.n) + ' hội thoại · ' + show(m.films) + ' phim · seed ' + show(m.seed) + miss;
+  }
+  $('srest').hidden = !m.restored;
   $('pline').textContent = 'đã chấm ' + done + '/' + n + ' · Lỗi ' + bad + ' (' + (done ? Math.round(bad / done * 100) + '%' : '—') + ') · Tốt ' + ok;
   const by = st.summary && st.summary.by_tag && typeof st.summary.by_tag === 'object' ? st.summary.by_tag : {};
   const parts = TAGS.map(([k, l]) => l + ' ' + (Number(by[k]) || 0));
   Object.keys(by).forEach(k => { if (!TAGS.some(t => t[0] === k)) parts.push(k + ' ' + (Number(by[k]) || 0)); });
   $('preason').textContent = 'Lý do lỗi (toàn bộ nhãn): ' + parts.join(' · ');
 }
+/* ---------- review sets (api/review_sets): each set keeps its own sample and grades ---------- */
+function setUrl(path) {
+  if (st.setsOn !== true) return path;
+  return path + (path.indexOf('?') < 0 ? '?' : '&') + 'set=' + encodeURIComponent(st.set);
+}
+function labeledCount() { return Object.keys(st.labels).filter(id => labelOf(id)).length; }
+function fmsg(id, text, bad) { const el = $(id); el.textContent = text; el.classList.toggle('bad', !!bad); }
+function hideSetForms() { ['newform', 'delform', 'sconfirm'].forEach(id => { $(id).hidden = true; }); }
+async function loadSets() {
+  let d;
+  try { d = await getJSON('api/review_sets'); }
+  catch (e) {
+    if (st.setsOn !== true) st.setsOn = false;      // no set routes (old backend): the plain review API, as before
+    renderSets();
+    return false;
+  }
+  st.setsOn = true;
+  st.setsDir = typeof d.dir === 'string' ? d.dir : '';
+  st.sets = Array.isArray(d.sets) ? d.sets.filter(s => s && typeof s.name === 'string') : [];
+  if (!st.sets.some(s => s.name === st.set)) { st.set = 'default'; savePrefs(); }
+  renderSets();
+  return true;
+}
+function refreshSetCounts() {
+  if (st.setsOn !== true) return;
+  clearTimeout(setCntTimer);
+  setCntTimer = setTimeout(() => { loadSets(); }, 800);
+}
+function renderSets() {
+  const sm = st.mode === 'sample', on = st.setsOn === true, show = sm && on;
+  $('setrow').hidden = !show;
+  $('setdir').hidden = !show || !st.setsDir;
+  $('setdir').textContent = 'Lưu ngoài thư mục kết quả: ' + st.setsDir;
+  $('setdir').title = st.setsDir;
+  $('setnote').hidden = !(sm && st.setsOn === false);
+  $('setnote').textContent = 'Máy chủ này chưa có bộ chấm: nhãn lưu theo cách cũ (không tách bộ).';
+  if (!show) { hideSetForms(); return; }
+  if (document.activeElement !== $('setsel')) {
+    $('setsel').innerHTML = st.sets.map(s => '<option value="' + esc(s.name) + '"' + (s.name === st.set ? ' selected' : '') + '>' +
+      esc(s.name) + ' · đã chấm ' + (num(s.labeled) || 0) + '/' + (num(s.n_sample) || 0) + '</option>').join('');
+  }
+  $('setcsv').href = 'api/review.csv?set=' + encodeURIComponent(st.set);
+  $('setdel').disabled = st.set === 'default';
+  $('setdel').title = st.set === 'default' ? 'Bộ mặc định không xóa được' : '';
+}
+/* switching a set drops the shown sample and labels, then loads that set's own */
+function applySet(name) {
+  flushNote();
+  st.set = name; st.setTok++;
+  st.labels = {}; st.summary = null; st.dirty = {};
+  st.sample = []; st.sampleMeta = null; st.setNoSample = false;
+  savePrefs();
+  hideSetForms();
+  renderSets();
+  renderList(); renderProgress(); updateGradePanel(true);
+  if (st.mode === 'sample') loadSample('saved');
+  loadReview();
+}
+function switchSet(name) { if (name && name !== st.set && st.setsOn === true) applySet(name); }
+async function setsPost(body) {
+  const r = await fetch('api/review_sets', {method: 'POST', headers: {'Content-Type': 'application/json'}, cache: 'no-store',
+    body: JSON.stringify(body)});
+  if (r.status === 400) throw new Error('tên bộ không hợp lệ (1–60 ký tự)');
+  if (r.status === 409) throw new Error('đã có bộ tên này');
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r;
+}
+function openNewForm() {
+  hideSetForms();
+  $('newname').value = ''; $('newcopy').checked = false;
+  fmsg('newmsg', '', false);
+  $('newform').hidden = false;
+  $('newname').focus();
+}
+async function createSet() {
+  const name = $('newname').value.trim();
+  if (!name) { fmsg('newmsg', 'Nhập tên bộ.', true); return; }
+  const body = {name: name};
+  if ($('newcopy').checked) body.from = st.set;
+  $('newok').disabled = true;
+  try { await setsPost(body); }
+  catch (e) { fmsg('newmsg', 'Không tạo được bộ: ' + e.message, true); $('newok').disabled = false; return; }
+  $('newok').disabled = false;
+  $('newform').hidden = true;
+  await loadSets();
+  applySet(name);
+}
+function askDelete() {
+  if (st.set === 'default') return;
+  hideSetForms();
+  fmsg('delmsg', 'Xóa bộ “' + st.set + '” và toàn bộ nhãn của nó? Không hoàn tác.', false);
+  $('delform').hidden = false;
+}
+async function deleteSet() {
+  const name = st.set;
+  if (name === 'default') return;
+  $('delok').disabled = true;
+  try { await setsPost({name: name, delete: true, confirm: true}); }
+  catch (e) { fmsg('delmsg', 'Không xóa được bộ: ' + e.message, true); $('delok').disabled = false; return; }
+  $('delok').disabled = false;
+  await loadSets();
+  applySet('default');
+}
+/* a new sample saves into the set and does not clear labels, but it changes the list: ask first when there are labels */
+function requestSample(shuffle) {
+  const n = labeledCount();
+  if (st.setsOn === true && n > 0) {
+    pendShuffle = !!shuffle;
+    hideSetForms();
+    $('sconmsg').textContent = 'bộ này đã chấm ' + n + ' mục, lấy mẫu mới sẽ không xóa nhãn nhưng đổi danh sách. Tiếp tục?';
+    $('sconfirm').hidden = false;
+    return;
+  }
+  doNewSample(shuffle);
+}
+function doNewSample(shuffle) {
+  hideSetForms();
+  if (shuffle) $('sseed').value = String(Math.floor(Math.random() * 100000));
+  loadSample('new');
+}
+function bindSets() {
+  $('setsel').addEventListener('change', () => switchSet($('setsel').value));
+  $('setnew').addEventListener('click', openNewForm);
+  $('newok').addEventListener('click', createSet);
+  $('newcancel').addEventListener('click', hideSetForms);
+  $('newname').addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); createSet(); }
+    else if (e.key === 'Escape') hideSetForms();
+  });
+  $('setdel').addEventListener('click', askDelete);
+  $('delok').addEventListener('click', deleteSet);
+  $('delcancel').addEventListener('click', hideSetForms);
+  $('sconok').addEventListener('click', () => doNewSample(pendShuffle));
+  $('sconnew').addEventListener('click', openNewForm);
+  $('sconcancel').addEventListener('click', hideSetForms);
+}
+
 /* input -> output card */
 function ioOpen() { return st.io === null ? false : !!st.io; }   // collapsed until opened: the sample list stays high on the screen
 function renderIoOpen() {
@@ -1217,7 +1426,8 @@ function bindEvents() {
     st.cat = b.dataset.cat;
     savePrefs();
     renderChips();
-    if (st.mode === 'sample') loadSample(); else loadList(true, false);
+    // in sample mode a category change never draws a new sample: the set's sample is fixed until "Lấy mẫu"
+  if (st.mode === 'sample') renderChips(); else loadList(true, false);
   });
   $('list').addEventListener('scroll', () => { st.listScrollAt = Date.now(); }, {passive: true});
   $('list').addEventListener('click', e => {
@@ -1227,13 +1437,14 @@ function bindEvents() {
   $('more-wrap').addEventListener('click', e => { if (e.target.closest('#more')) loadList(false, false); });
   $('lstatus').addEventListener('click', e => {
     if (e.target.closest('#lretry')) loadList(true, false);
-    if (e.target.closest('#sretry')) loadSample();
+    if (e.target.closest('#sretry')) loadSample(st.lastSampleMode);
   });
   $('empty').addEventListener('click', e => { if (e.target.closest('#retry')) selectConv(st.selId); });
   document.querySelectorAll('.modes button').forEach(b => b.addEventListener('click', () => setMode(b.dataset.m)));
-  $('sget').addEventListener('click', () => loadSample());
-  $('sshuf').addEventListener('click', () => { $('sseed').value = String(Math.floor(Math.random() * 100000)); loadSample(); });
-  $('sctl').addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') loadSample(); });
+  $('sget').addEventListener('click', () => requestSample(false));
+  $('sshuf').addEventListener('click', () => requestSample(true));
+  $('sctl').addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') requestSample(false); });
+  bindSets();
   $('g-ok').addEventListener('click', () => grade('ok', false));
   $('g-bad').addEventListener('click', () => grade('bad', false));
   $('g-clr').addEventListener('click', () => grade(null, false));
@@ -1363,8 +1574,10 @@ function init() {
   bindEvents();
   applyModeUi();
   loadList(true, st.mode === 'sample');
-  loadReview();
-  if (st.mode === 'sample') loadSample();
+  setsReady = loadSets().then(() => {       // labels and the sample depend on the set, so they wait for the set list
+    loadReview();
+    if (st.mode === 'sample') loadSample('saved');
+  });
   loadStats(false);     // the collapsed header shows the totals too
   if (st.selId) selectConv(st.selId);
   setInterval(refresh, 20000);
