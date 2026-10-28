@@ -41,9 +41,10 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+EMBED_SR = 16000
 FRAME = 0.020
 ACTIVE_RMS = 1e-4            # a frame quieter than this is the digital silence between sentences
-MAX_EMBED_S = 30.0
+MAX_EMBED_S = 20.0
 MAX_TURNS = 4            # turns embedded per speaker (each costs two embeddings); --max-turns changes it
 MIN_TURN_S = 1.0
 
@@ -263,6 +264,11 @@ def measure_folder(folder, embedder=None, originals=None):
     clean, sr2 = sf.read(str(clean_path), dtype="float32", always_2d=True)
     if raw.shape[1] != 2 or clean.shape[1] != 2 or sr != sr2:
         return None
+    if sr != EMBED_SR:
+        # the exports are not at 16 kHz: bring everything to the embedder's rate once, not on every embedding
+        raw = np.column_stack([_resample(raw[:, k], sr, EMBED_SR) for k in (0, 1)])
+        clean = np.column_stack([_resample(clean[:, k], sr, EMBED_SR) for k in (0, 1)])
+        sr = EMBED_SR
     left = ((meta.get("channels") or {}).get("left")) or "assistant"
     chan = {"assistant": 0, "user": 1} if left == "assistant" else {"assistant": 1, "user": 0}
     row = {"id": str(folder), "category": folder.parent.name, "duration_s": round(raw.shape[0] / sr, 1)}
@@ -315,8 +321,30 @@ def measure_folder(folder, embedder=None, originals=None):
 
 
 def _make_wespeaker(device):
+    import time
+    try:
+        import onnxruntime as ort
+        ort.set_default_logger_severity(3)            # the CPU provider prints one warning per convolution
+    except Exception:
+        pass
     from models.wespeaker_embedding import WeSpeakerONNXEmbedder
-    return WeSpeakerONNXEmbedder(device)
+    embedder = WeSpeakerONNXEmbedder(device)
+    try:
+        providers = embedder.active_providers()
+        t = time.perf_counter()
+        embedder.embed(np.zeros(3 * EMBED_SR, dtype=np.float32), EMBED_SR)
+        ms = (time.perf_counter() - t) * 1000
+        on_gpu = bool(providers) and providers[0] == "CUDAExecutionProvider"
+        print(f"[embedder] WeSpeaker requested={device} running_on={'GPU' if on_gpu else 'CPU'} "
+              f"providers={providers} embed(3 s)={ms:.0f} ms", flush=True)
+        if str(device).startswith("cuda") and not on_gpu:
+            print("[embedder] WARNING: CUDA was requested but WeSpeaker runs on the CPU; this will be slow", flush=True)
+        elif not on_gpu and ms > 2000:
+            print("[embedder] the CPU provider is very slow here: use --device cuda with a free GPU "
+                  "(CUDA_VISIBLE_DEVICES=<id>), or --max-turns 0 --limit 10", flush=True)
+    except Exception as exc:
+        print(f"[embedder] could not report the provider: {exc}", flush=True)
+    return embedder
 
 
 def _stats(values):

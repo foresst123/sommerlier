@@ -177,3 +177,21 @@ def test_main_prints_the_original_block(tmp_path, capsys):
                   embedder_factory=lambda device: FakeEmbedder()) == 0
     text = capsys.readouterr().out
     assert "against the original recording" in text and "orig_vs_clean_dist" in text
+
+
+def test_exports_not_at_16k_are_resampled_once_before_the_embedder(tmp_path):
+    d = _export(tmp_path, "hi")
+    for name in ("stereo_2ch.wav", "stereo_2ch_clean.wav"):          # rewrite both at 48 kHz
+        x, sr = sf.read(str(d / name), dtype="float32", always_2d=True)
+        up = np.column_stack([np.interp(np.linspace(0, len(x) - 1, len(x) * 3), np.arange(len(x)), x[:, k]) for k in (0, 1)])
+        sf.write(str(d / name), up.astype(np.float32), 48000, subtype="PCM_16")
+    seen = set()
+
+    class Spy(FakeEmbedder):
+        def embed(self, wave, sr):
+            seen.add(sr)
+            return super().embed(wave, sr)
+
+    row = m.measure_folder(d, Spy())
+    assert seen == {16000}
+    assert row["assistant_spk_dist"] < 0.05 and row["duration_s"] == pytest.approx(8.0, abs=0.1)
