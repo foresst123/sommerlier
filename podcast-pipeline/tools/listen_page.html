@@ -489,7 +489,7 @@ function setMode(m) {
   applyModeUi();
   if (m === 'sample') loadSample();
   else loadList(true, st.loaded);
-  if (ioOpen()) loadStats(false);
+  loadStats(false);     // the collapsed header shows the totals too
 }
 function applyModeUi() {
   const sm = st.mode === 'sample';
@@ -629,7 +629,7 @@ function renderProgress() {
   $('preason').textContent = 'Lý do lỗi (toàn bộ nhãn): ' + parts.join(' · ');
 }
 /* input -> output card */
-function ioOpen() { return st.io === null ? st.mode === 'sample' : !!st.io; }
+function ioOpen() { return st.io === null ? false : !!st.io; }   // collapsed until opened: the sample list stays high on the screen
 function renderIoOpen() {
   const o = ioOpen();
   $('iobody').hidden = !o;
@@ -1329,7 +1329,7 @@ function init() {
   loadList(true, st.mode === 'sample');
   loadReview();
   if (st.mode === 'sample') loadSample();
-  if (ioOpen()) loadStats(false);
+  loadStats(false);     // the collapsed header shows the totals too
   if (st.selId) selectConv(st.selId);
   setInterval(refresh, 20000);
   kick();
