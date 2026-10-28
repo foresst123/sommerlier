@@ -243,18 +243,29 @@ def main(argv=None):
             return table[(float(s), float(e))]
         return prob_fn
 
-    progress = {"crops": 0, "t0": time.time()}
+    progress = {"crops": 0, "failed": 0, "t0": time.time()}
 
     def make_embed_fn(piece):
         def embed_fn(spans):
             rows = []
             for s, e in spans:
-                rows.append(embed_clip(wave[idx(piece.audio_start + s): idx(piece.audio_start + e)]))
+                try:
+                    rows.append(embed_clip(wave[idx(piece.audio_start + s): idx(piece.audio_start + e)]))
+                except ValueError:                       # the embedder refuses this crop; run_piece drops its row
+                    rows.append(None)
+                    progress["failed"] += 1
                 progress["crops"] += 1
                 if progress["crops"] % 50 == 0:
                     print(json.dumps({"status": "embedding", "crops": progress["crops"],
+                                      "failed": progress["failed"],
                                       "seconds": round(time.time() - progress["t0"], 1)}), flush=True)
-            return np.stack(rows)
+                if progress["crops"] >= 20 and progress["failed"] > 0.3 * progress["crops"]:
+                    raise RuntimeError(f"the embedder refused {progress['failed']} of {progress['crops']} crops; "
+                                       "the ONNX GPU provider may be broken here, try --device cpu")
+            dim = next((len(r) for r in rows if r is not None), None)
+            if dim is None:
+                raise RuntimeError("the embedder refused every crop of this piece")
+            return np.stack([r if r is not None else np.full(dim, np.nan) for r in rows])
         return embed_fn
 
     t0 = time.time()
@@ -264,6 +275,7 @@ def main(argv=None):
                          max_embed_s=a.max_embed_s,
                          **({} if a.clustering == "vbx" else {"ahc_threshold": a.cosine_threshold}))
     params["embedding_padded_crops"] = counts["padded"]
+    params["embedding_failed_crops"] = progress["failed"]
     params["seconds"] = round(time.time() - t0, 1)
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     with open(a.out, "w", encoding="utf-8") as fh:

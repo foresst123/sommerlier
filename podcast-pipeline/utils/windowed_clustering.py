@@ -272,6 +272,18 @@ def _split_run(t0: float, t1: float, max_s: float = 3.0) -> list[tuple[float, fl
     return [(t0 + i * step, t0 + (i + 1) * step) for i in range(n)]
 
 
+def _trim_crops(crops, quantum: float, min_len: float) -> list[tuple[float, float]]:
+    """Each crop cut down to a multiple of quantum seconds; crops shorter than min_len are dropped."""
+    out = []
+    for t0, t1 in crops:
+        d = t1 - t0
+        if quantum > 0:
+            d = math.floor(d / quantum + 1e-9) * quantum
+        if d >= min_len - 1e-9 and d > 0:
+            out.append((t0, t0 + d))
+    return out
+
+
 def _fit_rows(raw: np.ndarray, n: int) -> np.ndarray:
     if raw.shape[0] >= n:
         return raw[:n]
@@ -325,11 +337,15 @@ def run_piece(duration: float, prob_fn: ProbFn, embed_fn: EmbedFn, *,
               reassign_iters: int = 2, median_frames: int = 5,
               post: Optional[dict] = None,
               cluster_fn: Optional[Callable] = None,
-              max_embed_s: float = 6.0) -> PieceResult:
+              max_embed_s: float = 6.0, min_crop_s: float = 0.5,
+              crop_quantum_s: float = 0.25) -> PieceResult:
     """Cluster one piece's windows into global speakers and binarise them into segments.
 
     max_embed_s caps the clean speech embedded per (window, label): the longest crops are kept until
     that many seconds are reached (0 means no cap). One embedding needs a few seconds, not all of them.
+    Crops are trimmed down to a multiple of crop_quantum_s (so an embedder sees few distinct lengths) and
+    crops under min_crop_s are dropped: very short audio gives unusable embeddings. A row of embed_fn that
+    is empty or not finite is dropped too (stats["invalid_crops"]); its label may then end up weak.
 
     cluster_fn(x, win_of, min_k, max_k) -> labels replaces constrained_ahc when given (arm G uses VBx).
     The Hungarian reassignment below runs either way, so it enforces cannot-link for any cluster_fn.
@@ -360,6 +376,7 @@ def run_piece(duration: float, prob_fn: ProbFn, embed_fn: EmbedFn, *,
                 continue
             crops = [crop for a, b in runs
                      for crop in _split_run((rec.f0 + a) * frame_s, (rec.f0 + b) * frame_s)]
+            crops = _trim_crops(crops, crop_quantum_s, min_crop_s)
             if max_embed_s > 0:
                 kept, total = [], 0.0
                 for crop in sorted(crops, key=lambda c: c[0] - c[1]):    # longest first
@@ -374,18 +391,24 @@ def run_piece(duration: float, prob_fn: ProbFn, embed_fn: EmbedFn, *,
     emb: dict[tuple[int, int], np.ndarray] = {}
     emb_raw: dict[tuple[int, int], np.ndarray] = {}     # mean of the embedder's own vectors, norm kept
     dim = 0
+    invalid_crops = 0
     if requests:
         raw = np.asarray(embed_fn([(t0, t1) for _, _, t0, t1 in requests]), dtype=float)
         if len(raw) != len(requests):
             raise ValueError("embed_fn returned a different number of rows")
         raw = raw.reshape(len(requests), -1)
-        vecs = _unit_strict(raw)
-        dim = vecs.shape[1]
+        valid = np.isfinite(raw).all(axis=1) & (np.linalg.norm(raw, axis=1) > 0)
+        invalid_crops = int((~valid).sum())
         grouped: dict[tuple[int, int], list] = {}
         grouped_raw: dict[tuple[int, int], list] = {}
-        for (w, j, _, _), v, r in zip(requests, vecs, raw):
-            grouped.setdefault((w, j), []).append(v)
-            grouped_raw.setdefault((w, j), []).append(r)
+        if valid.any():
+            kept_requests = [r for r, ok in zip(requests, valid) if ok]
+            raw = raw[valid]
+            vecs = _unit_strict(raw)
+            dim = vecs.shape[1]
+            for (w, j, _, _), v, r in zip(kept_requests, vecs, raw):
+                grouped.setdefault((w, j), []).append(v)
+                grouped_raw.setdefault((w, j), []).append(r)
         for key, vs in grouped.items():
             emb[key] = _unit(np.mean(vs, axis=0))
             emb_raw[key] = np.mean(grouped_raw[key], axis=0)
@@ -480,7 +503,7 @@ def run_piece(duration: float, prob_fn: ProbFn, embed_fn: EmbedFn, *,
         violations += len(assigned) - len(set(assigned.tolist()))
     stats = {"windows": len(recs), "strong_labels": len(item_keys), "weak_labels": weak,
              "fallback_assignments": fallback, "cannot_link_violations": violations,
-             "embedded_requests": len(requests), **cluster_stats}
+             "embedded_requests": len(requests), "invalid_crops": invalid_crops, **cluster_stats}
     return PieceResult(segments=segments, windows=windows, n_clusters=k, stats=stats)
 
 

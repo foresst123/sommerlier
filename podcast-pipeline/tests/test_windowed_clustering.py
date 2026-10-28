@@ -473,3 +473,47 @@ def test_max_embed_s_caps_the_clean_seconds_embedded_per_window_label():
     spans_seen.clear()
     W.run_piece(30.0, prob_fn, embed_fn, max_embed_s=0.0)       # 0 = no cap
     assert len(spans_seen[0]) > per_window
+
+
+def test_invalid_embedding_rows_are_dropped_not_fatal():
+    # An embedder may refuse a crop (NaN row); run_piece keeps going, counts it, and the label falls back to
+    # its valid crops, or becomes weak when none is left.
+    n_calls = {"n": 0}
+
+    def prob_fn(s, e):
+        n = int(round((e - s) / FS))
+        t = s + (np.arange(n) + 0.5) * FS
+        return np.stack([(t < 14).astype(float) * 0.9, (t >= 14).astype(float) * 0.9], axis=1)
+
+    def embed_fn(spans):
+        rows = []
+        for i, (t0, _) in enumerate(spans):
+            n_calls["n"] += 1
+            base = [5.0, 0.0] if t0 < 14 else [0.0, 5.0]
+            rows.append([np.nan, np.nan] if i % 3 == 0 else base)
+        return np.array(rows)
+
+    res = W.run_piece(30.0, prob_fn, embed_fn)
+    assert res.stats["invalid_crops"] > 0
+    assert res.n_clusters == 2
+
+
+def test_short_crops_are_dropped_and_lengths_are_quantised():
+    seen = []
+
+    def prob_fn(s, e):
+        n = int(round((e - s) / FS))
+        t = s + (np.arange(n) + 0.5) * FS
+        # clean speech: one run of 1.3 s plus one of 0.24 s, which is under min_crop_s
+        on = ((t >= 2.0) & (t < 3.3)) | ((t >= 10.0) & (t < 10.24))
+        return on.astype(float).reshape(-1, 1) * 0.9
+
+    def embed_fn(spans):
+        seen.extend(spans)
+        return np.tile([[1.0, 2.0]], (len(spans), 1))
+
+    W.run_piece(30.0, prob_fn, embed_fn, min_clean_s=1.0, max_embed_s=0)
+    assert seen
+    for t0, t1 in seen:
+        d = t1 - t0
+        assert d >= 0.5 - 1e-6 and abs(d / 0.25 - round(d / 0.25)) < 1e-6
