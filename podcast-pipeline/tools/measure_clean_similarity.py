@@ -44,7 +44,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 FRAME = 0.020
 ACTIVE_RMS = 1e-4            # a frame quieter than this is the digital silence between sentences
 MAX_EMBED_S = 30.0
-MAX_TURNS = 12
+MAX_TURNS = 4            # turns embedded per speaker (each costs two embeddings); --max-turns changes it
 MIN_TURN_S = 1.0
 
 
@@ -363,11 +363,15 @@ def summarize(rows, out=print):
 
 
 def main(argv=None, embedder_factory=None):
+    global MAX_TURNS
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--final", type=Path, required=True, help="the final folder (OUT/final)")
     ap.add_argument("--limit", type=int, default=0, help="measure only the first N conversations (0 = all)")
     ap.add_argument("--csv", type=Path, default=None, help="default: <final>/clean_similarity.csv")
     ap.add_argument("--device", default="cpu", help="cpu or cuda, for the WeSpeaker embedder")
+    ap.add_argument("--max-turns", type=int, default=None,
+                    help=f"turns per speaker embedded one by one (default {MAX_TURNS}; 0 = the whole-speech numbers only, "
+                         "the fastest)")
     ap.add_argument("--original-dir", type=Path, default=None,
                     help="the folder of the original recordings: adds the comparison with the original (all passes)")
     ap.add_argument("--embedder", choices=("wespeaker", "none"), default="wespeaker")
@@ -380,8 +384,12 @@ def main(argv=None, embedder_factory=None):
     folders = find_conversations(args.final)
     if args.limit:
         folders = folders[:args.limit]
+    if args.max_turns is not None:
+        MAX_TURNS = max(0, args.max_turns)
     originals = index_originals(args.original_dir) if args.original_dir else None
     rows = []
+    import time
+    t0 = time.time()
     for i, folder in enumerate(folders, 1):
         try:
             row = measure_folder(folder, embedder, originals)
@@ -390,8 +398,10 @@ def main(argv=None, embedder_factory=None):
             continue
         if row is not None:
             rows.append(row)
-        if i % 20 == 0:
-            print(f"  {i}/{len(folders)}", flush=True)
+        if i % 5 == 0 or i == len(folders):
+            spent = time.time() - t0
+            left = spent / i * (len(folders) - i)
+            print(f"  {i}/{len(folders)}  {spent / 60:.1f} min spent, about {left / 60:.1f} min left", flush=True)
     summarize(rows)
     if rows:
         keys = []
