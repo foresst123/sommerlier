@@ -245,7 +245,10 @@
         }
       },
       "conversation_exports": {
-        "assistant_clean_chain": "rf_vocals_resurrection>mpsenet_dns"
+        "assistant_clean_chain": "rf_vocals_resurrection>mpsenet_dns",
+        "user_ambience": {
+          "mode": "raw_mask"
+        }
       },
       "steps": {
         "music_analysis": false,

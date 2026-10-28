@@ -1091,6 +1091,7 @@ def main():
             assistant_clean_chain=env_profile.get("conversation_exports", {}).get(
                 "assistant_clean_chain", "none"),
             denoise_cfg=env_profile.get("denoise"),
+            user_ambience=env_profile.get("conversation_exports", {}).get("user_ambience"),
             **dict(env_profile.get("models", {}).get("conversation_selection", {})))
         alignment_cfg = dict(
             env_profile.get("models", {}).get("word_alignment", {}))

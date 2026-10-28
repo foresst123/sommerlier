@@ -1028,9 +1028,13 @@ class ConversationExportService:
     def __init__(self, llm, logger=None, render_workers: int = 1,
                  reuse_render: bool = False, replay_old_replies: bool = False,
                  assistant_clean_chain: str = "none", denoise_cfg: Optional[dict] = None,
-                 **settings):
+                 user_ambience: Optional[dict] = None, **settings):
         self.llm = llm
         self.logger = logger
+        # How the two channels are laid out (utils/ambience_bed.py): mode "none" is the old tracks of zeros.
+        # A bad mode raises here, once, not per excerpt.
+        from utils.ambience_bed import AmbienceParams
+        self.user_ambience = AmbienceParams.from_dict(user_ambience)
         # Denoise chain for the assistant track only ("none" = off). Malformed chains raise
         # here, not once per excerpt; the filter itself never raises (see _clean_assistant).
         self.assistant_clean_chain = (
