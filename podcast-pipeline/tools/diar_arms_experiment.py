@@ -2,7 +2,8 @@
 """Diarization arms on fixed conversation samples, shown as waveform lanes (one row per speaker, no text).
 
     python tools/diar_arms_experiment.py --audio-dir SRC --samples tools/diar_arms_samples.json --out OUT/diar_arms \
-        [--final OUT/final] [--gpu 6] [--env a100] [--only-arms A,C] [--fusion] [--k-min-clean 1.0] [--reuse]
+        [--final OUT/final] [--gpu 6] [--env a100] [--only-arms A,C,F] [--fusion] [--k-min-clean 1.0] [--reuse] \
+        [--windowed-piece-s 240] [--windowed-hop-s 10] [--windowed-python /path/to/nemotron/python]
 
 Per sample (a conversation clip of about 40 s inside a long source recording):
   1. cut a 5 min chunk of the source around the clip (it starts 2 min before the clip, clamped to the file), 16 kHz mono.
@@ -12,6 +13,11 @@ Per sample (a conversation clip of about 40 s inside a long source recording):
   3. arm B, DiariZen with its defaults. Arm C, DiariZen with min = max = K. Arm D, DiariZen with min 1, max K.
   4. arm E (--fusion), B's boundaries with labels renamed to A's labels by greedy one-to-one overlap.
      E is built from B, so it also runs A and B. C and D need A's K, so they run A too.
+  4b. arm F (--only-arms F, not in the default set), nemotron_windowed: tools/windowed_nemotron_run.py in the
+     Nemotron environment (--windowed-python, else NEMOTRON_PYTHON / worker_envs). Silero pieces of about
+     --windowed-piece-s seconds with 30 s overlap, 30 s Nemotron windows every --windowed-hop-s seconds, per-frame
+     probabilities merged by utils/windowed_clustering.run_file (global clustering with cannot-link, DiariZen-style
+     frame averaging). F needs no K. UNVERIFIED on GPU: not run on a real model yet.
   5. every arm is cropped to the clip window and shifted to 0, written as segments_<arm>.json, and drawn in one
      lanes.html per sample (tools/make_diar_lanes_page.py). index.html links the samples with a table of
      speakers, K, segments under 1 s, speech seconds and overlap seconds per arm. No DER, no text.
@@ -46,15 +52,20 @@ from tools.job_diar import INPUT_NAME, build_cmd  # noqa: E402
 from tools.make_diar_lanes_page import build as lanes_build  # noqa: E402
 from tools.make_variant_lanes_page import render  # noqa: E402
 from utils.nemotron_two_pass import clean_speech_duration  # noqa: E402
+from utils.worker_env import resolve_worker_python  # noqa: E402
 
 SR = 16000
 CHUNK_S = 300.0         # length of the cut around each clip
 LEAD_S = 120.0          # chunk starts this long before the clip
 SHORT_S = 1.0           # segments shorter than this are counted as short
 AUDIO_EXT = (".wav", ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".mp4", ".webm")
-ARMS = {"A": "nemotron", "B": "diarizen_auto", "C": "diarizen_k", "D": "diarizen_1_k", "E": "fusion"}
-ARM_ORDER = "ABCDE"
+ARMS = {"A": "nemotron", "B": "diarizen_auto", "C": "diarizen_k", "D": "diarizen_1_k", "E": "fusion",
+        "F": "nemotron_windowed"}
+ARM_ORDER = "ABCDEF"
 DEFAULT_ARMS = "A,B,C,D"
+WINDOWED_PIECE_S = 240.0
+WINDOWED_HOP_S = 10.0
+WINDOWED_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "windowed_nemotron_run.py")
 TEMPLATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diar_arms_samples.json")
 
 Runner = Callable[[List[str], dict], int]
@@ -316,6 +327,22 @@ def run_arm(sample_dir: Path, arm: str, values: dict, backend: str, cfg: dict, r
     return result
 
 
+def run_windowed(sample_dir: Path, cfg: dict, runner: Runner) -> Path:
+    """Run arm F (tools/windowed_nemotron_run.py in the Nemotron env) on sample_dir/chunk.wav."""
+    run_dir = sample_dir / "runs" / ARMS["F"]
+    result = run_dir / "out" / "segments.json"
+    if cfg["reuse"] and result.is_file():
+        return result
+    run_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [cfg["windowed_python"], WINDOWED_SCRIPT, "--audio", str(sample_dir / "chunk.wav"),
+           "--out", str(result), "--piece-s", str(cfg["windowed_piece_s"]),
+           "--hop-s", str(cfg["windowed_hop_s"]), "--config", cfg["config"], "--env", cfg["env"]]
+    code = runner(cmd, dict(os.environ, CUDA_VISIBLE_DEVICES=str(cfg["gpu"])))
+    if code != 0 or not result.is_file():
+        raise RuntimeError(f"arm {ARMS['F']} failed (exit {code}), see {run_dir}")
+    return result
+
+
 def process_sample(index: int, sample: dict, cfg: dict, runner: Runner, log: Callable[[str], None] = print) -> dict:
     name = str(sample["name"])
     sdir = Path(cfg["out"]) / f"{index:02d}_{ascii_slug(name)}"
@@ -340,6 +367,9 @@ def process_sample(index: int, sample: dict, cfg: dict, runner: Runner, log: Cal
                 if "A" not in segs or "B" not in segs:
                     raise RuntimeError("fusion needs arms A and B")
                 segs["E"] = fuse(segs["B"], segs["A"])
+                continue
+            if arm == "F":                      # windowed Nemotron: no K needed
+                segs["F"] = crop(read_rows(str(run_windowed(sdir, cfg, runner))), rs, re_)
                 continue
             backend, values = arm_settings(arm, k)
             path = run_arm(sdir, arm, values, backend, cfg, runner)
@@ -437,12 +467,18 @@ def main(argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) 
     ap.add_argument("--final", help="export folder, to look up each conversation's source_start/source_end")
     ap.add_argument("--gpu", default="0", help="physical GPU id, set as CUDA_VISIBLE_DEVICES")
     ap.add_argument("--env", default="a100", help="environment profile in config.json")
-    ap.add_argument("--only-arms", default=DEFAULT_ARMS, help="comma list of A,B,C,D (E needs --fusion)")
+    ap.add_argument("--only-arms", default=DEFAULT_ARMS,
+                    help="comma list of A,B,C,D,F (E needs --fusion; F is the windowed Nemotron arm)")
     ap.add_argument("--fusion", action="store_true", help="also build arm E")
     ap.add_argument("--k-min-clean", type=float, default=1.0, help="clean seconds for a speaker to count toward K")
     ap.add_argument("--reuse", action="store_true", help="skip arms whose segments.json already exists")
     ap.add_argument("--config", default=os.path.join(ROOT, "config.json"))
     ap.add_argument("--python", default=sys.executable)
+    ap.add_argument("--windowed-piece-s", type=float, default=WINDOWED_PIECE_S,
+                    help="arm F piece length (min and max are 0.75x and 1.25x of it)")
+    ap.add_argument("--windowed-hop-s", type=float, default=WINDOWED_HOP_S, help="arm F window hop (window is 30 s)")
+    ap.add_argument("--windowed-python",
+                    help="interpreter of the Nemotron env for arm F (default: NEMOTRON_PYTHON or worker_envs)")
     a = ap.parse_args(argv)
 
     letters = {x.strip().upper() for x in a.only_arms.split(",") if x.strip()}
@@ -456,11 +492,16 @@ def main(argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) 
     if "E" in run:
         run.add("B")            # fusion boundaries come from arm B
     arms = [x for x in ARM_ORDER if x in run]
+    windowed_python = None
+    if "F" in run:
+        windowed_python = a.windowed_python or resolve_worker_python("nemotron")
 
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     cfg = {"audio_dir": a.audio_dir, "final": a.final, "out": str(out), "gpu": a.gpu, "env": a.env,
-           "run": run, "k_min_clean": a.k_min_clean, "reuse": a.reuse, "config": a.config, "python": a.python}
+           "run": run, "k_min_clean": a.k_min_clean, "reuse": a.reuse, "config": a.config, "python": a.python,
+           "windowed_python": windowed_python, "windowed_piece_s": a.windowed_piece_s,
+           "windowed_hop_s": a.windowed_hop_s}
     summaries = []
     for i, sample in enumerate(load_samples(a.samples), 1):
         try:
