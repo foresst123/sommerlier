@@ -121,6 +121,11 @@ input[type=number],input[type=text]{padding:5px 8px;border:1px solid var(--line)
 </style>
 </head>
 <body>
+<div id="errbar" role="alert" hidden style="position:sticky;top:0;z-index:50;background:#b42318;color:#fff;padding:8px 12px;font:12px/1.4 ui-monospace,monospace">
+  <b>Lỗi trang:</b> <span id="errmsg"></span>
+  <button type="button" id="errcopy" style="margin-left:8px">Sao chép</button>
+  <button type="button" id="errclose" style="margin-left:4px">Đóng</button>
+</div>
 <main>
 <header class="top" id="top"><h1>Nghe hội thoại</h1><a href="./">← Theo dõi job</a></header>
 <div class="bar" id="bar">
@@ -223,6 +228,22 @@ input[type=number],input[type=text]{padding:5px 8px;border:1px solid var(--line)
 </div>
 </main>
 <script>
+/* any error is shown in a red bar (message, line and the top of the stack) instead of silently freezing the page */
+(function () {
+  const bar = document.getElementById('errbar'), msg = document.getElementById('errmsg');
+  let last = '', count = 0;
+  function show(text) {
+    if (text === last) { count++; msg.textContent = text + '  (x' + (count + 1) + ')'; return; }
+    last = text; count = 0; msg.textContent = text; bar.hidden = false;
+  }
+  window.__showErr = show;
+  window.addEventListener('error', e => show((e.message || 'error') + ' @ ' + String(e.filename || '').split('/').pop() + ':' + e.lineno + ':' + e.colno +
+    (e.error && e.error.stack ? '  | ' + e.error.stack.split('\n').slice(0, 4).join(' <- ') : '')));
+  window.addEventListener('unhandledrejection', e => show('promesse: ' + (e.reason && (e.reason.stack || e.reason.message) || e.reason)));
+  document.getElementById('errclose').onclick = () => { bar.hidden = true; last = ''; };
+  document.getElementById('errcopy').onclick = () => { try { navigator.clipboard.writeText(msg.textContent); } catch (e) {} };
+})();
+
 (function () {
 'use strict';
 const $ = id => document.getElementById(id);
@@ -1150,15 +1171,19 @@ function updateTime() {
 }
 function frame() {
   raf = 0;
-  const now = aud.currentTime || 0;
-  if (!aud.paused && Date.now() > st.manualUntil && trackW()) {
-    const x = (now - t0) * pps, W = trackW();
-    if (x < 0 || x > W * 0.92) panTo(now - 0.15 * W / pps);
+  try {
+    const now = aud.currentTime || 0;
+    if (!aud.paused && Date.now() > st.manualUntil && trackW()) {
+      const x = (now - t0) * pps, W = trackW();
+      if (x < 0 || x > W * 0.92) panTo(now - 0.15 * W / pps);
+    }
+    draw();
+    updateTime();
+    updateActive();
+  } catch (e) {
+    if (window.__showErr) window.__showErr('frame: ' + (e && e.message) + ' | ' + String((e && e.stack) || '').split('\n').slice(0, 3).join(' <- '));
   }
-  draw();
-  updateTime();
-  updateActive();
-  if (!aud.paused && !aud.ended) raf = requestAnimationFrame(frame);
+  if (!aud.paused && !aud.ended) raf = requestAnimationFrame(frame);     // always keep going, a bad frame must not stop the page
 }
 function kick() { if (!raf) raf = requestAnimationFrame(frame); }
 
