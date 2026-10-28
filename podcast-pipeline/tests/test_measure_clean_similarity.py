@@ -195,3 +195,22 @@ def test_exports_not_at_16k_are_resampled_once_before_the_embedder(tmp_path):
     row = m.measure_folder(d, Spy())
     assert seen == {16000}
     assert row["assistant_spk_dist"] < 0.05 and row["duration_s"] == pytest.approx(8.0, abs=0.1)
+
+
+def test_shuffle_picks_a_spread_of_folders_and_the_review_set_picks_exactly_its_own(tmp_path, capsys):
+    root = tmp_path / "final"
+    names = [f"a{i}" for i in range(6)] + [f"b{i}" for i in range(6)]
+    for n in names:
+        _export(root, n)
+    sets = tmp_path / "review_sets"
+    sets.mkdir()
+    ids = ["interrupt/a1", "interrupt/b3", "interrupt/missing"]
+    (sets / "mine.json").write_text(json.dumps({"sample": {"ids": ids}, "labels": {}}))
+    fake = lambda device: FakeEmbedder()
+    assert m.main(["--final", str(root), "--set", "mine", "--csv", str(tmp_path / "s.csv")], embedder_factory=fake) == 0
+    out = capsys.readouterr().out
+    assert "2 of 3 conversations found" in out and "2 conversations measured" in out
+    assert m.main(["--final", str(root), "--limit", "4", "--shuffle", "--seed", "1", "--csv", str(tmp_path / "r.csv")],
+                  embedder_factory=fake) == 0
+    rows = (tmp_path / "r.csv").read_text().splitlines()[1:]
+    assert len(rows) == 4 and any("/b" in r for r in rows) and any("/a" in r for r in rows)

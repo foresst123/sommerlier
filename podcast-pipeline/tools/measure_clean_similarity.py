@@ -397,6 +397,13 @@ def main(argv=None, embedder_factory=None):
     ap.add_argument("--limit", type=int, default=0, help="measure only the first N conversations (0 = all)")
     ap.add_argument("--csv", type=Path, default=None, help="default: <final>/clean_similarity.csv")
     ap.add_argument("--device", default="cpu", help="cpu or cuda, for the WeSpeaker embedder")
+    ap.add_argument("--shuffle", action="store_true",
+                    help="pick --limit conversations at random (--seed) instead of the first ones in folder order, "
+                         "which are all of one category and the first source ids")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--set", dest="review_set", default=None,
+                    help="measure exactly the conversations of a review set (the sample you listen to and grade)")
+    ap.add_argument("--review-dir", type=Path, default=None, help="default: <final>/../review_sets")
     ap.add_argument("--max-turns", type=int, default=None,
                     help=f"turns per speaker embedded one by one (default {MAX_TURNS}; 0 = the whole-speech numbers only, "
                          "the fastest)")
@@ -410,6 +417,16 @@ def main(argv=None, embedder_factory=None):
     if args.embedder == "wespeaker":
         embedder = (embedder_factory or _make_wespeaker)(args.device)
     folders = find_conversations(args.final)
+    if args.review_set:
+        review_dir = args.review_dir or args.final.parent / "review_sets"
+        data = json.loads((review_dir / f"{args.review_set}.json").read_text(encoding="utf-8"))
+        wanted = [str(i) for i in ((data.get("sample") or {}).get("ids") or list((data.get("labels") or {}).keys()))]
+        by_id = {str(f.relative_to(args.final)).replace(os.sep, "/"): f for f in folders}
+        folders = [by_id[i] for i in wanted if i in by_id]
+        print(f"review set {args.review_set!r}: {len(folders)} of {len(wanted)} conversations found", flush=True)
+    elif args.shuffle:
+        import random
+        random.Random(args.seed).shuffle(folders)
     if args.limit:
         folders = folders[:args.limit]
     if args.max_turns is not None:
