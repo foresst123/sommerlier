@@ -9,6 +9,10 @@ overlap), runs 30 s windows (hop --hop-s) through model.diarize(include_tensor_o
 per-frame speaker probabilities, and merges them with utils/windowed_clustering.run_file.
 Writes {"segments": [{"start", "end", "speaker"}, ...]} in seconds from the start of the audio.
 
+--dump-probs DIR (arm G, stage 1): the same pieces and windows, but only the per-window probabilities are
+written: DIR/piece_NNN.npz (utils/windowed_clustering.save_piece_probs) and DIR/plan.json, which is written
+last. Nothing is clustered and --out is not written. tools/windowed_vbx_stage.py (the `som` env) does the rest.
+
 UNVERIFIED on GPU: written without NeMo or CUDA. The frame length is read from the first window's
 output (window length / frame count), and include_tensor_outputs is the API tools/exp5_breakthrough_nemotron.py
 uses; both must be checked on a real run.
@@ -26,6 +30,7 @@ PIPELINE = os.path.dirname(TOOLS_DIR)
 # (same reason as nemotron_worker._load_converter), so nothing here shadows NeMo's package.
 sys.path = [p for p in sys.path if os.path.abspath(p or ".") != TOOLS_DIR]
 SR = 16000
+OVERLAP_S = 30.0        # utils/windowed_clustering.run_file's default piece overlap
 
 
 def _load(name, rel):
@@ -39,10 +44,12 @@ def _load(name, rel):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--audio", required=True, help="16 kHz mono WAV (the arm's chunk)")
-    ap.add_argument("--out", required=True, help="segments.json to write")
+    ap.add_argument("--out", required=True, help="segments.json to write (not written with --dump-probs)")
     ap.add_argument("--piece-s", type=float, default=240.0)
     ap.add_argument("--hop-s", type=float, default=10.0)
     ap.add_argument("--window-s", type=float, default=30.0)
+    ap.add_argument("--dump-probs", metavar="DIR",
+                    help="write per-window probabilities and plan.json to DIR, then stop (arm G stage 1)")
     ap.add_argument("--config", default=os.path.join(PIPELINE, "config.json"))
     ap.add_argument("--env", default="a100", help="environment profile in config.json")
     a = ap.parse_args(argv)
@@ -89,14 +96,41 @@ def main(argv=None):
     print(json.dumps({"status": "probe", "frame_s": round(frame_s, 5), "duration": round(duration, 3),
                       "speech_intervals": len(speech)}), flush=True)
 
-    def make_prob_fn(piece):
+    def window_probs(piece):
+        """(spans, probs): the piece's 30 s windows and one (frames, slots) array per window."""
         spans = wc.window_spans(piece.audio_duration, a.window_s, a.hop_s)
         clips = [wave[idx(piece.audio_start + s): idx(piece.audio_start + e)] for s, e in spans]
-        table = dict(zip(spans, diarize_windows(clips))) if clips else {}
+        return spans, (diarize_windows(clips) if clips else [])
+
+    def make_prob_fn(piece):
+        spans, probs = window_probs(piece)
+        table = dict(zip(spans, probs))
 
         def prob_fn(s, e):
             return table[(s, e)]
         return prob_fn
+
+    if a.dump_probs:
+        target, lo, hi = wc.piece_bounds(a.piece_s)
+        plan_speech = [(0.0, duration)] if speech is None else speech
+        pieces = wc.plan_pieces(duration, plan_speech, target_s=target, min_s=lo, max_s=hi,
+                                overlap_s=OVERLAP_S, vad_fn=helpers.build_vad_windows)
+        os.makedirs(a.dump_probs, exist_ok=True)
+        entries = []
+        for i, piece in enumerate(pieces):
+            spans, probs = window_probs(piece)
+            name = f"piece_{i:03d}.npz"
+            wc.save_piece_probs(os.path.join(a.dump_probs, name), piece, spans, probs, frame_s)
+            entries.append({"file": name, "core": [piece.core_start, piece.core_end],
+                            "audio": [piece.audio_start, piece.audio_end]})
+        plan = {"duration": duration, "frame_s": frame_s, "speech_intervals": len(speech),
+                "params": {"piece_s": a.piece_s, "window_s": a.window_s, "hop_s": a.hop_s,
+                           "overlap_s": OVERLAP_S},
+                "pieces": entries}
+        with open(os.path.join(a.dump_probs, "plan.json"), "w", encoding="utf-8") as fh:
+            json.dump(plan, fh, ensure_ascii=False, indent=1)
+        print(json.dumps({"status": "dumped", "pieces": len(entries), "dir": a.dump_probs}), flush=True)
+        return 0
 
     wes = _load("wespeaker_embedding", "models/wespeaker_embedding.py")
     # WeSpeaker imports utils.cpu_plan lazily; NeMo's `utils` would hide ours, so register it by path.

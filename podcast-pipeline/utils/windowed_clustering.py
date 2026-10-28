@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional, Sequence
 
 import numpy as np
+from scipy.cluster.hierarchy import fcluster, linkage
 from scipy.ndimage import median_filter
 from scipy.optimize import linear_sum_assignment
 
@@ -184,6 +185,57 @@ def constrained_ahc(x: np.ndarray, win_of: np.ndarray, threshold: float,
     return labels
 
 
+def make_vbx_cluster_fn(cluster_vbx: Callable, xvec_tf: Callable, plda_tf: Callable, plda_psi, *,
+                        ahc_threshold: float = 0.6, Fa: float = 0.07, Fb: float = 0.8, lda_dim: int = 128,
+                        max_iters: int = 20, init_smoothing: float = 7.0) -> Callable:
+    """cluster_fn for run_piece that runs VBx the way pyannote's VBxClustering (used by DiariZen) does.
+
+    cluster_vbx, xvec_tf, plda_tf and plda_psi are diarizen.clustering.VBx's cluster_vbx and vbx_setup
+    outputs, passed in so this module does not import diarizen. The AHC init is pyannote's: centroid
+    linkage on the unit embeddings cut at ahc_threshold (euclidean). VBx is GMM-style (loop_prob 0), so the
+    embeddings are an unordered set. A speaker is kept when its prior is above 1e-7; each embedding takes
+    its largest responsibility among the kept speakers.
+
+    run_piece hands it the raw (unnormalised) mean embeddings as `raw`: AHC runs on the unit vectors, the
+    PLDA transform on the raw ones, as in pyannote.
+
+    VBx does not enforce cannot-link: run_piece's per-window Hungarian reassignment does.
+    If VBx keeps more than max_k speakers, the piece falls back to constrained_ahc with the cosine
+    threshold ahc_threshold**2 / 2 (for unit vectors, euclidean d means cosine distance d**2 / 2).
+    Each call sets cluster_fn.last_info = {"vbx_fallback": bool}, which run_piece copies into its stats.
+    """
+    phi = np.asarray(plda_psi, dtype=float)[:lda_dim]
+
+    def cluster_fn(x, win_of, min_k, max_k, raw=None):
+        x = np.asarray(x, dtype=float)
+        n = len(x)
+        if n < 2:
+            cluster_fn.last_info = {"vbx_fallback": False}
+            return np.zeros(n, dtype=int)
+        normed = _unit(x)
+        ahc = fcluster(linkage(normed, method="centroid", metric="euclidean"), ahc_threshold,
+                       criterion="distance") - 1
+        _, ahc_init = np.unique(ahc, return_inverse=True)
+        # The PLDA transform subtracts a mean learned on the embedder's raw vectors, so it takes those.
+        fea = plda_tf(xvec_tf(x if raw is None else np.asarray(raw, dtype=float)), lda_dim)
+        q, sp = cluster_vbx(ahc_init, fea, phi, Fa=Fa, Fb=Fb, maxIters=max_iters, init_smoothing=init_smoothing)
+        q, sp = np.asarray(q, dtype=float), np.asarray(sp, dtype=float)
+        keep = np.flatnonzero(sp > 1e-7)
+        if keep.size == 0:
+            keep = np.array([int(np.argmax(sp))])
+        hard = keep[np.argmax(q[:, keep], axis=1)]
+        _, labels = np.unique(hard, return_inverse=True)
+        if int(labels.max()) + 1 > max_k:
+            cluster_fn.last_info = {"vbx_fallback": True}
+            return constrained_ahc(normed, win_of, ahc_threshold ** 2 / 2.0, min_k, max_k)
+        cluster_fn.last_info = {"vbx_fallback": False}
+        return labels.astype(int)
+
+    cluster_fn.last_info = {}
+    cluster_fn.wants_raw = True
+    return cluster_fn
+
+
 def _centroids(x: np.ndarray, labels: np.ndarray, k: int, prev: Optional[np.ndarray] = None) -> np.ndarray:
     out = np.zeros((k, x.shape[1]))
     for c in range(k):
@@ -271,8 +323,13 @@ def run_piece(duration: float, prob_fn: ProbFn, embed_fn: EmbedFn, *,
               active_thr: float = 0.5, min_clean_s: float = 1.0,
               ahc_threshold: float = 0.5, min_speakers: int = 1, max_speakers: int = 8,
               reassign_iters: int = 2, median_frames: int = 5,
-              post: Optional[dict] = None) -> PieceResult:
-    """Cluster one piece's windows into global speakers and binarise them into segments."""
+              post: Optional[dict] = None,
+              cluster_fn: Optional[Callable] = None) -> PieceResult:
+    """Cluster one piece's windows into global speakers and binarise them into segments.
+
+    cluster_fn(x, win_of, min_k, max_k) -> labels replaces constrained_ahc when given (arm G uses VBx).
+    The Hungarian reassignment below runs either way, so it enforces cannot-link for any cluster_fn.
+    """
     post = dict(POSTPROCESSING, **(post or {}))
     spans = window_spans(duration, window_s, hop_s)
     n_frames = int(math.ceil(duration / frame_s - 1e-9))
@@ -302,25 +359,41 @@ def run_piece(duration: float, prob_fn: ProbFn, embed_fn: EmbedFn, *,
                     requests.append((w, j, t0, t1))
 
     emb: dict[tuple[int, int], np.ndarray] = {}
+    emb_raw: dict[tuple[int, int], np.ndarray] = {}     # mean of the embedder's own vectors, norm kept
     dim = 0
     if requests:
-        vecs = np.asarray(embed_fn([(t0, t1) for _, _, t0, t1 in requests]), dtype=float)
-        if len(vecs) != len(requests):
+        raw = np.asarray(embed_fn([(t0, t1) for _, _, t0, t1 in requests]), dtype=float)
+        if len(raw) != len(requests):
             raise ValueError("embed_fn returned a different number of rows")
-        vecs = _unit_strict(vecs.reshape(len(requests), -1))
+        raw = raw.reshape(len(requests), -1)
+        vecs = _unit_strict(raw)
         dim = vecs.shape[1]
         grouped: dict[tuple[int, int], list] = {}
-        for (w, j, _, _), v in zip(requests, vecs):
+        grouped_raw: dict[tuple[int, int], list] = {}
+        for (w, j, _, _), v, r in zip(requests, vecs, raw):
             grouped.setdefault((w, j), []).append(v)
+            grouped_raw.setdefault((w, j), []).append(r)
         for key, vs in grouped.items():
             emb[key] = _unit(np.mean(vs, axis=0))
+            emb_raw[key] = np.mean(grouped_raw[key], axis=0)
 
     # Global clustering of the strong (embedded) labels.
     item_keys = sorted(emb)
     x = np.array([emb[k] for k in item_keys]).reshape(len(item_keys), dim)
     win_of = np.array([k[0] for k in item_keys], dtype=int)
-    labels = constrained_ahc(x, win_of, ahc_threshold, min_speakers, max_speakers) \
-        if len(item_keys) else np.zeros(0, dtype=int)
+    cluster_stats: dict = {}
+    if not len(item_keys):
+        labels = np.zeros(0, dtype=int)
+    elif cluster_fn is None:
+        labels = constrained_ahc(x, win_of, ahc_threshold, min_speakers, max_speakers)
+    else:
+        extra = {}
+        if getattr(cluster_fn, "wants_raw", False):
+            extra["raw"] = np.array([emb_raw[k] for k in item_keys]).reshape(len(item_keys), dim)
+        labels = np.asarray(cluster_fn(x, win_of, min_speakers, max_speakers, **extra), dtype=int)
+        if labels.shape != (len(item_keys),):
+            raise ValueError("cluster_fn must return one label per embedded label")
+        cluster_stats = {"vbx_fallback": bool(getattr(cluster_fn, "last_info", {}).get("vbx_fallback", False))}
     if len(item_keys):
         k0 = int(labels.max()) + 1
         cent = _centroids(x, labels, k0)
@@ -394,7 +467,7 @@ def run_piece(duration: float, prob_fn: ProbFn, embed_fn: EmbedFn, *,
         violations += len(assigned) - len(set(assigned.tolist()))
     stats = {"windows": len(recs), "strong_labels": len(item_keys), "weak_labels": weak,
              "fallback_assignments": fallback, "cannot_link_violations": violations,
-             "embedded_requests": len(requests)}
+             "embedded_requests": len(requests), **cluster_stats}
     return PieceResult(segments=segments, windows=windows, n_clusters=k, stats=stats)
 
 
@@ -460,16 +533,46 @@ def stitch_pieces(pieces: Sequence[Piece], results: Sequence[PieceResult], *,
             for r in merged]
 
 
+def save_piece_probs(path, piece: Piece, spans: Sequence[tuple[float, float]], probs_list: Sequence,
+                     frame_s: float) -> None:
+    """One piece's window probabilities to a compressed .npz (float64, so the round trip is exact)."""
+    if len(spans) != len(probs_list):
+        raise ValueError("spans and probs_list differ in length")
+    arrays = {f"p{i}": np.asarray(p, dtype=float) for i, p in enumerate(probs_list)}
+    np.savez_compressed(
+        path,
+        piece=np.array([piece.core_start, piece.core_end, piece.audio_start, piece.audio_end], dtype=float),
+        spans=np.asarray(spans, dtype=float).reshape(-1, 2),
+        frame_s=np.array(float(frame_s)),
+        **arrays)
+
+
+def load_piece_probs(path) -> tuple[Piece, list, list, float]:
+    """Inverse of save_piece_probs: (piece, spans, probs_list, frame_s)."""
+    with np.load(path) as z:
+        c0, c1, a0, a1 = (float(v) for v in z["piece"])
+        spans = [(float(s), float(e)) for s, e in z["spans"]]
+        probs = [np.asarray(z[f"p{i}"], dtype=float) for i in range(len(spans))]
+        frame_s = float(z["frame_s"])
+    return Piece(c0, c1, a0, a1), spans, probs, frame_s
+
+
 def run_file(duration: float, speech, *, make_prob_fn: Callable[[Piece], ProbFn],
              make_embed_fn: Callable[[Piece], EmbedFn], piece_s: float = 240.0, window_s: float = 30.0,
              hop_s: float = 10.0, overlap_s: float = 30.0, match_threshold: float = 0.5,
-             vad_fn: Optional[Callable] = None, **piece_kwargs) -> dict:
-    """Whole-file run: plan pieces, run_piece on each, stitch. piece_kwargs go to run_piece."""
-    target, lo, hi = piece_bounds(piece_s)
-    if speech is None:
-        speech = [(0.0, float(duration))]
-    pieces = plan_pieces(duration, speech, target_s=target, min_s=lo, max_s=hi, overlap_s=overlap_s,
-                         vad_fn=vad_fn)
+             vad_fn: Optional[Callable] = None, pieces: Optional[Sequence[Piece]] = None,
+             **piece_kwargs) -> dict:
+    """Whole-file run: plan pieces, run_piece on each, stitch. piece_kwargs go to run_piece.
+
+    pieces, when given, replaces the planning (speech and vad_fn are then unused).
+    """
+    if pieces is None:
+        target, lo, hi = piece_bounds(piece_s)
+        if speech is None:
+            speech = [(0.0, float(duration))]
+        pieces = plan_pieces(duration, speech, target_s=target, min_s=lo, max_s=hi, overlap_s=overlap_s,
+                             vad_fn=vad_fn)
+    pieces = list(pieces)
     results = [run_piece(p.audio_duration, make_prob_fn(p), make_embed_fn(p), window_s=window_s,
                          hop_s=hop_s, **piece_kwargs) for p in pieces]
     segments = stitch_pieces(pieces, results, match_threshold=match_threshold)
