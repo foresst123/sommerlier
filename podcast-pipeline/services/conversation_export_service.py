@@ -990,6 +990,7 @@ class _Render:
     left: Optional[np.ndarray] = None         # the track of cand.speakers[0]
     right: Optional[np.ndarray] = None        # the track of cand.speakers[1]
     method: Optional[str] = None              # how left/right were made
+    ambience: Optional[dict] = None           # what user_ambience did to the user track (None when off)
 
 
 @dataclass
@@ -1064,6 +1065,9 @@ class ConversationExportService:
         self.render_workers = max(1, int(render_workers))
         self._render_lock = threading.Lock()
         self._render_bytes = 0
+        # Quiet gaps of the whole recording, found once per recording and shared by the render workers.
+        self._gap_lock = threading.Lock()
+        self._gap_cache: Dict[tuple, tuple] = {}
         # Reuse the planning cut for the write instead of cutting twice. Same
         # arrays either way; off keeps the earlier behaviour.
         self.reuse_render = bool(reuse_render)
@@ -1942,7 +1946,7 @@ class ConversationExportService:
                 np.ascontiguousarray(gated[:, 1], dtype=np.float32), TIME_GATED)
 
     def _render(self, finder, cand: Candidate, waveform: np.ndarray, sample_rate: int,
-                speech_segments=None, separation_service=None) -> Optional[_Render]:
+                speech_segments=None, separation_service=None, *, roles=None) -> Optional[_Render]:
         """Cut the excerpt once; every file is made from this one cut.
 
         The mixture and both speaker tracks get the same start sample, the same
@@ -1959,8 +1963,102 @@ class ConversationExportService:
             left, right, out.method = self._speaker_tracks(
                 finder, cand, raw, sample_rate, lo, len(waveform),
                 speech_segments, separation_service)
+            if self.user_ambience.enabled:
+                left, right, out.ambience = self._user_channel_with_room(
+                    cand, roles, raw, waveform, sample_rate, lo, hi,
+                    left, right, out.method, speech_segments)
             out.left = fade_edges(left, sample_rate, cfg.fade_ms)
             out.right = fade_edges(right, sample_rate, cfg.fade_ms)
+        return out
+
+    def _user_channel_with_room(self, cand: Candidate, roles, raw: np.ndarray, waveform: np.ndarray,
+                                sample_rate: int, lo: int, hi: int, left: np.ndarray,
+                                right: np.ndarray, method, speech_segments):
+        """(left, right, info): the user's track rebuilt to keep the room (utils/ambience_bed.py).
+
+        Only over separated tracks, where the user's voice is known on its own. Any failure keeps the
+        tracks as they were and says so in `info`; it never stops the export.
+        """
+        mode = self.user_ambience.mode
+        if method != STRICT_TRACKS:
+            return left, right, {"mode": mode, "applied": False, "reason": "not_separated_tracks"}
+        if roles is None or not speech_segments:
+            why = "no_roles" if roles is None else "no_speech_segments"
+            return left, right, {"mode": mode, "applied": False, "reason": why}
+        try:
+            from utils.ambience_bed import build_bed, compose_user_channel, safe_mask
+            params = self.user_ambience
+            if roles.user not in cand.speakers or roles.assistant not in cand.speakers:
+                raise ValueError(f"roles {roles.user!r}/{roles.assistant!r} are not the excerpt's speakers")
+            sr = float(sample_rate)
+            lo_s, hi_s = lo / sr, hi / sr
+            spans_all = [(float(s.start), float(s.end)) for s in speech_segments]
+            gaps = self._quiet_gaps(speech_segments, spans_all, waveform, sample_rate)
+            bed = build_bed(waveform, sample_rate, gaps, spans_all, lo_s, hi_s, params,
+                            focus_s=(lo_s + hi_s) / 2.0)
+            in_excerpt = [s for s in speech_segments
+                          if float(s.end) > lo_s and float(s.start) < hi_s]
+            spans_of = {who: [(float(s.start), float(s.end)) for s in in_excerpt if s.speaker == who]
+                        for who in {roles.user, roles.assistant}}
+            other_spans = spans_of[roles.assistant]
+            third_spans = [(float(s.start), float(s.end)) for s in in_excerpt
+                           if s.speaker not in cand.speakers]
+            bad_spans = [span for span in self._failed_spans(speech_segments, cand)
+                         if span[1] > lo_s and span[0] < hi_s]
+            overlap_spans = self._crossings(spans_of[roles.assistant], spans_of[roles.user])
+            safe = safe_mask(len(raw), sample_rate, lo_s, other_spans, third_spans,
+                             bad_spans, overlap_spans, params)
+            user_is_first = roles.user == cand.speakers[0]
+            user_track = _fit(left if user_is_first else right, len(raw))
+            user = compose_user_channel(raw, user_track, bed.audio, safe, sample_rate, params)
+            user = _fit(np.ascontiguousarray(user, dtype=np.float32), len(raw))
+            info = {"mode": params.mode, "applied": True, "bed_tier": bed.tier,
+                    "bed_pieces": int(bed.pieces), "bed_repeats": int(bed.repeats),
+                    "safe_fraction": round(float(np.mean(safe)), 4) if len(safe) else 1.0}
+        except Exception as exc:                       # never let the room stop an export
+            if self.logger:
+                self.logger.warning(
+                    f"[conversation-exports] user channel kept without the room: {type(exc).__name__}: {exc}")
+            return left, right, {"mode": mode, "applied": False,
+                                 "error": f"{type(exc).__name__}: {exc}"}
+        if user_is_first:
+            return user, right, info
+        return left, user, info
+
+    def _quiet_gaps(self, speech_segments, spans_all, waveform: np.ndarray, sample_rate: int):
+        """The recording's quiet gaps, found once for the whole file (shared by the render workers)."""
+        from utils.ambience_bed import find_quiet_gaps
+        key = (id(speech_segments), id(waveform), int(sample_rate))
+        with self._gap_lock:
+            hit = self._gap_cache.get(key)
+            if hit is not None and hit[0] is speech_segments and hit[1] is waveform:
+                return hit[2]
+        gaps = find_quiet_gaps(spans_all, 0.0, len(waveform) / float(sample_rate),
+                               self.user_ambience, waveform, sample_rate)
+        with self._gap_lock:
+            # Holds the references the key is made from, so an id cannot be reused while cached.
+            self._gap_cache.clear()
+            self._gap_cache[key] = (speech_segments, waveform, gaps)
+        return gaps
+
+    @staticmethod
+    def _failed_spans(speech_segments, cand: Candidate) -> List[tuple]:
+        """The separator's failures that leave silence in a track (pipeline clock): the rows _zeroed_spans counts."""
+        from services.clean_two_channel_dataset_service import (
+            CleanTwoChannelDatasetService as _Tracks)
+        return [(row["start"] + cand.pad_start, row["end"] + cand.pad_start)
+                for row in _Tracks._failure_rows(speech_segments, cand)
+                if row["zeroed_in_strict_track"]]
+
+    @staticmethod
+    def _crossings(a_spans, b_spans) -> List[tuple]:
+        """The overlaps of two lists of spans."""
+        out = []
+        for a0, a1 in a_spans:
+            for b0, b1 in b_spans:
+                lo, hi = max(a0, b0), min(a1, b1)
+                if hi > lo:
+                    out.append((lo, hi))
         return out
 
     def _plan(self, finder, cand: Candidate, item: _Judged, waveform, sample_rate: int,
@@ -1992,7 +2090,7 @@ class ConversationExportService:
             plan.category, plan.skip = None, "symmetric_roles"
             return plan
         render = self._render(finder, cand, waveform, sample_rate,
-                              speech_segments, separation_service)
+                              speech_segments, separation_service, roles=roles)
         if render is None:
             plan.category, plan.skip = None, "too_short"
             return plan
@@ -2209,7 +2307,7 @@ class ConversationExportService:
         import soundfile as sf
         cand, roles = plan.cand, plan.roles
         render = self._release_render(plan) or self._render(
-            finder, cand, waveform, sample_rate, speech_segments, separation_service)
+            finder, cand, waveform, sample_rate, speech_segments, separation_service, roles=roles)
         os.makedirs(directory, exist_ok=True)
         files = {"mixture": MIXTURE_FILE}
         audio_files = {"mixture": MIXTURE_FILE}
@@ -2249,6 +2347,8 @@ class ConversationExportService:
             source_stem=base_name)
         if clean is not None:
             meta["assistant_clean"] = clean
+        if render.ambience is not None:
+            meta["user_ambience"] = render.ambience
         with open(os.path.join(directory, JSON_FILE), "w", encoding="utf-8") as fh:
             json.dump(meta, fh, ensure_ascii=False, indent=2)
         with open(os.path.join(directory, TEXT_FILE), "w", encoding="utf-8") as fh:
