@@ -317,6 +317,17 @@ SCRIPT = r"""
 "use strict";
 var DASH = "\u2014";
 var D = null, CLIPS = {};
+/* data files written before the distance existed: audio.ecapa_dist = 1 - audio.ecapa_cos, derived here (the file is not changed) */
+function deriveDistance() {
+  function fix(o, cosKey, distKey) {
+    var c = o && o[cosKey];
+    if (typeof c === "number" && !(distKey in o)) o[distKey] = Math.round((1 - c) * 1e6) / 1e6;
+  }
+  (D.files || []).forEach(function (f) {
+    Object.keys(f.metrics || {}).forEach(function (vid) { var a = f.metrics[vid] && f.metrics[vid].audio; if (a) fix(a, "ecapa_cos", "ecapa_dist"); });
+  });
+  Object.keys(D.summary || {}).forEach(function (vid) { fix(D.summary[vid], "audio.ecapa_cos", "audio.ecapa_dist"); });
+}
 var S = {fi: 0, vid: null, tab: "text", onlyDiff: true, sort: "time", shown: 50,
          mmode: "file", zoom: null, sel: -1, rshown: 200};
 
@@ -365,7 +376,7 @@ var DIRS = {
   "asr.wer_vs_baseline": "lower", "asr.wer_vs_reference": "lower",
   "asr.words_in_quiet_frames": "lower", "asr.empty_segments": "lower",
   "speakers.der_vs_baseline": "lower", "speakers.disagree_seconds": "lower",
-  "audio.corr_with_raw": "higher", "audio.ecapa_cos": "higher",
+  "audio.corr_with_raw": "higher", "audio.ecapa_cos": "higher", "audio.ecapa_dist": "lower",
   "audio.lag_samples": "zero", "audio.length_equal": "true",
   "separation.failed_spans": "lower"
 };
@@ -377,6 +388,7 @@ var TIPS = {
   "audio.length_equal": "Must be true: output length equals input length.",
   "audio.corr_with_raw": "Higher means closer to the raw waveform.",
   "audio.ecapa_cos": "Speaker-embedding similarity to raw; higher means the voice is preserved.",
+  "audio.ecapa_dist": "Speaker-embedding distance to raw (1 - cosine); 0 means the same voice, lower means the voice is preserved.",
   "diarization.n_speakers": "Informative: a different count is a difference, not an error.",
   "diarization.overlap_seconds": "Informative: more or less overlap is not good or bad by itself.",
   "diarization.n_segments": "Informative.",
@@ -399,7 +411,7 @@ var MOS_KEYS = ["mos", "dnsmos_ovrl", "scoreq", "utmos", "nisqa_mos"];
 var MOS_TIP = "Learned predictor (distilled DNSMOS/UTMOS/NISQA/SCOREQ plus a human-MOS head), 16 kHz so blind above 8 kHz. " +
   "It can reward hallucinated output. Delta only, never a gate: read it next to wer_vs_baseline and ecapa_cos.";
 var ORDER = {
-  audio: ["noise_floor_db", "gated_frame_pct", "lag_samples", "corr_with_raw", "hf_energy_ratio", "length_equal", "ecapa_cos"],
+  audio: ["noise_floor_db", "gated_frame_pct", "lag_samples", "corr_with_raw", "hf_energy_ratio", "length_equal", "ecapa_cos", "ecapa_dist"],
   diarization: ["n_speakers", "n_segments", "overlap_seconds", "median_segment_s", "short_segments_lt_0_5s"],
   separation: ["overlap_spans", "segments_separated", "failed_spans", "mean_similarity"],
   asr: ["n_words", "n_segments", "empty_segments", "words_per_sec", "wer_vs_baseline", "wer_vs_reference", "words_in_quiet_frames"],
@@ -408,7 +420,7 @@ var ORDER = {
 var SECTIONS = [["audio", "Audio"], ["diarization", "Diarization"], ["separation", "Separation"],
                 ["asr", "ASR"], ["speakers", "Speakers vs baseline"]];
 var SUMMARY_KEYS = ["asr.wer_vs_baseline", "asr.wer_vs_reference", "speakers.der_vs_baseline",
-                    "asr.words_in_quiet_frames", "audio.corr_with_raw", "audio.ecapa_cos",
+                    "asr.words_in_quiet_frames", "audio.corr_with_raw", "audio.ecapa_cos", "audio.ecapa_dist",
                     "diarization.n_speakers", "separation.mean_similarity"];
 
 /* judge a change: "good", "bad" or "" (neutral) */
@@ -878,6 +890,7 @@ function setFile(i) { S.fi = i; S.shown = 50; S.sel = -1; S.zoom = null; renderA
 
 function init() {
   D = JSON.parse($("data").textContent);
+  deriveDistance();
   CLIPS = JSON.parse($("clips").textContent);
   var nonBase = D.variants.filter(function (v) { return v.id !== D.baseline; });
   S.vid = nonBase.length ? nonBase[0].id : D.baseline;
@@ -929,7 +942,7 @@ function init() {
 }
 
 root.__cmp = {esc: esc, fmt: fmt, fmtDelta: fmtDelta, diffHtml: diffHtml, timelineSvg: timelineSvg, rangesHtml: rangesHtml,
-              judge: judge, DIRS: DIRS, setData: function (d, c) { D = d; CLIPS = c || {}; }, metricsHtml: metricsHtml, denoiseWarn: denoiseWarn, summaryNote: summaryNote,
+              judge: judge, DIRS: DIRS, setData: function (d, c) { D = d; CLIPS = c || {}; deriveDistance(); }, metricsHtml: metricsHtml, denoiseWarn: denoiseWarn, summaryNote: summaryNote,
               miniBars: miniBars, summaryHtml: summaryHtml, setState: function (s) { for (var k in s) S[k] = s[k]; }};
 if (root.document) {
   if (root.document.readyState === "loading") root.document.addEventListener("DOMContentLoaded", init); else init();

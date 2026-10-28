@@ -70,6 +70,8 @@ audio (variant wav vs raw):
 - `corr_with_raw` (Pearson after removing lag): neutral; near 1 = filter barely changed signal.
 - `hf_energy_ratio` (energy > 4 kHz / total): neutral (low = muffled, high = hiss kept).
 - `length_equal` (bool): up.
+- `ecapa_dist` (= 1 - `ecapa_cos`, the cosine distance of the same two embeddings): down; 0 = the same voice. Derived by
+  `tools/make_compare_page.py` when an older data file only has the cosine.
 - `ecapa_cos` (speaker-embedding cosine, first 30 s, raw vs variant): up. Computed only when
   `WESPEAKER_MODEL_PATH` points to a local ONNX file (WeSpeaker, not ECAPA; key kept per contract); else null.
 - `learned_mos` (dict or null): `{mos, dnsmos_ovrl, scoreq, utmos, nisqa_mos}`, each about 1-5, of the

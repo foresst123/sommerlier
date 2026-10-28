@@ -121,7 +121,7 @@ def _mos_delta(var: Optional[dict], raw: Optional[dict]) -> Optional[dict]:
 def audio_metrics(raw_path: Optional[str], var_path: Optional[str],
                   same_as_raw: bool = False, embed: bool = True) -> Dict[str, Optional[object]]:
     keys = ("noise_floor_db", "gated_frame_pct", "lag_samples", "corr_with_raw",
-            "hf_energy_ratio", "length_equal", "ecapa_cos", "learned_mos",
+            "hf_energy_ratio", "length_equal", "ecapa_cos", "ecapa_dist", "learned_mos",
             "learned_mos_delta")
     out: Dict[str, Optional[object]] = {k: None for k in keys}
     var, sr = read_wav(var_path)
@@ -133,7 +133,7 @@ def audio_metrics(raw_path: Optional[str], var_path: Optional[str],
         out["gated_frame_pct"] = float(100.0 * np.mean(lv < GATE_DB))
     out["hf_energy_ratio"] = hf_energy_ratio(var, sr)
     if same_as_raw:
-        out.update(lag_samples=0, corr_with_raw=1.0, length_equal=True, ecapa_cos=1.0)
+        out.update(lag_samples=0, corr_with_raw=1.0, length_equal=True, ecapa_cos=1.0, ecapa_dist=0.0)
         if embed:
             out["learned_mos"] = _learned(var_path, sr, cache=True)
             out["learned_mos_delta"] = _mos_delta(out["learned_mos"], out["learned_mos"])
@@ -148,6 +148,8 @@ def audio_metrics(raw_path: Optional[str], var_path: Optional[str],
         out["corr_with_raw"] = aligned_corr(raw, var, lag)
         if embed:
             out["ecapa_cos"] = _ecapa_cos(raw_path, var_path)
+            if out["ecapa_cos"] is not None:
+                out["ecapa_dist"] = 1.0 - out["ecapa_cos"]       # cosine distance: 0 = the same voice
     if embed:
         out["learned_mos"] = _learned(var_path, sr)
         out["learned_mos_delta"] = _mos_delta(out["learned_mos"], _learned(raw_path, rsr, cache=True))

@@ -96,7 +96,14 @@ def run_node(page, expr):
     d = json.dumps(embedded(page, "data"))
     code = (f"const window=globalThis;{script_of(page)}\n"
             f"const c=globalThis.__cmp;c.setData({d},{{}});console.log(JSON.stringify({expr}));")
-    r = subprocess.run([NODE, "-e", code], capture_output=True, text=True, timeout=60)
+    # through a file, not -e: the page script plus its data can pass the 128 KB limit of one argv string
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as fh:
+        fh.write(code)
+    try:
+        r = subprocess.run([NODE, fh.name], capture_output=True, text=True, timeout=60)
+    finally:
+        os.unlink(fh.name)
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout)
 
@@ -347,3 +354,16 @@ def test_warning_and_note_absent_in_old_data(tmp_path, data):
     assert run_node(page, "c.denoiseWarn(%s,'dfn3')" % fj) == ""
     assert run_node(page, "c.summaryNote()") == ""
     assert "Summary" not in run_node(page, "c.metricsHtml('summary',%s)" % fj)
+
+
+
+@pytest.mark.skipif(not NODE, reason="node not on PATH")
+def test_the_page_derives_the_ecapa_distance_from_an_older_data_file(tmp_path, data):
+    page = build(tmp_path, data)
+    r = run_node(page, "(function(){var D={files:[{metrics:{v1:{audio:{ecapa_cos:0.9}},none:{audio:{ecapa_cos:1}},"
+                       "v2:{audio:{ecapa_cos:0.5,ecapa_dist:0.4}},v3:{audio:{}}}}],"
+                       "summary:{v1:{'audio.ecapa_cos':0.8},none:{'audio.ecapa_cos':1}}};"
+                       "c.setData(D,{});return [D.files[0].metrics.v1.audio.ecapa_dist,D.files[0].metrics.none.audio.ecapa_dist,"
+                       "D.files[0].metrics.v2.audio.ecapa_dist,'ecapa_dist' in D.files[0].metrics.v3.audio,"
+                       "D.summary.v1['audio.ecapa_dist'],D.summary.none['audio.ecapa_dist']];})()")
+    assert r == [0.1, 0, 0.4, False, 0.2, 0]

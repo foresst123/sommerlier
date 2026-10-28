@@ -213,8 +213,8 @@ def test_build_schema_and_values(manifest):
     m = f["metrics"]["dfn3"]
     assert set(m) == {"audio", "diarization", "separation", "asr"}
     assert set(m["audio"]) == {"noise_floor_db", "gated_frame_pct", "lag_samples", "corr_with_raw",
-                               "hf_energy_ratio", "length_equal", "ecapa_cos", "learned_mos",
-                               "learned_mos_delta"}
+                               "hf_energy_ratio", "length_equal", "ecapa_cos", "ecapa_dist",
+                               "learned_mos", "learned_mos_delta"}
     assert set(m["asr"]) == {"n_words", "n_segments", "empty_segments", "words_per_sec",
                              "wer_vs_baseline", "wer_vs_reference", "words_in_quiet_frames"}
     assert m["audio"]["lag_samples"] == 0 and m["audio"]["corr_with_raw"] == pytest.approx(1.0)
