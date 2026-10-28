@@ -93,6 +93,13 @@ def _as_f64(x) -> np.ndarray:
     return np.asarray(x, dtype=np.float64).reshape(-1)
 
 
+def _as_1d(x) -> np.ndarray:
+    """The recording as given (no dtype change, no copy for an array): a long file is only ever sliced."""
+    if x is None:
+        return np.zeros(0, dtype=np.float32)
+    return np.asarray(x).reshape(-1)
+
+
 def _fit(a, n: int) -> np.ndarray:
     a = _as_f64(a)
     if a.size >= n:
@@ -105,8 +112,19 @@ def _odd(k: float) -> int:
     return k if k % 2 else k + 1
 
 
+_CHUNK = 1 << 20
+
+
 def _rms(x: np.ndarray) -> float:
-    return float(np.sqrt(np.mean(x * x))) if x.size else 0.0
+    """RMS with float64 accumulation, in blocks (no float64 copy of the whole input)."""
+    x = np.asarray(x).reshape(-1)
+    if x.size == 0:
+        return 0.0
+    acc = 0.0
+    for c in range(0, x.size, _CHUNK):
+        b = np.asarray(x[c:c + _CHUNK], dtype=np.float64)
+        acc += float(np.dot(b, b))
+    return float(np.sqrt(acc / x.size))
 
 
 def _clean_spans(spans, lo: Optional[float] = None, hi: Optional[float] = None) -> List[Span]:
@@ -152,12 +170,18 @@ def _frame_len(sr: int) -> int:
     return max(1, int(round(_FRAME_S * sr)))
 
 
+_FRAME_CHUNK = 4096  # frames per block: bounded temporaries however long the window
+
+
 def _frame_rms(x: np.ndarray, fl: int) -> np.ndarray:
+    """RMS of consecutive frames of length fl, computed in float32 blocks with float64 accumulation."""
     nf = x.size // fl
-    if nf == 0:
-        return np.zeros(0)
-    f = x[: nf * fl].reshape(nf, fl)
-    return np.sqrt(np.mean(f * f, axis=1))
+    out = np.zeros(nf)
+    for c in range(0, nf, _FRAME_CHUNK):
+        m = min(_FRAME_CHUNK, nf - c)
+        f = np.asarray(x[c * fl:(c + m) * fl], dtype=np.float32).reshape(m, fl)
+        out[c:c + m] = np.sqrt(np.mean(f * f, axis=1, dtype=np.float64))
+    return out
 
 
 def _db(level):
@@ -273,7 +297,7 @@ def find_quiet_gaps(speech_spans: Sequence[Span], lo_s: float, hi_s: float, para
         gaps.append((start, hi))
     if not gaps or waveform is None or sr is None or int(sr) <= 0:
         return gaps
-    x = _as_f64(waveform)
+    x = _as_1d(waveform)
     sr = int(sr)
     fl = _frame_len(sr)
     i_lo, i_hi = max(0, int(round(lo * sr))), min(x.size, int(round(hi * sr)))
@@ -306,15 +330,24 @@ def noise_floor_track(waveform: np.ndarray, sr: int, speech_spans: Sequence[Span
     n = max(0, int(round((float(end_s) - float(start_s)) * sr))) if sr > 0 else 0
     if n == 0:
         return np.zeros(0)
-    x = _as_f64(waveform)
+    x = _as_1d(waveform)
     fl = _frame_len(sr)
-    fr = _frame_rms(x, fl)
-    if fr.size == 0:
+    nfile = x.size // fl
+    if nfile == 0:
         return np.full(n, _FLOOR)
-    fc = (np.arange(fr.size) * fl + fl / 2) / sr
-    quiet = ~_in_spans(fc, _union(_clean_spans(speech_spans)))
     W = max(fl, int(round(params.floor_window_s * sr))) / sr
     ks = np.arange(int(np.floor(float(start_s) / W - 0.5)) - 1, int(np.floor(float(end_s) / W - 0.5)) + 3)
+    # only the frames of the windows in use are measured; they sit on the file's own 20 ms grid
+    f0 = max(0, int(np.floor(ks[0] * W * sr / fl)))
+    f1 = min(nfile, int(np.ceil((ks[-1] + 1) * W * sr / fl)))
+    if f1 <= f0:  # the excerpt lies outside the file: borrow the nearest stretch of it
+        m = int(np.ceil(ks.size * W * sr / fl))
+        f0, f1 = (max(0, nfile - m), nfile) if f0 >= nfile else (0, min(nfile, m))
+    fr = _frame_rms(x[f0 * fl:f1 * fl], fl)
+    if fr.size == 0:
+        return np.full(n, _FLOOR)
+    fc = ((f0 + np.arange(fr.size)) * fl + fl / 2) / sr
+    quiet = ~_in_spans(fc, _union(_clean_spans(speech_spans)))
     vals = np.full(ks.size, np.nan)
     for i, k in enumerate(ks):
         lo = np.searchsorted(fc, k * W, side="left")
@@ -342,8 +375,10 @@ def build_bed(waveform: np.ndarray, sr: int, gaps: Sequence[Span], speech_spans:
     """A continuous room tone for [start_s, end_s) (abs clock), length round((end_s - start_s) * sr).
 
     Tiers, first that works:
-      "local"      pieces of gaps within prefer_radius_s of `focus_s` (default: the middle of the excerpt)
-      "file"       pieces of any gap of the recording
+      "local"      pieces of gaps within prefer_radius_s of `focus_s` (default: the middle of the excerpt), when
+                   those gaps add up to at least the excerpt's length
+      "file"       the local gaps plus the nearest other gaps of the recording until they add up to the excerpt's
+                   length (all gaps if they never do, then repeats); also when the local gaps are too short
       "synthetic"  noise shaped by the spectrum of the quietest frames (minimum statistics), when no gap is long enough
       "pink"       pink noise at pink_dbfs, when nothing at all can be measured
     Pieces are random slices of the gaps (seeded by params.seed and start_s), joined by equal-power crossfades of
@@ -356,7 +391,7 @@ def build_bed(waveform: np.ndarray, sr: int, gaps: Sequence[Span], speech_spans:
     if n == 0:
         return BedResult(np.zeros(0, np.float32), "pink", notes=["empty range"])
     rng = np.random.default_rng([int(params.seed) & 0xFFFFFFFF, int(round(start_s * 1000)) & 0xFFFFFFFF])
-    x = _as_f64(waveform)
+    x = _as_1d(waveform)
     focus = 0.5 * (start_s + end_s) if focus_s is None else float(focus_s)
     floor = noise_floor_track(x, sr, speech_spans, start_s, end_s, params)
     min_len = max(2, int(round(params.gap_min_s * sr)))
@@ -365,19 +400,49 @@ def build_bed(waveform: np.ndarray, sr: int, gaps: Sequence[Span], speech_spans:
         i0, i1 = max(0, int(round(a * sr))), min(x.size, int(round(b * sr)))
         if i1 - i0 < min_len:
             continue
-        if _rms(x[i0:i1]) < 1e-6:
+        step = max(1, (i1 - i0) // 65536)  # silence test on a subsample: a long gap is not read whole
+        if _rms(x[i0:i1:step]) < 1e-6:
             continue
         usable.append((a, b, i0, i1))
     local = [g for g in usable if _dist(g[0], g[1], focus) <= params.prefer_radius_s]
     if usable:
-        pool = local or usable
+        need = _needed(n, sr, params)
+        local_len = sum(g[3] - g[2] for g in local)
+        notes: List[str] = []
+        if local and local_len >= need:
+            pool, tier = local, "local"
+        else:
+            # the local gaps do not cover the excerpt: add the nearest gaps of the file until they do
+            order = sorted(range(len(usable)), key=lambda j: _dist(usable[j][0], usable[j][1], focus))
+            take, total = set(), 0
+            for j in order:
+                if total >= need:
+                    break
+                take.add(j)
+                total += usable[j][3] - usable[j][2]
+            pool = [g for j, g in enumerate(usable) if j in take]
+            tier = "file"
+            if not local:
+                notes.append("no gap within prefer_radius_s")
+            elif local_len < need:
+                notes.append(f"local gaps cover {local_len / sr:.1f} s of {need / sr:.1f} s; nearest file gaps added")
+            if total < need:
+                notes.append("gaps of the whole recording are shorter than the excerpt: repeats")
         audio, pieces, repeats = _assemble(x, sr, [(g[2], g[3]) for g in pool], floor, n, params, rng)
-        notes = [] if local else ["no gap within prefer_radius_s"]
-        return BedResult(_finish_audio(audio), "local" if local else "file", pieces, repeats, notes)
+        return BedResult(_finish_audio(audio), tier, pieces, repeats, notes)
     syn = _synthetic(x, sr, floor, n, rng)
     if syn is not None:
         return BedResult(_finish_audio(syn), "synthetic", notes=["no gap long enough"])
     return BedResult(_finish_audio(_pink(n, params, rng)), "pink", notes=["nothing measurable"])
+
+
+def _needed(n: int, sr: int, params: AmbienceParams) -> int:
+    """Gap samples a bed of n samples needs: the output plus the crossfade overlap each piece gives back.
+
+    A piece is 1.5-3 s, so there are at most about n / 1.5 s + 2 of them; each one eats xfade samples of the next.
+    """
+    xf = max(1, int(round(params.xfade_ms * sr / 1000.0)))
+    return n + xf * (n // max(1, int(1.5 * sr)) + 2)
 
 
 def _dist(a: float, b: float, focus: float) -> float:
@@ -447,11 +512,14 @@ def _synthetic(x: np.ndarray, sr: int, floor: np.ndarray, n: int, rng: np.random
     nf = x.size // N
     if nf == 0:
         return None
-    frames = x[: nf * N].reshape(nf, N)
     win = np.hanning(N)
-    energy = np.sum(frames * frames, axis=1)
+    energy = np.zeros(nf)
+    for c in range(0, nf, _FRAME_CHUNK):
+        m = min(_FRAME_CHUNK, nf - c)
+        blk = np.asarray(x[c * N:(c + m) * N], dtype=np.float64).reshape(m, N)
+        energy[c:c + m] = np.sum(blk * blk, axis=1)
     k = max(1, int(np.ceil(0.10 * nf)))
-    quiet = frames[np.argsort(energy)[:k]]
+    quiet = np.stack([np.asarray(x[i * N:(i + 1) * N], dtype=np.float64) for i in np.argsort(energy)[:k]])
     P = np.mean(np.abs(np.fft.rfft(quiet * win, axis=1)) ** 2, axis=0)
     if not np.all(np.isfinite(P)) or P.sum() <= 1e-24:
         return None
@@ -522,8 +590,9 @@ def compose_user_channel(raw: np.ndarray, user_track: np.ndarray, bed: np.ndarra
                          params: AmbienceParams) -> np.ndarray:
     """The user channel, len(raw) samples.
 
-    raw_mask:  raw where `safe`; user_track + bed where not safe. Every raw<->bed boundary is an equal-power
-               crossfade of splice_fade_ms, centred on the boundary. The bed is NOT added to raw (that would be two rooms).
+    raw_mask:  raw where `safe`; user_track + bed where not safe. Every raw<->bed boundary is a crossfade of
+               splice_fade_ms, centred on the boundary: linear for the voice (raw and user_track carry the same voice),
+               equal-power for the bed. The bed is NOT added to raw (that would be two rooms).
     bed_only:  bed + user_track everywhere.
     `user_track` is the user's separated voice on the excerpt clock, zeros where the user is silent. The result never
     exceeds full scale (a gentle limiter, not a clip) and has no digital silence longer than 10 ms.
@@ -542,7 +611,9 @@ def compose_user_channel(raw: np.ndarray, user_track: np.ndarray, bed: np.ndarra
         m = np.asarray(safe, dtype=bool).reshape(-1)[:n]
         sf[: m.size] = m
         s = np.clip(_conv_centred(sf, _hann_kernel(_odd(params.splice_fade_ms * sr / 1000.0))), 0.0, 1.0)
-        out = np.sqrt(s) * raw + np.sqrt(1.0 - s) * (ut + bd)
+        # the voice is the same signal in raw and in user_track: linear weights (sum 1) so it never adds up to +3 dB.
+        # The bed is room noise, uncorrelated with raw: equal power on it.
+        out = s * raw + (1.0 - s) * ut + np.sqrt(1.0 - s) * bd
     return _finish_audio(out, bd)
 
 

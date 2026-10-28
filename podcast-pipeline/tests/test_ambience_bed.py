@@ -189,6 +189,49 @@ def test_build_bed_repeats_when_gap_is_too_short():
     assert res.repeats > 0
 
 
+def _scattered_case():
+    """200 s: a short gap next to focus (100 s), long gaps 60+ s away. Excerpt 95..105 needs ~12.4 s of gap."""
+    p = AmbienceParams(seed=5)
+    spans = [(10.0, 20.0), (30.0, 97.0), (99.0, 200.0)]
+    rec = _recording(200.0, spans, sigma=1e-3, seed=5).astype(np.float32)
+    gaps = find_quiet_gaps(spans, 0.0, 200.0, p)
+    return p, rec, gaps, spans
+
+
+def test_build_bed_local_tier_when_local_gaps_cover_the_excerpt():
+    p, rec, gaps, spans = _scattered_case()
+    # 0.5 s excerpt, the 1.65 s gap at 97.25..98.9 is local and covers it
+    res = build_bed(rec, SR, gaps, spans, 97.5, 98.0, p, focus_s=97.75)
+    assert res.tier == "local"
+    assert res.repeats == 0
+
+
+def test_build_bed_file_tier_when_local_gaps_are_too_short():
+    p, rec, gaps, spans = _scattered_case()
+    res = build_bed(rec, SR, gaps, spans, 95.0, 105.0, p, focus_s=100.0)
+    assert res.tier == "file"
+    assert res.repeats == 0
+    assert res.audio.size == 10 * SR
+    assert np.count_nonzero(res.audio == 0.0) == 0
+
+
+def test_build_bed_does_not_copy_the_whole_recording():
+    import tracemalloc
+
+    p, rec, gaps, spans = _scattered_case()
+    rec = np.concatenate([rec] * 3)  # 600 s; a float64 copy of it would be 77 MB
+    gaps = [(a + k * 200.0, b + k * 200.0) for k in range(3) for a, b in gaps]
+    spans = [(a + k * 200.0, b + k * 200.0) for k in range(3) for a, b in spans]
+    tracemalloc.start()
+    try:
+        res = build_bed(rec, SR, gaps, spans, 300.0, 310.0, p, focus_s=305.0)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert res.audio.size == 10 * SR
+    assert peak < 20e6
+
+
 def test_has_hum_detects_a_tone_not_noise():
     t = np.arange(SR * 2) / SR
     assert _has_hum(1e-2 * np.sin(2 * np.pi * 50.0 * t) + _noise(2.0, 1e-4, 4))
@@ -300,6 +343,21 @@ def test_compose_never_clips():
     p.mode = "raw_mask"
     out = compose_user_channel(raw * 3.0, loud_user, bed, safe, SR, p)
     assert np.max(np.abs(out)) <= 1.0
+
+
+def test_compose_splice_does_not_add_up_a_correlated_voice():
+    # the user talks through the safe/unsafe boundary (other speaker from 2.5 s, unsafe from 2.35 s):
+    # raw and user_track are the same voice, so the crossfade must not peak above it
+    p = AmbienceParams(mode="raw_mask")
+    total = 4.0
+    n = int(total * SR)
+    raw = _tone(1.0, 2.5, 220.0, 0.2, total)
+    safe = safe_mask(n, SR, 0.0, [(2.5, 3.0)], [], [], [], p)
+    bed = np.zeros(n)
+    out = compose_user_channel(raw, raw.copy(), bed, safe, SR, p)
+    w = slice(_idx(2.33), _idx(2.37))
+    assert np.max(np.abs(out[w])) <= 1.05 * np.max(np.abs(raw[w]))
+    assert np.allclose(out[w], raw[w], atol=1e-4)
 
 
 # -- postprocess_assistant ---------------------------------------------------
