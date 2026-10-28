@@ -3,6 +3,7 @@ import soundfile as sf
 
 from utils.lhotse_duplex import (
     BackchannelParams,
+    CoverageParams,
     anchor_backchannel_ids,
     check_item_coverage,
     find_unannotated_speech,
@@ -136,3 +137,56 @@ def test_find_unannotated_ignores_clicks():
     x = np.zeros(SR * 2, dtype=np.float32)
     x[1000:1100] = 0.5  # ~6 ms click
     assert find_unannotated_speech(x, SR, []) == []
+
+
+def noise(n_sec, rms, seed):
+    rng = np.random.default_rng(seed)
+    return (rng.standard_normal(int(n_sec * SR)) * rms).astype(np.float32)
+
+
+def write_stereo(path, ch0, ch1):
+    sf.write(str(path), np.stack([ch0, ch1], axis=1), SR)
+    return str(path)
+
+
+def test_room_tone_on_user_channel_is_not_unannotated_speech(tmp_path):
+    # (a) user channel = continuous room tone RMS 0.01 (above the fixed 0.005), speech 1-3 s annotated
+    user = noise(10.0, 0.01, seed=1)
+    user[SR:3 * SR] = noise(2.0, 0.2, seed=2)
+    wav = write_stereo(tmp_path / "a.wav", user, np.zeros_like(user))
+    thresholds = {}
+    assert check_item_coverage(wav, {0: [(1.0, 3.0)], 1: []}, thresholds=thresholds) == []
+    assert 0.03 < thresholds[0] < 0.045  # about 4 x the 0.0096 floor
+    # with the floor switched off, the same room is rejected (the old behaviour)
+    assert find_unannotated_speech(user, SR, [(1.0, 3.0)], CoverageParams(floor_factor=0))
+
+
+def test_speech_over_room_tone_still_violates():
+    # (b) room tone RMS 0.01 everywhere, plus an unannotated 3 s speech at RMS 0.2
+    user = noise(10.0, 0.01, seed=3)
+    user[5 * SR:8 * SR] = noise(3.0, 0.2, seed=4)
+    regions = find_unannotated_speech(user, SR, [(1.0, 2.0)])
+    assert len(regions) == 1
+    s, e = regions[0]
+    assert abs(s - 5.0) < 0.05 and abs(e - 8.0) < 0.05
+
+
+def test_assistant_gaps_keep_fixed_threshold(tmp_path):
+    # (c) assistant channel: exact zeros between sentences, one 4 s sentence unannotated
+    asst = np.zeros(int(10 * SR), dtype=np.float32)
+    asst[SR // 2:3 * SR // 2] = noise(1.0, 0.07, seed=7)[:SR]  # annotated sentence
+    asst[3 * SR:7 * SR] = noise(4.0, 0.07, seed=8)            # unannotated sentence
+    wav = write_stereo(tmp_path / "c.wav", np.zeros_like(asst), asst)
+    thresholds = {}
+    v = check_item_coverage(wav, {0: [], 1: [(0.5, 1.5)]}, thresholds=thresholds)
+    assert [(x["channel"], round(x["start"]), round(x["end"])) for x in v] == [(1, 3, 7)]
+    assert thresholds[1] == 0.005  # zero floor: the fixed threshold stays
+
+
+def test_all_zero_channel_has_no_violation(tmp_path):
+    # (d) a channel of only exact zeros
+    zeros = np.zeros(int(6 * SR), dtype=np.float32)
+    wav = write_stereo(tmp_path / "d.wav", zeros, zeros)
+    thresholds = {}
+    assert check_item_coverage(wav, {0: [], 1: []}, thresholds=thresholds) == []
+    assert thresholds == {0: 0.005, 1: 0.005}
