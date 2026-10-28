@@ -1018,10 +1018,10 @@ async function loadWave(url) {
 /* ---------- lanes: view, drawing ---------- */
 function setSpacer() { hsp.style.width = Math.ceil(totalDur() * pps) + 'px'; }
 function clampT0(t) { return Math.max(0, Math.min(t, Math.max(0, totalDur() - trackW() / pps))); }
-function panTo(t) {
+function panTo(t, quiet) {
   t0 = clampT0(t);
   hs.scrollLeft = t0 * pps;
-  kick();
+  if (!quiet) kick();      // frame() pans while it is already drawing: asking for another frame there doubles them every frame
 }
 function refit() {
   if (!trackW()) return;
@@ -1173,9 +1173,9 @@ function frame() {
   raf = 0;
   try {
     const now = aud.currentTime || 0;
-    if (!aud.paused && Date.now() > st.manualUntil && trackW()) {
+    if (!aud.paused && Date.now() > st.manualUntil && trackW() && !fitMode) {     // nothing to follow while the whole file fits
       const x = (now - t0) * pps, W = trackW();
-      if (x < 0 || x > W * 0.92) panTo(now - 0.15 * W / pps);
+      if (x < 0 || x > W * 0.92) panTo(now - 0.15 * W / pps, true);
     }
     draw();
     updateTime();
@@ -1183,7 +1183,7 @@ function frame() {
   } catch (e) {
     if (window.__showErr) window.__showErr('frame: ' + (e && e.message) + ' | ' + String((e && e.stack) || '').split('\n').slice(0, 3).join(' <- '));
   }
-  if (!aud.paused && !aud.ended) raf = requestAnimationFrame(frame);     // always keep going, a bad frame must not stop the page
+  if (!aud.paused && !aud.ended && !raf) raf = requestAnimationFrame(frame);     // one pending frame at most; a bad frame must not stop the page
 }
 function kick() { if (!raf) raf = requestAnimationFrame(frame); }
 

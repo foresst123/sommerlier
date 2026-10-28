@@ -781,3 +781,15 @@ def test_stats_reads_each_audio_file_once_within_the_cache_window(server, monkey
     assert len(reads) == 3
     job_listen._audio_index(str(audio))
     assert len(reads) == 3
+
+
+def test_the_page_frame_loop_never_schedules_two_frames_per_frame():
+    """Regression: frame() panned with panTo(), which asked for another frame, and then scheduled its own. Past 92% of a
+    fitted timeline that happened on every frame, so the frames doubled each time and the page froze near the end."""
+    import re
+    page = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools", "listen_page.html"), encoding="utf-8").read()
+    assert re.search(r"function panTo\(t, quiet\)", page)
+    frame = page[page.index("function frame()"):page.index("function kick()")]
+    assert "panTo(now - 0.15 * W / pps, true)" in frame          # the pan inside the loop is quiet
+    assert "!fitMode" in frame                                   # and does nothing while the whole file fits
+    assert "!raf) raf = requestAnimationFrame(frame)" in frame   # at most one pending frame
