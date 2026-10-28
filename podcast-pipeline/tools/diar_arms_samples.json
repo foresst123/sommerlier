@@ -1,0 +1,17 @@
+[
+  {"name": "MỐI TÌNH ĐẦU", "kind": "Backchannel", "turns": 7, "duration": "0:45",
+   "stem": "70MHLeTDFXA", "folder_suffix": 576, "start": null, "end": null,
+   "note": "folder suffix 576s = assumed conversation start second in the source; end = start + duration unless --final finds the conversation"},
+  {"name": "Camera Công Sở Tập 164", "kind": "Backchannel", "turns": 7, "duration": "0:39",
+   "stem": "3nhwg6YOXs8", "folder_suffix": 152, "start": null, "end": null,
+   "note": "folder suffix 152s = assumed conversation start second in the source; end = start + duration unless --final finds the conversation"},
+  {"name": "NGƯỜI ĐÀN ÔNG HOÀN HẢO tập 227", "kind": "Turns", "turns": 7, "duration": "0:42",
+   "stem": "7CClq19pl5s", "folder_suffix": 390, "start": null, "end": null,
+   "note": "folder suffix 390s = assumed conversation start second in the source; end = start + duration unless --final finds the conversation"},
+  {"name": "QUYẾT ĐẠI CA LÀM DÂN SALE", "kind": "Backchannel", "turns": 11, "duration": "0:43",
+   "stem": "47eZ7k71xpo", "folder_suffix": 161, "start": null, "end": null,
+   "note": "folder suffix 161s = assumed conversation start second in the source; end = start + duration unless --final finds the conversation"},
+  {"name": "Đội Đặc Nhiệm Nhà C21 tập 3", "kind": "Turns", "turns": 10, "duration": "0:39",
+   "stem": "3g4J7FAIbS4", "folder_suffix": 1460, "start": null, "end": null,
+   "note": "folder suffix 1460s = assumed conversation start second in the source; end = start + duration unless --final finds the conversation"}
+]
