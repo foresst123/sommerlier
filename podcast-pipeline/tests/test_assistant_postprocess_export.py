@@ -220,3 +220,93 @@ def test_a_failing_quality_drops_the_key_and_keeps_the_verdict(tmp_path, monkeyp
 
     assert "quality" not in result
     assert result["ok"] is True
+
+
+# --- _verify: the clean pair ------------------------------------------------------------
+
+CLEAN_CHECKS = ("stereo_clean_assistant_channel_is_assistant_clean", "stereo_clean_user_channel_is_user")
+
+
+def _clean_pair(tmp_path, user, assistant_clean, assistant_channel="left"):
+    """The raw mixture/user/assistant plus the clean assistant and the clean stereo pair, as _clean_assistant writes."""
+    files, n = _pair(tmp_path, user, assistant_clean)
+    pair = (assistant_clean, user) if assistant_channel == "left" else (user, assistant_clean)
+    sf.write(str(tmp_path / "assistant_clean.wav"), assistant_clean, SR, subtype="PCM_16")
+    sf.write(str(tmp_path / "stereo_2ch_clean.wav"), np.column_stack(pair), SR, subtype="PCM_16")
+    files.update({"assistant_clean": "assistant_clean.wav", "stereo_2ch_clean": "stereo_2ch_clean.wav"})
+    return files, n
+
+
+def test_a_right_clean_pair_passes_both_clean_checks(tmp_path):
+    user = _alternating(SR, 0.1)
+    assistant_clean = _alternating(SR, 0.05)
+    files, n = _clean_pair(tmp_path, user, assistant_clean)
+    result = _service(chain="none")._verify(str(tmp_path), files, SR, n, "left")
+
+    assert result["checks"][CLEAN_CHECKS[0]] is True
+    assert result["checks"][CLEAN_CHECKS[1]] is True
+    assert result["ok"] is True
+
+
+@pytest.mark.parametrize("assistant_channel", ["left", "right"])
+def test_a_clean_pair_with_the_assistant_channel_changed_by_one_sample_fails_that_check(tmp_path, assistant_channel):
+    user = _alternating(SR, 0.1)
+    assistant_clean = _alternating(SR, 0.05)
+    files, n = _clean_pair(tmp_path, user, assistant_clean, assistant_channel)
+    stereo, _ = sf.read(str(tmp_path / "stereo_2ch_clean.wav"), dtype="int16", always_2d=True)
+    mine = 0 if assistant_channel == "left" else 1
+    stereo[SR // 2, mine] += 1                          # one 16-bit step in the assistant's ear
+    sf.write(str(tmp_path / "stereo_2ch_clean.wav"), stereo, SR, subtype="PCM_16")
+    result = _service(chain="none")._verify(str(tmp_path), files, SR, n, assistant_channel)
+
+    assert result["checks"][CLEAN_CHECKS[0]] is False
+    assert result["checks"][CLEAN_CHECKS[1]] is True
+    assert result["ok"] is False
+
+
+def test_a_clean_pair_with_the_user_channel_changed_fails_the_user_check(tmp_path):
+    user = _alternating(SR, 0.1)
+    assistant_clean = _alternating(SR, 0.05)
+    files, n = _clean_pair(tmp_path, user, assistant_clean)
+    stereo, _ = sf.read(str(tmp_path / "stereo_2ch_clean.wav"), dtype="int16", always_2d=True)
+    stereo[SR // 3, 1] -= 1                             # one 16-bit step in the user's ear
+    sf.write(str(tmp_path / "stereo_2ch_clean.wav"), stereo, SR, subtype="PCM_16")
+    result = _service(chain="none")._verify(str(tmp_path), files, SR, n, "left")
+
+    assert result["checks"][CLEAN_CHECKS[0]] is True
+    assert result["checks"][CLEAN_CHECKS[1]] is False
+    assert result["ok"] is False
+
+
+def test_without_the_clean_files_the_clean_checks_are_not_there(tmp_path):
+    files, n = _pair(tmp_path, _alternating(SR, 0.1), _alternating(SR, 0.2))
+    result = _service(chain="none")._verify(str(tmp_path), files, SR, n, "left")
+
+    assert not any(name in result["checks"] for name in CLEAN_CHECKS)
+
+
+# --- _verify quality: the level step of the user file -----------------------------------
+
+def test_the_user_level_step_is_the_largest_jump_between_50_ms_windows(tmp_path):
+    # 0.5 s at 2048 / 32768 (-24 dBFS), then 0.5 s at 20480 / 32768 (-4 dBFS): a 20 dB step at 0.5 s.
+    user = np.concatenate([_alternating(SR // 2, 2048 / 32768.0), _alternating(SR // 2, 20480 / 32768.0)])
+    files, n = _pair(tmp_path, user, _alternating(SR, 0.2))
+    quality = _service(chain="none")._verify(str(tmp_path), files, SR, n, "left")["quality"]
+
+    assert quality["user_max_rms_step_db"] == pytest.approx(20.0, abs=0.01)
+
+
+def test_the_user_level_step_skips_digital_silence_and_is_none_without_two_levels(tmp_path):
+    # Loud, digital zero, then loud at the same level: the silence is skipped, so the step is 0.
+    # 2400 + 3200 + 2400 samples: whole 50 ms windows (400 samples) on each side of the silence.
+    user = np.concatenate([_alternating(2400, 2048 / 32768.0), np.zeros(3200, dtype=np.float32),
+                           _alternating(2400, 2048 / 32768.0)])
+    files, n = _pair(tmp_path, user, _alternating(SR, 0.2))
+    quality = _service(chain="none")._verify(str(tmp_path), files, SR, n, "left")["quality"]
+    assert quality["user_max_rms_step_db"] == pytest.approx(0.0, abs=0.01)
+
+    silent = tmp_path / "silent"
+    silent.mkdir()
+    files, n = _pair(silent, np.zeros(SR, dtype=np.float32), _alternating(SR, 0.2))
+    quality = _service(chain="none")._verify(str(silent), files, SR, n, "left")["quality"]
+    assert quality["user_max_rms_step_db"] is None

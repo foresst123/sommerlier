@@ -705,6 +705,11 @@ def _item_of(item_dir: str, name: str, base_name: str, safe: str) -> bool:
     return re.fullmatch(re.escape(safe) + r"_\d+s(_b)*", name) is not None
 
 
+def _unique(spans) -> list:
+    """The same (start, end) pairs, each once, in their first order."""
+    return list(dict.fromkeys(spans))
+
+
 def _merge(spans):
     merged = []
     for lo, hi in sorted(spans):
@@ -1965,13 +1970,13 @@ class ConversationExportService:
                 speech_segments, separation_service)
             if self.user_ambience.enabled:
                 left, right, out.ambience = self._user_channel_with_room(
-                    cand, roles, raw, waveform, sample_rate, lo, hi,
+                    finder, cand, roles, raw, waveform, sample_rate, lo, hi,
                     left, right, out.method, speech_segments)
             out.left = fade_edges(left, sample_rate, cfg.fade_ms)
             out.right = fade_edges(right, sample_rate, cfg.fade_ms)
         return out
 
-    def _user_channel_with_room(self, cand: Candidate, roles, raw: np.ndarray, waveform: np.ndarray,
+    def _user_channel_with_room(self, finder, cand: Candidate, roles, raw: np.ndarray, waveform: np.ndarray,
                                 sample_rate: int, lo: int, hi: int, left: np.ndarray,
                                 right: np.ndarray, method, speech_segments):
         """(left, right, info): the user's track rebuilt to keep the room (utils/ambience_bed.py).
@@ -2000,14 +2005,21 @@ class ConversationExportService:
                           if float(s.end) > lo_s and float(s.start) < hi_s]
             spans_of = {who: [(float(s.start), float(s.end)) for s in in_excerpt if s.speaker == who]
                         for who in {roles.user, roles.assistant}}
-            other_spans = spans_of[roles.assistant]
-            third_spans = [(float(s.start), float(s.end)) for s in in_excerpt
-                           if s.speaker not in cand.speakers]
+            # The ASR segments of the excerpt count too: a speaker missing from speech_segments
+            # must still keep the user's channel out of their voice. Only adds unsafe time.
+            asr = [(float(seg.start), float(seg.end), seg.speaker)
+                   for seg in finder.segs[cand.first:cand.last + 1]]
+            other_spans = _unique(spans_of[roles.assistant]
+                                  + [(a, b) for a, b, who in asr if who == roles.assistant])
+            third_spans = _unique([(float(s.start), float(s.end)) for s in in_excerpt
+                                   if s.speaker not in cand.speakers]
+                                  + [(a, b) for a, b, who in asr if who not in cand.speakers])
             bad_spans = [span for span in self._failed_spans(speech_segments, cand)
                          if span[1] > lo_s and span[0] < hi_s]
             overlap_spans = self._crossings(spans_of[roles.assistant], spans_of[roles.user])
             safe = safe_mask(len(raw), sample_rate, lo_s, other_spans, third_spans,
-                             bad_spans, overlap_spans, params)
+                             bad_spans, overlap_spans, params,
+                             tail_ms=params.reverb_tail_max_ms)
             user_is_first = roles.user == cand.speakers[0]
             user_track = _fit(left if user_is_first else right, len(raw))
             user = compose_user_channel(raw, user_track, bed.audio, safe, sample_rate, params)
@@ -2029,17 +2041,18 @@ class ConversationExportService:
         """The recording's quiet gaps, found once for the whole file (shared by the render workers)."""
         from utils.ambience_bed import find_quiet_gaps
         key = (id(speech_segments), id(waveform), int(sample_rate))
+        # The lock is held while the gaps are found (about 1.2 s an hour), so the other render
+        # workers wait for this one result instead of each finding the same gaps again.
         with self._gap_lock:
             hit = self._gap_cache.get(key)
             if hit is not None and hit[0] is speech_segments and hit[1] is waveform:
                 return hit[2]
-        gaps = find_quiet_gaps(spans_all, 0.0, len(waveform) / float(sample_rate),
-                               self.user_ambience, waveform, sample_rate)
-        with self._gap_lock:
+            gaps = find_quiet_gaps(spans_all, 0.0, len(waveform) / float(sample_rate),
+                                   self.user_ambience, waveform, sample_rate)
             # Holds the references the key is made from, so an id cannot be reused while cached.
             self._gap_cache.clear()
             self._gap_cache[key] = (speech_segments, waveform, gaps)
-        return gaps
+            return gaps
 
     @staticmethod
     def _failed_spans(speech_segments, cand: Candidate) -> List[tuple]:
@@ -2242,6 +2255,16 @@ class ConversationExportService:
                 stereo.shape[1] == 2 and np.array_equal(stereo[:, mine], data["assistant"][:, 0]))
             checks["stereo_user_channel_is_user"] = bool(
                 stereo.shape[1] == 2 and np.array_equal(stereo[:, other], data["user"][:, 0]))
+        if "stereo_2ch_clean" in info and "assistant_clean" in info:
+            # The clean pair is what the clean files say it is, bit for bit, like the raw pair above.
+            clean_stereo = data["stereo_2ch_clean"]
+            mine, other = (0, 1) if assistant_channel == "left" else (1, 0)
+            checks["stereo_clean_assistant_channel_is_assistant_clean"] = bool(
+                clean_stereo.shape[1] == 2
+                and np.array_equal(clean_stereo[:, mine], data["assistant_clean"][:, 0]))
+            checks["stereo_clean_user_channel_is_user"] = bool(
+                "user" in data and clean_stereo.shape[1] == 2
+                and np.array_equal(clean_stereo[:, other], data["user"][:, 0]))
         result = {"ok": all(checks.values()), "sample_rate": sample_rate,
                   "num_samples": num_samples,
                   "duration": round(num_samples / float(sample_rate), 6),
@@ -2264,6 +2287,9 @@ class ConversationExportService:
         assistant_floor_dbfs: 10th percentile of the 20 ms frame levels of the whole assistant file. Frames
         of exact zero sit at the -120 dBFS clamp, so once the expander has zeroed the gaps this reads that
         clamp; assistant_zero_frame_share says how many frames that is.
+        user_max_rms_step_db: the largest jump in level (dB) between two consecutive 50 ms windows of the
+        user file. Windows of exact silence are skipped first, so a jump across a silent stretch counts
+        as the two levels either side of it. None when fewer than two windows are not silent.
         """
         user_zero = np.concatenate([[False], np.asarray(user) == 0, [False]]).astype(np.int8)
         edges = np.flatnonzero(np.diff(user_zero))
@@ -2278,9 +2304,20 @@ class ConversationExportService:
             db = 20.0 * np.log10(np.maximum(rms, 1e-6))
             floor = round(float(np.percentile(db, 10)), 2)
             zero_share = round(float(np.mean(rms == 0)), 4)
+        step = None
+        win = max(1, int(round(0.05 * sample_rate)))
+        m = len(user) // win
+        if m:
+            u = np.asarray(user, dtype=np.float64)[:m * win] / 32768.0
+            urms = np.sqrt(np.mean(u.reshape(m, win) ** 2, axis=1))
+            urms = urms[urms > 0]                    # absolute silence is skipped, not a level
+            if urms.size >= 2:
+                udb = 20.0 * np.log10(urms)
+                step = round(float(np.max(np.abs(np.diff(udb)))), 2)
         return {"longest_zero_run_s": round(longest / float(sample_rate), 6),
                 "assistant_floor_dbfs": floor,
-                "assistant_zero_frame_share": zero_share}
+                "assistant_zero_frame_share": zero_share,
+                "user_max_rms_step_db": step}
 
     def _clean_assistant(self, directory: str, assistant, user, sample_rate: int):
         """Filter the assistant track with assistant_clean_chain and write the clean pair.
