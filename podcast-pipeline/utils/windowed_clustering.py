@@ -200,9 +200,10 @@ def make_vbx_cluster_fn(cluster_vbx: Callable, xvec_tf: Callable, plda_tf: Calla
     PLDA transform on the raw ones, as in pyannote.
 
     VBx does not enforce cannot-link: run_piece's per-window Hungarian reassignment does.
-    If VBx keeps more than max_k speakers, the piece falls back to constrained_ahc with the cosine
+    If VBx keeps fewer than min_k or more than max_k speakers, the piece falls back to constrained_ahc with the cosine
     threshold ahc_threshold**2 / 2 (for unit vectors, euclidean d means cosine distance d**2 / 2).
-    Each call sets cluster_fn.last_info = {"vbx_fallback": bool}, which run_piece copies into its stats.
+    Each call sets cluster_fn.last_info (vbx_fallback, embeddings, ahc_init_clusters, vbx_clusters and the largest
+    VBx priors), which run_piece copies into its stats: it says why a piece ended with one speaker.
     """
     phi = np.asarray(plda_psi, dtype=float)[:lda_dim]
 
@@ -210,7 +211,7 @@ def make_vbx_cluster_fn(cluster_vbx: Callable, xvec_tf: Callable, plda_tf: Calla
         x = np.asarray(x, dtype=float)
         n = len(x)
         if n < 2:
-            cluster_fn.last_info = {"vbx_fallback": False}
+            cluster_fn.last_info = {"vbx_fallback": False, "embeddings": n, "vbx_clusters": min(n, 1)}
             return np.zeros(n, dtype=int)
         normed = _unit(x)
         ahc = fcluster(linkage(normed, method="centroid", metric="euclidean"), ahc_threshold,
@@ -225,10 +226,14 @@ def make_vbx_cluster_fn(cluster_vbx: Callable, xvec_tf: Callable, plda_tf: Calla
             keep = np.array([int(np.argmax(sp))])
         hard = keep[np.argmax(q[:, keep], axis=1)]
         _, labels = np.unique(hard, return_inverse=True)
-        if int(labels.max()) + 1 > max_k:
-            cluster_fn.last_info = {"vbx_fallback": True}
+        k_vbx = int(labels.max()) + 1
+        info = {"vbx_fallback": False, "embeddings": n, "ahc_init_clusters": int(ahc_init.max()) + 1,
+                "vbx_clusters": k_vbx, "vbx_priors_top": [round(float(v), 4) for v in np.sort(sp)[::-1][:5]]}
+        if k_vbx > max_k or k_vbx < min_k:
+            info["vbx_fallback"] = True
+            cluster_fn.last_info = info
             return constrained_ahc(normed, win_of, ahc_threshold ** 2 / 2.0, min_k, max_k)
-        cluster_fn.last_info = {"vbx_fallback": False}
+        cluster_fn.last_info = info
         return labels.astype(int)
 
     cluster_fn.last_info = {}
@@ -429,7 +434,8 @@ def run_piece(duration: float, prob_fn: ProbFn, embed_fn: EmbedFn, *,
         labels = np.asarray(cluster_fn(x, win_of, min_speakers, max_speakers, **extra), dtype=int)
         if labels.shape != (len(item_keys),):
             raise ValueError("cluster_fn must return one label per embedded label")
-        cluster_stats = {"vbx_fallback": bool(getattr(cluster_fn, "last_info", {}).get("vbx_fallback", False))}
+        cluster_stats = dict(getattr(cluster_fn, "last_info", None) or {})
+        cluster_stats["vbx_fallback"] = bool(cluster_stats.get("vbx_fallback", False))
     if len(item_keys):
         k0 = int(labels.max()) + 1
         cent = _centroids(x, labels, k0)

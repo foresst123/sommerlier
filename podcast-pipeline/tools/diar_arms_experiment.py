@@ -362,7 +362,8 @@ def run_windowed_arm(arm: str, sample_dir: Path, cfg: dict, runner: Runner) -> P
         code = runner(cmd1, env)
         if code != 0 or not (probs / "plan.json").is_file():
             raise RuntimeError(f"arm {ARMS[arm]} stage 1 (probabilities) failed (exit {code}), see {run_dir}")
-    cmd2 = [cfg["python"], VBX_STAGE_SCRIPT, "--audio", chunk, "--probs-dir", str(probs), "--out", str(result)]
+    cmd2 = [cfg["python"], VBX_STAGE_SCRIPT, "--audio", chunk, "--probs-dir", str(probs), "--out", str(result),
+            "--min-speakers", str(cfg["windowed_min_speakers"])]
     if arm == "G":
         cmd2 += ["--ahc-threshold", str(cfg["vbx_ahc_threshold"]), "--fa", str(cfg["vbx_fa"]),
                  "--fb", str(cfg["vbx_fb"])]
@@ -518,6 +519,8 @@ def main(argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) 
                     help="interpreter of the Nemotron env for arms F and G (default: NEMOTRON_PYTHON or worker_envs)")
     ap.add_argument("--vbx-ahc-threshold", type=float, default=VBX_AHC_THRESHOLD,
                     help="arm G: euclidean cut of the AHC init before VBx (UNVERIFIED default)")
+    ap.add_argument("--windowed-min-speakers", type=int, default=1,
+                    help="arms F and G: at least this many speakers per piece (G falls back to AHC below it)")
     ap.add_argument("--vbx-fa", type=float, default=VBX_FA, help="arm G: VBx Fa (UNVERIFIED default)")
     ap.add_argument("--vbx-fb", type=float, default=VBX_FB, help="arm G: VBx Fb (UNVERIFIED default)")
     ap.add_argument("--plda-dir", help="arm G: folder with xvec_transform.npz and plda.npz (default: HF cache)")
@@ -543,7 +546,7 @@ def main(argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) 
     cfg = {"audio_dir": a.audio_dir, "final": a.final, "out": str(out), "gpu": a.gpu, "env": a.env,
            "run": run, "k_min_clean": a.k_min_clean, "reuse": a.reuse, "config": a.config, "python": a.python,
            "windowed_python": windowed_python, "windowed_piece_s": a.windowed_piece_s,
-           "windowed_hop_s": a.windowed_hop_s, "vbx_ahc_threshold": a.vbx_ahc_threshold, "vbx_fa": a.vbx_fa,
+           "windowed_hop_s": a.windowed_hop_s, "windowed_min_speakers": a.windowed_min_speakers, "vbx_ahc_threshold": a.vbx_ahc_threshold, "vbx_fa": a.vbx_fa,
            "vbx_fb": a.vbx_fb, "plda_dir": a.plda_dir}
     summaries = []
     for i, sample in enumerate(load_samples(a.samples), 1):

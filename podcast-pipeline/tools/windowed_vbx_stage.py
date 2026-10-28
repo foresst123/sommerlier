@@ -168,6 +168,8 @@ def main(argv=None):
     ap.add_argument("--embedder", choices=("pyannote", "wespeaker"),
                     help="default: pyannote for vbx, wespeaker (ResNet-293 ONNX) for ahc")
     ap.add_argument("--cosine-threshold", type=float, default=0.5, help="cosine cut of the AHC of --clustering ahc")
+    ap.add_argument("--min-speakers", type=int, default=1,
+                    help="clusters per piece at least; below it VBx falls back to AHC (arm F's AHC stops at it too)")
     ap.add_argument("--max-embed-s", type=float, default=6.0,
                     help="clean seconds embedded per (window, label); 0 = all of it")
     ap.add_argument("--plda-dir", help="folder with xvec_transform.npz and plda.npz (default: HF cache)")
@@ -272,7 +274,7 @@ def main(argv=None):
     result = wc.run_file(duration, None, make_prob_fn=make_prob_fn, make_embed_fn=make_embed_fn,
                          pieces=pieces, piece_s=plan["params"]["piece_s"], window_s=plan["params"]["window_s"],
                          hop_s=plan["params"]["hop_s"], frame_s=float(plan["frame_s"]), cluster_fn=cluster_fn,
-                         max_embed_s=a.max_embed_s,
+                         max_embed_s=a.max_embed_s, min_speakers=a.min_speakers,
                          **({} if a.clustering == "vbx" else {"ahc_threshold": a.cosine_threshold}))
     params["embedding_padded_crops"] = counts["padded"]
     params["embedding_failed_crops"] = progress["failed"]
@@ -281,6 +283,8 @@ def main(argv=None):
     with open(a.out, "w", encoding="utf-8") as fh:
         json.dump({"segments": result["segments"], "pieces": result["pieces"], "frame_s": float(plan["frame_s"]),
                    "params": params}, fh, ensure_ascii=False, indent=1)
+    print(json.dumps({"status": "pieces", "clusters": [p["clusters"] for p in result["pieces"]],
+                      "stats": [p["stats"] for p in result["pieces"]]}), flush=True)
     print(json.dumps({"status": "done", "segments": len(result["segments"]), "pieces": len(result["pieces"]),
                       "vbx_fallback_pieces": sum(1 for p in result["pieces"] if p["stats"].get("vbx_fallback"))}),
           flush=True)

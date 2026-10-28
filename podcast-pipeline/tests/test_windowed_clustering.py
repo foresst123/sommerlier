@@ -306,7 +306,7 @@ def test_vbx_falls_back_to_constrained_ahc_above_max_k():
     xtf, ptf = _identity_tf()
     fn = W.make_vbx_cluster_fn(three_speakers, xtf, ptf, np.ones(4), lda_dim=4, ahc_threshold=0.6)
     labels = fn(x, win_of, 1, 2)
-    assert fn.last_info == {"vbx_fallback": True}
+    assert fn.last_info["vbx_fallback"] is True
     expected = W.constrained_ahc(x, win_of, 0.6 ** 2 / 2.0, 1, 2)     # euclid 0.6 -> cosine 0.18
     assert np.array_equal(labels, expected)
     assert len(set(labels.tolist())) <= 2
@@ -318,7 +318,7 @@ def test_vbx_with_fewer_than_two_embeddings_puts_everything_in_cluster_zero():
     fn = W.make_vbx_cluster_fn(_oracle_vbx(calls), xtf, ptf, np.ones(3), lda_dim=3)
     assert fn(np.array([[1.0, 0.0, 0.0]]), np.array([0]), 1, 8).tolist() == [0]
     assert fn(np.zeros((0, 3)), np.zeros(0, dtype=int), 1, 8).size == 0
-    assert calls == [] and fn.last_info == {"vbx_fallback": False}
+    assert calls == [] and fn.last_info["vbx_fallback"] is False
 
 
 def test_save_and_load_piece_probs_round_trip(tmp_path):
@@ -381,7 +381,7 @@ def test_reference_vbx_separates_two_speakers_through_make_vbx_cluster_fn():
     plda_tf = lambda x0, lda_dim=dim: x0[:, :lda_dim]         # noqa: E731
     fn = W.make_vbx_cluster_fn(vbx.cluster_vbx, xvec_tf, plda_tf, np.ones(dim), lda_dim=32)
     labels = fn(X, np.arange(n) // 2, 1, 8)
-    assert fn.last_info == {"vbx_fallback": False}
+    assert fn.last_info["vbx_fallback"] is False
     assert len(set(labels.tolist())) == 2
     assert len(set(zip(labels.tolist(), speakers.tolist()))) == 2     # each label is one speaker
 
@@ -517,3 +517,22 @@ def test_short_crops_are_dropped_and_lengths_are_quantised():
     for t0, t1 in seen:
         d = t1 - t0
         assert d >= 0.5 - 1e-6 and abs(d / 0.25 - round(d / 0.25)) < 1e-6
+
+
+def test_vbx_that_collapses_to_one_speaker_falls_back_when_min_speakers_is_two():
+    # The failure seen on real audio: VBx merges everything into one cluster. With a floor of two speakers the
+    # piece falls back to constrained AHC, and last_info says what VBx had done.
+    def collapsing_vbx(ahc_init, fea, phi, Fa, Fb, maxIters, init_smoothing):
+        q = np.zeros((len(fea), 3))
+        q[:, 0] = 1.0
+        return q, np.array([1.0, 0.0, 0.0])
+
+    fn = W.make_vbx_cluster_fn(collapsing_vbx, lambda x: x, lambda x, lda_dim: x[:, :lda_dim], np.ones(4), lda_dim=4)
+    x = np.array([[1.0, 0, 0, 0], [0.98, 0.2, 0, 0], [0, 1.0, 0, 0], [0.1, 0.99, 0, 0]])
+    win_of = np.array([0, 1, 0, 1])
+    one = fn(x, win_of, 1, 8)
+    assert one.max() == 0 and fn.last_info["vbx_clusters"] == 1 and fn.last_info["vbx_fallback"] is False
+    two = fn(x, win_of, 2, 8)
+    assert two.max() == 1 and fn.last_info["vbx_fallback"] is True
+    assert fn.last_info["vbx_clusters"] == 1 and fn.last_info["embeddings"] == 4
+    assert two[0] == two[1] and two[2] == two[3] and two[0] != two[2]
