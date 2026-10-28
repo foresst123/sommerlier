@@ -266,3 +266,17 @@ def test_failed_arm_f_is_recorded_and_the_run_goes_on(tmp_path):
                  "--windowed-python", sys.executable], runner=FakeWindowed(fail=True))
     assert rc == 0
     assert "failed (exit 1)" in (out / "index.html").read_text(encoding="utf-8")
+
+
+def test_main_py_runs_without_a_terminal_on_stdin(monkeypatch):
+    # main.py asks for folders at a prompt when stdin is a terminal; the arms must not wait on it.
+    import subprocess
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(X.subprocess, "run", fake_run)
+    assert X.run_main(["x"], {}) == 0
+    assert seen["stdin"] is subprocess.DEVNULL

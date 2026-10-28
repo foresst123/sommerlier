@@ -307,7 +307,8 @@ def arm_settings(arm: str, k: Optional[int]) -> Tuple[str, dict]:
 
 
 def run_main(cmd: List[str], env: dict) -> int:
-    return subprocess.run(cmd, cwd=ROOT, env=env, check=False).returncode
+    # No terminal on stdin: main.py then takes its folders from config instead of asking at a prompt.
+    return subprocess.run(cmd, cwd=ROOT, env=env, check=False, stdin=subprocess.DEVNULL).returncode
 
 
 def run_arm(sample_dir: Path, arm: str, values: dict, backend: str, cfg: dict, runner: Runner) -> Path:

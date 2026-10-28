@@ -31,6 +31,7 @@ SR = 16000
 def _load(name, rel):
     spec = importlib.util.spec_from_file_location(name, os.path.join(PIPELINE, rel))
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module      # @dataclass looks its module up here while the class body runs
     spec.loader.exec_module(module)
     return module
 

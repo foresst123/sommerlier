@@ -179,3 +179,15 @@ def test_silence_gives_no_segments():
 def test_postprocessing_matches_the_nemotron_segments_values():
     from utils.nemotron_segments import POSTPROCESSING_BASE
     assert W.POSTPROCESSING == POSTPROCESSING_BASE
+
+
+def test_run_script_loads_the_module_by_path():
+    # The NeMo-side script loads modules by path; a dataclass in the module fails to build
+    # unless the module is registered in sys.modules first.
+    from tools import windowed_nemotron_run as script
+    mod = script._load("windowed_clustering_by_path", "utils/windowed_clustering.py")
+    try:
+        assert callable(mod.run_piece)
+        assert mod.Piece(0.0, 1.0, 0.0, 1.0).audio_duration == 1.0
+    finally:
+        sys.modules.pop("windowed_clustering_by_path", None)
