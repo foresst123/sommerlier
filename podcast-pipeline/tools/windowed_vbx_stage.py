@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""Arm G, stage 2: VBx global clustering of the windowed Nemotron probabilities. Runs in the `som` env.
+"""Arms F and G, stage 2: global clustering of the windowed Nemotron probabilities. Runs in the `som` env.
 
     <som python> tools/windowed_vbx_stage.py --audio chunk.wav --probs-dir DIR --out segments.json \
+        [--clustering vbx|ahc] [--embedder pyannote|wespeaker] [--max-embed-s 6] \
         [--plda-dir DIR] [--embedding-model pyannote/wespeaker-voxceleb-resnet34-LM] [--ahc-threshold 0.6] \
         [--fa 0.07] [--fb 0.8] [--lda-dim 128] [--max-iters 20] [--init-smoothing 7.0] [--device cuda:0]
+
+Arm G is the default (--clustering vbx, --embedder pyannote). Arm F is --clustering ahc --embedder wespeaker:
+the constrained AHC of utils/windowed_clustering and the repo's WeSpeaker ResNet-293 ONNX model
+(models/wespeaker_embedding.py), which runs on the GPU here; in the Nemotron env onnxruntime cannot load CUDA 13
+and falls back to the CPU. VBx needs the ResNet34 embedder its PLDA was trained for, so vbx with wespeaker is refused.
 
 Reads DIR/plan.json and DIR/piece_NNN.npz written by tools/windowed_nemotron_run.py --dump-probs (stage 1, NeMo
 env). For each piece it runs utils/windowed_clustering.run_file with make_vbx_cluster_fn: the speaker embeddings
@@ -66,6 +72,22 @@ def find_plda_dir(explicit: str | None = None) -> str:
     if not found:
         raise FileNotFoundError(f"no PLDA folder with {PLDA_FILES} under {hf_hub_root()}; pass --plda-dir")
     return found[0]
+
+
+def build_wespeaker(device: str):
+    """The repo's WeSpeaker ResNet-293 ONNX embedder (arm F). Returns (embed_clip, providers)."""
+    from models.wespeaker_embedding import WeSpeakerONNXEmbedder
+    emb = WeSpeakerONNXEmbedder(device=device)
+    providers = emb.active_providers()
+    if str(device).startswith("cuda") and "CUDAExecutionProvider" not in providers:
+        print(f"WARNING: WeSpeaker has no CUDA provider here, providers={providers}: it runs on the CPU",
+              file=sys.stderr, flush=True)
+
+    def embed_clip(clip):
+        out = emb.embed(np.asarray(clip, dtype=np.float32), SR)
+        return np.asarray(out.detach().cpu().numpy() if hasattr(out, "detach") else out, dtype=float).reshape(-1)
+
+    return embed_clip, providers
 
 
 def import_vbx():
@@ -141,6 +163,13 @@ def main(argv=None):
     ap.add_argument("--audio", required=True, help="16 kHz mono WAV, the same chunk stage 1 read")
     ap.add_argument("--probs-dir", required=True, help="folder written by windowed_nemotron_run.py --dump-probs")
     ap.add_argument("--out", required=True, help="segments.json to write")
+    ap.add_argument("--clustering", choices=("vbx", "ahc"), default="vbx",
+                    help="vbx = arm G, ahc = arm F (constrained AHC at --cosine-threshold)")
+    ap.add_argument("--embedder", choices=("pyannote", "wespeaker"),
+                    help="default: pyannote for vbx, wespeaker (ResNet-293 ONNX) for ahc")
+    ap.add_argument("--cosine-threshold", type=float, default=0.5, help="cosine cut of the AHC of --clustering ahc")
+    ap.add_argument("--max-embed-s", type=float, default=6.0,
+                    help="clean seconds embedded per (window, label); 0 = all of it")
     ap.add_argument("--plda-dir", help="folder with xvec_transform.npz and plda.npz (default: HF cache)")
     ap.add_argument("--embedding-model", default=EMBEDDING_REPO,
                     help="HF repo (pytorch_model.bin) or a local .bin file; the path must name WeSpeaker")
@@ -160,21 +189,40 @@ def main(argv=None):
         raise SystemExit(f"windowed_vbx_stage needs torch in this env (som): {exc}")
 
     device = a.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
-    cluster_vbx, vbx_setup = import_vbx()
-    plda_dir = find_plda_dir(a.plda_dir)
-    xvec_tf, plda_tf, plda_psi = vbx_setup(plda_dir)
+    embedder = a.embedder or ("pyannote" if a.clustering == "vbx" else "wespeaker")
+    if a.clustering == "vbx" and embedder != "pyannote":
+        raise SystemExit("--clustering vbx needs --embedder pyannote: the PLDA was trained for WeSpeaker ResNet34")
     plan, pieces, tables = load_plan(a.probs_dir)
-    params = {"Fa": a.fa, "Fb": a.fb, "ahc_threshold": a.ahc_threshold, "lda_dim": a.lda_dim,
-              "max_iters": a.max_iters, "init_smoothing": a.init_smoothing, "plda_dir": plda_dir,
-              "embedding_model": a.embedding_model, "device": device,
+    params = {"clustering": a.clustering, "embedder": embedder, "max_embed_s": a.max_embed_s, "device": device,
               "window_s": plan["params"]["window_s"], "hop_s": plan["params"]["hop_s"],
               "piece_s": plan["params"]["piece_s"]}
-    print(json.dumps({"status": "start", "plda_dir": plda_dir, "plda_candidates": plda_candidates(),
-                      "pieces": len(pieces), "params": params}, ensure_ascii=False), flush=True)
+    cluster_fn = None
+    if a.clustering == "vbx":
+        cluster_vbx, vbx_setup = import_vbx()
+        plda_dir = find_plda_dir(a.plda_dir)
+        xvec_tf, plda_tf, plda_psi = vbx_setup(plda_dir)
+        params.update({"Fa": a.fa, "Fb": a.fb, "ahc_threshold": a.ahc_threshold, "lda_dim": a.lda_dim,
+                       "max_iters": a.max_iters, "init_smoothing": a.init_smoothing, "plda_dir": plda_dir,
+                       "embedding_model": a.embedding_model})
+        cluster_fn = wc.make_vbx_cluster_fn(cluster_vbx, xvec_tf, plda_tf, plda_psi, ahc_threshold=a.ahc_threshold,
+                                            Fa=a.fa, Fb=a.fb, lda_dim=a.lda_dim, max_iters=a.max_iters,
+                                            init_smoothing=a.init_smoothing)
+        start = {"plda_dir": plda_dir, "plda_candidates": plda_candidates()}
+    else:
+        params["cosine_threshold"] = a.cosine_threshold
+        start = {}
+    print(json.dumps({"status": "start", "pieces": len(pieces), "params": params, **start},
+                     ensure_ascii=False), flush=True)
 
-    emb, _torch, emb_path = build_embedder(a.embedding_model, device)
-    params["embedding_path"] = emb_path
-    embed_clip, counts = make_clip_embedder(emb, torch, device)
+    counts = {"padded": 0}
+    if embedder == "pyannote":
+        emb, _torch, emb_path = build_embedder(a.embedding_model, device)
+        params["embedding_path"] = emb_path
+        embed_clip, counts = make_clip_embedder(emb, torch, device)
+    else:
+        embed_clip, providers = build_wespeaker(device)
+        params["onnx_providers"] = providers
+        print(json.dumps({"status": "embedder", "wespeaker_providers": providers}), flush=True)
 
     wave, sr = sf.read(a.audio, dtype="float32", always_2d=False)
     if getattr(wave, "ndim", 1) == 2:
@@ -195,19 +243,26 @@ def main(argv=None):
             return table[(float(s), float(e))]
         return prob_fn
 
+    progress = {"crops": 0, "t0": time.time()}
+
     def make_embed_fn(piece):
         def embed_fn(spans):
-            rows = [embed_clip(wave[idx(piece.audio_start + s): idx(piece.audio_start + e)]) for s, e in spans]
+            rows = []
+            for s, e in spans:
+                rows.append(embed_clip(wave[idx(piece.audio_start + s): idx(piece.audio_start + e)]))
+                progress["crops"] += 1
+                if progress["crops"] % 50 == 0:
+                    print(json.dumps({"status": "embedding", "crops": progress["crops"],
+                                      "seconds": round(time.time() - progress["t0"], 1)}), flush=True)
             return np.stack(rows)
         return embed_fn
 
-    cluster_fn = wc.make_vbx_cluster_fn(cluster_vbx, xvec_tf, plda_tf, plda_psi, ahc_threshold=a.ahc_threshold,
-                                        Fa=a.fa, Fb=a.fb, lda_dim=a.lda_dim, max_iters=a.max_iters,
-                                        init_smoothing=a.init_smoothing)
     t0 = time.time()
     result = wc.run_file(duration, None, make_prob_fn=make_prob_fn, make_embed_fn=make_embed_fn,
                          pieces=pieces, piece_s=plan["params"]["piece_s"], window_s=plan["params"]["window_s"],
-                         hop_s=plan["params"]["hop_s"], frame_s=float(plan["frame_s"]), cluster_fn=cluster_fn)
+                         hop_s=plan["params"]["hop_s"], frame_s=float(plan["frame_s"]), cluster_fn=cluster_fn,
+                         max_embed_s=a.max_embed_s,
+                         **({} if a.clustering == "vbx" else {"ahc_threshold": a.cosine_threshold}))
     params["embedding_padded_crops"] = counts["padded"]
     params["seconds"] = round(time.time() - t0, 1)
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)

@@ -324,8 +324,12 @@ def run_piece(duration: float, prob_fn: ProbFn, embed_fn: EmbedFn, *,
               ahc_threshold: float = 0.5, min_speakers: int = 1, max_speakers: int = 8,
               reassign_iters: int = 2, median_frames: int = 5,
               post: Optional[dict] = None,
-              cluster_fn: Optional[Callable] = None) -> PieceResult:
+              cluster_fn: Optional[Callable] = None,
+              max_embed_s: float = 6.0) -> PieceResult:
     """Cluster one piece's windows into global speakers and binarise them into segments.
+
+    max_embed_s caps the clean speech embedded per (window, label): the longest crops are kept until
+    that many seconds are reached (0 means no cap). One embedding needs a few seconds, not all of them.
 
     cluster_fn(x, win_of, min_k, max_k) -> labels replaces constrained_ahc when given (arm G uses VBx).
     The Hungarian reassignment below runs either way, so it enforces cannot-link for any cluster_fn.
@@ -354,9 +358,18 @@ def run_piece(duration: float, prob_fn: ProbFn, embed_fn: EmbedFn, *,
             runs = _runs(clean)
             if sum(b - a for a, b in runs) * frame_s < min_clean_s:
                 continue
-            for a, b in runs:
-                for t0, t1 in _split_run((rec.f0 + a) * frame_s, (rec.f0 + b) * frame_s):
-                    requests.append((w, j, t0, t1))
+            crops = [crop for a, b in runs
+                     for crop in _split_run((rec.f0 + a) * frame_s, (rec.f0 + b) * frame_s)]
+            if max_embed_s > 0:
+                kept, total = [], 0.0
+                for crop in sorted(crops, key=lambda c: c[0] - c[1]):    # longest first
+                    if total >= max_embed_s:
+                        break
+                    kept.append(crop)
+                    total += crop[1] - crop[0]
+                crops = sorted(kept)
+            for t0, t1 in crops:
+                requests.append((w, j, t0, t1))
 
     emb: dict[tuple[int, int], np.ndarray] = {}
     emb_raw: dict[tuple[int, int], np.ndarray] = {}     # mean of the embedder's own vectors, norm kept

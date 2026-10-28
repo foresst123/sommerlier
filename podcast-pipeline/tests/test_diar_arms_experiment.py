@@ -215,57 +215,9 @@ def test_failed_arm_does_not_stop_others(tmp_path):
     assert "no K" in index
 
 
-class FakeWindowed:
-    """Stands in for tools/windowed_nemotron_run.py: writes its --out file, or fails."""
-
-    def __init__(self, fail=False):
-        self.fail = fail
-        self.calls = []
-
-    def __call__(self, cmd, env):
-        self.calls.append(cmd)
-        if self.fail:
-            return 1
-        out = Path(cmd[cmd.index("--out") + 1])
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps({"segments": [
-            {"start": 49.0, "end": 52.0, "speaker": "SPEAKER_00"},
-            {"start": 60.0, "end": 66.0, "speaker": "SPEAKER_01"}]}), encoding="utf-8")
-        return 0
-
-
 def test_arm_f_is_listed_but_not_a_default_arm():
     assert X.ARMS["F"] == "nemotron_windowed" and "F" in X.ARM_ORDER
     assert "F" not in X.DEFAULT_ARMS.split(",")
-
-
-def test_arm_f_runs_the_windowed_script_and_needs_no_k(tmp_path):
-    src, sp = _make_samples(tmp_path)
-    out = tmp_path / "out"
-    fake = FakeWindowed()
-    rc = X.main(["--audio-dir", str(src), "--samples", str(sp), "--out", str(out), "--only-arms", "F",
-                 "--windowed-python", sys.executable, "--windowed-piece-s", "200", "--windowed-hop-s", "5"],
-                runner=fake)
-    assert rc == 0
-    assert len(fake.calls) == 2                                   # one run per sample
-    cmd = fake.calls[0]
-    assert cmd[1] == X.WINDOWED_SCRIPT
-    assert cmd[cmd.index("--piece-s") + 1] == "200.0" and cmd[cmd.index("--hop-s") + 1] == "5.0"
-    sdir = sorted(p for p in out.iterdir() if p.is_dir())[0]
-    seg = json.loads((sdir / "segments_nemotron_windowed.json").read_text())["segments"]
-    assert [r["speaker"] for r in seg] == ["SPEAKER_00", "SPEAKER_01"]
-    assert seg[0]["start"] == 0.0 and seg[0]["end"] == 2.0       # cropped to the clip, shifted to 0
-    assert not (sdir / "segments_nemotron.json").exists()
-    assert "nemotron_windowed" in (out / "index.html").read_text(encoding="utf-8")
-
-
-def test_failed_arm_f_is_recorded_and_the_run_goes_on(tmp_path):
-    src, sp = _make_samples(tmp_path)
-    out = tmp_path / "out"
-    rc = X.main(["--audio-dir", str(src), "--samples", str(sp), "--out", str(out), "--only-arms", "F",
-                 "--windowed-python", sys.executable], runner=FakeWindowed(fail=True))
-    assert rc == 0
-    assert "failed (exit 1)" in (out / "index.html").read_text(encoding="utf-8")
 
 
 class FakeWindowedVbx:
@@ -377,3 +329,36 @@ def test_main_py_runs_without_a_terminal_on_stdin(monkeypatch):
     monkeypatch.setattr(X.subprocess, "run", fake_run)
     assert X.run_main(["x"], {}) == 0
     assert seen["stdin"] is subprocess.DEVNULL
+
+
+def test_arm_f_runs_dump_then_the_ahc_stage_with_the_onnx_embedder(tmp_path):
+    src, sp = _make_samples(tmp_path)
+    out = tmp_path / "out"
+    fake = FakeWindowedVbx()
+    rc = X.main(["--audio-dir", str(src), "--samples", str(sp), "--out", str(out), "--only-arms", "F",
+                 "--windowed-python", sys.executable, "--python", sys.executable,
+                 "--windowed-piece-s", "200", "--windowed-hop-s", "5"], runner=fake)
+    assert rc == 0
+    assert len(fake.calls) == 4                                   # two stages per sample
+    dump, stage2 = fake.calls[0:2]
+    assert dump[1] == X.WINDOWED_SCRIPT and "--dump-probs" in dump
+    assert dump[dump.index("--piece-s") + 1] == "200.0" and dump[dump.index("--hop-s") + 1] == "5.0"
+    assert stage2[1] == X.VBX_STAGE_SCRIPT
+    assert stage2[stage2.index("--clustering") + 1] == "ahc"
+    assert stage2[stage2.index("--embedder") + 1] == "wespeaker"
+    assert "--fa" not in stage2 and "--plda-dir" not in stage2     # the VBx flags are arm G's
+    sdir = sorted(p for p in out.iterdir() if p.is_dir())[0]
+    seg = json.loads((sdir / "segments_nemotron_windowed.json").read_text())["segments"]
+    assert [r["speaker"] for r in seg] == ["SPEAKER_00", "SPEAKER_01"]
+    assert seg[0]["start"] == 0.0 and seg[0]["end"] == 2.0       # cropped to the clip, shifted to 0
+    assert "nemotron_windowed" in (out / "index.html").read_text(encoding="utf-8")
+
+
+def test_failed_arm_f_is_recorded_and_the_run_goes_on(tmp_path):
+    src, sp = _make_samples(tmp_path)
+    out = tmp_path / "out"
+    rc = X.main(["--audio-dir", str(src), "--samples", str(sp), "--out", str(out), "--only-arms", "F",
+                 "--windowed-python", sys.executable, "--python", sys.executable],
+                runner=FakeWindowedVbx(fail_stage=2))
+    assert rc == 0
+    assert "stage 2 (AHC) failed (exit 1)" in (out / "index.html").read_text(encoding="utf-8")

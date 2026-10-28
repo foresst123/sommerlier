@@ -454,3 +454,22 @@ def test_run_piece_passes_raw_only_to_a_cluster_fn_that_wants_it():
     assert calls[0] == ("plain", None)
     assert calls[1][0] == "wants" and calls[1][1] is not None
     assert np.allclose(np.linalg.norm(calls[1][1], axis=1), 5.0)     # raw norm kept
+
+
+def test_max_embed_s_caps_the_clean_seconds_embedded_per_window_label():
+    spans_seen = []
+
+    def prob_fn(s, e):
+        n = int(round((e - s) / FS))
+        return np.full((n, 1), 0.9)             # one label, clean speech through the whole window
+
+    def embed_fn(spans):
+        spans_seen.append(list(spans))
+        return np.tile([[3.0, 0.0]], (len(spans), 1))
+
+    W.run_piece(30.0, prob_fn, embed_fn, max_embed_s=6.0)
+    per_window = len(spans_seen[0])
+    assert sum(t1 - t0 for t0, t1 in spans_seen[0]) <= 6.0 + 3.0 + 1e-6 and per_window >= 2
+    spans_seen.clear()
+    W.run_piece(30.0, prob_fn, embed_fn, max_embed_s=0.0)       # 0 = no cap
+    assert len(spans_seen[0]) > per_window

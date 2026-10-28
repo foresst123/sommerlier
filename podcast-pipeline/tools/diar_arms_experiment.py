@@ -14,13 +14,12 @@ Per sample (a conversation clip of about 40 s inside a long source recording):
   3. arm B, DiariZen with its defaults. Arm C, DiariZen with min = max = K. Arm D, DiariZen with min 1, max K.
   4. arm E (--fusion), B's boundaries with labels renamed to A's labels by greedy one-to-one overlap.
      E is built from B, so it also runs A and B. C and D need A's K, so they run A too.
-  4b. arm F (--only-arms F, not in the default set), nemotron_windowed: tools/windowed_nemotron_run.py in the
-     Nemotron environment (--windowed-python, else NEMOTRON_PYTHON / worker_envs). Silero pieces of about
-     --windowed-piece-s seconds with 30 s overlap, 30 s Nemotron windows every --windowed-hop-s seconds, per-frame
-     probabilities merged by utils/windowed_clustering.run_file (global clustering with cannot-link, DiariZen-style
-     frame averaging). F needs no K. UNVERIFIED on GPU: not run on a real model yet.
-  4c. arm G (--only-arms G, not in the default set), nemotron_windowed_vbx: the same windows as F, in two
-     processes. Stage 1 (--windowed-python) runs tools/windowed_nemotron_run.py --dump-probs into runs/<arm>/probs.
+  4b. arm F (--only-arms F, not in the default set), nemotron_windowed: the same two steps as G, but the clustering
+     is the constrained AHC of utils/windowed_clustering and the embeddings come from the repo's WeSpeaker ResNet-293
+     ONNX model, run on the GPU in the som env (the Nemotron env cannot: onnxruntime needs CUDA 13 there). Silero
+     pieces of about --windowed-piece-s seconds with 30 s overlap, 30 s Nemotron windows every --windowed-hop-s
+     seconds, per-frame probabilities merged DiariZen style. F needs no K. UNVERIFIED on GPU.
+  4c. arm G (--only-arms G, not in the default set), nemotron_windowed_vbx: the same windows as F. Stage 1 (--windowed-python) runs tools/windowed_nemotron_run.py --dump-probs into runs/<arm>/probs.
      Stage 2 (--python, the som env) runs tools/windowed_vbx_stage.py: WeSpeaker ResNet34 embeddings, then VBx
      with the DiariZen PLDA (--plda-dir, else the HF cache) and the per-window Hungarian reassignment.
      --vbx-ahc-threshold, --vbx-fa, --vbx-fb go to stage 2. G needs no K. UNVERIFIED on GPU.
@@ -338,25 +337,16 @@ def run_arm(sample_dir: Path, arm: str, values: dict, backend: str, cfg: dict, r
     return result
 
 
-def run_windowed(sample_dir: Path, cfg: dict, runner: Runner) -> Path:
-    """Run arm F (tools/windowed_nemotron_run.py in the Nemotron env) on sample_dir/chunk.wav."""
-    run_dir = sample_dir / "runs" / ARMS["F"]
-    result = run_dir / "out" / "segments.json"
-    if cfg["reuse"] and result.is_file():
-        return result
-    run_dir.mkdir(parents=True, exist_ok=True)
-    cmd = [cfg["windowed_python"], WINDOWED_SCRIPT, "--audio", str(sample_dir / "chunk.wav"),
-           "--out", str(result), "--piece-s", str(cfg["windowed_piece_s"]),
-           "--hop-s", str(cfg["windowed_hop_s"]), "--config", cfg["config"], "--env", cfg["env"]]
-    code = runner(cmd, dict(os.environ, CUDA_VISIBLE_DEVICES=str(cfg["gpu"])))
-    if code != 0 or not result.is_file():
-        raise RuntimeError(f"arm {ARMS['F']} failed (exit {code}), see {run_dir}")
-    return result
+def run_windowed_arm(arm: str, sample_dir: Path, cfg: dict, runner: Runner) -> Path:
+    """Arms F and G on sample_dir/chunk.wav, in two steps.
 
-
-def run_windowed_vbx(sample_dir: Path, cfg: dict, runner: Runner) -> Path:
-    """Run arm G on sample_dir/chunk.wav: stage 1 (Nemotron env) dumps probabilities, stage 2 (som) clusters."""
-    run_dir = sample_dir / "runs" / ARMS["G"]
+    Stage 1 (Nemotron env) dumps the per-window probabilities. Stage 2 (--python, the som env) embeds on the GPU
+    and clusters: arm F with the repo's WeSpeaker ResNet-293 and constrained AHC, arm G with pyannote's ResNet34
+    and DiariZen's VBx. The Nemotron env cannot run ONNX Runtime on the GPU (it needs CUDA 13), so F no longer
+    embeds there.
+    """
+    label = "VBx" if arm == "G" else "AHC"
+    run_dir = sample_dir / "runs" / ARMS[arm]
     probs = run_dir / "probs"
     result = run_dir / "out" / "segments.json"
     if cfg["reuse"] and result.is_file():
@@ -371,15 +361,18 @@ def run_windowed_vbx(sample_dir: Path, cfg: dict, runner: Runner) -> Path:
                 "--config", cfg["config"], "--env", cfg["env"]]
         code = runner(cmd1, env)
         if code != 0 or not (probs / "plan.json").is_file():
-            raise RuntimeError(f"arm {ARMS['G']} stage 1 (probabilities) failed (exit {code}), see {run_dir}")
-    cmd2 = [cfg["python"], VBX_STAGE_SCRIPT, "--audio", chunk, "--probs-dir", str(probs),
-            "--out", str(result), "--ahc-threshold", str(cfg["vbx_ahc_threshold"]),
-            "--fa", str(cfg["vbx_fa"]), "--fb", str(cfg["vbx_fb"])]
-    if cfg["plda_dir"]:
-        cmd2 += ["--plda-dir", str(cfg["plda_dir"])]
+            raise RuntimeError(f"arm {ARMS[arm]} stage 1 (probabilities) failed (exit {code}), see {run_dir}")
+    cmd2 = [cfg["python"], VBX_STAGE_SCRIPT, "--audio", chunk, "--probs-dir", str(probs), "--out", str(result)]
+    if arm == "G":
+        cmd2 += ["--ahc-threshold", str(cfg["vbx_ahc_threshold"]), "--fa", str(cfg["vbx_fa"]),
+                 "--fb", str(cfg["vbx_fb"])]
+        if cfg["plda_dir"]:
+            cmd2 += ["--plda-dir", str(cfg["plda_dir"])]
+    else:
+        cmd2 += ["--clustering", "ahc", "--embedder", "wespeaker"]
     code = runner(cmd2, env)
     if code != 0 or not result.is_file():
-        raise RuntimeError(f"arm {ARMS['G']} stage 2 (VBx) failed (exit {code}), see {run_dir}")
+        raise RuntimeError(f"arm {ARMS[arm]} stage 2 ({label}) failed (exit {code}), see {run_dir}")
     return result
 
 
@@ -409,10 +402,10 @@ def process_sample(index: int, sample: dict, cfg: dict, runner: Runner, log: Cal
                 segs["E"] = fuse(segs["B"], segs["A"])
                 continue
             if arm == "F":                      # windowed Nemotron: no K needed
-                segs["F"] = crop(read_rows(str(run_windowed(sdir, cfg, runner))), rs, re_)
+                segs["F"] = crop(read_rows(str(run_windowed_arm("F", sdir, cfg, runner))), rs, re_)
                 continue
             if arm == "G":                      # windowed Nemotron + VBx: no K needed
-                segs["G"] = crop(read_rows(str(run_windowed_vbx(sdir, cfg, runner))), rs, re_)
+                segs["G"] = crop(read_rows(str(run_windowed_arm("G", sdir, cfg, runner))), rs, re_)
                 continue
             backend, values = arm_settings(arm, k)
             path = run_arm(sdir, arm, values, backend, cfg, runner)
