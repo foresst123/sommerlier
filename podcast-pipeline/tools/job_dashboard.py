@@ -300,7 +300,7 @@ def make_handler(out, final, ctx=None):
 
         def do_POST(self):
             path = urlsplit(self.path).path.rstrip("/")
-            if job_listen.handle_post(self, path, final):
+            if job_listen.handle_post(self, path, final, ctx):
                 return
             self.send_error(404)
 
@@ -313,6 +313,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("out", type=Path)
     ap.add_argument("--final", type=Path, default=None, help="default OUT/final")
+    ap.add_argument("--review-dir", type=Path, default=None,
+                    help="where the review sets (the Good/Bad grades and their samples) are kept; default OUT/review_sets, outside final")
     ap.add_argument("--audio-dir", type=Path, default=None,
                     help="the original recordings: the listening tab then shows the input hours and the output/input ratio")
     ap.add_argument("--port", type=int, default=8765)
@@ -342,7 +344,7 @@ def main(argv=None):
     if args.once:
         print(json.dumps(collect(args.out, final), indent=2, ensure_ascii=False))
         return 0
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(args.out, final, {"audio_dir": args.audio_dir, "total_recordings": len(ls.file_stems(args.out)) or None}))
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(args.out, final, {"audio_dir": args.audio_dir, "review_dir": args.review_dir or args.out / "review_sets", "total_recordings": len(ls.file_stems(args.out)) or None}))
     print(f"http://{args.host}:{args.port}/   (Ctrl+C to stop; the jobs are not touched)", flush=True)
     try:
         server.serve_forever()
