@@ -844,6 +844,7 @@ function loadAudio(keep) {
   const f = (st.detail && st.detail.files) || {};
   const k = effSrc();
   renderSources();
+  applyChannel(); renderChannels();       // the mixture is mono: both ears, the per-speaker buttons are off
   if (!k) {
     st.audioUrl = '';
     if (metaHandler) aud.removeEventListener('loadedmetadata', metaHandler);
@@ -932,8 +933,15 @@ function ensureGraph() {
   renderChannels();
   return graph === 'ok';
 }
+window.__listenDebug = { gains: () => (gains ? gains.map(r => r.map(x => x.gain.value)) : null), pickChan: k => pickChan(k) };   // for the browser test
+/* the mixture is one mono channel: sent as it is to the graph it would play in the left ear only */
+function isMonoSource() { return effSrc() === 'mix'; }
 function applyChannel() {
   if (!gains) return;
+  if (isMonoSource()) {
+    for (let i = 0; i < 2; i++) for (let e = 0; e < 2; e++) gains[i][e].gain.value = i === 0 ? 1 : 0;   // channel 0 to both ears
+    return;
+  }
   const aIdx = assistantIdx();
   for (let i = 0; i < 2; i++) {
     const role = i === aIdx ? 'assistant' : 'user';
@@ -951,10 +959,13 @@ function renderChannels() {
     return;
   }
   wrap.hidden = false;
-  wrap.innerHTML = CHAN.map(([k, l]) => '<button type="button" data-k="' + k + '" aria-pressed="' + (st.chan === k) + '">' + l + '</button>').join('');
+  const mono = isMonoSource();
+  wrap.innerHTML = CHAN.map(([k, l]) => '<button type="button" data-k="' + k + '" aria-pressed="' + (mono ? k === 'both' : st.chan === k) + '"' +
+    (mono && k !== 'both' ? ' disabled title="Hỗn hợp là một kênh mono: không tách được từng người"' : '') + '>' + l + '</button>').join('');
+  if (mono) wrap.innerHTML += '<span class="note" style="margin-left:6px">mono: cả hai người ở cả hai tai</span>';
 }
 function pickChan(k) {
-  if (!CHAN.some(c => c[0] === k)) return;
+  if (!CHAN.some(c => c[0] === k) || isMonoSource()) return;
   st.chan = k;
   savePrefs();
   ensureGraph();
