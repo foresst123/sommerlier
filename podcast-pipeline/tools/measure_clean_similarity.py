@@ -18,6 +18,13 @@ measures, per channel, on the frames where the channel is not silent:
 and across the speakers: cross_dist_raw / cross_dist_clean, the distance between the assistant's and the user's voice
 (and cross_sim_*, the cosine). A cross distance close to the distance a person has to themself (spk_dist of the same
 recording) hints that "two speakers" are one person; a clean channel that lost its voice shows as a large spk_dist.
+With --original-dir (the folder of the recordings the pipeline was run on) it also compares against the ORIGINAL recording,
+so all three passes are covered: the original excerpt is cut at meta["source_start"]..["source_end"] and, for each speaker,
+only the turns in which the other speaker is silent are used (the single microphone then holds mostly that speaker):
+  orig_vs_raw_dist    original vs the channel before the export filter (the first pass, rf_crowd>blend50, and the separation)
+  orig_vs_clean_dist  original vs the final clean channel (all passes)
+  (raw_vs_clean is spk_dist above: the export filter only), plus the room level before and after:
+  floor_orig_dbfs / floor_raw2_dbfs / floor_final_dbfs  the 10th percentile frame level of those solo turns.
 A channel the filter did not touch (an old export: the user channel was never filtered) is marked `filtered=0` and its
 numbers are the identity (spk_dist 0, si_sdr_db 99). Standard library + numpy + soundfile; the embedder needs the
 pipeline's WeSpeaker (models/wespeaker_embedding.py) and is skipped with --embedder none.
@@ -153,6 +160,88 @@ def speaker_numbers(embedder, raw, clean, sr, turns):
     return out, er, ec
 
 
+AUDIO_EXTS = (".wav", ".mp3", ".m4a", ".flac", ".opus", ".ogg", ".aac")
+
+
+def _safe_stem(stem):
+    import re
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", stem)
+
+
+def index_originals(folder):
+    """{stem: path} and {safe stem: path} of the audio files in `folder` (the exporter may have sanitised the stem)."""
+    by = {}
+    for p in sorted(Path(folder).iterdir()):
+        if p.is_file() and p.suffix.lower() in AUDIO_EXTS:
+            by.setdefault(p.stem, p)
+            by.setdefault(_safe_stem(p.stem), p)
+    return by
+
+
+def _resample(x, sr_in, sr_out):
+    if sr_in == sr_out:
+        return x.astype(np.float32)
+    try:
+        import torch
+        import torchaudio
+        return torchaudio.functional.resample(torch.from_numpy(np.asarray(x, dtype=np.float32)), sr_in, sr_out).numpy()
+    except Exception:                       # no torchaudio: linear interpolation (enough for an embedding and levels)
+        n = int(round(len(x) * sr_out / sr_in))
+        return np.interp(np.linspace(0, len(x) - 1, n), np.arange(len(x)), x).astype(np.float32)
+
+
+def read_original(path, start_s, end_s, sr_out):
+    """The original recording between two times, mono, at sr_out; None when it cannot be read."""
+    import soundfile as sf
+    try:
+        info = sf.info(str(path))
+        a, n = int(start_s * info.samplerate), int((end_s - start_s) * info.samplerate)
+        x, sr = sf.read(str(path), start=max(0, a), frames=max(0, n), dtype="float32", always_2d=True)
+    except Exception:
+        return None
+    return _resample(x.mean(axis=1), sr, sr_out)
+
+
+def solo_spans(meta, role, margin=0.2):
+    """Item-relative (start, end) of the turns of `role` in which the other speaker is silent (+ margin), >= MIN_TURN_S."""
+    turns = [t for t in meta.get("conversation", []) if "start" in t and "end" in t]
+    others = [(float(t["start"]) - margin, float(t["end"]) + margin) for t in turns if t.get("role") != role]
+    spans = []
+    for t in turns:
+        if t.get("role") != role:
+            continue
+        a, b = float(t["start"]), float(t["end"])
+        if b - a >= MIN_TURN_S and not any(a < oe and ob < b for ob, oe in others):
+            spans.append((a, b))
+    return spans[:MAX_TURNS]
+
+
+def _concat(x, spans, sr):
+    parts = [x[int(a * sr):int(b * sr)] for a, b in spans if int(b * sr) <= len(x)]
+    return np.concatenate(parts).astype(np.float32) if parts else np.zeros(0, dtype=np.float32)
+
+
+def original_numbers(embedder, orig, raw, clean, spans, sr):
+    """Distances and room levels of one speaker's solo turns: original vs before vs after the export filter."""
+    o, r, c = (_concat(x, spans, sr) for x in (orig, raw, clean))
+    n = min(len(o), len(r), len(c))
+    out = {}
+    if n < sr * MIN_TURN_S:
+        return out
+    o, r, c = o[:n], r[:n], c[:n]
+    out["orig_solo_s"] = round(n / sr, 1)
+    for key, x in (("floor_orig_dbfs", o), ("floor_raw2_dbfs", r), ("floor_final_dbfs", c)):
+        fr = frames_rms(x, sr)
+        if fr.size:
+            out[key] = round(_db(np.percentile(fr, 10)), 1)
+    if embedder is not None:
+        eo, er, ec = (_embed(embedder, x[: int(MAX_EMBED_S * sr)], sr) for x in (o, r, c))
+        out["orig_vs_raw_dist"] = round(1.0 - cosine(eo, er), 4)
+        out["orig_vs_clean_dist"] = round(1.0 - cosine(eo, ec), 4)
+        out["raw_vs_clean_dist"] = round(1.0 - cosine(er, ec), 4)
+    return out
+
+
 def find_conversations(final):
     found = []
     for cur, dirs, files in os.walk(final):
@@ -163,7 +252,7 @@ def find_conversations(final):
     return found
 
 
-def measure_folder(folder, embedder=None):
+def measure_folder(folder, embedder=None, originals=None):
     """One row (dict) for a conversation folder, or None when it has no clean pair."""
     import soundfile as sf
     raw_path, clean_path = folder / "stereo_2ch.wav", folder / "stereo_2ch_clean.wav"
@@ -178,6 +267,12 @@ def measure_folder(folder, embedder=None):
     chan = {"assistant": 0, "user": 1} if left == "assistant" else {"assistant": 1, "user": 0}
     row = {"id": str(folder), "category": folder.parent.name, "duration_s": round(raw.shape[0] / sr, 1)}
     embeds = {}
+    orig = None
+    if originals is not None:
+        src = originals.get(str(meta.get("source_stem") or "")) or originals.get(_safe_stem(str(meta.get("source_stem") or "")))
+        if src is not None and meta.get("source_start") is not None and meta.get("source_end") is not None:
+            orig = read_original(src, float(meta["source_start"]), float(meta["source_end"]), sr)
+        row["original_found"] = int(orig is not None)
     for role, ch in chan.items():
         r, c = raw[:, ch], clean[:, ch]
         n = min(len(r), len(c))
@@ -202,6 +297,12 @@ def measure_folder(folder, embedder=None):
             for k, v in sp.items():
                 row[f"{role}_{k}"] = v
             embeds[role] = (er, ec)
+        if orig is not None:
+            try:
+                for k, v in original_numbers(embedder, orig, r, c, solo_spans(meta, role), sr).items():
+                    row[f"{role}_{k}"] = v
+            except Exception as exc:
+                row[f"{role}_orig_error"] = f"{type(exc).__name__}: {exc}"[:80]
     if embedder is not None and embeds.get("assistant", (None,))[0] is not None \
             and embeds.get("user", (None,))[0] is not None:
         sim_raw = cosine(embeds["assistant"][0], embeds["user"][0])
@@ -235,6 +336,15 @@ def summarize(rows, out=print):
             vals = [r.get(f"{role}_{key}") for r in done]
             if any(v is not None for v in vals):
                 out(f"  {key:16s} {_stats(vals)}")
+    with_orig = [r for r in rows if r.get("original_found")]
+    if with_orig:
+        out(f"\n[against the original recording] {len(with_orig)} conversations, solo turns only")
+        for role in ("assistant", "user"):
+            for key in ("orig_vs_raw_dist", "raw_vs_clean_dist", "orig_vs_clean_dist",
+                        "floor_orig_dbfs", "floor_raw2_dbfs", "floor_final_dbfs"):
+                vals = [r.get(f"{role}_{key}") for r in with_orig]
+                if any(v is not None for v in vals):
+                    out(f"  {role:9s} {key:19s} {_stats(vals)}")
     cross = [r for r in rows if "cross_sim_clean" in r]
     if cross:
         out(f"\n[between the two speakers] distance = 1 - cosine\n"
@@ -258,6 +368,8 @@ def main(argv=None, embedder_factory=None):
     ap.add_argument("--limit", type=int, default=0, help="measure only the first N conversations (0 = all)")
     ap.add_argument("--csv", type=Path, default=None, help="default: <final>/clean_similarity.csv")
     ap.add_argument("--device", default="cpu", help="cpu or cuda, for the WeSpeaker embedder")
+    ap.add_argument("--original-dir", type=Path, default=None,
+                    help="the folder of the original recordings: adds the comparison with the original (all passes)")
     ap.add_argument("--embedder", choices=("wespeaker", "none"), default="wespeaker")
     args = ap.parse_args(argv)
     if not args.final.is_dir():
@@ -268,10 +380,11 @@ def main(argv=None, embedder_factory=None):
     folders = find_conversations(args.final)
     if args.limit:
         folders = folders[:args.limit]
+    originals = index_originals(args.original_dir) if args.original_dir else None
     rows = []
     for i, folder in enumerate(folders, 1):
         try:
-            row = measure_folder(folder, embedder)
+            row = measure_folder(folder, embedder, originals)
         except Exception as exc:
             print(f"skip {folder}: {type(exc).__name__}: {exc}", file=sys.stderr)
             continue

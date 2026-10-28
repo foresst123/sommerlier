@@ -106,3 +106,74 @@ def test_a_folder_without_the_clean_pair_is_skipped(tmp_path):
     d = _export(tmp_path, "x")
     (d / "stereo_2ch_clean.wav").unlink()
     assert m.measure_folder(d, FakeEmbedder()) is None
+
+
+def _with_original(tmp_path, orig_sr=SR, changed_voice=False, noise=0.02):
+    """An export folder plus the original recording it was cut from (source_start 10 s, source_stem 'ep 01')."""
+    audio = tmp_path / "audio"
+    audio.mkdir()
+    d = _export(tmp_path / "final", "item", clean_assistant_freq=550 if changed_voice else 220)
+    meta = json.loads((d / "conversation.json").read_text())
+    meta.update(source_stem="ep 01", source_start=10.0, source_end=18.0)
+    (d / "conversation.json").write_text(json.dumps(meta))
+    rng = np.random.default_rng(1)
+    n = int(40 * orig_sr)
+    t = np.arange(n) / orig_sr
+    orig = (rng.standard_normal(n) * noise).astype(np.float32)
+    for a, b, f in ((0.5, 3.5, 220), (5, 7.5, 220), (3.8, 5, 330)):           # item-relative, the same voices
+        i, j = int((10 + a) * orig_sr), int((10 + b) * orig_sr)
+        orig[i:j] += 0.3 * np.sin(2 * np.pi * f * t[i:j])
+    sf.write(str(audio / "ep 01.wav"), orig, orig_sr, subtype="PCM_16")
+    return d, audio
+
+
+def test_the_original_is_compared_with_the_raw_and_the_clean_channel(tmp_path):
+    d, audio = _with_original(tmp_path)
+    row = m.measure_folder(d, FakeEmbedder(), m.index_originals(audio))
+    assert row["original_found"] == 1
+    assert row["assistant_orig_vs_clean_dist"] < 0.1                           # the voice is the same all along
+    assert row["assistant_floor_orig_dbfs"] < row["assistant_floor_final_dbfs"] + 60
+    assert {"assistant_orig_vs_raw_dist", "assistant_raw_vs_clean_dist", "assistant_orig_solo_s"} <= set(row)
+
+
+def test_a_filter_that_changes_the_voice_shows_in_the_distance_to_the_original(tmp_path):
+    d, audio = _with_original(tmp_path, changed_voice=True)
+    row = m.measure_folder(d, FakeEmbedder(), m.index_originals(audio))
+    assert row["assistant_orig_vs_clean_dist"] > 0.5
+    assert row["assistant_orig_vs_raw_dist"] < 0.1
+
+
+def test_an_original_at_another_sample_rate_is_resampled(tmp_path):
+    d, audio = _with_original(tmp_path, orig_sr=32000)
+    row = m.measure_folder(d, FakeEmbedder(), m.index_originals(audio))
+    assert row["original_found"] == 1 and row["assistant_orig_vs_clean_dist"] < 0.15
+
+
+def test_the_original_is_found_by_the_sanitised_stem(tmp_path):
+    d, audio = _with_original(tmp_path)
+    meta = json.loads((d / "conversation.json").read_text())
+    meta["source_stem"] = "ep_01"                                              # what the exporter may have written
+    (d / "conversation.json").write_text(json.dumps(meta))
+    assert m.measure_folder(d, FakeEmbedder(), m.index_originals(audio))["original_found"] == 1
+
+
+def test_a_missing_original_is_reported_not_fatal(tmp_path):
+    d, audio = _with_original(tmp_path)
+    (audio / "ep 01.wav").unlink()
+    row = m.measure_folder(d, FakeEmbedder(), m.index_originals(audio))
+    assert row["original_found"] == 0 and "assistant_orig_vs_clean_dist" not in row
+
+
+def test_solo_spans_leave_out_the_turns_with_the_other_speaker(tmp_path):
+    meta = {"conversation": [{"role": "assistant", "start": 0, "end": 4}, {"role": "user", "start": 3.5, "end": 6},
+                             {"role": "assistant", "start": 8, "end": 10}]}
+    assert m.solo_spans(meta, "assistant") == [(8.0, 10.0)]
+    assert m.solo_spans(meta, "user") == []                                    # overlapped by the first turn
+
+
+def test_main_prints_the_original_block(tmp_path, capsys):
+    d, audio = _with_original(tmp_path)
+    assert m.main(["--final", str(tmp_path / "final"), "--original-dir", str(audio), "--csv", str(tmp_path / "o.csv")],
+                  embedder_factory=lambda device: FakeEmbedder()) == 0
+    text = capsys.readouterr().out
+    assert "against the original recording" in text and "orig_vs_clean_dist" in text
