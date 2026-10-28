@@ -29,6 +29,7 @@ from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import line_status as ls  # noqa: E402
+import job_diar  # noqa: E402
 import job_listen  # noqa: E402
 
 STAGES = ("denoise", "diarization", "separation_plan", "separation", "asr", "conversation_selection")
@@ -236,11 +237,12 @@ th{color:var(--mute);font-weight:500;border-top:0}.bad{color:var(--bad)}.ok{colo
 .tabs button{font:inherit;background:transparent;color:var(--mute);border:1px solid var(--line);border-bottom:0;border-radius:8px 8px 0 0;padding:7px 16px;cursor:pointer}
 .tabs button[aria-selected=true]{background:var(--card);color:var(--ink);font-weight:600}
 .tabs button:focus-visible{outline:2px solid var(--run);outline-offset:-2px}
-#tab-listen{max-width:1400px;margin:0 auto;padding:0 8px}
-#listenFrame{display:block;width:100%;height:calc(100vh - 62px);border:1px solid var(--line);border-radius:0 8px 8px 8px;background:var(--card)}
+#tab-listen,#tab-diar{max-width:1400px;margin:0 auto;padding:0 8px}
+#listenFrame,#diarFrame{display:block;width:100%;height:calc(100vh - 62px);border:1px solid var(--line);border-radius:0 8px 8px 8px;background:var(--card)}
 </style></head><body>
-<nav class="tabs" role="tablist"><button role="tab" id="t-prog" aria-selected="true" aria-controls="tab-prog">Tiến độ job</button><button role="tab" id="t-listen" aria-selected="false" aria-controls="tab-listen">Nghe hội thoại</button></nav>
+<nav class="tabs" role="tablist"><button role="tab" id="t-prog" aria-selected="true" aria-controls="tab-prog">Tiến độ job</button><button role="tab" id="t-listen" aria-selected="false" aria-controls="tab-listen">Nghe hội thoại</button><button role="tab" id="t-diar" aria-selected="false" aria-controls="tab-diar">Thử diarization</button></nav>
 <section id="tab-listen" hidden><iframe id="listenFrame" title="Nghe hội thoại" allow="autoplay"></iframe></section>
+<section id="tab-diar" class="frametab" hidden><iframe id="diarFrame" title="Thử diarization" allow="autoplay"></iframe></section>
 <main id="tab-prog">
 <h1>Tiến độ job</h1><div class="sub" id="sub">đang tải…</div><div id="warn" class="warn"></div>
 <div class="card"><h2>Các stage</h2><div id="stages"></div></div>
@@ -266,23 +268,37 @@ async function tick(){
  $('proc').innerHTML=['front','asr','llm'].map(j=>{const ps=d.processes.filter(p=>p.name.startsWith(j+'_'));return `<div class="mute" style="margin:8px 0 2px"><b>${jn[j]}</b> · ${ps.length?ps.length+' tiến trình':'chưa có log'}</div>`+(ps.length?`<table>${ps.map(p=>`<tr><td>${p.name.replace(/^[a-z]+_[0-9]+_/,'')}</td><td class="${p.age_s>600?'warn':'mute'}">${p.age}</td><td class="log">${esc(p.line)}</td></tr>`).join('')}</table>`:'')}).join('');
  $('claims').innerHTML=d.claims.length?`<table>${d.claims.map(c=>`<tr><td>${c.stage}</td><td>${esc(c.file)}</td><td class="mute">${esc(c.who)}</td></tr>`).join('')}</table>`:'<span class="mute">không có</span>';
 }
-function showTab(name){const L=name==='listen';
- $('tab-prog').hidden=L;$('tab-listen').hidden=!L;
- $('t-prog').setAttribute('aria-selected',String(!L));$('t-listen').setAttribute('aria-selected',String(L));
- if(L&&!$('listenFrame').getAttribute('src'))$('listenFrame').setAttribute('src','listen');   // loaded once, then kept: playback survives a tab switch
- try{history.replaceState(null,'',L?'#nghe':'#')}catch(e){}}
-$('t-prog').onclick=()=>showTab('prog');$('t-listen').onclick=()=>showTab('listen');
-if(location.hash==='#nghe')showTab('listen');
+function showTab(name){
+ const tabs={prog:['tab-prog','t-prog'],listen:['tab-listen','t-listen'],diar:['tab-diar','t-diar']};
+ for(const k in tabs){$(tabs[k][0]).hidden=k!==name;$(tabs[k][1]).setAttribute('aria-selected',String(k===name));}
+ const frames={listen:['listenFrame','listen'],diar:['diarFrame','diar']};
+ if(frames[name]&&!$(frames[name][0]).getAttribute('src'))$(frames[name][0]).setAttribute('src',frames[name][1]);   // loaded once, then kept: playback and a running experiment survive a tab switch
+ try{history.replaceState(null,'',name==='listen'?'#nghe':name==='diar'?'#diar':'#')}catch(e){}}
+$('t-prog').onclick=()=>showTab('prog');$('t-listen').onclick=()=>showTab('listen');$('t-diar').onclick=()=>showTab('diar');
+if(location.hash==='#nghe')showTab('listen');else if(location.hash==='#diar')showTab('diar');
 tick();setInterval(tick,5000);
 </script></body></html>"""
 
 
+def make_diar_ctx(out, final, ctx=None):
+    """What the diarization lab needs: where the audio is, where runs are kept, which interpreter and pipeline to run."""
+    ctx = ctx or {}
+    return {"audio_dir": ctx.get("audio_dir"), "final": final, "out": out,
+            "lab_dir": ctx.get("diar_dir") or out / "diar_lab",
+            "pipeline_dir": ctx.get("pipeline_dir") or Path(__file__).resolve().parents[1],
+            "python": ctx.get("python") or sys.executable, "env_name": ctx.get("env_name") or "a100",
+            "config_path": ctx.get("config_path")}
+
+
 def make_handler(out, final, ctx=None):
+    diar_ctx = make_diar_ctx(out, final, ctx)
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             parts = urlsplit(self.path)
             path = parts.path.rstrip("/")
             if job_listen.handle(self, path, parse_qs(parts.query), final, ctx):
+                return
+            if job_diar.handle(self, path, parse_qs(parts.query), diar_ctx):
                 return
             if path in ("", "/index.html"):
                 body, kind = PAGE.encode(), "text/html; charset=utf-8"
@@ -302,6 +318,8 @@ def make_handler(out, final, ctx=None):
             path = urlsplit(self.path).path.rstrip("/")
             if job_listen.handle_post(self, path, final, ctx):
                 return
+            if job_diar.handle_post(self, path, diar_ctx):
+                return
             self.send_error(404)
 
         def log_message(self, *args):
@@ -315,6 +333,8 @@ def main(argv=None):
     ap.add_argument("--final", type=Path, default=None, help="default OUT/final")
     ap.add_argument("--review-dir", type=Path, default=None,
                     help="where the review sets (the Good/Bad grades and their samples) are kept; default OUT/review_sets, outside final")
+    ap.add_argument("--diar-dir", type=Path, default=None,
+                    help="where the diarization lab keeps its runs; default OUT/diar_lab")
     ap.add_argument("--audio-dir", type=Path, default=None,
                     help="the original recordings: the listening tab then shows the input hours and the output/input ratio")
     ap.add_argument("--port", type=int, default=8765)
@@ -344,7 +364,7 @@ def main(argv=None):
     if args.once:
         print(json.dumps(collect(args.out, final), indent=2, ensure_ascii=False))
         return 0
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(args.out, final, {"audio_dir": args.audio_dir, "review_dir": args.review_dir or args.out / "review_sets", "total_recordings": len(ls.file_stems(args.out)) or None}))
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(args.out, final, {"audio_dir": args.audio_dir, "diar_dir": args.diar_dir, "review_dir": args.review_dir or args.out / "review_sets", "total_recordings": len(ls.file_stems(args.out)) or None}))
     print(f"http://{args.host}:{args.port}/   (Ctrl+C to stop; the jobs are not touched)", flush=True)
     try:
         server.serve_forever()

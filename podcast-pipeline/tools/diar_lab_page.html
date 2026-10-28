@@ -1049,7 +1049,7 @@ async function renderCompare() {
     const eq = p ? same(p, va, vb) : JSON.stringify(va) === JSON.stringify(vb);
     if (!eq) pdiff.push(`<tr><td>${esc(p ? (p.label || k) : k)}<br><span class="note">${esc(k)}</span></td><td>${esc(va === undefined ? '—' : (typeof va === 'object' ? JSON.stringify(va) : String(va)))}</td><td>${esc(vb === undefined ? '—' : (typeof vb === 'object' ? JSON.stringify(vb) : String(vb)))}</td></tr>`);
   }
-  const tiles = [['DER (ước lượng)', cmp.der_like != null ? num(cmp.der_like, 1) + ' %' : null], ['Lệch tổng', cmp.disagreement_s != null ? num(cmp.disagreement_s, 1) + ' s' : null],
+  const tiles = [['DER (ước lượng)', cmp.der_like != null ? num(cmp.der_like * 100, 1) + ' %' : null], ['Lệch tổng', cmp.disagreement_s != null ? num(cmp.disagreement_s, 1) + ' s' : null],
     ['Bỏ sót (miss)', cmp.miss_s != null ? num(cmp.miss_s, 1) + ' s' : null], ['Báo nhầm (FA)', cmp.false_alarm_s != null ? num(cmp.false_alarm_s, 1) + ' s' : null],
     ['Nhầm người', cmp.confusion_s != null ? num(cmp.confusion_s, 1) + ' s' : null]];
   box.innerHTML = head + `<p class="note">A: ${desc(A)} · B: ${desc(B)}</p>
