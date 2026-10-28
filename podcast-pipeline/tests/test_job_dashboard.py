@@ -117,3 +117,16 @@ def test_manifest_hours_total_and_by_category(tmp_path):
 def test_manifest_hours_is_none_without_a_manifest(tmp_path):
     out = make_out(tmp_path)
     assert jd.final_state(out / "final")["data"] is None
+
+
+def test_category_is_read_from_the_recording_id_when_the_audio_is_a_swapped_copy(tmp_path):
+    import gzip
+    out = make_out(tmp_path)
+    lh = out / "final" / "lhotse"
+    lh.mkdir(parents=True)
+    cut = {"duration": 3600.0, "recording": {"id": "final-backchannel-stereo_2ch-abc",
+           "sources": [{"source": "/x/final/lhotse/audio/item_5s_1234abcd.wav"}]}}
+    with gzip.open(lh / "manifest.jsonl.gz", "wt", encoding="utf-8") as f:
+        f.write(json.dumps(cut) + "\n")
+    data = jd.final_state(out / "final")["data"]
+    assert data["by_category"] == {"backchannel": {"cuts": 1, "hours": 1.0}}

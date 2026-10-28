@@ -175,7 +175,10 @@ def manifest_hours(manifest):
                 for source in (cut.get("recording") or {}).get("sources") or []:
                     src = str(source.get("source") or "")
                     break
-                name = next((c for c in CATEGORIES if f"/{c}/" in src), "other")
+                rec_id = str((cut.get("recording") or {}).get("id") or cut.get("id") or "")
+                # the swapped copies live under lhotse/audio/, so the category is also read from the id
+                # <batch>-<category>-<name>-<uid> that convert_item builds
+                name = next((c for c in CATEGORIES if f"/{c}/" in src or f"-{c}-" in rec_id), "other")
                 total += dur
                 cuts += 1
                 row = cats.setdefault(name, {"cuts": 0, "hours": 0.0})
