@@ -70,3 +70,18 @@ def test_run_reads_every_sample_folder_and_prints_a_table(tmp_path, capsys):
     assert "reference: diarizen_auto" in out and "== 01_a" in out and "speaker recall" in out
     assert csv_path.read_text(encoding="utf-8").startswith("sample,arm")
     assert C.main([str(tmp_path / "03_no_ref"), "--ref", "nothing"]) == 1
+
+
+def test_postprocess_merges_the_raw_arms_but_not_the_reference_or_the_pipeline_arms(tmp_path):
+    ref = [seg(0, 5, "A"), seg(5.3, 10, "B")]
+    raw = [seg(0, 2, "x"), seg(2.3, 5, "x"), seg(5.3, 10, "y")]          # a 0.3 s gap inside x's turn
+    d = tmp_path / "01_a"
+    d.mkdir()
+    for name, rows in (("diarizen_auto", ref), ("nemotron_dz", raw), ("nemotron", raw)):
+        (d / f"segments_{name}.json").write_text(json.dumps({"segments": rows}), encoding="utf-8")
+    plain = {r["arm"]: r for r in C.run(str(tmp_path), "diarizen_auto", None, 0.0)}
+    merged = {r["arm"]: r for r in C.run(str(tmp_path), "diarizen_auto", None, 0.0, postprocess=True)}
+    assert plain["nemotron_dz"]["miss"] > 0.0                             # the gap counts as missed speech
+    assert merged["nemotron_dz"]["miss"] == 0.0                           # merged like the pipeline would
+    assert merged["nemotron"]["miss"] == plain["nemotron"]["miss"] > 0.0   # arm A is left as it is
+    assert C.pipeline_postprocess([seg(0, 2, "x"), seg(2.3, 4, "x")]) == [seg(0.0, 4.0, "x")]

@@ -16,6 +16,9 @@ says how far each arm is from it, so a gap means "they disagree, listen", not "w
   short <1s     reference segments under one second (backchannels): share the arm covers with speech (any speaker),
                 and share it covers with the speaker it maps to
   speaker recall  per reference speaker with >=1 s: share of that speaker's time the mapped arm speaker covers
+
+Arms A, B and H were post-processed by the pipeline (merge of nearby turns and so on); the windowed arms are raw.
+--postprocess applies the pipeline's own merge_gap / bridge_gap steps to the raw ones, so the table compares like with like.
 """
 
 from __future__ import annotations
@@ -33,6 +36,10 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 STEP = 0.01
+# Arms whose segments.json is the raw output of tools/windowed_*: arms A, B and H went through the pipeline's own
+# post-processing (main.py), these did not. --postprocess gives them the same one.
+RAW_ARMS = ("nemotron_windowed", "nemotron_windowed_vbx", "nemotron_dense_vbx", "nemotron_dz")
+MERGE_GAP, BRIDGE_GAP, MAX_SEGMENT = 0.5, 3.0, 20.0     # config.json, a100: merge_gap, bridge_gap, max_segment_length
 SHORT_S = 1.0
 MIN_SPEAKER_S = 1.0
 
@@ -142,6 +149,18 @@ def compare(ref_segs: list[dict], hyp_segs: list[dict], duration: float, collar:
             "speaker_recall": recall}
 
 
+def pipeline_postprocess(segments: list[dict]) -> list[dict]:
+    """The steps of DiarizationService.diarize_postprocess that need no audio: drop sub-0.2 s jitter, merge nearby turns
+    of one speaker (merge_gap), bridge an interrupted turn (bridge_gap). VAD, seam split and the length split are left out.
+    """
+    from utils import segment_utils as su
+    rows = [dict(index=f"{i:05d}", **s) for i, s in enumerate(sorted(segments, key=lambda r: (r["start"], r["end"])))]
+    rows = su.filter_diarizer_noise(rows)
+    rows = su.cut_by_speaker_label(rows, merge_gap=MERGE_GAP, max_segment_length=MAX_SEGMENT)
+    rows = su.bridge_interrupted_speaker_turns(rows, bridge_gap=BRIDGE_GAP)
+    return [{"start": float(r["start"]), "end": float(r["end"]), "speaker": str(r["speaker"])} for r in rows]
+
+
 def clip_duration(sample_dir: str, all_segs: list[list[dict]]) -> float:
     clip = os.path.join(sample_dir, "clip.wav")
     try:
@@ -156,13 +175,15 @@ def arm_of(path: str) -> str:
     return os.path.basename(path)[len("segments_"):-len(".json")]
 
 
-def run(root: str, ref_arm: str, arms: Optional[list[str]], collar: float) -> list[dict]:
+def run(root: str, ref_arm: str, arms: Optional[list[str]], collar: float, postprocess: bool = False) -> list[dict]:
     rows = []
     for sdir in sorted(d for d in glob.glob(os.path.join(root, "*")) if os.path.isdir(d)):
         files = {arm_of(f): f for f in glob.glob(os.path.join(sdir, "segments_*.json"))}
         if ref_arm not in files:
             continue
         segs = {a: load_segments(f) for a, f in files.items()}
+        if postprocess:
+            segs = {a: pipeline_postprocess(v) if a in RAW_ARMS else v for a, v in segs.items()}
         duration = clip_duration(sdir, list(segs.values()))
         for arm in sorted(a for a in segs if a != ref_arm and (not arms or a in arms)):
             r = compare(segs[ref_arm], segs[arm], duration, collar)
@@ -193,10 +214,13 @@ def main(argv=None) -> int:
     ap.add_argument("--ref", default="diarizen_auto", help="the arm taken as the reference")
     ap.add_argument("--arms", help="comma list of arms to compare (default: every other arm found)")
     ap.add_argument("--collar", type=float, default=0.25)
+    ap.add_argument("--postprocess", action="store_true",
+                    help="give the raw windowed arms (nemotron_windowed*, nemotron_dense_vbx, nemotron_dz) the pipeline's "
+                         "own merge and bridge steps, as arms A and B already went through them")
     ap.add_argument("--csv", help="also write the rows to this file")
     a = ap.parse_args(argv)
     arms = [x.strip() for x in a.arms.split(",")] if a.arms else None
-    rows = run(a.root, a.ref, arms, a.collar)
+    rows = run(a.root, a.ref, arms, a.collar, a.postprocess)
     if not rows:
         print(f"no sample with segments_{a.ref}.json under {a.root}", file=sys.stderr)
         return 1
