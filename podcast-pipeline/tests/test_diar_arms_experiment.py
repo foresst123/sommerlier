@@ -362,3 +362,21 @@ def test_failed_arm_f_is_recorded_and_the_run_goes_on(tmp_path):
                 runner=FakeWindowedVbx(fail_stage=2))
     assert rc == 0
     assert "stage 2 (AHC) failed (exit 1)" in (out / "index.html").read_text(encoding="utf-8")
+
+
+def test_arm_h_runs_nemotron_in_one_pass_and_needs_no_k(tmp_path):
+    assert X.ARMS["H"] == "nemotron_one_pass" and "H" not in X.DEFAULT_ARMS.split(",")
+    src, sp = _make_samples(tmp_path)
+    out = tmp_path / "out"
+    fake = FakeMain(_table)
+    rc = X.main(["--audio-dir", str(src), "--samples", str(sp), "--out", str(out), "--only-arms", "H"],
+                runner=fake)
+    assert rc == 0
+    cmd = fake.calls[0]
+    assert cmd[cmd.index("--diarization_backend") + 1] == "nemotron"
+    assert "models.nemotron.legacy_one_pass=true" in cmd
+    assert not any(c.startswith("models.diarizen") for c in cmd)
+    sdir = sorted(p for p in out.iterdir() if p.is_dir())[0]
+    assert (sdir / "segments_nemotron_one_pass.json").is_file()
+    assert not (sdir / "segments_nemotron.json").exists()            # arm A did not run
+    assert "nemotron_one_pass" in (out / "index.html").read_text(encoding="utf-8")

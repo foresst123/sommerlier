@@ -23,6 +23,9 @@ Per sample (a conversation clip of about 40 s inside a long source recording):
      Stage 2 (--python, the som env) runs tools/windowed_vbx_stage.py: WeSpeaker ResNet34 embeddings, then VBx
      with the DiariZen PLDA (--plda-dir, else the HF cache) and the per-window Hungarian reassignment.
      --vbx-ahc-threshold, --vbx-fa, --vbx-fb go to stage 2. G needs no K. UNVERIFIED on GPU.
+  4d. arm H (--only-arms H, not in the default set), nemotron_one_pass: Nemotron's legacy one-pass path
+     (models.nemotron.legacy_one_pass), the whole chunk in one request, no windows and no external stitching. It
+     tests whether the model's own speaker cache (AOSC) holds the identities over about 5 minutes. H needs no K.
   5. every arm is cropped to the clip window and shifted to 0, written as segments_<arm>.json, and drawn in one
      lanes.html per sample (tools/make_diar_lanes_page.py). index.html links the samples with a table of
      speakers, K, segments under 1 s, speech seconds and overlap seconds per arm. No DER, no text.
@@ -65,8 +68,8 @@ LEAD_S = 120.0          # chunk starts this long before the clip
 SHORT_S = 1.0           # segments shorter than this are counted as short
 AUDIO_EXT = (".wav", ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".mp4", ".webm")
 ARMS = {"A": "nemotron", "B": "diarizen_auto", "C": "diarizen_k", "D": "diarizen_1_k", "E": "fusion",
-        "F": "nemotron_windowed", "G": "nemotron_windowed_vbx"}
-ARM_ORDER = "ABCDEFG"
+        "F": "nemotron_windowed", "G": "nemotron_windowed_vbx", "H": "nemotron_one_pass"}
+ARM_ORDER = "ABCDEFGH"
 DEFAULT_ARMS = "A,B,C,D"
 WINDOWED_PIECE_S = 240.0
 WINDOWED_HOP_S = 10.0
@@ -306,6 +309,8 @@ def arm_settings(arm: str, k: Optional[int]) -> Tuple[str, dict]:
     """(backend, --set values) of one run arm."""
     if arm == "A":
         return "nemotron", {}
+    if arm == "H":      # one Nemotron request over the whole chunk: its own speaker cache keeps the identities
+        return "nemotron", {"models.nemotron.legacy_one_pass": True}
     if arm == "B":
         return "diarizen", {}
     if k is None:
@@ -505,8 +510,8 @@ def main(argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) 
     ap.add_argument("--gpu", default="0", help="physical GPU id, set as CUDA_VISIBLE_DEVICES")
     ap.add_argument("--env", default="a100", help="environment profile in config.json")
     ap.add_argument("--only-arms", default=DEFAULT_ARMS,
-                    help="comma list of A,B,C,D,F,G (E needs --fusion; F is the windowed Nemotron arm, "
-                         "G the same windows with VBx clustering)")
+                    help="comma list of A,B,C,D,F,G,H (E needs --fusion; F is the windowed Nemotron arm, "
+                         "G the same windows with VBx clustering, H Nemotron in one pass over the chunk)")
     ap.add_argument("--fusion", action="store_true", help="also build arm E")
     ap.add_argument("--k-min-clean", type=float, default=1.0, help="clean seconds for a speaker to count toward K")
     ap.add_argument("--reuse", action="store_true", help="skip arms whose segments.json already exists")
