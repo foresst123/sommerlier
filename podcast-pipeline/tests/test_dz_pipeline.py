@@ -235,3 +235,41 @@ def test_run_file_stitches_two_dz_pieces_into_the_same_three_speakers():
     labels = {r["speaker"] for r in out["segments"]}
     assert len(labels) == 3
     assert [p["clusters"] for p in out["pieces"]] == [3, 3]
+
+
+def test_active_slots_left_without_a_cluster_are_counted():
+    # Two slots are active in every window but VBx finds one cluster: the Hungarian step can serve only one of them.
+    def prob_fn(s, e):
+        n = int(round((e - s) / FS))
+        out = np.full((n, 2), 0.05)
+        out[: n // 2, 0] = 0.95
+        out[n // 2:, 1] = 0.95
+        return out
+
+    def vbx_fn(train):
+        return np.ones((len(train), 1)), np.ones(1)
+
+    res = DZ.run_piece_dz(30.0, prob_fn, lambda span, mask: np.array([1.0, 0.0]), vbx_fn=vbx_fn,
+                          window_s=16.0, hop_s=4.0, frame_s=FS)
+    assert res.stats["active_unassigned"] == res.stats["windows"]
+
+
+def test_inspect_probs_summarises_a_probability_dump(tmp_path, capsys):
+    from tools import inspect_probs as I
+    piece = W.Piece(0.0, 20.0, 0.0, 20.0)
+    spans = [(0.0, 16.0), (2.0, 18.0)]
+    probs = []
+    for s, e in spans:
+        n = int(round((e - s) / FS))
+        p = np.full((n, 3), 0.05)
+        p[: n // 2, 0] = 0.9
+        p[n // 4: 3 * n // 4, 1] = 0.9           # overlaps slot 0 for a quarter of the window
+        probs.append(p)
+    W.save_piece_probs(str(tmp_path / "piece_000.npz"), piece, spans, probs, FS)
+    (tmp_path / "plan.json").write_text('{"frame_s": %s, "pieces": [{"file": "piece_000.npz"}]}' % FS, encoding="utf-8")
+    wins, frame_s = I.load_windows(str(tmp_path))
+    r = I.summarise(wins, frame_s, 0.5)
+    assert r["windows"] == 2 and r["active_slots_per_window"] == 2.0
+    assert 0.2 < r["overlap"] < 0.5 and r["overlap_3plus"] == 0.0
+    assert I.main([str(tmp_path)]) == 0
+    assert "clean>=10%" in capsys.readouterr().out

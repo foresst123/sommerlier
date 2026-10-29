@@ -198,6 +198,7 @@ def run_piece_dz(duration: float, prob_fn: Callable, embed_fn: EmbedMaskFn, *, v
                                           * np.linalg.norm(centroids, axis=1)[None, :])
         soft = (1.0 + cos).reshape(n_win, n_slot, -1)       # 2 - (1 - cos)
         hard = constrained_argmax(soft)
+        stats["active_unassigned"] = int(((hard == -2) & active).sum())    # active slots left without a cluster
         _, renumbered = np.unique(hard.ravel(), return_inverse=True)   # as DiariZen: -2 shifts every id by one
         hard = renumbered.reshape(n_win, n_slot).astype(int)
     hard[~active] = -2                                    # inactive slots are ignored from here on
