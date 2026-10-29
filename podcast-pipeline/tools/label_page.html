@@ -17,16 +17,19 @@ select,button,input,textarea{font:inherit;color:inherit;background:var(--card);b
 button{cursor:pointer}button:hover{border-color:var(--accent)}button:disabled{opacity:.45;cursor:default}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 #status{margin-left:auto;font-size:13px}.ok{color:var(--ok)}.bad{color:var(--bad)}.mute{color:var(--mute)}
-main{padding:12px 16px;max-width:1500px;margin:0 auto}
+main{padding:8px 12px}
 #banner{display:none;margin:0 0 10px;padding:8px 12px;border:1px solid var(--bad);border-radius:6px;color:var(--bad)}
 #banner button{margin-left:8px}
 .bar{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin:0 0 8px}
 .bar label{display:inline-flex;gap:4px;align-items:center;color:var(--mute)}
 #wrap{border:1px solid var(--line);border-radius:8px;background:var(--card);overflow:hidden;touch-action:none}
 canvas{display:block;width:100%}
-.cols{display:grid;grid-template-columns:minmax(260px,340px) 1fr;gap:14px;margin-top:12px}
-@media (max-width:820px){.cols{grid-template-columns:1fr}}
-.card{border:1px solid var(--line);border-radius:8px;background:var(--card);padding:10px 12px}
+.panels{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px;align-items:flex-start}
+.panels>.card{flex:1 1 240px;margin:0}
+details.card summary{cursor:pointer;color:var(--mute);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+details.card[open] summary{margin-bottom:8px}
+.hint{font-size:12px;color:var(--mute);margin:6px 0 0}
+.card{border:1px solid var(--line);border-radius:8px;background:var(--card);padding:8px 10px}
 .region{padding:8px 10px;border:1px solid var(--accent);border-radius:8px;background:var(--card)}
 .region button.spkbtn{border-width:2px}
 .card h2{font-size:13px;margin:0 0 8px;color:var(--mute);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
@@ -35,7 +38,7 @@ canvas{display:block;width:100%}
 .spk kbd,.keys kbd{border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 5px;font-size:12px;background:var(--lane)}
 .keys{font-size:12.5px;color:var(--mute);line-height:1.9}
 textarea{width:100%;min-height:70px}
-audio{width:100%;max-width:560px}
+audio{width:100%;max-width:460px;height:34px}
 </style>
 </head>
 <body>
@@ -49,41 +52,43 @@ audio{width:100%;max-width:560px}
 </header>
 <main>
   <div id="banner"></div>
-  <div class="bar">
+  <div class="bar" style="margin-bottom:6px">
     <audio id="aud" controls preload="auto"></audio>
     <label>Tốc độ <select id="rate"><option>0.5</option><option>0.75</option><option selected>1</option><option>1.25</option><option>1.5</option></select></label>
-    <label><input type="checkbox" id="snap" checked> Hít vào biên của arm khi kéo (giữ Alt để tắt)</label>
-    <label><input type="checkbox" id="follow" checked> Theo con trỏ phát</label>
-    <button id="zin">+</button><button id="zout">−</button><button id="zfit">Vừa khung</button>
+    <label><input type="checkbox" id="snap" checked> Hít biên arm (Alt: tắt)</label>
+    <label><input type="checkbox" id="follow" checked> Theo con trỏ</label>
+    <button id="zin" title="Phóng to">+</button><button id="zout" title="Thu nhỏ">−</button><button id="zfit">Vừa khung</button>
   </div>
-  <div class="bar" id="armbar"></div>
+  <div class="bar" id="armbar" style="margin-bottom:6px"></div>
   <div id="regionbar" class="bar region" style="display:none"></div>
   <div id="wrap"><canvas id="cv"></canvas></div>
-  <div class="cols">
+  <div class="panels">
     <div class="card">
-      <h2>Người nói của bạn</h2>
+      <h2>Người nói</h2>
       <div id="speakers"></div>
       <button id="addspk">+ Thêm người nói</button>
-      <h2 style="margin-top:14px">Khởi tạo từ arm</h2>
+    </div>
+    <div class="card">
+      <h2>Điểm xuất phát</h2>
       <div class="bar" style="margin:0"><select id="initarm"></select><button id="initbtn">Nạp</button></div>
-      <p class="mute" style="font-size:12.5px;margin:6px 0 0">Nạp kết quả của một arm làm điểm xuất phát rồi chỉ việc sửa nhanh hơn đánh từ đầu. Cần xác nhận nếu đã có nhãn.</p>
-      <h2 style="margin-top:14px">Sai số thời gian khi chấm</h2>
-      <label class="mute">± <input type="number" id="tol" min="0" max="5" step="0.05" value="0.25" style="width:80px"> giây quanh biên nhãn</label>
-      <p class="mute" style="font-size:12.5px;margin:6px 0 0">Nhãn tay luôn lệch một chút. Công cụ chấm bỏ qua khoảng này quanh mỗi biên. Vùng "chưa chắc" (hàng xám) thì không chấm gì cả.</p>
+      <p class="hint">Nạp kết quả một arm rồi sửa. Các arm khác được ẩn; bấm "Hiện lại tất cả arm" để xem lại.</p>
     </div>
-    <div>
-      <div class="card"><h2>Cách đánh nhãn nhanh</h2><div class="keys">
-        <b>1.</b> Kéo chuột trên <b>thước thời gian hoặc sóng âm</b> để chọn một <b>vùng</b> (hai thanh xanh ở đầu và cuối). Kéo hai thanh để chỉnh cho khớp<br>
-        <b>2.</b> Bấm <b>▶ Phát vùng</b> để nghe lại, rồi bấm <b>tên người nói</b> (hoặc phím <kbd>1</kbd>…<kbd>9</kbd>) để gán vùng cho người đó · <b>Không ai nói</b> để xoá nhãn trong vùng · <b>Chưa chắc</b> để loại vùng khỏi phần chấm<br>
-        Khi đang nghe, bấm <kbd>[</kbd> ở đầu câu và <kbd>]</kbd> ở cuối câu để đặt hai thanh theo con trỏ phát<br>
-        Cũng có thể kéo chuột trên hàng của một người để tạo đoạn, kéo mép để chỉnh, kéo thân để dời · <kbd>Delete</kbd> xoá · <kbd>S</kbd> cắt tại con trỏ · <kbd>M</kbd> nối đoạn kế<br>
-        <kbd>Space</kbd> phát/dừng · <kbd>←</kbd><kbd>→</kbd> tua 0,5 s (<kbd>Shift</kbd> 2 s) · <kbd>P</kbd> phát vùng hoặc đoạn đang chọn · <kbd>Esc</kbd> bỏ chọn · <kbd>Ctrl</kbd>+lăn chuột zoom · <kbd>Ctrl</kbd><kbd>Z</kbd>/<kbd>Y</kbd> hoàn tác · <kbd>Ctrl</kbd><kbd>S</kbd> lưu
-      </div></div>
-      <div class="card" style="margin-top:12px"><h2>Ghi chú cho mẫu</h2>
-        <textarea id="notes" placeholder="Ví dụ: người thứ ba chỉ nói 'dạ' lúc 12 s; mẫu này có nhạc nền"></textarea>
-        <div class="mute" id="summary" style="margin-top:6px"></div>
+    <details class="card">
+      <summary>Phím tắt</summary>
+      <div class="keys">
+        Kéo trên thước hoặc sóng để chọn vùng · kéo hai thanh xanh để chỉnh · <kbd>[</kbd> <kbd>]</kbd> đặt đầu/cuối theo con trỏ phát<br>
+        <kbd>1</kbd>…<kbd>9</kbd> gán người nói cho vùng (hoặc đoạn đang chọn) · <kbd>P</kbd> phát vùng · <kbd>Esc</kbd> bỏ chọn<br>
+        Kéo trên hàng người nói để tạo đoạn · <kbd>Delete</kbd> xoá · <kbd>S</kbd> cắt · <kbd>M</kbd> nối<br>
+        <kbd>Space</kbd> phát/dừng · <kbd>←</kbd><kbd>→</kbd> tua 0,5 s · <kbd>Ctrl</kbd>+<kbd>Z</kbd>/<kbd>Y</kbd> hoàn tác · <kbd>Ctrl</kbd>+<kbd>S</kbd> lưu
       </div>
-    </div>
+    </details>
+    <details class="card">
+      <summary>Chấm điểm và ghi chú</summary>
+      <label class="mute">± <input type="number" id="tol" min="0" max="5" step="0.05" value="0.25" style="width:80px"> giây quanh biên nhãn</label>
+      <p class="hint">Nhãn tay luôn lệch chút. Vùng "chưa chắc" không được chấm.</p>
+      <textarea id="notes" placeholder="Ví dụ: người thứ ba chỉ nói 'dạ' lúc 12 s" style="margin-top:6px"></textarea>
+      <div class="mute" id="summary" style="margin-top:6px"></div>
+    </details>
   </div>
 </main>
 <script>
