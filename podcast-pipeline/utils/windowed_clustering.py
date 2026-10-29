@@ -603,10 +603,11 @@ def run_file(duration: float, speech, *, make_prob_fn: Callable[[Piece], ProbFn]
              make_embed_fn: Callable[[Piece], EmbedFn], piece_s: float = 240.0, window_s: float = 30.0,
              hop_s: float = 10.0, overlap_s: float = 30.0, match_threshold: float = 0.5,
              vad_fn: Optional[Callable] = None, pieces: Optional[Sequence[Piece]] = None,
-             **piece_kwargs) -> dict:
+             piece_fn: Optional[Callable] = None, **piece_kwargs) -> dict:
     """Whole-file run: plan pieces, run_piece on each, stitch. piece_kwargs go to run_piece.
 
-    pieces, when given, replaces the planning (speech and vad_fn are then unused).
+    pieces, when given, replaces the planning (speech and vad_fn are then unused). piece_fn replaces run_piece
+    (same call shape; arm J passes utils.dz_pipeline.run_piece_dz).
     """
     if pieces is None:
         target, lo, hi = piece_bounds(piece_s)
@@ -615,8 +616,9 @@ def run_file(duration: float, speech, *, make_prob_fn: Callable[[Piece], ProbFn]
         pieces = plan_pieces(duration, speech, target_s=target, min_s=lo, max_s=hi, overlap_s=overlap_s,
                              vad_fn=vad_fn)
     pieces = list(pieces)
-    results = [run_piece(p.audio_duration, make_prob_fn(p), make_embed_fn(p), window_s=window_s,
-                         hop_s=hop_s, **piece_kwargs) for p in pieces]
+    run = piece_fn or run_piece
+    results = [run(p.audio_duration, make_prob_fn(p), make_embed_fn(p), window_s=window_s,
+                   hop_s=hop_s, **piece_kwargs) for p in pieces]
     segments = stitch_pieces(pieces, results, match_threshold=match_threshold)
     return {
         "segments": segments,

@@ -405,3 +405,29 @@ def test_arm_i_is_arm_g_with_dense_windows(tmp_path):
             "--windowed-python", sys.executable, "--python", sys.executable, "--windowed-hop-s", "7"],
            runner=fake_g)
     assert "--window-s" not in fake_g.calls[0] and fake_g.calls[0][fake_g.calls[0].index("--hop-s") + 1] == "7.0"
+
+
+def test_arm_j_runs_the_diarizen_steps_in_the_diarizen_env(tmp_path):
+    assert X.ARMS["J"] == "nemotron_dz" and "J" not in X.DEFAULT_ARMS.split(",")
+    src, sp = _make_samples(tmp_path)
+    out = tmp_path / "out"
+    fake = FakeWindowedVbx()
+    rc = X.main(["--audio-dir", str(src), "--samples", str(sp), "--out", str(out), "--only-arms", "J",
+                 "--windowed-python", sys.executable, "--python", "/som/python", "--vbx-python", "/dz/python",
+                 "--dense-window-s", "16", "--dense-hop-s", "0.8", "--dz-thr", "0.4", "--dz-median-frames", "5"],
+                runner=fake)
+    assert rc == 0
+    dump, stage2 = fake.calls[0:2]
+    assert dump[dump.index("--window-s") + 1] == "16.0" and dump[dump.index("--hop-s") + 1] == "0.8"
+    assert stage2[0] == "/dz/python" and stage2[1] == X.VBX_STAGE_SCRIPT
+    assert stage2[stage2.index("--clustering") + 1] == "dz"
+    assert stage2[stage2.index("--thr") + 1] == "0.4" and stage2[stage2.index("--median-frames") + 1] == "5"
+    assert "--fa" in stage2 and "--fb" in stage2
+    sdir = sorted(p for p in out.iterdir() if p.is_dir())[0]
+    assert (sdir / "segments_nemotron_dz.json").is_file()
+    # F keeps the som python; G and I use --vbx-python too
+    fake_f = FakeWindowedVbx()
+    X.main(["--audio-dir", str(src), "--samples", str(sp), "--out", str(tmp_path / "out_f"), "--only-arms", "F",
+            "--windowed-python", sys.executable, "--python", "/som/python", "--vbx-python", "/dz/python"],
+           runner=fake_f)
+    assert fake_f.calls[1][0] == "/som/python"

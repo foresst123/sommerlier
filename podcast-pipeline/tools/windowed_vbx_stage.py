@@ -6,6 +6,10 @@
         [--plda-dir DIR] [--embedding-model pyannote/wespeaker-voxceleb-resnet34-LM] [--ahc-threshold 0.6] \
         [--fa 0.07] [--fb 0.8] [--lda-dim 128] [--max-iters 20] [--init-smoothing 7.0] [--device cuda:0]
 
+Arm J is --clustering dz: DiariZen's own pipeline steps (utils/dz_pipeline.py) with masked embeddings of the whole
+window, a per-frame speaker count and top-k reconstruction. Run it with the python of the DiariZen env, which has
+the pyannote 3.1.1 fork DiariZen is built on.
+
 Arm G is the default (--clustering vbx, --embedder pyannote). Arm F is --clustering ahc --embedder wespeaker:
 the constrained AHC of utils/windowed_clustering and the repo's WeSpeaker ResNet-293 ONNX model
 (models/wespeaker_embedding.py), which runs on the GPU here; in the Nemotron env onnxruntime cannot load CUDA 13
@@ -31,6 +35,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import math
 import os
 import sys
 import time
@@ -41,6 +46,7 @@ sys.path.insert(0, ROOT)
 import numpy as np  # noqa: E402
 
 import utils.windowed_clustering as wc  # noqa: E402
+import utils.dz_pipeline as dz  # noqa: E402
 
 SR = 16000
 VBX_REPO = "BUT-FIT/diarizen-wavlm-large-s80-md-v2"
@@ -141,6 +147,23 @@ def make_clip_embedder(emb, torch, device: str):
     return embed_clip, counts
 
 
+def make_masked_embedder(emb, torch, device: str):
+    """(window audio, frame mask) -> (D,) raw embedding, or None when the model refuses (arm J, as DiariZen calls it)."""
+    failed = {"n": 0}
+
+    def embed(clip, mask):
+        x = torch.from_numpy(np.asarray(clip, dtype=np.float32)).to(device).reshape(1, 1, -1)
+        w = torch.from_numpy(np.asarray(mask, dtype=np.float32)).to(device).reshape(1, -1)
+        try:
+            out = emb(x, masks=w)
+        except (ValueError, RuntimeError):
+            failed["n"] += 1
+            return None
+        return np.asarray(out, dtype=float).reshape(-1)
+
+    return embed, failed
+
+
 def load_plan(probs_dir: str):
     with open(os.path.join(probs_dir, "plan.json"), encoding="utf-8") as fh:
         plan = json.load(fh)
@@ -163,13 +186,19 @@ def main(argv=None):
     ap.add_argument("--audio", required=True, help="16 kHz mono WAV, the same chunk stage 1 read")
     ap.add_argument("--probs-dir", required=True, help="folder written by windowed_nemotron_run.py --dump-probs")
     ap.add_argument("--out", required=True, help="segments.json to write")
-    ap.add_argument("--clustering", choices=("vbx", "ahc"), default="vbx",
-                    help="vbx = arm G, ahc = arm F (constrained AHC at --cosine-threshold)")
+    ap.add_argument("--clustering", choices=("vbx", "ahc", "dz"), default="vbx",
+                    help="vbx = arm G, ahc = arm F (constrained AHC at --cosine-threshold), dz = arm J (DiariZen steps)")
     ap.add_argument("--embedder", choices=("pyannote", "wespeaker"),
                     help="default: pyannote for vbx, wespeaker (ResNet-293 ONNX) for ahc")
     ap.add_argument("--cosine-threshold", type=float, default=0.5, help="cosine cut of the AHC of --clustering ahc")
     ap.add_argument("--min-speakers", type=int, default=1,
                     help="clusters per piece at least; below it VBx falls back to AHC (arm F's AHC stops at it too)")
+    ap.add_argument("--thr", type=float, default=0.5, help="dz: slot probability threshold of the local segmentation")
+    ap.add_argument("--median-frames", type=int, default=3,
+                    help="dz: median filter along time of each window's binarised slots (DiariZen: 11 frames of 20 ms)")
+    ap.add_argument("--min-frames-ratio", type=float, default=0.1,
+                    help="dz: share of a window's frames a slot needs alone to enter the clustering (DiariZen 0.1)")
+    ap.add_argument("--max-speakers", type=int, default=20, help="dz: cap of the per-frame speaker count")
     ap.add_argument("--max-embed-s", type=float, default=6.0,
                     help="clean seconds embedded per (window, label); 0 = all of it")
     ap.add_argument("--plda-dir", help="folder with xvec_transform.npz and plda.npz (default: HF cache)")
@@ -191,24 +220,31 @@ def main(argv=None):
         raise SystemExit(f"windowed_vbx_stage needs torch in this env (som): {exc}")
 
     device = a.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
-    embedder = a.embedder or ("pyannote" if a.clustering == "vbx" else "wespeaker")
-    if a.clustering == "vbx" and embedder != "pyannote":
-        raise SystemExit("--clustering vbx needs --embedder pyannote: the PLDA was trained for WeSpeaker ResNet34")
+    embedder = a.embedder or ("wespeaker" if a.clustering == "ahc" else "pyannote")
+    if a.clustering in ("vbx", "dz") and embedder != "pyannote":
+        raise SystemExit("--clustering vbx and dz need --embedder pyannote: the PLDA was trained for WeSpeaker ResNet34")
     plan, pieces, tables = load_plan(a.probs_dir)
     params = {"clustering": a.clustering, "embedder": embedder, "max_embed_s": a.max_embed_s, "device": device,
               "window_s": plan["params"]["window_s"], "hop_s": plan["params"]["hop_s"],
               "piece_s": plan["params"]["piece_s"]}
     cluster_fn = None
-    if a.clustering == "vbx":
+    dz_vbx = None
+    if a.clustering in ("vbx", "dz"):
         cluster_vbx, vbx_setup = import_vbx()
         plda_dir = find_plda_dir(a.plda_dir)
         xvec_tf, plda_tf, plda_psi = vbx_setup(plda_dir)
         params.update({"Fa": a.fa, "Fb": a.fb, "ahc_threshold": a.ahc_threshold, "lda_dim": a.lda_dim,
                        "max_iters": a.max_iters, "init_smoothing": a.init_smoothing, "plda_dir": plda_dir,
                        "embedding_model": a.embedding_model})
-        cluster_fn = wc.make_vbx_cluster_fn(cluster_vbx, xvec_tf, plda_tf, plda_psi, ahc_threshold=a.ahc_threshold,
-                                            Fa=a.fa, Fb=a.fb, lda_dim=a.lda_dim, max_iters=a.max_iters,
-                                            init_smoothing=a.init_smoothing)
+        if a.clustering == "vbx":
+            cluster_fn = wc.make_vbx_cluster_fn(cluster_vbx, xvec_tf, plda_tf, plda_psi,
+                                                ahc_threshold=a.ahc_threshold, Fa=a.fa, Fb=a.fb, lda_dim=a.lda_dim,
+                                                max_iters=a.max_iters, init_smoothing=a.init_smoothing)
+        else:
+            dz_vbx = dz.make_dz_vbx_fn(cluster_vbx, xvec_tf, plda_tf, plda_psi, ahc_threshold=a.ahc_threshold,
+                                       Fa=a.fa, Fb=a.fb, lda_dim=a.lda_dim, max_iters=a.max_iters)
+            params.update({"thr": a.thr, "median_frames": a.median_frames, "min_frames_ratio": a.min_frames_ratio,
+                           "max_speakers": a.max_speakers})
         start = {"plda_dir": plda_dir, "plda_candidates": plda_candidates()}
     else:
         params["cosine_threshold"] = a.cosine_threshold
@@ -221,6 +257,8 @@ def main(argv=None):
         emb, _torch, emb_path = build_embedder(a.embedding_model, device)
         params["embedding_path"] = emb_path
         embed_clip, counts = make_clip_embedder(emb, torch, device)
+        masked_embed, masked_failed = make_masked_embedder(emb, torch, device)
+        min_samples = getattr(emb, "min_num_samples", None)
     else:
         embed_clip, providers = build_wespeaker(device)
         params["onnx_providers"] = providers
@@ -247,6 +285,18 @@ def main(argv=None):
 
     progress = {"crops": 0, "failed": 0, "t0": time.time()}
 
+    def make_dz_embed_fn(piece):
+        win_s = float(plan["params"]["window_s"])
+
+        def embed_fn(span, mask):
+            progress["crops"] += 1
+            if progress["crops"] % 50 == 0:
+                print(json.dumps({"status": "embedding", "embeddings": progress["crops"],
+                                  "failed": masked_failed["n"],
+                                  "seconds": round(time.time() - progress["t0"], 1)}), flush=True)
+            return masked_embed(wave[idx(piece.audio_start + span[0]): idx(piece.audio_start + span[1])], mask)
+        return embed_fn
+
     def make_embed_fn(piece):
         def embed_fn(spans):
             rows = []
@@ -271,11 +321,24 @@ def main(argv=None):
         return embed_fn
 
     t0 = time.time()
-    result = wc.run_file(duration, None, make_prob_fn=make_prob_fn, make_embed_fn=make_embed_fn,
-                         pieces=pieces, piece_s=plan["params"]["piece_s"], window_s=plan["params"]["window_s"],
-                         hop_s=plan["params"]["hop_s"], frame_s=float(plan["frame_s"]), cluster_fn=cluster_fn,
-                         max_embed_s=a.max_embed_s, min_speakers=a.min_speakers,
-                         **({} if a.clustering == "vbx" else {"ahc_threshold": a.cosine_threshold}))
+    if a.clustering == "dz":
+        win_frames = int(round(float(plan["params"]["window_s"]) / float(plan["frame_s"])))
+        min_frames = (math.ceil(win_frames * min_samples / (float(plan["params"]["window_s"]) * SR))
+                      if min_samples else 1)
+        params["min_num_frames"] = min_frames
+        result = wc.run_file(duration, None, make_prob_fn=make_prob_fn, make_embed_fn=make_dz_embed_fn,
+                             pieces=pieces, piece_s=plan["params"]["piece_s"], window_s=plan["params"]["window_s"],
+                             hop_s=plan["params"]["hop_s"], frame_s=float(plan["frame_s"]), piece_fn=dz.run_piece_dz,
+                             vbx_fn=dz_vbx, thr=a.thr, median_frames=a.median_frames,
+                             min_frames_ratio=a.min_frames_ratio, min_num_frames=min_frames,
+                             max_speakers=a.max_speakers)
+        progress["failed"] = masked_failed["n"]
+    else:
+        result = wc.run_file(duration, None, make_prob_fn=make_prob_fn, make_embed_fn=make_embed_fn,
+                             pieces=pieces, piece_s=plan["params"]["piece_s"], window_s=plan["params"]["window_s"],
+                             hop_s=plan["params"]["hop_s"], frame_s=float(plan["frame_s"]), cluster_fn=cluster_fn,
+                             max_embed_s=a.max_embed_s, min_speakers=a.min_speakers,
+                             **({} if a.clustering == "vbx" else {"ahc_threshold": a.cosine_threshold}))
     params["embedding_padded_crops"] = counts["padded"]
     params["embedding_failed_crops"] = progress["failed"]
     params["seconds"] = round(time.time() - t0, 1)

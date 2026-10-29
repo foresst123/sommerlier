@@ -29,6 +29,11 @@ Per sample (a conversation clip of about 40 s inside a long source recording):
   4e. arm I (--only-arms I, not in the default set), nemotron_dense_vbx: arm G with DiariZen's window (--dense-window-s,
      16 s) and a hop of --dense-hop-s (0.8 s), so every frame is seen by about 20 windows and VBx gets hundreds of
      embeddings per 5 minutes instead of a few dozen. Same stages, same flags as G. I needs no K. UNVERIFIED on GPU.
+  4f. arm J (--only-arms J, not in the default set), nemotron_dz: arm I's windows (16 s, hop 0.8 s) through DiariZen's
+     own steps, utils/dz_pipeline.py: binarised and median-filtered slots, a per-frame speaker count, one masked
+     embedding of the whole window per slot (the ResNet gets the window and `weights` = the slot's clean frames), the
+     10% clean-frame rule, VBx, a Hungarian assignment per window and the top-count reconstruction. Stage 2 should run
+     with --vbx-python set to the DiariZen env. --dz-thr and --dz-median-frames set the Nemotron binarisation. UNVERIFIED on GPU.
   5. every arm is cropped to the clip window and shifted to 0, written as segments_<arm>.json, and drawn in one
      lanes.html per sample (tools/make_diar_lanes_page.py). index.html links the samples with a table of
      speakers, K, segments under 1 s, speech seconds and overlap seconds per arm. No DER, no text.
@@ -72,8 +77,8 @@ SHORT_S = 1.0           # segments shorter than this are counted as short
 AUDIO_EXT = (".wav", ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".mp4", ".webm")
 ARMS = {"A": "nemotron", "B": "diarizen_auto", "C": "diarizen_k", "D": "diarizen_1_k", "E": "fusion",
         "F": "nemotron_windowed", "G": "nemotron_windowed_vbx", "H": "nemotron_one_pass",
-        "I": "nemotron_dense_vbx"}
-ARM_ORDER = "ABCDEFGHI"
+        "I": "nemotron_dense_vbx", "J": "nemotron_dz"}
+ARM_ORDER = "ABCDEFGHIJ"
 DEFAULT_ARMS = "A,B,C,D"
 WINDOWED_PIECE_S = 240.0
 WINDOWED_HOP_S = 10.0
@@ -349,16 +354,18 @@ def run_arm(sample_dir: Path, arm: str, values: dict, backend: str, cfg: dict, r
 
 
 def run_windowed_arm(arm: str, sample_dir: Path, cfg: dict, runner: Runner) -> Path:
-    """Arms F, G and I on sample_dir/chunk.wav, in two steps.
+    """Arms F, G, I and J on sample_dir/chunk.wav, in two steps.
 
     Stage 1 (Nemotron env) dumps the per-window probabilities. Stage 2 (--python, the som env) embeds on the GPU
     and clusters: arm F with the repo's WeSpeaker ResNet-293 and constrained AHC, arm G with pyannote's ResNet34
     and DiariZen's VBx. The Nemotron env cannot run ONNX Runtime on the GPU (it needs CUDA 13), so F no longer
     embeds there.
     """
-    label = "VBx" if arm in ("G", "I") else "AHC"
-    window_s = cfg["dense_window_s"] if arm == "I" else None     # arm I: DiariZen-like dense windows
-    hop_s = cfg["dense_hop_s"] if arm == "I" else cfg["windowed_hop_s"]
+    label = {"G": "VBx", "I": "VBx", "J": "DiariZen steps"}.get(arm, "AHC")
+    dense = arm in ("I", "J")                                    # arms I and J: DiariZen-like dense windows
+    window_s = cfg["dense_window_s"] if dense else None
+    hop_s = cfg["dense_hop_s"] if dense else cfg["windowed_hop_s"]
+    stage2_python = (cfg.get("vbx_python") or cfg["python"]) if arm in ("G", "I", "J") else cfg["python"]
     run_dir = sample_dir / "runs" / ARMS[arm]
     probs = run_dir / "probs"
     result = run_dir / "out" / "segments.json"
@@ -377,9 +384,11 @@ def run_windowed_arm(arm: str, sample_dir: Path, cfg: dict, runner: Runner) -> P
         code = runner(cmd1, env)
         if code != 0 or not (probs / "plan.json").is_file():
             raise RuntimeError(f"arm {ARMS[arm]} stage 1 (probabilities) failed (exit {code}), see {run_dir}")
-    cmd2 = [cfg["python"], VBX_STAGE_SCRIPT, "--audio", chunk, "--probs-dir", str(probs), "--out", str(result),
+    cmd2 = [stage2_python, VBX_STAGE_SCRIPT, "--audio", chunk, "--probs-dir", str(probs), "--out", str(result),
             "--min-speakers", str(cfg["windowed_min_speakers"])]
-    if arm in ("G", "I"):
+    if arm in ("G", "I", "J"):
+        if arm == "J":
+            cmd2 += ["--clustering", "dz", "--thr", str(cfg["dz_thr"]), "--median-frames", str(cfg["dz_median_frames"])]
         cmd2 += ["--ahc-threshold", str(cfg["vbx_ahc_threshold"]), "--fa", str(cfg["vbx_fa"]),
                  "--fb", str(cfg["vbx_fb"])]
         if cfg["plda_dir"]:
@@ -420,7 +429,7 @@ def process_sample(index: int, sample: dict, cfg: dict, runner: Runner, log: Cal
             if arm == "F":                      # windowed Nemotron: no K needed
                 segs["F"] = crop(read_rows(str(run_windowed_arm("F", sdir, cfg, runner))), rs, re_)
                 continue
-            if arm in ("G", "I"):               # windowed Nemotron + VBx (G sparse, I dense): no K needed
+            if arm in ("G", "I", "J"):          # windowed Nemotron + VBx (G sparse, I dense) or DiariZen steps (J)
                 segs[arm] = crop(read_rows(str(run_windowed_arm(arm, sdir, cfg, runner))), rs, re_)
                 continue
             backend, values = arm_settings(arm, k)
@@ -520,9 +529,9 @@ def main(argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) 
     ap.add_argument("--gpu", default="0", help="physical GPU id, set as CUDA_VISIBLE_DEVICES")
     ap.add_argument("--env", default="a100", help="environment profile in config.json")
     ap.add_argument("--only-arms", default=DEFAULT_ARMS,
-                    help="comma list of A,B,C,D,F,G,H,I (E needs --fusion; F is the windowed Nemotron arm, "
+                    help="comma list of A,B,C,D,F,G,H,I,J (E needs --fusion; F is the windowed Nemotron arm, "
                          "G the same windows with VBx clustering, H Nemotron in one pass over the chunk, "
-                         "I dense windows like DiariZen with VBx)")
+                         "I dense windows like DiariZen with VBx, J DiariZen's own pipeline steps)")
     ap.add_argument("--fusion", action="store_true", help="also build arm E")
     ap.add_argument("--k-min-clean", type=float, default=1.0, help="clean seconds for a speaker to count toward K")
     ap.add_argument("--reuse", action="store_true", help="skip arms whose segments.json already exists")
@@ -539,6 +548,12 @@ def main(argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) 
                     help="arm I: Nemotron window length (DiariZen uses 16 s)")
     ap.add_argument("--dense-hop-s", type=float, default=DENSE_HOP_S,
                     help="arm I: hop between windows; 0.8 s gives hundreds of embeddings per 5 minutes like DiariZen")
+    ap.add_argument("--vbx-python",
+                    help="python of stage 2 for the VBx arms G, I and J; the DiariZen env gives arm J DiariZen's own "
+                         "pyannote 3.1.1 (default: --python)")
+    ap.add_argument("--dz-thr", type=float, default=0.5, help="arm J: slot probability threshold")
+    ap.add_argument("--dz-median-frames", type=int, default=3,
+                    help="arm J: median filter of the binarised slots (frames of the Nemotron output)")
     ap.add_argument("--windowed-min-speakers", type=int, default=1,
                     help="arms F and G: at least this many speakers per piece (G falls back to AHC below it)")
     ap.add_argument("--vbx-fa", type=float, default=VBX_FA, help="arm G: VBx Fa (UNVERIFIED default)")
@@ -558,7 +573,7 @@ def main(argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) 
         run.add("B")            # fusion boundaries come from arm B
     arms = [x for x in ARM_ORDER if x in run]
     windowed_python = None
-    if run & {"F", "G", "I"}:
+    if run & {"F", "G", "I", "J"}:
         windowed_python = a.windowed_python or resolve_worker_python("nemotron")
 
     out = Path(a.out)
@@ -566,7 +581,8 @@ def main(argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) 
     cfg = {"audio_dir": a.audio_dir, "final": a.final, "out": str(out), "gpu": a.gpu, "env": a.env,
            "run": run, "k_min_clean": a.k_min_clean, "reuse": a.reuse, "config": a.config, "python": a.python,
            "windowed_python": windowed_python, "windowed_piece_s": a.windowed_piece_s,
-           "windowed_hop_s": a.windowed_hop_s, "dense_window_s": a.dense_window_s, "dense_hop_s": a.dense_hop_s,
+           "windowed_hop_s": a.windowed_hop_s, "dense_window_s": a.dense_window_s, "dense_hop_s": a.dense_hop_s, "vbx_python": a.vbx_python,
+           "dz_thr": a.dz_thr, "dz_median_frames": a.dz_median_frames,
            "windowed_min_speakers": a.windowed_min_speakers, "vbx_ahc_threshold": a.vbx_ahc_threshold, "vbx_fa": a.vbx_fa,
            "vbx_fb": a.vbx_fb, "plda_dir": a.plda_dir}
     summaries = []
