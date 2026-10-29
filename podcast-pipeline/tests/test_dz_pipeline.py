@@ -273,3 +273,11 @@ def test_inspect_probs_summarises_a_probability_dump(tmp_path, capsys):
     assert 0.2 < r["overlap"] < 0.5 and r["overlap_3plus"] == 0.0
     assert I.main([str(tmp_path)]) == 0
     assert "clean>=10%" in capsys.readouterr().out
+
+
+def test_median_filter_size_follows_seconds_not_the_frame_rate():
+    # Nemotron-3's output is 10 ms per frame: 0.22 s is 23 frames there, 3 frames of 80 ms.
+    assert DZ.frames_for_seconds(0.22, 0.01) == 23
+    assert DZ.frames_for_seconds(0.22, 0.08) == 3
+    assert DZ.frames_for_seconds(0.0, 0.01) == 1
+    assert DZ.frames_for_seconds(0.2, 0.01) == 21            # 20 is even: the next odd size

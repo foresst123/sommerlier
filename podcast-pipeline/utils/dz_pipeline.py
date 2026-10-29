@@ -6,7 +6,8 @@ core/inference.py, utils/signal.py), except the local segmentation, which is Nem
 (DiariZen's is a 4-speaker powerset):
 
   1. each window's slot probabilities are binarised at `thr`, then median-filtered along time (DiariZen: size 11 frames
-     on its own 20 ms frames; here `median_frames`);
+     of about 20 ms, so about 0.22 s; here `median_frames`, which the stage derives from seconds: Nemotron's output is
+     10 ms per frame, so the same 0.22 s is 23 frames);
   2. per-frame speaker count = round(mean over the windows covering the frame of the number of active slots);
   3. one embedding per (window, active slot): the WeSpeaker ResNet sees the whole window and `weights` = the frames where
      only that slot is active (the whole slot mask when it has no more than `min_num_frames` such frames);
@@ -39,6 +40,12 @@ from utils.windowed_clustering import PieceResult, WindowFit, _fit_rows, window_
 
 EmbedMaskFn = Callable[[tuple, np.ndarray], Optional[np.ndarray]]   # ((start, end), frame mask) -> vector or None
 VbxFn = Callable[[np.ndarray], tuple]                               # train embeddings -> (q, sp)
+
+
+def frames_for_seconds(seconds: float, frame_s: float) -> int:
+    """Odd number of frames closest to `seconds` (a median filter needs an odd size). Nemotron's output is 10 ms."""
+    n = max(1, int(round(seconds / frame_s)))
+    return n if n % 2 == 1 else n + 1
 
 
 def binarise_window(raw: np.ndarray, thr: float = 0.5, median_frames: int = 3) -> np.ndarray:

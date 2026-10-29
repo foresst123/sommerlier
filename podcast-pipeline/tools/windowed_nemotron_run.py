@@ -89,7 +89,7 @@ def main(argv=None):
             raise RuntimeError("model.diarize returned no tensor outputs; UNVERIFIED API, see exp5_breakthrough_nemotron.py")
         return [(p.squeeze(0) if p.ndim == 3 else p).detach().float().cpu().numpy() for p in out[1]]
 
-    # Frame length from one real window: the model's frame grid, not an assumed 80 ms.
+    # Frame length from one real window: the model's frame grid (Nemotron-3 outputs 10 ms frames; 80 ms is its encoder frame).
     probe_len = min(a.window_s, duration)
     probe = diarize_windows([wave[: idx(probe_len)]])[0]
     frame_s = probe_len / float(probe.shape[0])

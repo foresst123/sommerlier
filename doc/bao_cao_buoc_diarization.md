@@ -51,7 +51,7 @@ Mục tiêu cuối là dữ liệu hội thoại hai người sạch. Vì vậy 
 
 ## 6. Rủi ro và điều chưa kiểm
 
-- Cách lấy xác suất theo frame của Nemotron (`include_tensor_outputs`) và độ dài frame (80 ms hay 10 ms) chưa kiểm trên NeMo thật.
+- Cách lấy xác suất theo frame của Nemotron (`include_tensor_outputs`) chưa kiểm trên NeMo thật. Độ dài frame đầu ra đã đo: **10 ms** (80 ms là frame của encoder, dùng cho tham số streaming).
 - Số DIHARD của Nemotron-3 lấy từ báo chí, giấy phép mâu thuẫn giữa các nguồn (OpenMDW-1.1 hay evaluation), cần kiểm.
 - Giấy phép DiariZen (CC BY-NC) và DiarizationLM chưa được xác minh cho dùng sản xuất.
 - Chỉ có 20 clip test, nên chênh dưới khoảng 1 điểm DER giữa hai cấu hình là nhiễu.

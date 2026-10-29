@@ -201,8 +201,11 @@ def main(argv=None):
     ap.add_argument("--min-speakers", type=int, default=1,
                     help="clusters per piece at least; below it VBx falls back to AHC (arm F's AHC stops at it too)")
     ap.add_argument("--thr", type=float, default=0.5, help="dz: slot probability threshold of the local segmentation")
-    ap.add_argument("--median-frames", type=int, default=3,
-                    help="dz: median filter along time of each window's binarised slots (DiariZen: 11 frames of 20 ms)")
+    ap.add_argument("--median-s", type=float, default=0.22,
+                    help="dz: median filter along time of each window's binarised slots, in seconds "
+                         "(DiariZen: 11 frames of about 20 ms); turned into an odd number of output frames")
+    ap.add_argument("--median-frames", type=int,
+                    help="dz: the median filter size in output frames, overriding --median-s")
     ap.add_argument("--min-frames-ratio", type=float, default=0.1,
                     help="dz: share of a window's frames a slot needs alone to enter the clustering (DiariZen 0.1)")
     ap.add_argument("--max-speakers", type=int, default=20, help="dz: cap of the per-frame speaker count")
@@ -250,7 +253,9 @@ def main(argv=None):
         else:
             dz_vbx = dz.make_dz_vbx_fn(cluster_vbx, xvec_tf, plda_tf, plda_psi, ahc_threshold=a.ahc_threshold,
                                        Fa=a.fa, Fb=a.fb, lda_dim=a.lda_dim, max_iters=a.max_iters)
-            params.update({"thr": a.thr, "median_frames": a.median_frames, "min_frames_ratio": a.min_frames_ratio,
+            median_frames = a.median_frames or dz.frames_for_seconds(a.median_s, float(plan["frame_s"]))
+            params.update({"thr": a.thr, "median_frames": median_frames, "median_s": a.median_s,
+                           "frame_s": float(plan["frame_s"]), "min_frames_ratio": a.min_frames_ratio,
                            "max_speakers": a.max_speakers})
         start = {"plda_dir": plda_dir, "plda_candidates": plda_candidates()}
     else:
@@ -336,7 +341,7 @@ def main(argv=None):
         result = wc.run_file(duration, None, make_prob_fn=make_prob_fn, make_embed_fn=make_dz_embed_fn,
                              pieces=pieces, piece_s=plan["params"]["piece_s"], window_s=plan["params"]["window_s"],
                              hop_s=plan["params"]["hop_s"], frame_s=float(plan["frame_s"]), piece_fn=dz.run_piece_dz,
-                             vbx_fn=dz_vbx, thr=a.thr, median_frames=a.median_frames,
+                             vbx_fn=dz_vbx, thr=a.thr, median_frames=median_frames,
                              min_frames_ratio=a.min_frames_ratio, min_num_frames=min_frames,
                              max_speakers=a.max_speakers)
         progress["failed"] = masked_failed["n"]

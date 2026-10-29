@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """What Nemotron's windowed slot probabilities look like to a DiariZen-style clustering. No torch, no GPU.
 
-    python tools/inspect_probs.py PROBS_DIR [--median-frames 3] [--edge-s 2.0]
+    python tools/inspect_probs.py PROBS_DIR [--median-s 0.22] [--edge-s 2.0]
 
 PROBS_DIR is the folder an arm G/I/J stage 1 wrote (plan.json and piece_NNN.npz). For several slot thresholds it
 prints what decides how many embeddings the clustering gets and how good they are:
@@ -46,11 +46,12 @@ def load_windows(probs_dir: str):
     return wins, float(plan["frame_s"])
 
 
-def summarise(wins, frame_s: float, thr: float, median_frames: int = 3, edge_s: float = 2.0) -> dict:
+def summarise(wins, frame_s: float, thr: float, median_s: float = 0.22, edge_s: float = 2.0) -> dict:
     active_slots, clean_ok, active_total = [], 0, 0
     speech = overlap = three = frames = uncertain = 0
     edge_speech = edge_frames = mid_speech = mid_frames = 0
     edge_n = max(1, int(round(edge_s / frame_s)))
+    median_frames = dz.frames_for_seconds(median_s, frame_s)
     for _, probs in wins:
         probs = np.asarray(probs, dtype=float)
         binary = dz.binarise_window(probs, thr, median_frames)
@@ -91,7 +92,7 @@ def summarise(wins, frame_s: float, thr: float, median_frames: int = 3, edge_s: 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("probs_dir")
-    ap.add_argument("--median-frames", type=int, default=3)
+    ap.add_argument("--median-s", type=float, default=0.22)
     ap.add_argument("--edge-s", type=float, default=2.0)
     a = ap.parse_args(argv)
     wins, frame_s = load_windows(a.probs_dir)
@@ -99,7 +100,7 @@ def main(argv=None) -> int:
     head = ("thr", "slots/win", "speech", "overlap", ">=3 on", "clean>=10%", "uncertain", "edge speech", "mid speech")
     print("  ".join(f"{h:>11}" for h in head))
     for thr in THRESHOLDS:
-        r = summarise(wins, frame_s, thr, a.median_frames, a.edge_s)
+        r = summarise(wins, frame_s, thr, a.median_s, a.edge_s)
         row = (r["thr"], r["active_slots_per_window"], r["speech"], r["overlap"], r["overlap_3plus"], r["clean_10pct"],
                r["uncertain"], r["edge_speech"], r["mid_speech"])
         print("  ".join(f"{v:>11.3f}" for v in row))

@@ -414,14 +414,14 @@ def test_arm_j_runs_the_diarizen_steps_in_the_diarizen_env(tmp_path):
     fake = FakeWindowedVbx()
     rc = X.main(["--audio-dir", str(src), "--samples", str(sp), "--out", str(out), "--only-arms", "J",
                  "--windowed-python", sys.executable, "--python", "/som/python", "--vbx-python", "/dz/python",
-                 "--dense-window-s", "16", "--dense-hop-s", "0.8", "--dz-thr", "0.4", "--dz-median-frames", "5"],
+                 "--dense-window-s", "16", "--dense-hop-s", "0.8", "--dz-thr", "0.4", "--dz-median-s", "0.3"],
                 runner=fake)
     assert rc == 0
     dump, stage2 = fake.calls[0:2]
     assert dump[dump.index("--window-s") + 1] == "16.0" and dump[dump.index("--hop-s") + 1] == "0.8"
     assert stage2[0] == "/dz/python" and stage2[1] == X.VBX_STAGE_SCRIPT
     assert stage2[stage2.index("--clustering") + 1] == "dz"
-    assert stage2[stage2.index("--thr") + 1] == "0.4" and stage2[stage2.index("--median-frames") + 1] == "5"
+    assert stage2[stage2.index("--thr") + 1] == "0.4" and stage2[stage2.index("--median-s") + 1] == "0.3"
     assert "--fa" in stage2 and "--fb" in stage2
     sdir = sorted(p for p in out.iterdir() if p.is_dir())[0]
     assert (sdir / "segments_nemotron_dz.json").is_file()

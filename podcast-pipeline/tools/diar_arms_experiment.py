@@ -33,7 +33,7 @@ Per sample (a conversation clip of about 40 s inside a long source recording):
      own steps, utils/dz_pipeline.py: binarised and median-filtered slots, a per-frame speaker count, one masked
      embedding of the whole window per slot (the ResNet gets the window and `weights` = the slot's clean frames), the
      10% clean-frame rule, VBx, a Hungarian assignment per window and the top-count reconstruction. Stage 2 should run
-     with --vbx-python set to the DiariZen env. --dz-thr and --dz-median-frames set the Nemotron binarisation. UNVERIFIED on GPU.
+     with --vbx-python set to the DiariZen env. --dz-thr and --dz-median-s set the Nemotron binarisation. UNVERIFIED on GPU.
   5. every arm is cropped to the clip window and shifted to 0, written as segments_<arm>.json, and drawn in one
      lanes.html per sample (tools/make_diar_lanes_page.py). index.html links the samples with a table of
      speakers, K, segments under 1 s, speech seconds and overlap seconds per arm. No DER, no text.
@@ -388,7 +388,7 @@ def run_windowed_arm(arm: str, sample_dir: Path, cfg: dict, runner: Runner) -> P
             "--min-speakers", str(cfg["windowed_min_speakers"])]
     if arm in ("G", "I", "J"):
         if arm == "J":
-            cmd2 += ["--clustering", "dz", "--thr", str(cfg["dz_thr"]), "--median-frames", str(cfg["dz_median_frames"])]
+            cmd2 += ["--clustering", "dz", "--thr", str(cfg["dz_thr"]), "--median-s", str(cfg["dz_median_s"])]
         cmd2 += ["--ahc-threshold", str(cfg["vbx_ahc_threshold"]), "--fa", str(cfg["vbx_fa"]),
                  "--fb", str(cfg["vbx_fb"])]
         if cfg["plda_dir"]:
@@ -552,8 +552,9 @@ def main(argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) 
                     help="python of stage 2 for the VBx arms G, I and J; the DiariZen env gives arm J DiariZen's own "
                          "pyannote 3.1.1 (default: --python)")
     ap.add_argument("--dz-thr", type=float, default=0.5, help="arm J: slot probability threshold")
-    ap.add_argument("--dz-median-frames", type=int, default=3,
-                    help="arm J: median filter of the binarised slots (frames of the Nemotron output)")
+    ap.add_argument("--dz-median-s", type=float, default=0.22,
+                    help="arm J: median filter of the binarised slots in seconds (DiariZen: 11 frames of about 20 ms); "
+                         "Nemotron's output is 10 ms per frame")
     ap.add_argument("--windowed-min-speakers", type=int, default=1,
                     help="arms F and G: at least this many speakers per piece (G falls back to AHC below it)")
     ap.add_argument("--vbx-fa", type=float, default=VBX_FA, help="arm G: VBx Fa (UNVERIFIED default)")
@@ -582,7 +583,7 @@ def main(argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) 
            "run": run, "k_min_clean": a.k_min_clean, "reuse": a.reuse, "config": a.config, "python": a.python,
            "windowed_python": windowed_python, "windowed_piece_s": a.windowed_piece_s,
            "windowed_hop_s": a.windowed_hop_s, "dense_window_s": a.dense_window_s, "dense_hop_s": a.dense_hop_s, "vbx_python": a.vbx_python,
-           "dz_thr": a.dz_thr, "dz_median_frames": a.dz_median_frames,
+           "dz_thr": a.dz_thr, "dz_median_s": a.dz_median_s,
            "windowed_min_speakers": a.windowed_min_speakers, "vbx_ahc_threshold": a.vbx_ahc_threshold, "vbx_fa": a.vbx_fa,
            "vbx_fb": a.vbx_fb, "plda_dir": a.plda_dir}
     summaries = []
