@@ -380,3 +380,28 @@ def test_arm_h_runs_nemotron_in_one_pass_and_needs_no_k(tmp_path):
     assert (sdir / "segments_nemotron_one_pass.json").is_file()
     assert not (sdir / "segments_nemotron.json").exists()            # arm A did not run
     assert "nemotron_one_pass" in (out / "index.html").read_text(encoding="utf-8")
+
+
+def test_arm_i_is_arm_g_with_dense_windows(tmp_path):
+    assert X.ARMS["I"] == "nemotron_dense_vbx" and "I" not in X.DEFAULT_ARMS.split(",")
+    src, sp = _make_samples(tmp_path)
+    out = tmp_path / "out"
+    fake = FakeWindowedVbx()
+    rc = X.main(["--audio-dir", str(src), "--samples", str(sp), "--out", str(out), "--only-arms", "I",
+                 "--windowed-python", sys.executable, "--python", sys.executable,
+                 "--windowed-hop-s", "10", "--dense-window-s", "12", "--dense-hop-s", "0.4",
+                 "--vbx-fb", "0.3"], runner=fake)
+    assert rc == 0
+    dump, stage2 = fake.calls[0:2]
+    assert dump[dump.index("--window-s") + 1] == "12.0" and dump[dump.index("--hop-s") + 1] == "0.4"
+    assert stage2[1] == X.VBX_STAGE_SCRIPT and "--clustering" not in stage2      # VBx is the stage default
+    assert stage2[stage2.index("--fb") + 1] == "0.3"
+    sdir = sorted(p for p in out.iterdir() if p.is_dir())[0]
+    assert (sdir / "segments_nemotron_dense_vbx.json").is_file()
+    assert "dense" in str(sdir / "runs") or (sdir / "runs" / "nemotron_dense_vbx" / "probs" / "plan.json").is_file()
+    # arm G keeps its own sparse settings and has no --window-s
+    fake_g = FakeWindowedVbx()
+    X.main(["--audio-dir", str(src), "--samples", str(sp), "--out", str(tmp_path / "out_g"), "--only-arms", "G",
+            "--windowed-python", sys.executable, "--python", sys.executable, "--windowed-hop-s", "7"],
+           runner=fake_g)
+    assert "--window-s" not in fake_g.calls[0] and fake_g.calls[0][fake_g.calls[0].index("--hop-s") + 1] == "7.0"
