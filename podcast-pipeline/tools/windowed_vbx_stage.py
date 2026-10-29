@@ -105,9 +105,16 @@ def import_vbx():
 
 
 def build_embedder(model: str, device: str):
-    """pyannote WeSpeaker ResNet34 (the embedding model DiariZen's PLDA was trained on). UNVERIFIED API."""
+    """pyannote WeSpeaker ResNet34, the embedding model DiariZen's PLDA was trained on.
+
+    PretrainedSpeakerEmbedding(path, device=...) and emb(waveforms, masks=...) are the calls DiariZen's pyannote fork
+    makes (speaker_verification.py). The pyannote 3.1.1 loader of the DiariZen env needs torch.load back at
+    weights_only=False (torch >= 2.6), as the DiariZen worker does, so the shim goes in before the model is built.
+    """
     try:
         import torch
+        from utils.torch_compat import install_torch_load_shim
+        install_torch_load_shim()
         from pyannote.audio.pipelines.speaker_verification import PretrainedSpeakerEmbedding
     except ImportError as exc:
         raise SystemExit(f"windowed_vbx_stage needs torch and pyannote.audio in this env: {exc}")

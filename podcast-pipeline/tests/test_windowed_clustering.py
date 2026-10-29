@@ -536,3 +536,24 @@ def test_vbx_that_collapses_to_one_speaker_falls_back_when_min_speakers_is_two()
     assert two.max() == 1 and fn.last_info["vbx_fallback"] is True
     assert fn.last_info["vbx_clusters"] == 1 and fn.last_info["embeddings"] == 4
     assert two[0] == two[1] and two[2] == two[3] and two[0] != two[2]
+
+
+def test_stage_installs_the_torch_load_shim_before_the_embedder_is_built(tmp_path, monkeypatch):
+    # torch >= 2.6 refuses the pyannote checkpoint unless torch.load is back at weights_only=False.
+    import types
+    order = []
+    fake_torch = types.ModuleType("torch")
+    fake_torch.device = lambda name: name
+    sv = types.ModuleType("pyannote.audio.pipelines.speaker_verification")
+    sv.PretrainedSpeakerEmbedding = lambda path, device=None: order.append("model") or object()
+    for name in ("pyannote", "pyannote.audio", "pyannote.audio.pipelines"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "pyannote.audio.pipelines.speaker_verification", sv)
+    from utils import torch_compat
+    monkeypatch.setattr(torch_compat, "install_torch_load_shim", lambda: order.append("shim"))
+    from tools import windowed_vbx_stage as stage
+    model = tmp_path / "wespeaker_pytorch_model.bin"
+    model.write_bytes(b"")
+    stage.build_embedder(str(model), "cpu")
+    assert order == ["shim", "model"]
