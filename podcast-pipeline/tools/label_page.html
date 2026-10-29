@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Đánh nhãn diarization</title>
+<style>
+:root{--bg:#fbfaf7;--card:#fff;--ink:#1d1d1b;--mute:#6b675f;--line:#e4e1da;--accent:#2f6fed;--bad:#c0392b;--ok:#1b7f4b;--sel:#111;
+--lane:#f3f1ec;--ref:#ece9e1;--ignore:rgba(120,120,120,.28)}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#161614;--card:#1f1f1c;--ink:#ece9e2;--mute:#9a968c;--line:#3a3834;--accent:#7aa2ff;--bad:#ff7b6b;--ok:#5fd28f;--sel:#fff;--lane:#262622;--ref:#2b2a26;--ignore:rgba(200,200,200,.22)}}
+:root[data-theme="dark"]{--bg:#161614;--card:#1f1f1c;--ink:#ece9e2;--mute:#9a968c;--line:#3a3834;--accent:#7aa2ff;--bad:#ff7b6b;--ok:#5fd28f;--sel:#fff;--lane:#262622;--ref:#2b2a26;--ignore:rgba(200,200,200,.22)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif}
+header{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--card);position:sticky;top:0;z-index:5}
+header h1{font-size:15px;margin:0 8px 0 0}
+select,button,input,textarea{font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:6px;padding:4px 8px}
+button{cursor:pointer}button:hover{border-color:var(--accent)}button:disabled{opacity:.45;cursor:default}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+#status{margin-left:auto;font-size:13px}.ok{color:var(--ok)}.bad{color:var(--bad)}.mute{color:var(--mute)}
+main{padding:12px 16px;max-width:1500px;margin:0 auto}
+#banner{display:none;margin:0 0 10px;padding:8px 12px;border:1px solid var(--bad);border-radius:6px;color:var(--bad)}
+#banner button{margin-left:8px}
+.bar{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin:0 0 8px}
+.bar label{display:inline-flex;gap:4px;align-items:center;color:var(--mute)}
+#wrap{border:1px solid var(--line);border-radius:8px;background:var(--card);overflow:hidden;touch-action:none}
+canvas{display:block;width:100%}
+.cols{display:grid;grid-template-columns:minmax(260px,340px) 1fr;gap:14px;margin-top:12px}
+@media (max-width:820px){.cols{grid-template-columns:1fr}}
+.card{border:1px solid var(--line);border-radius:8px;background:var(--card);padding:10px 12px}
+.card h2{font-size:13px;margin:0 0 8px;color:var(--mute);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.spk{display:flex;gap:6px;align-items:center;margin:4px 0}
+.spk i{width:12px;height:12px;border-radius:3px;flex:none}.spk input[type=text]{flex:1;min-width:0}
+.spk kbd,.keys kbd{border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 5px;font-size:12px;background:var(--lane)}
+.keys{font-size:12.5px;color:var(--mute);line-height:1.9}
+textarea{width:100%;min-height:70px}
+audio{width:100%;max-width:560px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Đánh nhãn diarization</h1>
+  <select id="sample" title="Mẫu"></select>
+  <button id="undo" title="Ctrl+Z">Hoàn tác</button><button id="redo" title="Ctrl+Y">Làm lại</button>
+  <button id="save" class="primary" title="Ctrl+S">Lưu ngay</button>
+  <button id="download">Tải JSON</button>
+  <span id="status" class="mute">Chưa tải</span>
+</header>
+<main>
+  <div id="banner"></div>
+  <div class="bar">
+    <audio id="aud" controls preload="auto"></audio>
+    <label>Tốc độ <select id="rate"><option>0.5</option><option>0.75</option><option selected>1</option><option>1.25</option><option>1.5</option></select></label>
+    <label><input type="checkbox" id="snap" checked> Hít vào biên của arm khi kéo (giữ Alt để tắt)</label>
+    <label><input type="checkbox" id="follow" checked> Theo con trỏ phát</label>
+    <button id="zin">+</button><button id="zout">−</button><button id="zfit">Vừa khung</button>
+  </div>
+  <div class="bar" id="armbar"></div>
+  <div id="wrap"><canvas id="cv"></canvas></div>
+  <div class="cols">
+    <div class="card">
+      <h2>Người nói của bạn</h2>
+      <div id="speakers"></div>
+      <button id="addspk">+ Thêm người nói</button>
+      <h2 style="margin-top:14px">Khởi tạo từ arm</h2>
+      <div class="bar" style="margin:0"><select id="initarm"></select><button id="initbtn">Nạp</button></div>
+      <p class="mute" style="font-size:12.5px;margin:6px 0 0">Nạp kết quả của một arm làm điểm xuất phát rồi chỉ việc sửa nhanh hơn đánh từ đầu. Cần xác nhận nếu đã có nhãn.</p>
+      <h2 style="margin-top:14px">Sai số thời gian khi chấm</h2>
+      <label class="mute">± <input type="number" id="tol" min="0" max="5" step="0.05" value="0.25" style="width:80px"> giây quanh biên nhãn</label>
+      <p class="mute" style="font-size:12.5px;margin:6px 0 0">Nhãn tay luôn lệch một chút. Công cụ chấm bỏ qua khoảng này quanh mỗi biên. Vùng "chưa chắc" (hàng xám) thì không chấm gì cả.</p>
+    </div>
+    <div>
+      <div class="card"><h2>Phím tắt</h2><div class="keys">
+        <kbd>Space</kbd> phát/dừng · <kbd>←</kbd><kbd>→</kbd> tua 0,5 s (<kbd>Shift</kbd> 2 s) · <kbd>P</kbd> phát đoạn đang chọn<br>
+        Kéo chuột trên hàng một người để <b>tạo đoạn</b> · kéo mép để chỉnh · kéo thân để dời · <kbd>Delete</kbd> xoá · <kbd>S</kbd> cắt tại con trỏ · <kbd>M</kbd> nối với đoạn kế (cùng người)<br>
+        <b>Khi đang phát:</b> giữ <kbd>1</kbd>…<kbd>9</kbd> để đánh dấu người đó đang nói (nhả phím là kết thúc đoạn). Khi dừng, <kbd>1</kbd>…<kbd>9</kbd> đổi người của đoạn đang chọn<br>
+        Hàng xám cuối: kéo để đánh dấu vùng <b>chưa chắc</b> (không chấm) · <kbd>Ctrl</kbd>+lăn chuột zoom · lăn chuột cuộn ngang · <kbd>Ctrl</kbd><kbd>Z</kbd>/<kbd>Y</kbd> hoàn tác · <kbd>Ctrl</kbd><kbd>S</kbd> lưu
+      </div></div>
+      <div class="card" style="margin-top:12px"><h2>Ghi chú cho mẫu</h2>
+        <textarea id="notes" placeholder="Ví dụ: người thứ ba chỉ nói 'dạ' lúc 12 s; mẫu này có nhạc nền"></textarea>
+        <div class="mute" id="summary" style="margin-top:6px"></div>
+      </div>
+    </div>
+  </div>
+</main>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const PALETTE = ["#2f6fed","#e0662b","#1b9e77","#b8449c","#d4a017","#2aa6b8","#8a5cf5","#c0392b","#5d7b2e"];
+const GUTTER = 168, RULER = 22, WAVE = 54, REF_H = 15, LAB_H = 30, IGN_H = 24, MIN_DUR = 0.05, EDGE_PX = 6;
+
+let sampleName = null, doc = null, rev = 0, arms = {}, duration = 0, peaks = null;
+let view = {t0: 0, pps: 40};
+let sel = null, drag = null, held = {}, undoStack = [], redoStack = [];
+let dirty = false, saveTimer = null, saving = false, conflict = false, playUntil = null;
+const shown = new Set();
+const aud = $("aud"), cv = $("cv"), ctx = cv.getContext("2d");
+
+// ---------- helpers
+const clone = o => JSON.parse(JSON.stringify(o));
+const fmt = t => `${Math.floor(t / 60)}:${(t % 60).toFixed(2).padStart(5, "0")}`;
+const colorOf = id => { const i = doc ? doc.speakers.findIndex(s => s.id === id) : -1; return PALETTE[(i < 0 ? 0 : i) % PALETTE.length]; };
+const armColor = (arm, i) => PALETTE[(i + 3) % PALETTE.length];
+function setStatus(text, cls) { const s = $("status"); s.textContent = text; s.className = cls || "mute"; }
+function t2x(t) { return GUTTER + (t - view.t0) * view.pps; }
+function x2t(x) { return view.t0 + (x - GUTTER) / view.pps; }
+function clampView() {
+  const w = cv.clientWidth - GUTTER;
+  view.t0 = Math.max(0, Math.min(view.t0, Math.max(0, duration - w / view.pps)));
+}
+function fit() { view.pps = Math.max(2, (cv.clientWidth - GUTTER - 8) / Math.max(1, duration)); view.t0 = 0; draw(); }
+
+// ---------- layout: rows
+function layout() {
+  const rows = []; let y = 0;
+  rows.push({kind: "ruler", y, h: RULER}); y += RULER;
+  rows.push({kind: "wave", y, h: WAVE}); y += WAVE;
+  let ai = 0;
+  for (const arm of Object.keys(arms)) {
+    if (!shown.has(arm)) continue;
+    const spk = [...new Set(arms[arm].map(s => s.speaker))];
+    spk.forEach(sp => { rows.push({kind: "ref", arm, spk: sp, y, h: REF_H, ai}); y += REF_H; });
+    ai++;
+    y += 3;
+  }
+  y += 6;
+  if (doc) {
+    doc.speakers.forEach((sp, i) => { rows.push({kind: "lab", spk: sp.id, i, y, h: LAB_H}); y += LAB_H; });
+    rows.push({kind: "ign", y, h: IGN_H}); y += IGN_H;
+  }
+  return {rows, height: y + 4};
+}
+
+function resize() {
+  const {height} = layout(), dpr = window.devicePixelRatio || 1;
+  const w = $("wrap").clientWidth;
+  cv.style.height = height + "px"; cv.width = Math.round(w * dpr); cv.height = Math.round(height * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  draw();
+}
+
+// ---------- drawing
+function draw() {
+  const L = layout(), W = cv.clientWidth, H = L.height;
+  const css = getComputedStyle(document.documentElement);
+  const ink = css.getPropertyValue("--ink").trim(), mute = css.getPropertyValue("--mute").trim(),
+    line = css.getPropertyValue("--line").trim(), lane = css.getPropertyValue("--lane").trim(),
+    ref = css.getPropertyValue("--ref").trim(), ignc = css.getPropertyValue("--ignore").trim(),
+    selc = css.getPropertyValue("--sel").trim();
+  ctx.clearRect(0, 0, W, H);
+  ctx.font = "12px system-ui,sans-serif"; ctx.textBaseline = "middle";
+  const t1 = x2t(W);
+  for (const r of L.rows) {
+    if (r.kind === "lab" || r.kind === "ign") { ctx.fillStyle = lane; ctx.fillRect(GUTTER, r.y, W - GUTTER, r.h - 2); }
+    if (r.kind === "ref") { ctx.fillStyle = ref; ctx.fillRect(GUTTER, r.y, W - GUTTER, r.h - 1); }
+  }
+  // ruler
+  const step = [0.1, 0.2, 0.5, 1, 2, 5, 10, 30, 60].find(s => s * view.pps >= 70) || 60;
+  ctx.fillStyle = mute; ctx.strokeStyle = line;
+  for (let t = Math.ceil(view.t0 / step) * step; t < t1; t += step) {
+    const x = t2x(t); ctx.fillRect(x, 8, 1, RULER - 8);
+    ctx.fillText(fmt(t), x + 3, 10);
+    ctx.fillStyle = line; ctx.fillRect(x, RULER, 1, H - RULER); ctx.fillStyle = mute;
+  }
+  // waveform
+  const wv = L.rows.find(r => r.kind === "wave");
+  if (peaks && wv) {
+    ctx.fillStyle = mute; const mid = wv.y + wv.h / 2;
+    for (let x = GUTTER; x < W; x++) {
+      const a = Math.max(0, Math.floor(x2t(x) * peaks.rate)), b = Math.min(peaks.len, Math.max(a + 1, Math.floor(x2t(x + 1) * peaks.rate)));
+      if (a >= peaks.len) break;
+      let mx = 0; for (let i = a; i < b; i++) if (peaks.data[i] > mx) mx = peaks.data[i];
+      const h = Math.max(1, mx * (wv.h - 4)); ctx.fillRect(x, mid - h / 2, 1, h);
+    }
+  }
+  // gutter labels and reference arms
+  ctx.save(); ctx.beginPath(); ctx.rect(GUTTER, 0, W - GUTTER, H); ctx.clip();
+  for (const r of L.rows) {
+    if (r.kind === "ref") {
+      ctx.fillStyle = armColor(r.arm, r.ai);
+      for (const s of arms[r.arm]) if (s.speaker === r.spk && s.end > view.t0 && s.start < t1)
+        ctx.fillRect(t2x(s.start), r.y + 2, Math.max(1, (s.end - s.start) * view.pps), r.h - 4);
+    }
+    if (r.kind === "ign") {
+      ctx.fillStyle = ignc;
+      for (const s of doc.ignore) if (s.end > view.t0 && s.start < t1) ctx.fillRect(t2x(s.start), r.y, (s.end - s.start) * view.pps, r.h - 2);
+      if (sel && sel.kind === "ign" && doc.ignore[sel.i]) { const s = doc.ignore[sel.i]; ctx.strokeStyle = selc; ctx.lineWidth = 2; ctx.strokeRect(t2x(s.start), r.y + 1, (s.end - s.start) * view.pps, r.h - 4); }
+    }
+    if (r.kind === "lab") {
+      doc.segments.forEach((s, i) => {
+        if (s.speaker !== r.spk || s.end < view.t0 || s.start > t1) return;
+        ctx.fillStyle = colorOf(s.speaker); ctx.globalAlpha = .88;
+        ctx.fillRect(t2x(s.start), r.y + 2, Math.max(2, (s.end - s.start) * view.pps), r.h - 6); ctx.globalAlpha = 1;
+        if (sel && sel.kind === "seg" && sel.i === i) { ctx.strokeStyle = selc; ctx.lineWidth = 2; ctx.strokeRect(t2x(s.start), r.y + 2, (s.end - s.start) * view.pps, r.h - 6); }
+      });
+    }
+  }
+  if (drag && drag.preview) {
+    const p = drag.preview; ctx.fillStyle = p.kind === "ign" ? ignc : colorOf(p.speaker); ctx.globalAlpha = .6;
+    const row = L.rows.find(r => r.kind === (p.kind === "ign" ? "ign" : "lab") && (p.kind === "ign" || r.spk === p.speaker));
+    if (row) ctx.fillRect(t2x(p.start), row.y + 2, (p.end - p.start) * view.pps, row.h - 6); ctx.globalAlpha = 1;
+  }
+  for (const k of Object.keys(held)) {   // recording by key
+    const h = held[k], sp = doc.speakers[+k - 1]; if (!sp) continue;
+    const row = L.rows.find(r => r.kind === "lab" && r.spk === sp.id);
+    ctx.fillStyle = colorOf(sp.id); ctx.globalAlpha = .55;
+    if (row) ctx.fillRect(t2x(h.start), row.y + 2, Math.max(2, (aud.currentTime - h.start) * view.pps), row.h - 6); ctx.globalAlpha = 1;
+  }
+  const px = t2x(aud.currentTime);
+  ctx.fillStyle = ink; ctx.fillRect(px, 0, 1.5, H);
+  ctx.restore();
+  // gutter text
+  ctx.fillStyle = css.getPropertyValue("--card").trim(); ctx.fillRect(0, 0, GUTTER, H);
+  ctx.fillStyle = mute;
+  for (const r of L.rows) {
+    if (r.kind === "ref") {
+      ctx.fillStyle = armColor(r.arm, r.ai); ctx.font = "11px system-ui,sans-serif";
+      const first = !L.rows.some(o => o.kind === "ref" && o.arm === r.arm && o.y < r.y);
+      ctx.fillText(first ? `${r.arm.slice(0, 20)} · ${r.spk.slice(-4)}` : `      · ${r.spk.slice(-4)}`, 6, r.y + r.h / 2);
+      ctx.font = "12px system-ui,sans-serif";
+    }
+    if (r.kind === "lab") { const sp = doc.speakers[r.i]; ctx.fillStyle = colorOf(sp.id); ctx.fillText(`${r.i + 1}  ${sp.name}`.slice(0, 20), 6, r.y + r.h / 2); }
+    if (r.kind === "ign") { ctx.fillStyle = mute; ctx.fillText("chưa chắc (bỏ)", 6, r.y + r.h / 2); }
+    if (r.kind === "wave") { ctx.fillStyle = mute; ctx.fillText("sóng âm", 6, r.y + r.h / 2); }
+  }
+}
+
+// ---------- hit testing and editing
+function rowAt(y) { return layout().rows.find(r => y >= r.y && y < r.y + r.h); }
+function snapTime(t, noSnap) {
+  if (noSnap || !$("snap").checked) return t;
+  const lim = Math.max(0.05, 8 / view.pps); let best = t, bd = lim;
+  const consider = v => { const d = Math.abs(v - t); if (d < bd) { bd = d; best = v; } };
+  for (const a of shown) for (const s of arms[a] || []) { consider(s.start); consider(s.end); }
+  for (let i = 0; i < doc.segments.length; i++) { if (drag && drag.i === i) continue; consider(doc.segments[i].start); consider(doc.segments[i].end); }
+  return best;
+}
+function pushUndo() { undoStack.push(clone(docState())); if (undoStack.length > 200) undoStack.shift(); redoStack = []; }
+function docState() { return {speakers: doc.speakers, segments: doc.segments, ignore: doc.ignore}; }
+function applyState(s) { doc.speakers = clone(s.speakers); doc.segments = clone(s.segments); doc.ignore = clone(s.ignore); sel = null; changed(false); renderSpeakers(); resize(); }
+function undo() { if (!undoStack.length) return; redoStack.push(clone(docState())); applyState(undoStack.pop()); }
+function redo() { if (!redoStack.length) return; undoStack.push(clone(docState())); applyState(redoStack.pop()); }
+function changed(push = true) { dirty = true; setStatus("Có thay đổi chưa lưu…", "mute"); clearTimeout(saveTimer); saveTimer = setTimeout(save, 800); summary(); }
+
+cv.addEventListener("mousedown", e => {
+  if (!doc) return;
+  const rect = cv.getBoundingClientRect(), x = e.clientX - rect.left, y = e.clientY - rect.top, r = rowAt(y);
+  if (!r) return;
+  if (r.kind === "ruler" || r.kind === "wave" || r.kind === "ref") { if (x > GUTTER) { aud.currentTime = Math.max(0, Math.min(duration, x2t(x))); draw(); } return; }
+  if (x <= GUTTER) { return; }
+  const t = x2t(x), noSnap = e.altKey;
+  if (r.kind === "lab") {
+    let hit = -1, mode = "move";
+    doc.segments.forEach((s, i) => { if (s.speaker !== r.spk) return;
+      const a = t2x(s.start), b = t2x(s.end);
+      if (Math.abs(x - a) <= EDGE_PX && x >= a - EDGE_PX) { hit = i; mode = "start"; }
+      else if (Math.abs(x - b) <= EDGE_PX) { hit = i; mode = "end"; }
+      else if (hit < 0 && x > a && x < b) { hit = i; mode = "move"; } });
+    if (hit >= 0) { sel = {kind: "seg", i: hit}; const s = doc.segments[hit]; drag = {mode, i: hit, t0: t, orig: {start: s.start, end: s.end}, pushed: false, noSnap}; }
+    else { sel = null; drag = {mode: "new", speaker: r.spk, t0: snapTime(t, noSnap), noSnap, preview: null}; }
+  } else if (r.kind === "ign") {
+    const hit = doc.ignore.findIndex(s => t >= s.start && t <= s.end);
+    if (hit >= 0) { sel = {kind: "ign", i: hit}; const s = doc.ignore[hit]; drag = {mode: "imove", i: hit, t0: t, orig: {start: s.start, end: s.end}, pushed: false, noSnap}; }
+    else { sel = null; drag = {mode: "inew", t0: snapTime(t, noSnap), noSnap, preview: null}; }
+  }
+  draw(); e.preventDefault();
+});
+window.addEventListener("mousemove", e => {
+  if (!drag || !doc) return;
+  const rect = cv.getBoundingClientRect(), t = x2t(e.clientX - rect.left), noSnap = e.altKey || drag.noSnap;
+  const clampT = v => Math.max(0, Math.min(duration, v));
+  if (drag.mode === "new" || drag.mode === "inew") {
+    const a = clampT(drag.t0), b = clampT(snapTime(t, noSnap));
+    drag.preview = drag.mode === "new" ? {kind: "seg", speaker: drag.speaker, start: Math.min(a, b), end: Math.max(a, b)} : {kind: "ign", start: Math.min(a, b), end: Math.max(a, b)};
+  } else {
+    const list = (drag.mode === "imove") ? doc.ignore : doc.segments, s = list[drag.i];
+    if (!drag.pushed && Math.abs(t - drag.t0) * view.pps > 2) { pushUndo(); drag.pushed = true; }
+    if (!drag.pushed) return;
+    if (drag.mode === "start") s.start = clampT(Math.min(snapTime(t, noSnap), s.end - MIN_DUR));
+    else if (drag.mode === "end") s.end = clampT(Math.max(snapTime(t, noSnap), s.start + MIN_DUR));
+    else { const d = t - drag.t0, len = drag.orig.end - drag.orig.start; let st = drag.orig.start + d;
+      const sn = snapTime(st, noSnap); const sn2 = snapTime(st + len, noSnap) - len; st = Math.abs(sn - st) <= Math.abs(sn2 - st) ? sn : sn2;
+      st = Math.max(0, Math.min(duration - len, st)); s.start = st; s.end = st + len; }
+  }
+  draw();
+});
+window.addEventListener("mouseup", () => {
+  if (!drag || !doc) return;
+  const d = drag; drag = null;
+  if ((d.mode === "new" || d.mode === "inew") && d.preview && d.preview.end - d.preview.start >= MIN_DUR) {
+    pushUndo();
+    const p = d.preview;
+    if (d.mode === "new") { doc.segments.push({start: round(p.start), end: round(p.end), speaker: p.speaker}); sel = {kind: "seg", i: doc.segments.length - 1}; }
+    else { doc.ignore.push({start: round(p.start), end: round(p.end), note: ""}); sel = {kind: "ign", i: doc.ignore.length - 1}; }
+    changed();
+  } else if (d.pushed) { normalize(); changed(); }
+  draw();
+});
+const round = v => Math.round(v * 1000) / 1000;
+function normalize() { doc.segments.forEach(s => { s.start = round(s.start); s.end = round(s.end); }); doc.ignore.forEach(s => { s.start = round(s.start); s.end = round(s.end); }); }
+cv.addEventListener("wheel", e => {
+  if (!doc) return; e.preventDefault();
+  const rect = cv.getBoundingClientRect(), x = e.clientX - rect.left;
+  if (e.ctrlKey || e.metaKey) { const t = x2t(Math.max(GUTTER, x)); view.pps = Math.max(2, Math.min(600, view.pps * (e.deltaY < 0 ? 1.25 : 0.8))); view.t0 = t - (Math.max(GUTTER, x) - GUTTER) / view.pps; }
+  else view.t0 += (e.deltaX || e.deltaY) / view.pps;
+  clampView(); draw();
+}, {passive: false});
+$("zin").onclick = () => { const t = aud.currentTime; view.pps = Math.min(600, view.pps * 1.4); view.t0 = t - (cv.clientWidth - GUTTER) / 2 / view.pps; clampView(); draw(); };
+$("zout").onclick = () => { const t = aud.currentTime; view.pps = Math.max(2, view.pps / 1.4); view.t0 = t - (cv.clientWidth - GUTTER) / 2 / view.pps; clampView(); draw(); };
+$("zfit").onclick = fit;
+
+// ---------- keyboard
+window.addEventListener("keydown", e => {
+  const tag = (e.target.tagName || "").toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select") { if (!(e.ctrlKey && (e.key === "s" || e.key === "z" || e.key === "y"))) return; }
+  if (!doc) return;
+  const k = e.key;
+  if (e.ctrlKey || e.metaKey) {
+    if (k === "z") { e.preventDefault(); undo(); } else if (k === "y") { e.preventDefault(); redo(); } else if (k === "s") { e.preventDefault(); save(); }
+    return;
+  }
+  if (k === " ") { e.preventDefault(); aud.paused ? aud.play() : aud.pause(); }
+  else if (k === "ArrowLeft") { e.preventDefault(); aud.currentTime = Math.max(0, aud.currentTime - (e.shiftKey ? 2 : .5)); draw(); }
+  else if (k === "ArrowRight") { e.preventDefault(); aud.currentTime = Math.min(duration, aud.currentTime + (e.shiftKey ? 2 : .5)); draw(); }
+  else if (k === "Delete" || k === "Backspace") { if (sel) { e.preventDefault(); pushUndo(); (sel.kind === "seg" ? doc.segments : doc.ignore).splice(sel.i, 1); sel = null; changed(); draw(); } }
+  else if (k === "s" || k === "S") { if (sel && sel.kind === "seg") { const s = doc.segments[sel.i], t = aud.currentTime;
+      if (t > s.start + MIN_DUR && t < s.end - MIN_DUR) { pushUndo(); const tail = {start: round(t), end: s.end, speaker: s.speaker}; s.end = round(t); doc.segments.push(tail); sel = {kind: "seg", i: doc.segments.length - 1}; changed(); draw(); } } }
+  else if (k === "m" || k === "M") { if (sel && sel.kind === "seg") { const s = doc.segments[sel.i];
+      let j = -1, best = 1e9; doc.segments.forEach((o, i) => { if (i !== sel.i && o.speaker === s.speaker && o.start >= s.end - 1e-6 && o.start - s.end < best) { best = o.start - s.end; j = i; } });
+      if (j >= 0) { pushUndo(); s.end = doc.segments[j].end; doc.segments.splice(j, 1); sel = {kind: "seg", i: doc.segments.indexOf(s)}; changed(); draw(); } } }
+  else if (k === "p" || k === "P") { if (sel && sel.kind === "seg") { const s = doc.segments[sel.i]; aud.currentTime = s.start; playUntil = s.end; aud.play(); } }
+  else if (/^[1-9]$/.test(k)) {
+    const sp = doc.speakers[+k - 1]; if (!sp) return;
+    if (!aud.paused) { if (!held[k]) held[k] = {start: aud.currentTime}; }
+    else if (sel && sel.kind === "seg") { pushUndo(); doc.segments[sel.i].speaker = sp.id; changed(); draw(); }
+  }
+});
+window.addEventListener("keyup", e => {
+  const k = e.key; if (!doc || !held[k]) return;
+  const h = held[k]; delete held[k]; const sp = doc.speakers[+k - 1], end = aud.currentTime;
+  if (sp && end - h.start >= MIN_DUR) { pushUndo(); doc.segments.push({start: round(h.start), end: round(end), speaker: sp.id}); changed(); }
+  draw();
+});
+
+// ---------- audio
+aud.addEventListener("timeupdate", () => { if (playUntil !== null && aud.currentTime >= playUntil) { aud.pause(); playUntil = null; } });
+aud.addEventListener("pause", () => { playUntil = null; for (const k of Object.keys(held)) window.dispatchEvent(new KeyboardEvent("keyup", {key: k})); });
+$("rate").onchange = () => { aud.playbackRate = +$("rate").value; };
+function loop() {
+  if (!aud.paused && doc) {
+    if ($("follow").checked) { const W = cv.clientWidth, px = t2x(aud.currentTime); if (px > W - 40 || px < GUTTER) { view.t0 = Math.max(0, aud.currentTime - 1); clampView(); } }
+    draw();
+  }
+  requestAnimationFrame(loop);
+}
+async function loadPeaks(url) {
+  peaks = null;
+  try {
+    const buf = await (await fetch(url)).arrayBuffer();
+    const AC = window.AudioContext || window.webkitAudioContext, ac = new AC();
+    const a = await ac.decodeAudioData(buf); ac.close();
+    const ch = a.getChannelData(0), rate = 200, n = Math.ceil(a.duration * rate), step = ch.length / n, data = new Float32Array(n);
+    let top = 1e-6;
+    for (let i = 0; i < n; i++) { let m = 0; const s = Math.floor(i * step), e = Math.min(ch.length, Math.floor((i + 1) * step) + 1); for (let j = s; j < e; j++) { const v = Math.abs(ch[j]); if (v > m) m = v; } data[i] = m; if (m > top) top = m; }
+    for (let i = 0; i < n; i++) data[i] /= top;
+    peaks = {data, len: n, rate}; duration = a.duration;
+  } catch (err) { console.warn("waveform not available", err); }
+}
+
+// ---------- speakers, summary
+function renderSpeakers() {
+  const box = $("speakers"); box.innerHTML = "";
+  doc.speakers.forEach((sp, i) => {
+    const tot = doc.segments.filter(s => s.speaker === sp.id).reduce((a, s) => a + s.end - s.start, 0);
+    const row = document.createElement("div"); row.className = "spk";
+    row.innerHTML = `<kbd>${i + 1}</kbd><i style="background:${colorOf(sp.id)}"></i><input type="text" value="${sp.name.replace(/"/g, "&quot;")}"><span class="mute">${tot.toFixed(1)} s</span><button title="Xoá người nói">×</button>`;
+    row.querySelector("input").onchange = ev => { pushUndo(); sp.name = ev.target.value; changed(); resize(); };
+    row.querySelector("button").onclick = () => {
+      const n = doc.segments.filter(s => s.speaker === sp.id).length;
+      if (n && !confirm(`Xoá "${sp.name}" cùng ${n} đoạn của người này?`)) return;
+      pushUndo(); doc.segments = doc.segments.filter(s => s.speaker !== sp.id); doc.speakers.splice(i, 1); sel = null; changed(); renderSpeakers(); resize();
+    };
+    box.appendChild(row);
+  });
+}
+$("addspk").onclick = () => {
+  if (!doc) return; pushUndo();
+  let n = doc.speakers.length + 1, id = "S" + n; while (doc.speakers.some(s => s.id === id)) id = "S" + (++n);
+  doc.speakers.push({id, name: "Người nói " + (doc.speakers.length + 1)});
+  changed(); renderSpeakers(); resize();
+};
+function summary() {
+  if (!doc) return;
+  const spk = doc.speakers.length, segs = doc.segments.length, tot = doc.segments.reduce((a, s) => a + s.end - s.start, 0);
+  $("summary").textContent = `${spk} người nói, ${segs} đoạn, ${tot.toFixed(1)} s tiếng nói, ${doc.ignore.length} vùng chưa chắc. Bản lưu số ${rev}.`;
+}
+$("notes").oninput = () => { if (!doc) return; doc.notes = $("notes").value; changed(); };
+$("tol").onchange = () => { if (!doc) return; doc.tolerance_s = Math.max(0, Math.min(5, +$("tol").value || 0)); changed(); };
+
+// ---------- init from an arm
+$("initbtn").onclick = () => {
+  const arm = $("initarm").value; if (!doc || !arm || !arms[arm]) return;
+  if (doc.segments.length && !confirm("Đã có nhãn. Thay toàn bộ bằng kết quả của arm này? (Có thể hoàn tác bằng Ctrl+Z)")) return;
+  pushUndo();
+  const tot = {}; arms[arm].forEach(s => tot[s.speaker] = (tot[s.speaker] || 0) + s.end - s.start);
+  const order = Object.keys(tot).sort((a, b) => tot[b] - tot[a]);
+  doc.speakers = order.map((sp, i) => ({id: "S" + (i + 1), name: `Người nói ${i + 1}`}));
+  const idOf = Object.fromEntries(order.map((sp, i) => [sp, "S" + (i + 1)]));
+  doc.segments = arms[arm].map(s => ({start: round(s.start), end: round(s.end), speaker: idOf[s.speaker]}));
+  sel = null; changed(); renderSpeakers(); resize();
+};
+
+// ---------- load, save
+async function api(path, opts) { const r = await fetch(path, opts); const j = await r.json().catch(() => ({})); return {ok: r.ok, status: r.status, body: j}; }
+async function loadSamples() {
+  const r = await api("/api/label/samples"); const sel = $("sample"); sel.innerHTML = "";
+  (r.body.samples || []).forEach(s => { const o = document.createElement("option"); o.value = s.name;
+    o.textContent = `${s.name}${s.segments ? ` (${s.segments} đoạn, bản ${s.rev})` : " (chưa có nhãn)"}`; sel.appendChild(o); });
+  const want = new URLSearchParams(location.search).get("sample");
+  if (want && [...sel.options].some(o => o.value === want)) sel.value = want;
+  return (r.body.samples || []);
+}
+async function openSample(name) {
+  if (dirty) await save();
+  sampleName = name; doc = null; sel = null; undoStack = []; redoStack = []; conflict = false; $("banner").style.display = "none";
+  setStatus("Đang tải…");
+  const r = await api(`/api/label/${encodeURIComponent(name)}`);
+  doc = r.body; rev = doc.rev || 0; dirty = false;
+  const base = `/diar_arms/${encodeURIComponent(name)}`;
+  const info = (await loadSamples()).find(s => s.name === name) || {arms: []};
+  $("sample").value = name;
+  arms = {};
+  for (const a of info.arms) { const j = await fetch(`${base}/segments_${a}.json`).then(x => x.json()).catch(() => null); if (j) arms[a] = (j.segments || j).map(s => ({start: +s.start, end: +s.end, speaker: String(s.speaker)})); }
+  shown.clear(); Object.keys(arms).forEach(a => shown.add(a));
+  const bar = $("armbar"); bar.innerHTML = "<span class='mute'>Hiện arm tham khảo:</span>";
+  Object.keys(arms).forEach((a, i) => { const l = document.createElement("label"); l.innerHTML = `<input type="checkbox" checked><span style="color:${armColor(a, i)}">${a}</span>`;
+    l.querySelector("input").onchange = ev => { ev.target.checked ? shown.add(a) : shown.delete(a); resize(); }; bar.appendChild(l); });
+  const ia = $("initarm"); ia.innerHTML = ""; Object.keys(arms).forEach(a => { const o = document.createElement("option"); o.value = a; o.textContent = a; ia.appendChild(o); });
+  aud.src = `${base}/clip.wav`; aud.playbackRate = +$("rate").value;
+  await loadPeaks(`${base}/clip.wav`);
+  if (!duration) duration = Math.max(1, ...Object.values(arms).flat().map(s => s.end));
+  $("notes").value = doc.notes || ""; $("tol").value = doc.tolerance_s ?? 0.25;
+  renderSpeakers(); summary(); resize(); fit();
+  setStatus(rev ? `Đã nạp bản lưu số ${rev}` : "Chưa có nhãn cho mẫu này", "mute");
+  history.replaceState(null, "", `?sample=${encodeURIComponent(name)}`);
+}
+async function save(force = false) {
+  if (!doc || saving || (conflict && !force)) return;
+  clearTimeout(saveTimer); saving = true; setStatus("Đang lưu…");
+  try {
+    const r = await api(`/api/label/${encodeURIComponent(sampleName)}`, {method: "PUT", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({labels: {tolerance_s: doc.tolerance_s, notes: doc.notes, speakers: doc.speakers, segments: doc.segments, ignore: doc.ignore}, base_rev: rev, force})});
+    if (r.status === 409) { conflict = true; showConflict(r.body.current); setStatus("Xung đột phiên bản", "bad"); }
+    else if (!r.ok) { setStatus("Lỗi lưu: " + (r.body.error || r.status), "bad"); saveTimer = setTimeout(save, 5000); }
+    else { rev = r.body.rev; dirty = false; conflict = false; $("banner").style.display = "none"; setStatus(`Đã lưu lúc ${new Date().toLocaleTimeString()} (bản ${rev})`, "ok"); summary(); }
+  } catch (err) { setStatus("Không kết nối được máy chủ, sẽ thử lại…", "bad"); localStorage.setItem("label-draft-" + sampleName, JSON.stringify(doc)); saveTimer = setTimeout(save, 5000); }
+  saving = false;
+}
+function showConflict(current) {
+  const b = $("banner"); b.style.display = "block";
+  b.innerHTML = `Nhãn này đã được lưu từ nơi khác (bản ${current.rev}). <button id="cl">Tải bản mới (bỏ thay đổi ở tab này)</button><button id="cf">Ghi đè bằng bản của tab này</button>`;
+  $("cl").onclick = () => { dirty = false; openSample(sampleName); };
+  $("cf").onclick = () => { rev = current.rev; conflict = false; save(true); };
+}
+$("save").onclick = () => save();
+$("undo").onclick = undo; $("redo").onclick = redo;
+$("download").onclick = () => { if (!doc) return; const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(doc, null, 1)], {type: "application/json"})); a.download = `${sampleName}_labels.json`; a.click(); };
+$("sample").onchange = () => openSample($("sample").value);
+window.addEventListener("beforeunload", e => { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
+window.addEventListener("resize", resize);
+(async function () {
+  const list = await loadSamples();
+  if (!list.length) { setStatus("Không có mẫu nào (cần thư mục có clip.wav)", "bad"); return; }
+  await openSample($("sample").value); loop();
+})();
+</script>
+</body>
+</html>

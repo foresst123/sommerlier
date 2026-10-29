@@ -4,7 +4,8 @@
     python tools/compare_arms.py OUT/diar_arms [--ref diarizen_auto] [--arms nemotron,nemotron_dz] [--collar 0.25]
                                               [--csv table.csv]
 
-Reads OUT/diar_arms/*/segments_<arm>.json (already cropped to the clip). The reference is not the truth: the table
+Reads OUT/diar_arms/*/segments_<arm>.json (already cropped to the clip). The reference is not the truth unless it is --ref labels (hand labels, with their own timing tolerance and their
+"not sure" regions left out): the table
 says how far each arm is from it, so a gap means "they disagree, listen", not "wrong". Per sample and arm:
 
   spk >=1s      speakers with at least one second of speech in the clip (ref in the first row of a sample)
@@ -97,11 +98,13 @@ def best_mapping(ref: np.ndarray, hyp: np.ndarray, scored: np.ndarray) -> dict[i
 
 
 def compare(ref_segs: list[dict], hyp_segs: list[dict], duration: float, collar: float = 0.25,
-            step: float = STEP) -> dict:
+            step: float = STEP, ignore: Optional[list[tuple[float, float]]] = None) -> dict:
     n = int(math.ceil(duration / step))
     ref, ref_labels = to_frames(ref_segs, n, step)
     hyp, hyp_labels = to_frames(hyp_segs, n, step)
     scored = collar_mask(ref_segs, n, collar, step)
+    for a, b in ignore or ():                                  # regions the labeller was not sure about: not scored
+        scored[max(0, int(math.floor(a / step))):min(n, int(math.ceil(b / step)))] = False
     mapping = best_mapping(ref, hyp, scored)
 
     n_ref = ref.sum(axis=1)
@@ -175,24 +178,55 @@ def arm_of(path: str) -> str:
     return os.path.basename(path)[len("segments_"):-len(".json")]
 
 
-def run(root: str, ref_arm: str, arms: Optional[list[str]], collar: float, postprocess: bool = False) -> list[dict]:
+def load_labels(sample_dir: str) -> Optional[dict]:
+    path = os.path.join(sample_dir, "labels.json")
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    return doc if doc.get("segments") else None
+
+
+def run(root: str, ref_arm: str, arms: Optional[list[str]], collar: Optional[float],
+        postprocess: bool = False) -> list[dict]:
+    """ref_arm "labels" takes the hand labels of tools/label_page.html as the reference: their own timing tolerance is
+    the collar unless one is given, and their "not sure" regions are left out of the scoring."""
     rows = []
     for sdir in sorted(d for d in glob.glob(os.path.join(root, "*")) if os.path.isdir(d)):
         files = {arm_of(f): f for f in glob.glob(os.path.join(sdir, "segments_*.json"))}
-        if ref_arm not in files:
-            continue
-        segs = {a: load_segments(f) for a, f in files.items()}
+        ignore, tol = None, collar
+        if ref_arm == "labels":
+            doc = load_labels(sdir)
+            if doc is None or not files:
+                continue
+            ref_segs = [{"start": s["start"], "end": s["end"], "speaker": str(s["speaker"])} for s in doc["segments"]]
+            ignore = [(i["start"], i["end"]) for i in doc.get("ignore", [])]
+            tol = float(doc.get("tolerance_s", 0.25)) if collar is None else collar
+            segs = {a: load_segments(f) for a, f in files.items()}
+            candidates = sorted(segs)
+        else:
+            if ref_arm not in files:
+                continue
+            segs = {a: load_segments(f) for a, f in files.items()}
+            ref_segs = segs[ref_arm]
+            tol = 0.25 if collar is None else collar
+            candidates = sorted(a for a in segs if a != ref_arm)
         if postprocess:
             segs = {a: pipeline_postprocess(v) if a in RAW_ARMS else v for a, v in segs.items()}
-        duration = clip_duration(sdir, list(segs.values()))
-        for arm in sorted(a for a in segs if a != ref_arm and (not arms or a in arms)):
-            r = compare(segs[ref_arm], segs[arm], duration, collar)
+        duration = clip_duration(sdir, [ref_segs] + list(segs.values()))
+        for arm in candidates:
+            if arms and arm not in arms:
+                continue
+            r = compare(ref_segs, segs[arm], duration, tol, ignore=ignore)
             rows.append(dict(sample=os.path.basename(sdir), arm=arm, **r))
     return rows
 
 
 def print_table(rows: list[dict], ref_arm: str) -> None:
-    print(f"reference: {ref_arm}  (a gap means the two disagree, not that the arm is wrong)")
+    if ref_arm == "labels":
+        print("reference: your hand labels (edge tolerance and 'not sure' regions as saved with them)")
+    else:
+        print(f"reference: {ref_arm}  (a gap means the two disagree, not that the arm is wrong)")
     head = ("arm", "spk>=1s", "ref s", "arm s", "miss%", "FA%", "conf%", "DER%", "short any%", "short spk%")
     last = None
     for r in rows:
@@ -211,9 +245,11 @@ def print_table(rows: list[dict], ref_arm: str) -> None:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("root", help="the diar_arms output folder (one sub-folder per sample)")
-    ap.add_argument("--ref", default="diarizen_auto", help="the arm taken as the reference")
+    ap.add_argument("--ref", default="diarizen_auto",
+                    help="the arm taken as the reference, or 'labels' for the hand labels saved by tools/label_server.py")
     ap.add_argument("--arms", help="comma list of arms to compare (default: every other arm found)")
-    ap.add_argument("--collar", type=float, default=0.25)
+    ap.add_argument("--collar", type=float, default=None,
+                    help="seconds left out around every reference edge (default 0.25; with --ref labels, the tolerance of each sample's labels)")
     ap.add_argument("--postprocess", action="store_true",
                     help="give the raw windowed arms (nemotron_windowed*, nemotron_dense_vbx, nemotron_dz) the pipeline's "
                          "own merge and bridge steps, as arms A and B already went through them")
@@ -222,7 +258,8 @@ def main(argv=None) -> int:
     arms = [x.strip() for x in a.arms.split(",")] if a.arms else None
     rows = run(a.root, a.ref, arms, a.collar, a.postprocess)
     if not rows:
-        print(f"no sample with segments_{a.ref}.json under {a.root}", file=sys.stderr)
+        what = "labels.json" if a.ref == "labels" else f"segments_{a.ref}.json"
+        print(f"no sample with {what} under {a.root}", file=sys.stderr)
         return 1
     print_table(rows, a.ref)
     if a.csv:

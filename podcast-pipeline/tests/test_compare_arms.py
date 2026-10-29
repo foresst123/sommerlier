@@ -85,3 +85,23 @@ def test_postprocess_merges_the_raw_arms_but_not_the_reference_or_the_pipeline_a
     assert merged["nemotron_dz"]["miss"] == 0.0                           # merged like the pipeline would
     assert merged["nemotron"]["miss"] == plain["nemotron"]["miss"] > 0.0   # arm A is left as it is
     assert C.pipeline_postprocess([seg(0, 2, "x"), seg(2.3, 4, "x")]) == [seg(0.0, 4.0, "x")]
+
+
+def test_hand_labels_are_a_reference_with_their_own_tolerance_and_ignored_regions(tmp_path, capsys):
+    d = tmp_path / "01_a"
+    d.mkdir()
+    labels = {"tolerance_s": 0.25, "speakers": [], "segments": [seg(0, 5, "S1"), seg(5, 10, "S2")],
+              "ignore": [{"start": 8, "end": 10, "note": ""}]}
+    (d / "labels.json").write_text(json.dumps(labels), encoding="utf-8")
+    hyp = [seg(0.2, 5.2, "x"), seg(5.2, 8.0, "y")]                         # edges 0.2 s late, nothing after 8 s
+    (d / "segments_nemotron_dz.json").write_text(json.dumps({"segments": hyp}), encoding="utf-8")
+    (tmp_path / "02_unlabelled").mkdir()
+    (tmp_path / "02_unlabelled" / "segments_nemotron_dz.json").write_text("{}", encoding="utf-8")
+    rows = C.run(str(tmp_path), "labels", None, None)
+    assert [r["sample"] for r in rows] == ["01_a"]                          # the unlabelled sample is skipped
+    r = rows[0]
+    assert r["miss"] == 0.0 and r["fa"] == 0.0 and r["conf"] == 0.0         # 0.2 s late is inside 0.25; 8-10 s is ignored
+    assert C.run(str(tmp_path), "labels", None, 0.0)[0]["conf"] > 0.0       # a tighter collar sees the late edges
+    assert C.main([str(tmp_path), "--ref", "labels"]) == 0
+    assert "your hand labels" in capsys.readouterr().out
+    assert C.main([str(tmp_path / "02_unlabelled"), "--ref", "labels"]) == 1
