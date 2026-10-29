@@ -27,6 +27,8 @@ canvas{display:block;width:100%}
 .cols{display:grid;grid-template-columns:minmax(260px,340px) 1fr;gap:14px;margin-top:12px}
 @media (max-width:820px){.cols{grid-template-columns:1fr}}
 .card{border:1px solid var(--line);border-radius:8px;background:var(--card);padding:10px 12px}
+.region{padding:8px 10px;border:1px solid var(--accent);border-radius:8px;background:var(--card)}
+.region button.spkbtn{border-width:2px}
 .card h2{font-size:13px;margin:0 0 8px;color:var(--mute);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
 .spk{display:flex;gap:6px;align-items:center;margin:4px 0}
 .spk i{width:12px;height:12px;border-radius:3px;flex:none}.spk input[type=text]{flex:1;min-width:0}
@@ -55,6 +57,7 @@ audio{width:100%;max-width:560px}
     <button id="zin">+</button><button id="zout">−</button><button id="zfit">Vừa khung</button>
   </div>
   <div class="bar" id="armbar"></div>
+  <div id="regionbar" class="bar region" style="display:none"></div>
   <div id="wrap"><canvas id="cv"></canvas></div>
   <div class="cols">
     <div class="card">
@@ -69,11 +72,12 @@ audio{width:100%;max-width:560px}
       <p class="mute" style="font-size:12.5px;margin:6px 0 0">Nhãn tay luôn lệch một chút. Công cụ chấm bỏ qua khoảng này quanh mỗi biên. Vùng "chưa chắc" (hàng xám) thì không chấm gì cả.</p>
     </div>
     <div>
-      <div class="card"><h2>Phím tắt</h2><div class="keys">
-        <kbd>Space</kbd> phát/dừng · <kbd>←</kbd><kbd>→</kbd> tua 0,5 s (<kbd>Shift</kbd> 2 s) · <kbd>P</kbd> phát đoạn đang chọn<br>
-        Kéo chuột trên hàng một người để <b>tạo đoạn</b> · kéo mép để chỉnh · kéo thân để dời · <kbd>Delete</kbd> xoá · <kbd>S</kbd> cắt tại con trỏ · <kbd>M</kbd> nối với đoạn kế (cùng người)<br>
-        <b>Khi đang phát:</b> giữ <kbd>1</kbd>…<kbd>9</kbd> để đánh dấu người đó đang nói (nhả phím là kết thúc đoạn). Khi dừng, <kbd>1</kbd>…<kbd>9</kbd> đổi người của đoạn đang chọn<br>
-        Hàng xám cuối: kéo để đánh dấu vùng <b>chưa chắc</b> (không chấm) · <kbd>Ctrl</kbd>+lăn chuột zoom · lăn chuột cuộn ngang · <kbd>Ctrl</kbd><kbd>Z</kbd>/<kbd>Y</kbd> hoàn tác · <kbd>Ctrl</kbd><kbd>S</kbd> lưu
+      <div class="card"><h2>Cách đánh nhãn nhanh</h2><div class="keys">
+        <b>1.</b> Kéo chuột trên <b>thước thời gian hoặc sóng âm</b> để chọn một <b>vùng</b> (hai thanh xanh ở đầu và cuối). Kéo hai thanh để chỉnh cho khớp<br>
+        <b>2.</b> Bấm <b>▶ Phát vùng</b> để nghe lại, rồi bấm <b>tên người nói</b> (hoặc phím <kbd>1</kbd>…<kbd>9</kbd>) để gán vùng cho người đó · <b>Không ai nói</b> để xoá nhãn trong vùng · <b>Chưa chắc</b> để loại vùng khỏi phần chấm<br>
+        Khi đang nghe, bấm <kbd>[</kbd> ở đầu câu và <kbd>]</kbd> ở cuối câu để đặt hai thanh theo con trỏ phát<br>
+        Cũng có thể kéo chuột trên hàng của một người để tạo đoạn, kéo mép để chỉnh, kéo thân để dời · <kbd>Delete</kbd> xoá · <kbd>S</kbd> cắt tại con trỏ · <kbd>M</kbd> nối đoạn kế<br>
+        <kbd>Space</kbd> phát/dừng · <kbd>←</kbd><kbd>→</kbd> tua 0,5 s (<kbd>Shift</kbd> 2 s) · <kbd>P</kbd> phát vùng hoặc đoạn đang chọn · <kbd>Esc</kbd> bỏ chọn · <kbd>Ctrl</kbd>+lăn chuột zoom · <kbd>Ctrl</kbd><kbd>Z</kbd>/<kbd>Y</kbd> hoàn tác · <kbd>Ctrl</kbd><kbd>S</kbd> lưu
       </div></div>
       <div class="card" style="margin-top:12px"><h2>Ghi chú cho mẫu</h2>
         <textarea id="notes" placeholder="Ví dụ: người thứ ba chỉ nói 'dạ' lúc 12 s; mẫu này có nhạc nền"></textarea>
@@ -86,11 +90,11 @@ audio{width:100%;max-width:560px}
 "use strict";
 const $ = id => document.getElementById(id);
 const PALETTE = ["#2f6fed","#e0662b","#1b9e77","#b8449c","#d4a017","#2aa6b8","#8a5cf5","#c0392b","#5d7b2e"];
-const GUTTER = 168, RULER = 22, WAVE = 54, REF_H = 15, LAB_H = 30, IGN_H = 24, MIN_DUR = 0.05, EDGE_PX = 6;
+const HANDLE_PX = 8, GUTTER = 168, RULER = 22, WAVE = 54, REF_H = 15, LAB_H = 30, IGN_H = 24, MIN_DUR = 0.05, EDGE_PX = 6;
 
 let sampleName = null, doc = null, rev = 0, arms = {}, duration = 0, peaks = null;
 let view = {t0: 0, pps: 40};
-let sel = null, drag = null, held = {}, undoStack = [], redoStack = [];
+let sel = null, drag = null, region = null, undoStack = [], redoStack = [];
 let dirty = false, saveTimer = null, saving = false, conflict = false, playUntil = null;
 const shown = new Set();
 const aud = $("aud"), cv = $("cv"), ctx = cv.getContext("2d");
@@ -145,7 +149,7 @@ function draw() {
   const ink = css.getPropertyValue("--ink").trim(), mute = css.getPropertyValue("--mute").trim(),
     line = css.getPropertyValue("--line").trim(), lane = css.getPropertyValue("--lane").trim(),
     ref = css.getPropertyValue("--ref").trim(), ignc = css.getPropertyValue("--ignore").trim(),
-    selc = css.getPropertyValue("--sel").trim();
+    selc = css.getPropertyValue("--sel").trim(), accentC = css.getPropertyValue("--accent").trim();
   ctx.clearRect(0, 0, W, H);
   ctx.font = "12px system-ui,sans-serif"; ctx.textBaseline = "middle";
   const t1 = x2t(W);
@@ -199,11 +203,11 @@ function draw() {
     const row = L.rows.find(r => r.kind === (p.kind === "ign" ? "ign" : "lab") && (p.kind === "ign" || r.spk === p.speaker));
     if (row) ctx.fillRect(t2x(p.start), row.y + 2, (p.end - p.start) * view.pps, row.h - 6); ctx.globalAlpha = 1;
   }
-  for (const k of Object.keys(held)) {   // recording by key
-    const h = held[k], sp = doc.speakers[+k - 1]; if (!sp) continue;
-    const row = L.rows.find(r => r.kind === "lab" && r.spk === sp.id);
-    ctx.fillStyle = colorOf(sp.id); ctx.globalAlpha = .55;
-    if (row) ctx.fillRect(t2x(h.start), row.y + 2, Math.max(2, (aud.currentTime - h.start) * view.pps), row.h - 6); ctx.globalAlpha = 1;
+  if (region) {
+    const a = t2x(region.start), b = t2x(region.end);
+    ctx.fillStyle = accentC; ctx.globalAlpha = .13; ctx.fillRect(a, RULER, b - a, H - RULER); ctx.globalAlpha = 1;
+    ctx.fillStyle = accentC; ctx.fillRect(a - 1.5, 0, 3, H); ctx.fillRect(b - 1.5, 0, 3, H);
+    ctx.beginPath(); ctx.arc(a, RULER / 2, 5, 0, 7); ctx.arc(b, RULER / 2, 5, 0, 7); ctx.fill();
   }
   const px = t2x(aud.currentTime);
   ctx.fillStyle = ink; ctx.fillRect(px, 0, 1.5, H);
@@ -245,9 +249,11 @@ cv.addEventListener("mousedown", e => {
   if (!doc) return;
   const rect = cv.getBoundingClientRect(), x = e.clientX - rect.left, y = e.clientY - rect.top, r = rowAt(y);
   if (!r) return;
-  if (r.kind === "ruler" || r.kind === "wave" || r.kind === "ref") { if (x > GUTTER) { aud.currentTime = Math.max(0, Math.min(duration, x2t(x))); draw(); } return; }
   if (x <= GUTTER) { return; }
   const t = x2t(x), noSnap = e.altKey;
+  if (region && Math.abs(x - t2x(region.start)) <= HANDLE_PX) { drag = {mode: "rstart", noSnap}; draw(); e.preventDefault(); return; }
+  if (region && Math.abs(x - t2x(region.end)) <= HANDLE_PX) { drag = {mode: "rend", noSnap}; draw(); e.preventDefault(); return; }
+  if (r.kind === "ruler" || r.kind === "wave" || r.kind === "ref") { drag = {mode: "rnew", x0: x, t0: snapTime(t, noSnap), moved: false, noSnap}; e.preventDefault(); return; }
   if (r.kind === "lab") {
     let hit = -1, mode = "move";
     doc.segments.forEach((s, i) => { if (s.speaker !== r.spk) return;
@@ -268,6 +274,14 @@ window.addEventListener("mousemove", e => {
   if (!drag || !doc) return;
   const rect = cv.getBoundingClientRect(), t = x2t(e.clientX - rect.left), noSnap = e.altKey || drag.noSnap;
   const clampT = v => Math.max(0, Math.min(duration, v));
+  if (drag.mode === "rnew") {
+    const x = e.clientX - rect.left;
+    if (!drag.moved && Math.abs(x - drag.x0) < 4) return;
+    drag.moved = true; const a = clampT(drag.t0), b = clampT(snapTime(t, noSnap));
+    region = {start: Math.min(a, b), end: Math.max(a, b)}; updateRegionBar(); draw(); return;
+  }
+  if (drag.mode === "rstart") { region.start = clampT(Math.min(snapTime(t, noSnap), region.end - MIN_DUR)); updateRegionBar(); draw(); return; }
+  if (drag.mode === "rend") { region.end = clampT(Math.max(snapTime(t, noSnap), region.start + MIN_DUR)); updateRegionBar(); draw(); return; }
   if (drag.mode === "new" || drag.mode === "inew") {
     const a = clampT(drag.t0), b = clampT(snapTime(t, noSnap));
     drag.preview = drag.mode === "new" ? {kind: "seg", speaker: drag.speaker, start: Math.min(a, b), end: Math.max(a, b)} : {kind: "ign", start: Math.min(a, b), end: Math.max(a, b)};
@@ -283,9 +297,16 @@ window.addEventListener("mousemove", e => {
   }
   draw();
 });
+cv.addEventListener("mousemove", e => {
+  if (drag || !region) { if (!drag) cv.style.cursor = ""; return; }
+  const x = e.clientX - cv.getBoundingClientRect().left;
+  cv.style.cursor = (Math.abs(x - t2x(region.start)) <= HANDLE_PX || Math.abs(x - t2x(region.end)) <= HANDLE_PX) ? "ew-resize" : "";
+});
 window.addEventListener("mouseup", () => {
   if (!drag || !doc) return;
   const d = drag; drag = null;
+  if (d.mode === "rnew") { if (!d.moved) { aud.currentTime = Math.max(0, Math.min(duration, d.t0)); } else if (region) { region = {start: round(region.start), end: round(region.end)}; updateRegionBar(); } draw(); return; }
+  if (d.mode === "rstart" || d.mode === "rend") { region = {start: round(region.start), end: round(region.end)}; updateRegionBar(); draw(); return; }
   if ((d.mode === "new" || d.mode === "inew") && d.preview && d.preview.end - d.preview.start >= MIN_DUR) {
     pushUndo();
     const p = d.preview;
@@ -308,6 +329,53 @@ $("zin").onclick = () => { const t = aud.currentTime; view.pps = Math.min(600, v
 $("zout").onclick = () => { const t = aud.currentTime; view.pps = Math.max(2, view.pps / 1.4); view.t0 = t - (cv.clientWidth - GUTTER) / 2 / view.pps; clampView(); draw(); };
 $("zfit").onclick = fit;
 
+// ---------- region: two handles, then a speaker
+function mergeSame(spk) {
+  const mine = doc.segments.filter(s => s.speaker === spk).sort((a, b) => a.start - b.start), out = [];
+  for (const s of mine) { const last = out[out.length - 1]; if (last && s.start <= last.end + 1e-6) last.end = Math.max(last.end, s.end); else out.push({...s}); }
+  doc.segments = doc.segments.filter(s => s.speaker !== spk).concat(out);
+}
+function cutOut(list, a, b, keepSpk) {
+  const out = [];
+  for (const s of list) {
+    if ((keepSpk !== undefined && s.speaker === keepSpk) || s.end <= a || s.start >= b) { out.push(s); continue; }
+    if (s.start < a) out.push({...s, end: round(a)});
+    if (s.end > b) out.push({...s, start: round(b)});
+  }
+  return out;
+}
+function assignRegion(spId) {
+  if (!region || !doc) return;
+  const a = round(region.start), b = round(region.end); pushUndo();
+  if ($("overwrite").checked) doc.segments = cutOut(doc.segments, a, b, spId);
+  doc.segments.push({start: a, end: b, speaker: spId}); mergeSame(spId);
+  sel = null; changed(); renderSpeakers(); draw();
+}
+function clearRegionLabels() {
+  if (!region) return; pushUndo(); doc.segments = cutOut(doc.segments, round(region.start), round(region.end)); sel = null; changed(); renderSpeakers(); draw();
+}
+function ignoreRegion() {
+  if (!region) return; pushUndo(); doc.ignore.push({start: round(region.start), end: round(region.end), note: ""}); changed(); draw();
+}
+function playRegion() { if (!region) return; aud.currentTime = region.start; playUntil = region.end; aud.play(); }
+function addSpeaker() {
+  pushUndo(); let n = doc.speakers.length + 1, id = "S" + n; while (doc.speakers.some(s => s.id === id)) id = "S" + (++n);
+  doc.speakers.push({id, name: "Người nói " + (doc.speakers.length + 1)}); changed(); renderSpeakers(); resize(); return id;
+}
+function updateRegionBar() {
+  const bar = $("regionbar");
+  if (!region || !doc) { bar.style.display = "none"; return; }
+  bar.style.display = "flex"; bar.innerHTML = "";
+  const mk = (text, fn, cls, color) => { const b = document.createElement("button"); b.textContent = text; if (cls) b.className = cls; if (color) b.style.borderColor = color; b.onclick = fn; bar.appendChild(b); return b; };
+  const info = document.createElement("span"); info.innerHTML = `<b>Vùng chọn</b> ${fmt(region.start)} → ${fmt(region.end)} <span class="mute">(${(region.end - region.start).toFixed(2)} s)</span>`; bar.appendChild(info);
+  mk("▶ Phát vùng", playRegion);
+  doc.speakers.forEach((sp, i) => mk(`${i + 1} · ${sp.name}`, () => assignRegion(sp.id), "spkbtn", colorOf(sp.id)));
+  mk("+ Người mới", () => assignRegion(addSpeaker()));
+  mk("Không ai nói", clearRegionLabels); mk("Chưa chắc", ignoreRegion); mk("Bỏ chọn", () => { region = null; updateRegionBar(); draw(); });
+  const l = document.createElement("label"); l.innerHTML = `<input type="checkbox" id="overwrite" ${window._overwrite === false ? "" : "checked"}> bỏ nhãn người khác trong vùng khi gán`;
+  l.querySelector("input").onchange = ev => { window._overwrite = ev.target.checked; }; bar.appendChild(l);
+}
+
 // ---------- keyboard
 window.addEventListener("keydown", e => {
   const tag = (e.target.tagName || "").toLowerCase();
@@ -327,23 +395,20 @@ window.addEventListener("keydown", e => {
   else if (k === "m" || k === "M") { if (sel && sel.kind === "seg") { const s = doc.segments[sel.i];
       let j = -1, best = 1e9; doc.segments.forEach((o, i) => { if (i !== sel.i && o.speaker === s.speaker && o.start >= s.end - 1e-6 && o.start - s.end < best) { best = o.start - s.end; j = i; } });
       if (j >= 0) { pushUndo(); s.end = doc.segments[j].end; doc.segments.splice(j, 1); sel = {kind: "seg", i: doc.segments.indexOf(s)}; changed(); draw(); } } }
-  else if (k === "p" || k === "P") { if (sel && sel.kind === "seg") { const s = doc.segments[sel.i]; aud.currentTime = s.start; playUntil = s.end; aud.play(); } }
+  else if (k === "p" || k === "P") { if (region) playRegion(); else if (sel && sel.kind === "seg") { const s = doc.segments[sel.i]; aud.currentTime = s.start; playUntil = s.end; aud.play(); } }
   else if (/^[1-9]$/.test(k)) {
     const sp = doc.speakers[+k - 1]; if (!sp) return;
-    if (!aud.paused) { if (!held[k]) held[k] = {start: aud.currentTime}; }
+    if (region) assignRegion(sp.id);
     else if (sel && sel.kind === "seg") { pushUndo(); doc.segments[sel.i].speaker = sp.id; changed(); draw(); }
   }
-});
-window.addEventListener("keyup", e => {
-  const k = e.key; if (!doc || !held[k]) return;
-  const h = held[k]; delete held[k]; const sp = doc.speakers[+k - 1], end = aud.currentTime;
-  if (sp && end - h.start >= MIN_DUR) { pushUndo(); doc.segments.push({start: round(h.start), end: round(end), speaker: sp.id}); changed(); }
-  draw();
+  else if (k === "[") { const t = round(aud.currentTime); region = {start: t, end: Math.min(duration, region && region.end > t ? region.end : t + 1)}; updateRegionBar(); draw(); }
+  else if (k === "]") { const t = round(aud.currentTime); region = {start: region && region.start < t ? region.start : Math.max(0, t - 1), end: t}; updateRegionBar(); draw(); }
+  else if (k === "Escape") { region = null; sel = null; updateRegionBar(); draw(); }
 });
 
 // ---------- audio
 aud.addEventListener("timeupdate", () => { if (playUntil !== null && aud.currentTime >= playUntil) { aud.pause(); playUntil = null; } });
-aud.addEventListener("pause", () => { playUntil = null; for (const k of Object.keys(held)) window.dispatchEvent(new KeyboardEvent("keyup", {key: k})); });
+aud.addEventListener("pause", () => { playUntil = null; });
 $("rate").onchange = () => { aud.playbackRate = +$("rate").value; };
 function loop() {
   if (!aud.paused && doc) {
@@ -381,13 +446,9 @@ function renderSpeakers() {
     };
     box.appendChild(row);
   });
+  updateRegionBar();
 }
-$("addspk").onclick = () => {
-  if (!doc) return; pushUndo();
-  let n = doc.speakers.length + 1, id = "S" + n; while (doc.speakers.some(s => s.id === id)) id = "S" + (++n);
-  doc.speakers.push({id, name: "Người nói " + (doc.speakers.length + 1)});
-  changed(); renderSpeakers(); resize();
-};
+$("addspk").onclick = () => { if (doc) addSpeaker(); };
 function summary() {
   if (!doc) return;
   const spk = doc.speakers.length, segs = doc.segments.length, tot = doc.segments.reduce((a, s) => a + s.end - s.start, 0);
@@ -395,6 +456,16 @@ function summary() {
 }
 $("notes").oninput = () => { if (!doc) return; doc.notes = $("notes").value; changed(); };
 $("tol").onchange = () => { if (!doc) return; doc.tolerance_s = Math.max(0, Math.min(5, +$("tol").value || 0)); changed(); };
+
+// ---------- reference arms: hidden once one is loaded, always one click away
+function renderArmBar() {
+  const bar = $("armbar"), names = Object.keys(arms), all = names.length > 0 && names.every(a => shown.has(a));
+  bar.innerHTML = "<span class='mute'>Arm tham khảo:</span>";
+  names.forEach((a, i) => { const l = document.createElement("label"); l.innerHTML = `<input type="checkbox" ${shown.has(a) ? "checked" : ""}><span style="color:${armColor(a, i)}">${a}</span>`;
+    l.querySelector("input").onchange = ev => { ev.target.checked ? shown.add(a) : shown.delete(a); renderArmBar(); resize(); }; bar.appendChild(l); });
+  const b = document.createElement("button"); b.textContent = all ? "Ẩn tất cả arm" : "Hiện lại tất cả arm";
+  b.onclick = () => { if (all) shown.clear(); else names.forEach(a => shown.add(a)); renderArmBar(); resize(); }; bar.appendChild(b);
+}
 
 // ---------- init from an arm
 $("initbtn").onclick = () => {
@@ -406,7 +477,7 @@ $("initbtn").onclick = () => {
   doc.speakers = order.map((sp, i) => ({id: "S" + (i + 1), name: `Người nói ${i + 1}`}));
   const idOf = Object.fromEntries(order.map((sp, i) => [sp, "S" + (i + 1)]));
   doc.segments = arms[arm].map(s => ({start: round(s.start), end: round(s.end), speaker: idOf[s.speaker]}));
-  sel = null; changed(); renderSpeakers(); resize();
+  sel = null; shown.clear(); renderArmBar(); changed(); renderSpeakers(); resize();
 };
 
 // ---------- load, save
@@ -430,10 +501,9 @@ async function openSample(name) {
   $("sample").value = name;
   arms = {};
   for (const a of info.arms) { const j = await fetch(`${base}/segments_${a}.json`).then(x => x.json()).catch(() => null); if (j) arms[a] = (j.segments || j).map(s => ({start: +s.start, end: +s.end, speaker: String(s.speaker)})); }
-  shown.clear(); Object.keys(arms).forEach(a => shown.add(a));
-  const bar = $("armbar"); bar.innerHTML = "<span class='mute'>Hiện arm tham khảo:</span>";
-  Object.keys(arms).forEach((a, i) => { const l = document.createElement("label"); l.innerHTML = `<input type="checkbox" checked><span style="color:${armColor(a, i)}">${a}</span>`;
-    l.querySelector("input").onchange = ev => { ev.target.checked ? shown.add(a) : shown.delete(a); resize(); }; bar.appendChild(l); });
+  shown.clear(); region = null; updateRegionBar();
+  if (!rev) Object.keys(arms).forEach(a => shown.add(a));   // labels already saved: start with only the wave and the labels
+  renderArmBar();
   const ia = $("initarm"); ia.innerHTML = ""; Object.keys(arms).forEach(a => { const o = document.createElement("option"); o.value = a; o.textContent = a; ia.appendChild(o); });
   aud.src = `${base}/clip.wav`; aud.playbackRate = +$("rate").value;
   await loadPeaks(`${base}/clip.wav`);
