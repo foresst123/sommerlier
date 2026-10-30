@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import sys
 
@@ -120,3 +121,67 @@ def test_fb_sweep_arms_are_raw_and_get_the_postprocess(tmp_path):
     merged = {r["arm"]: r for r in C.run(str(tmp_path), "diarizen_auto", None, 0.0, postprocess=True)}
     assert plain["nemotron_dz_fb0.4"]["arm_s"] == pytest.approx(3.7)   # the 0.3 s gap is not filled
     assert merged["nemotron_dz_fb0.4"]["arm_s"] == pytest.approx(4.0)   # merged like the pipeline would
+
+
+def test_overlap_numbers_on_a_hand_made_example():
+    # hyp: A 0-4, B 2-6 (both on 2-4 = 2 s), A 8-9. Any speech = 0-6 and 8-9 = 7 s, so the ratio is 2/7.
+    hyp = [seg(0, 4, "A"), seg(2, 6, "B"), seg(8, 9, "A")]
+    r = C.compare(REF, hyp, 10.0, collar=0.0)
+    assert r["overlap_s"] == 2.0 and r["overlap_ratio"] == pytest.approx(0.286)
+    assert r["ref_overlap_s"] == 0.0 and r["ref_overlap_ratio"] == 0.0        # REF: A 0-5 then B 5-10, no overlap
+    assert r["arm_s"] == 7.0                                                    # the ratio's denominator
+
+
+def test_overlap_counts_a_speaker_once_and_ignores_the_collar():
+    # A's two segments overlap each other: that is one speaker, so no overlap. The collar does not change overlap.
+    r = C.compare(REF, [seg(0, 2, "A"), seg(1, 3, "A"), seg(5, 10, "B")], 10.0, collar=0.0)
+    assert r["overlap_s"] == 0.0 and r["overlap_ratio"] == 0.0
+    hyp = [seg(0, 5.2, "A"), seg(5.2, 10, "B"), seg(5.0, 5.4, "C")]              # C sits on the turn change
+    assert C.compare(REF, hyp, 10.0, collar=0.25)["overlap_s"] == C.compare(REF, hyp, 10.0, collar=0.0)["overlap_s"] == 0.4
+
+
+def test_overlap_ratio_is_nan_without_speech():
+    r = C.compare(REF, [], 10.0, collar=0.0)
+    assert r["overlap_s"] == 0.0 and math.isnan(r["overlap_ratio"])          # the arm has no speech at all
+    assert r["ref_overlap_s"] == 0.0 and r["ref_overlap_ratio"] == 0.0      # the reference has speech, no overlap
+
+
+def test_ov_arms_are_raw_and_get_the_postprocess(tmp_path):
+    assert C.is_raw_arm("nemotron_dz_ov") and C.is_raw_arm("nemotron_dz_demucs_ov")
+    assert not C.is_raw_arm("nemotron") and not C.is_raw_arm("diarizen_auto")
+    d = tmp_path / "01_a"
+    d.mkdir()
+    (d / "segments_diarizen_auto.json").write_text(json.dumps({"segments": REF}), encoding="utf-8")
+    (d / "segments_nemotron_dz_ov.json").write_text(
+        json.dumps({"segments": [seg(0, 2, "x"), seg(2.3, 4, "x")]}), encoding="utf-8")
+    plain = {r["arm"]: r for r in C.run(str(tmp_path), "diarizen_auto", None, 0.0)}
+    merged = {r["arm"]: r for r in C.run(str(tmp_path), "diarizen_auto", None, 0.0, postprocess=True)}
+    assert plain["nemotron_dz_ov"]["arm_s"] == pytest.approx(3.7)
+    assert merged["nemotron_dz_ov"]["arm_s"] == pytest.approx(4.0)
+
+
+def test_csv_keeps_its_columns_and_adds_the_overlap_ones_at_the_end(tmp_path):
+    d = tmp_path / "01_a"
+    d.mkdir()
+    (d / "segments_diarizen_auto.json").write_text(json.dumps({"segments": REF}), encoding="utf-8")
+    (d / "segments_nemotron_dz_ov.json").write_text(
+        json.dumps({"segments": [seg(0, 4, "x"), seg(2, 6, "y")]}), encoding="utf-8")
+    csv_path = tmp_path / "t.csv"
+    assert C.main([str(tmp_path), "--collar", "0", "--csv", str(csv_path)]) == 0
+    header = csv_path.read_text(encoding="utf-8").splitlines()[0].split(",")
+    assert header == ["sample", "arm", "ref_speakers", "arm_speakers", "ref_s", "arm_s", "miss", "fa", "conf", "der",
+                      "short_n", "short_any", "short_spk", "speaker_recall",
+                      "overlap_s", "overlap_ratio", "ref_overlap_s", "ref_overlap_ratio"]
+
+
+def test_table_shows_the_overlap_columns_and_the_reference_in_the_header(tmp_path, capsys):
+    d = tmp_path / "01_a"
+    d.mkdir()
+    (d / "segments_diarizen_auto.json").write_text(json.dumps({"segments": REF}), encoding="utf-8")
+    (d / "segments_nemotron_dz_ov.json").write_text(
+        json.dumps({"segments": [seg(0, 4, "x"), seg(2, 6, "y")]}), encoding="utf-8")
+    assert C.main([str(tmp_path), "--collar", "0"]) == 0
+    out = capsys.readouterr().out
+    assert "ovl %" in out and "ref overlap: 0.0 s, 0.0%" in out
+    # arm: 2 s with two speakers over 6 s with any speech (0-6), so 33.3%
+    assert "33.3" in out.split("nemotron_dz_ov")[1].splitlines()[0]

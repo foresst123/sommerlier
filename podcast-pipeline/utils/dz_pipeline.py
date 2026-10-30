@@ -134,16 +134,38 @@ def binarize_frames(values: np.ndarray, frame_s: float, offset_s: float = 0.0, o
     return out
 
 
+def drop_short_on_runs(track: np.ndarray, frame_s: float, min_on_s: float) -> np.ndarray:
+    """A copy of one 0/1 track with every ON run shorter than min_on_s seconds set to 0.
+
+    A run is its number of ON frames times frame_s, the length binarize_frames gives an interior run. A run of exactly
+    min_on_s is kept (a 1e-9 s tolerance covers float error). OFF frames are never changed. min_on_s 0 changes nothing.
+    """
+    out = np.asarray(track, dtype=float).copy()
+    if min_on_s <= 0 or out.size == 0:
+        return out
+    on = np.concatenate([[0], (out > 0.5).astype(int), [0]])
+    edges = np.diff(on)
+    for start, end in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)):   # [start, end) of each ON run
+        if (end - start) * frame_s + 1e-9 < min_on_s:
+            out[start:end] = 0.0
+    return out
+
+
 def run_piece_dz(duration: float, prob_fn: Callable, embed_fn: EmbedMaskFn, *, vbx_fn: VbxFn,
                  window_s: float = 16.0, hop_s: float = 0.8, frame_s: float = 0.08, thr: float = 0.5,
                  median_frames: int = 3, min_frames_ratio: float = 0.1, min_num_frames: int = 1,
-                 max_speakers: int = 20, drop_empty_clusters: bool = True) -> PieceResult:
+                 max_speakers: int = 20, drop_empty_clusters: bool = True, min_on_s: float = 0.0) -> PieceResult:
     """One piece through DiariZen's steps (see the module docstring). Returns a PieceResult like run_piece's.
 
     drop_empty_clusters: np.unique's shift leaves DiariZen with an empty cluster 0 whenever a slot got no cluster, and
     a frame whose count exceeds its non-empty clusters can then pick that empty one (a ghost speaker). True renumbers
     the clusters that are used; this is the one deliberate deviation from DiariZen. False keeps its ids.
+
+    min_on_s (experiment, not DiariZen): after the per-cluster binarisation, each cluster's ON runs shorter than this
+    many seconds are removed; each cluster is cleaned on its own and OFF gaps are not touched. 0 leaves the output as is.
     """
+    if not min_on_s >= 0:
+        raise ValueError(f"min_on_s must be 0 or more, got {min_on_s}")
     spans = window_spans(duration, window_s, hop_s)
     n_frames = int(math.ceil(duration / frame_s - 1e-9))
 
@@ -232,7 +254,8 @@ def run_piece_dz(duration: float, prob_fn: Callable, embed_fn: EmbedMaskFn, *, v
             for i in range(min(int(count[t]), n_clusters)):
                 binary_out[top[i, t], t] = 1.0
         for k in range(n_clusters):
-            for s0, s1 in binarize_frames(binary_out[k], frame_s):
+            track = drop_short_on_runs(binary_out[k], frame_s, min_on_s) if min_on_s > 0 else binary_out[k]
+            for s0, s1 in binarize_frames(track, frame_s):
                 segments.append({"start": s0, "end": s1, "cluster": k})
     segments.sort(key=lambda r: (r["start"], r["end"]))
 

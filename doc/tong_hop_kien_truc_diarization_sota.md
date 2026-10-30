@@ -156,6 +156,10 @@ Quét Fb cho J và K (chỉ chạy stage 2, không chạy lại stage 1 hay Demu
 `python tools/diar_arms_experiment.py --audio-dir $AUDIO --samples tools/diar_arms_samples.json --out $OUT/diar_arms --only-arms J,K --fb-sweep 0.2,0.4 --windowed-python $NEMOTRON_PY --vbx-python $DZ_PY --demucs-python $DEMUCS_PY --python $SOM_PY`
 HT Demucs là bộ tách nguồn **âm nhạc** (stem giọng hát), không phải bộ khử nhiễu lời nói; nó chỉ thử trên nhánh embedding. Chưa kiểm chứng: Demucs chưa chạy trên GPU, các giá trị Fb 0.2 và 0.4 chỉ là điểm quét đầu tiên, và chưa có nhãn tay để so.
 
+**Đã viết mã, chưa kiểm chứng (biến thể nhạy hơn với chồng lấn).** `--overlap-variants` thêm hai arm `nemotron_dz_ov` (J) và `nemotron_dz_demucs_ov` (K) với `--ov-thr` 0.35 và `--ov-min-on-s` 0.2 s; J và K giữ nguyên làm mốc. Hai arm này chỉ chạy stage 2 trên xác suất và vocals đã có. J và K không có onset/offset của NeMo; chỗ tương ứng là `--thr` và bộ lọc trung vị. Stage 2 bỏ mọi đoạn ON của từng cụm ngắn hơn 0.2 s (đoạn đúng 0.2 s được giữ). `compare_arms.py` thêm hai cột cuối: `overlap_s` (giây có từ hai người nói trở lên) và `overlap_ratio` (chia cho giây có tiếng nói), tính trên segment không có collar, cho cả arm và tham chiếu. Ví dụ:
+`python tools/diar_arms_experiment.py --audio-dir $AUDIO --samples tools/diar_arms_samples.json --out $OUT/diar_arms --only-arms J,K --overlap-variants --windowed-python $NEMOTRON_PY --vbx-python $DZ_PY --demucs-python $DEMUCS_PY --python $SOM_PY`
+Giá trị 0.35 chỉ là điểm đoán đầu tiên, chưa kiểm chứng trên dữ liệu nào. Ngưỡng thấp hơn cũng làm tăng báo động giả (khoảng không có người nói bị gán là có tiếng), nên phải đọc `miss`/`FA` cùng với `ovl %`.
+
 Chưa giải thích được: G sụp về 1 người (nghi do 30 s và ít embedding; chưa tách nguyên nhân). Chưa xem kết quả chạy thr 0.35 và median 0.22.
 
 ## 9. Việc cần kiểm lại trước khi trích dẫn

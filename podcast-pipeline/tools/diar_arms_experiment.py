@@ -5,7 +5,8 @@
         [--final OUT/final] [--gpu 6] [--env a100] [--only-arms A,C,F,G] [--fusion] [--k-min-clean 1.0] [--reuse] \
         [--windowed-piece-s 240] [--windowed-hop-s 10] [--windowed-python /path/to/nemotron/python] \
         [--python /path/to/som/python] [--vbx-ahc-threshold 0.6] [--vbx-fa 0.07] [--vbx-fb 0.8] [--plda-dir DIR] \
-        [--vbx-python /path/to/dz/python] [--demucs-python /path/to/demucs/python] [--fb-sweep 0.2,0.4]
+        [--vbx-python /path/to/dz/python] [--demucs-python /path/to/demucs/python] [--fb-sweep 0.2,0.4] \
+        [--overlap-variants [--ov-thr 0.35] [--ov-min-on-s 0.2]]
 
 Per sample (a conversation clip of about 40 s inside a long source recording):
   1. cut a 5 min chunk of the source around the clip (it starts 2 min before the clip, clamped to the file), 16 kHz mono.
@@ -43,6 +44,10 @@ Per sample (a conversation clip of about 40 s inside a long source recording):
   4h. --fb-sweep "0.2,0.4" (values above 0): for each selected arm J and K, stage 2 only, with --fb <value>, reusing
      the probs (and K's vocals wav), into runs/<arm>_fb<value>. These extra arms (nemotron_dz_fb0.4, nemotron_dz_demucs_fb0.2)
      are listed like the others. The base arms keep --vbx-fb. No P_loop: DiariZen's VBx runs with loopProb 0.
+  4i. --overlap-variants (experiment): for each selected arm J and K, stage 2 only, with --thr --ov-thr (default 0.35)
+     and --min-on-s --ov-min-on-s (default 0.2), into runs/nemotron_dz_ov and runs/nemotron_dz_demucs_ov. Same Fb,
+     median filter and probs as the base arm; K's vocals for the embeddings. Independent of --fb-sweep: the sweep arms
+     keep the base threshold. The base J and K commands do not change (no --min-on-s). UNVERIFIED on GPU.
   5. every arm is cropped to the clip window and shifted to 0, written as segments_<arm>.json, and drawn in one
      lanes.html per sample (tools/make_diar_lanes_page.py). index.html links the samples with a table of
      speakers, K, segments under 1 s, speech seconds and overlap seconds per arm. No DER, no text.
@@ -102,6 +107,10 @@ VBX_ARMS = ("G", "I", "J", "K")     # stage 2 with VBx or DiariZen steps, in the
 DZ_ARMS = ("J", "K")                # stage 2 with DiariZen's own steps (--clustering dz)
 DENSE_ARMS = ("I", "J", "K")        # DiariZen-like windows: 16 s, hop 0.8 s
 FB_SWEEP_ARMS = ("J", "K")          # the arms the --fb-sweep values are run for
+OV_ARMS = ("J", "K")                # the arms --overlap-variants adds a `_ov` arm for
+OV_SUFFIX = "+ov"                   # key suffix of an overlap variant: 'J+ov' is nemotron_dz_ov
+OV_THR = 0.35                       # first guess, not validated: a lower slot threshold keeps more overlap
+OV_MIN_ON_S = 0.2                   # stage 2 drops ON runs shorter than this (--min-on-s)
 STAGE2_LABEL = {"G": "VBx", "I": "VBx", "J": "DiariZen steps", "K": "DiariZen steps"}
 VBX_AHC_THRESHOLD = 0.6     # UNVERIFIED: not checked against the DiariZen config
 VBX_FA = 0.07               # UNVERIFIED
@@ -375,15 +384,28 @@ def arm_key(letter: str, fb: Optional[str] = None) -> str:
     return letter if fb is None else f"{letter}@{fb}"
 
 
+def ov_key(letter: str) -> str:
+    """'J+ov' for the --overlap-variants arm of J (nemotron_dz_ov)."""
+    return letter + OV_SUFFIX
+
+
+def is_ov(key: str) -> bool:
+    return key.endswith(OV_SUFFIX)
+
+
 def split_key(key: str) -> Tuple[str, Optional[str]]:
+    """(letter, fb). An overlap variant gives its base letter with fb None: check is_ov first."""
+    if is_ov(key):
+        key = key[: -len(OV_SUFFIX)]
     letter, _, fb = key.partition("@")
     return letter, (fb or None)
 
 
 def arm_name(key: str) -> str:
-    """The arm's name in the output: nemotron_dz, or nemotron_dz_fb0.4 for a sweep arm."""
+    """The arm's name in the output: nemotron_dz, nemotron_dz_fb0.4 for a sweep arm, nemotron_dz_ov for a variant."""
     letter, fb = split_key(key)
-    return ARMS[letter] if fb is None else f"{ARMS[letter]}_fb{fb}"
+    name = ARMS[letter] if fb is None else f"{ARMS[letter]}_fb{fb}"
+    return name + "_ov" if is_ov(key) else name
 
 
 def parse_fb_sweep(text: Optional[str]) -> List[str]:
@@ -449,14 +471,19 @@ def ensure_vocals(sample_dir: Path, cfg: dict, runner: Runner, skip_existing: bo
 
 
 def stage2_cmd(arm: str, sample_dir: Path, probs: Path, result: Path, cfg: dict, fb: str,
-               embed_audio: Optional[Path] = None) -> List[str]:
-    """The stage 2 command of a windowed arm. Without embed_audio it is the same command as before arm K existed."""
+               embed_audio: Optional[Path] = None, thr: Optional[float] = None,
+               min_on_s: Optional[float] = None) -> List[str]:
+    """The stage 2 command of a windowed arm. Without embed_audio, thr and min_on_s it is the same command as before.
+
+    thr replaces --dz-thr and min_on_s adds --min-on-s; both are given only by the --overlap-variants arms.
+    """
     python = (cfg.get("vbx_python") or cfg["python"]) if arm in VBX_ARMS else cfg["python"]
     cmd = [python, VBX_STAGE_SCRIPT, "--audio", str(sample_dir / "chunk.wav"), "--probs-dir", str(probs),
            "--out", str(result), "--min-speakers", str(cfg["windowed_min_speakers"])]
     if arm in VBX_ARMS:
         if arm in DZ_ARMS:
-            cmd += ["--clustering", "dz", "--thr", str(cfg["dz_thr"]), "--median-s", str(cfg["dz_median_s"])]
+            dz_thr = cfg["dz_thr"] if thr is None else thr
+            cmd += ["--clustering", "dz", "--thr", str(dz_thr), "--median-s", str(cfg["dz_median_s"])]
         cmd += ["--ahc-threshold", str(cfg["vbx_ahc_threshold"]), "--fa", str(cfg["vbx_fa"]), "--fb", fb]
         if cfg["plda_dir"]:
             cmd += ["--plda-dir", str(cfg["plda_dir"])]
@@ -464,6 +491,8 @@ def stage2_cmd(arm: str, sample_dir: Path, probs: Path, result: Path, cfg: dict,
         cmd += ["--clustering", "ahc", "--embedder", "wespeaker"]
     if embed_audio is not None:
         cmd += ["--embed-audio", str(embed_audio)]
+    if min_on_s is not None:
+        cmd += ["--min-on-s", str(min_on_s)]
     return cmd
 
 
@@ -494,9 +523,11 @@ def run_windowed_arm(arm: str, sample_dir: Path, cfg: dict, runner: Runner) -> P
     return result
 
 
-def run_fb_arm(arm: str, fb: str, sample_dir: Path, cfg: dict, runner: Runner) -> Path:
-    """A --fb-sweep arm: stage 2 only, with --fb <fb>, on arm J's probs (and K's vocals). Never reruns stage 1 or Demucs."""
-    name = arm_name(arm_key(arm, fb))
+def run_stage2_arm(arm: str, name: str, sample_dir: Path, cfg: dict, runner: Runner, fb: str,
+                   thr: Optional[float] = None, min_on_s: Optional[float] = None) -> Path:
+    """Stage 2 only, into runs/<name>, on arm J's probs (and K's vocals). Never reruns stage 1 or Demucs: missing
+    inputs are made as the base arm makes them, existing ones are used. Used by the --fb-sweep and --overlap-variants arms.
+    """
     run_dir = sample_dir / "runs" / name
     result = run_dir / "out" / "segments.json"
     if cfg["reuse"] and result.is_file():
@@ -504,11 +535,26 @@ def run_fb_arm(arm: str, fb: str, sample_dir: Path, cfg: dict, runner: Runner) -
     run_dir.mkdir(parents=True, exist_ok=True)
     probs = dump_probs("J", sample_dir, cfg, runner, skip_existing=True)
     embed_audio = ensure_vocals(sample_dir, cfg, runner, skip_existing=True) if arm == "K" else None
-    cmd2 = stage2_cmd(arm, sample_dir, probs, result, cfg, fb=fb, embed_audio=embed_audio)
+    cmd2 = stage2_cmd(arm, sample_dir, probs, result, cfg, fb=fb, embed_audio=embed_audio, thr=thr,
+                      min_on_s=min_on_s)
     code = runner(cmd2, gpu_env(cfg))
     if code != 0 or not result.is_file():
         raise RuntimeError(f"arm {name} stage 2 ({STAGE2_LABEL[arm]}) failed (exit {code}), see {run_dir}")
     return result
+
+
+def run_fb_arm(arm: str, fb: str, sample_dir: Path, cfg: dict, runner: Runner) -> Path:
+    """A --fb-sweep arm: stage 2 only, with --fb <fb>, on arm J's probs (and K's vocals). Never reruns stage 1 or Demucs."""
+    return run_stage2_arm(arm, arm_name(arm_key(arm, fb)), sample_dir, cfg, runner, fb=fb)
+
+
+def run_ov_arm(arm: str, sample_dir: Path, cfg: dict, runner: Runner) -> Path:
+    """An --overlap-variants arm (J+ov, K+ov): the base arm's stage 2 with --thr ov_thr and --min-on-s ov_min_on_s.
+
+    Everything else is the base arm's: the same Fb (--vbx-fb), median filter and probs; K's vocals for the embeddings.
+    """
+    return run_stage2_arm(arm, arm_name(ov_key(arm)), sample_dir, cfg, runner, fb=str(cfg["vbx_fb"]),
+                          thr=cfg["ov_thr"], min_on_s=cfg["ov_min_on_s"])
 
 
 def process_sample(index: int, sample: dict, cfg: dict, runner: Runner, log: Callable[[str], None] = print) -> dict:
@@ -530,6 +576,9 @@ def process_sample(index: int, sample: dict, cfg: dict, runner: Runner, log: Cal
     for key in cfg["keys"]:              # base arms in letter order, each followed by its --fb-sweep arms
         arm, fb = split_key(key)
         try:
+            if is_ov(key):                      # --overlap-variants: stage 2 only, after the base arm in the key order
+                segs[key] = crop(read_rows(str(run_ov_arm(arm, sdir, cfg, runner))), rs, re_)
+                continue
             if arm == "E":
                 if "A" not in segs or "B" not in segs:
                     raise RuntimeError("fusion needs arms A and B")
@@ -667,6 +716,13 @@ def main(argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) 
     ap.add_argument("--fb-sweep",
                     help="comma list of VBx Fb values above 0 (e.g. 0.2,0.4): for each selected arm J and K, run "
                          "stage 2 only with that --fb, into runs/<arm>_fb<value>")
+    ap.add_argument("--overlap-variants", action="store_true",
+                    help="for each selected arm J and K, one more stage 2 run with --ov-thr and --ov-min-on-s, into "
+                         "runs/nemotron_dz_ov and runs/nemotron_dz_demucs_ov (stage 1 and Demucs are not rerun)")
+    ap.add_argument("--ov-thr", type=float, default=OV_THR,
+                    help="--overlap-variants: slot probability threshold, in (0, 1) (first guess, not validated)")
+    ap.add_argument("--ov-min-on-s", type=float, default=OV_MIN_ON_S,
+                    help="--overlap-variants: stage 2 drops each cluster's ON runs shorter than this (seconds, 0 or more)")
     ap.add_argument("--dz-thr", type=float, default=0.5, help="arm J: slot probability threshold")
     ap.add_argument("--dz-median-s", type=float, default=0.22,
                     help="arm J: median filter of the binarised slots in seconds (DiariZen: 11 frames of about 20 ms); "
@@ -687,6 +743,12 @@ def main(argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) 
         ap.error(str(exc))
     if a.fb_sweep is not None and not letters & set(FB_SWEEP_ARMS):
         ap.error("--fb-sweep needs arm J or K in --only-arms")
+    if not (math.isfinite(a.ov_thr) and 0 < a.ov_thr < 1):
+        ap.error(f"--ov-thr must be in (0, 1), got {a.ov_thr}")
+    if not (math.isfinite(a.ov_min_on_s) and a.ov_min_on_s >= 0):
+        ap.error(f"--ov-min-on-s must be 0 or more, got {a.ov_min_on_s}")
+    if a.overlap_variants and not letters & set(OV_ARMS):
+        ap.error("--overlap-variants needs arm J or K in --only-arms")
     if a.fusion:
         letters.add("E")
     run = set(letters)
@@ -694,12 +756,14 @@ def main(argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) 
         run.add("A")            # K comes from arm A
     if "E" in run:
         run.add("B")            # fusion boundaries come from arm B
-    keys = []                   # base arms in letter order, each followed by its --fb-sweep arms
+    keys = []                   # base arms in letter order, each followed by its --fb-sweep and overlap arms
     for letter in ARM_ORDER:
         if letter in run:
             keys.append(arm_key(letter))
             if letter in FB_SWEEP_ARMS:
                 keys += [arm_key(letter, fb) for fb in fb_values]
+            if a.overlap_variants and letter in OV_ARMS:
+                keys.append(ov_key(letter))
     windowed_python = None
     if run & {"F", "G", "I", "J", "K"}:
         windowed_python = a.windowed_python or resolve_worker_python("nemotron")
@@ -713,7 +777,7 @@ def main(argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) 
            "windowed_hop_s": a.windowed_hop_s, "dense_window_s": a.dense_window_s, "dense_hop_s": a.dense_hop_s,
            "vbx_python": a.vbx_python, "dz_thr": a.dz_thr, "dz_median_s": a.dz_median_s,
            "windowed_min_speakers": a.windowed_min_speakers, "vbx_ahc_threshold": a.vbx_ahc_threshold, "vbx_fa": a.vbx_fa,
-           "vbx_fb": a.vbx_fb, "plda_dir": a.plda_dir}
+           "vbx_fb": a.vbx_fb, "plda_dir": a.plda_dir, "ov_thr": a.ov_thr, "ov_min_on_s": a.ov_min_on_s}
     summaries = []
     for i, sample in enumerate(load_samples(a.samples), 1):
         try:

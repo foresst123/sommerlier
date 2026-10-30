@@ -18,6 +18,10 @@ says how far each arm is from it, so a gap means "they disagree, listen", not "w
                 and share it covers with the speaker it maps to
   speaker recall  per reference speaker with >=1 s: share of that speaker's time the mapped arm speaker covers
 
+  ovl s / ovl %  seconds with two or more speakers at once, and that as a share of the seconds with any speech (the
+                overlap_ratio column of the CSV, x100). Taken on the segments as given, with no collar; the reference's
+                values are in the sample's header line and in the ref_overlap_* CSV columns.
+
 Arms A, B and H were post-processed by the pipeline (merge of nearby turns and so on); the windowed arms are raw.
 --postprocess applies the pipeline's own merge_gap / bridge_gap steps to the raw ones, so the table compares like with like.
 """
@@ -43,8 +47,14 @@ RAW_ARMS = ("nemotron_windowed", "nemotron_windowed_vbx", "nemotron_dense_vbx", 
 
 
 def is_raw_arm(arm: str) -> bool:
-    """A RAW_ARMS arm, or one of its --fb-sweep arms (nemotron_dz_fb0.4, nemotron_dz_demucs_fb0.2)."""
+    """A RAW_ARMS arm, one of its --fb-sweep arms (nemotron_dz_fb0.4, nemotron_dz_demucs_fb0.2), or one of its
+    --overlap-variants arms (nemotron_dz_ov, nemotron_dz_demucs_ov)."""
+    if arm.endswith("_ov"):
+        arm = arm[: -len("_ov")]
     return arm in RAW_ARMS or any(arm.startswith(raw + "_fb") for raw in RAW_ARMS)
+
+
+OVERLAP_COLUMNS = ("overlap_s", "overlap_ratio", "ref_overlap_s", "ref_overlap_ratio")
 
 
 MERGE_GAP, BRIDGE_GAP, MAX_SEGMENT = 0.5, 3.0, 20.0     # config.json, a100: merge_gap, bridge_gap, max_segment_length
@@ -104,8 +114,21 @@ def best_mapping(ref: np.ndarray, hyp: np.ndarray, scored: np.ndarray) -> dict[i
     return {int(c): int(r) for r, c in zip(rows, cols) if overlap[r, c] > 0}
 
 
+def overlap_numbers(mat: np.ndarray, step: float = STEP) -> tuple[float, float]:
+    """(seconds with >= 2 speakers active, seconds with >= 1 speaker active) of a (frames, speakers) matrix."""
+    count = mat.sum(axis=1)
+    return float((count >= 2).sum()) * step, float((count >= 1).sum()) * step
+
+
 def compare(ref_segs: list[dict], hyp_segs: list[dict], duration: float, collar: float = 0.25,
             step: float = STEP, ignore: Optional[list[tuple[float, float]]] = None) -> dict:
+    """The score of one arm against the reference. Besides the columns of the table, two overlap numbers for the arm
+    and for the reference, on the segments as given (no collar, no ignored regions):
+
+      overlap_s      seconds in which two or more speakers are active at once (a speaker counts once, however many
+                     of its segments overlap)
+      overlap_ratio  overlap_s divided by the seconds in which at least one speaker is active (nan when there is no speech)
+    """
     n = int(math.ceil(duration / step))
     ref, ref_labels = to_frames(ref_segs, n, step)
     hyp, hyp_labels = to_frames(hyp_segs, n, step)
@@ -150,13 +173,20 @@ def compare(ref_segs: list[dict], hyp_segs: list[dict], duration: float, collar:
     def speakers(mat):
         return int((mat.sum(axis=0) * step >= MIN_SPEAKER_S).sum())
 
+    def ratio(ov_s, any_s):
+        return round(ov_s / any_s, 3) if any_s > 0 else float("nan")
+
+    hyp_ov, hyp_any_s = overlap_numbers(hyp, step)
+    ref_ov, ref_any_s = overlap_numbers(ref, step)
     return {"ref_speakers": speakers(ref), "arm_speakers": speakers(hyp),
             "ref_s": round(float(ref_any.sum()) * step, 1), "arm_s": round(float(hyp_any.sum()) * step, 1),
             "miss": round(pct(miss), 1), "fa": round(pct(fa), 1), "conf": round(pct(conf), 1),
             "der": round(pct(miss + fa + conf), 1), "short_n": len(short),
             "short_any": round(100.0 * seen_any / len(short), 1) if short else None,
             "short_spk": round(100.0 * seen_spk / len(short), 1) if short else None,
-            "speaker_recall": recall}
+            "speaker_recall": recall,
+            "overlap_s": round(hyp_ov, 2), "overlap_ratio": ratio(hyp_ov, hyp_any_s),
+            "ref_overlap_s": round(ref_ov, 2), "ref_overlap_ratio": ratio(ref_ov, ref_any_s)}
 
 
 def pipeline_postprocess(segments: list[dict]) -> list[dict]:
@@ -229,21 +259,35 @@ def run(root: str, ref_arm: str, arms: Optional[list[str]], collar: Optional[flo
     return rows
 
 
+def _pct_text(ratio) -> str:
+    """0.2857 -> '28.6'; nan (no speech) -> '-'."""
+    return "-" if ratio is None or math.isnan(ratio) else f"{100.0 * ratio:.1f}"
+
+
+def _ref_overlap_text(row: dict) -> str:
+    """'ref overlap: 2.0 s, 33.3%' for the reference of the row's sample ('no speech' when it has none)."""
+    ratio = row["ref_overlap_ratio"]
+    share = "no speech" if math.isnan(ratio) else f"{100.0 * ratio:.1f}%"
+    return f"ref overlap: {row['ref_overlap_s']} s, {share}"
+
+
 def print_table(rows: list[dict], ref_arm: str) -> None:
     if ref_arm == "labels":
         print("reference: your hand labels (edge tolerance and 'not sure' regions as saved with them)")
     else:
         print(f"reference: {ref_arm}  (a gap means the two disagree, not that the arm is wrong)")
-    head = ("arm", "spk>=1s", "ref s", "arm s", "miss%", "FA%", "conf%", "DER%", "short any%", "short spk%")
+    head = ("arm", "spk>=1s", "ref s", "arm s", "miss%", "FA%", "conf%", "DER%", "short any%", "short spk%",
+            "ovl s", "ovl %")
     last = None
     for r in rows:
         if r["sample"] != last:
             last = r["sample"]
-            print(f"\n== {last}")
+            print(f"\n== {last}  ({_ref_overlap_text(r)})")
             print("  ".join(f"{h:>20}" if i == 0 else f"{h:>10}" for i, h in enumerate(head)))
         spk = f"{r['arm_speakers']} (ref {r['ref_speakers']})"
         short = (f"{r['short_any']}/{r['short_n']}" if r["short_n"] else "-", f"{r['short_spk']}" if r["short_n"] else "-")
-        cells = (r["arm"], spk, r["ref_s"], r["arm_s"], r["miss"], r["fa"], r["conf"], r["der"], short[0], short[1])
+        cells = (r["arm"], spk, r["ref_s"], r["arm_s"], r["miss"], r["fa"], r["conf"], r["der"], short[0], short[1],
+                 r["overlap_s"], _pct_text(r["overlap_ratio"]))
         print("  ".join(f"{str(c):>20}" if i == 0 else f"{str(c):>10}" for i, c in enumerate(cells)))
         if r["speaker_recall"]:
             print(f"{'':>20}  speaker recall: " + ", ".join(f"{k}={v}" for k, v in r["speaker_recall"].items()))
@@ -271,8 +315,8 @@ def main(argv=None) -> int:
     print_table(rows, a.ref)
     if a.csv:
         with open(a.csv, "w", newline="", encoding="utf-8") as fh:
-            keys = [k for k in rows[0] if k != "speaker_recall"]
-            w = csv.DictWriter(fh, fieldnames=keys + ["speaker_recall"])
+            keys = [k for k in rows[0] if k != "speaker_recall" and k not in OVERLAP_COLUMNS]
+            w = csv.DictWriter(fh, fieldnames=keys + ["speaker_recall"] + list(OVERLAP_COLUMNS))
             w.writeheader()
             for r in rows:
                 w.writerow(dict({k: r[k] for k in keys}, speaker_recall=json.dumps(r["speaker_recall"])))

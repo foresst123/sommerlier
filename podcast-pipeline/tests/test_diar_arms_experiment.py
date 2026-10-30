@@ -611,3 +611,148 @@ def test_parse_fb_sweep_and_arm_names():
     assert X.arm_name("J") == "nemotron_dz" and X.arm_name("J@0.4") == "nemotron_dz_fb0.4"
     assert X.arm_name("K@0.2") == "nemotron_dz_demucs_fb0.2"
     assert X.split_key("K@0.2") == ("K", "0.2") and X.split_key("A") == ("A", None)
+
+
+def _stage2(calls):
+    return [c for c in calls if X.VBX_STAGE_SCRIPT in c]
+
+
+def _without_out_thr_min(cmd):
+    """The command as a list with --out, --thr and --min-on-s and their values taken out."""
+    drop = {"--out", "--thr", "--min-on-s"}
+    res, skip = [], False
+    for tok in cmd:
+        if skip:
+            skip = False
+            continue
+        if tok in drop:
+            skip = True
+            continue
+        res.append(tok)
+    return res
+
+
+def test_overlap_variants_add_one_stage_two_run_per_base_arm(tmp_path):
+    src, sp = _make_samples(tmp_path)
+    out = tmp_path / "out"
+    fake = FakeDemucs()
+    rc = X.main(_windowed_args(sp, src, out, "J,K", "--overlap-variants", "--demucs-python", "/demucs/python",
+                               "--vbx-python", "/dz/python"), runner=fake)
+    assert rc == 0
+    per_sample = len(fake.calls) // 2
+    assert per_sample == 6            # stage 1, J, J+ov, demucs, K, K+ov: no stage 1 or demucs for the variants
+    assert sum(X.WINDOWED_SCRIPT in c for c in fake.calls) == 2 and sum(X.DEMUCS_SCRIPT in c for c in fake.calls) == 2
+    base_j, ov_j, base_k, ov_k = _stage2(fake.calls[0:per_sample])
+    assert _stage2_out(ov_j).endswith("runs/nemotron_dz_ov/out/segments.json")
+    assert _stage2_out(ov_k).endswith("runs/nemotron_dz_demucs_ov/out/segments.json")
+    for cmd in (ov_j, ov_k):
+        assert cmd[0] == "/dz/python" and cmd[cmd.index("--clustering") + 1] == "dz"
+        assert cmd[cmd.index("--thr") + 1] == "0.35" and cmd[cmd.index("--min-on-s") + 1] == "0.2"
+        assert cmd[cmd.index("--fb") + 1] == "0.8" and cmd[cmd.index("--median-s") + 1] == "0.22"
+        assert cmd[cmd.index("--probs-dir") + 1] == base_j[base_j.index("--probs-dir") + 1]
+    assert ov_k[ov_k.index("--embed-audio") + 1] == base_k[base_k.index("--embed-audio") + 1]
+    assert "--embed-audio" not in ov_j
+    assert base_j[base_j.index("--thr") + 1] == "0.5" and "--min-on-s" not in base_j       # base is unchanged
+    assert "--min-on-s" not in base_k and base_k[base_k.index("--thr") + 1] == "0.5"
+    sdir = sorted(p for p in out.iterdir() if p.is_dir())[0]
+    for name in ("nemotron_dz", "nemotron_dz_ov", "nemotron_dz_demucs", "nemotron_dz_demucs_ov"):
+        assert (sdir / f"segments_{name}.json").is_file(), name
+    index = (out / "index.html").read_text(encoding="utf-8")
+    assert "J nemotron_dz_ov" in index and "K nemotron_dz_demucs_ov" in index
+
+
+def test_overlap_variant_command_differs_from_its_base_only_in_thr_and_min_on_s(tmp_path):
+    src, sp = _make_samples(tmp_path)
+    plain = FakeDemucs()
+    X.main(_windowed_args(sp, src, tmp_path / "plain", "J,K"), runner=plain)
+    ov = FakeDemucs()
+    X.main(_windowed_args(sp, src, tmp_path / "ov", "J,K", "--overlap-variants"), runner=ov)
+    fix = lambda cmd: [t.replace(str(tmp_path / "plain"), "<OUT>").replace(str(tmp_path / "ov"), "<OUT>")
+                       for t in cmd]
+    base_plain = [fix(c) for c in _stage2(plain.calls) if "--min-on-s" not in c]
+    base_ov = [fix(c) for c in _stage2(ov.calls) if "--min-on-s" not in c]
+    assert base_plain == base_ov and len(base_plain) == 4                       # the base commands did not change
+    ov_only = [fix(c) for c in _stage2(ov.calls) if "--min-on-s" in c]
+    assert len(ov_only) == 4                                                    # two samples x (J+ov, K+ov)
+    for cmd in ov_only:
+        stripped = _without_out_thr_min(cmd)
+        twins = [b for b in base_ov if _without_out_thr_min(b) == stripped]
+        assert len(twins) == 1 and "0.35" in cmd and "0.2" in cmd
+
+
+def test_overlap_variant_uses_the_ov_flags_and_fb_of_the_base(tmp_path):
+    src, sp = _make_samples(tmp_path)
+    fake = FakeDemucs()
+    X.main(_windowed_args(sp, src, tmp_path / "out", "J", "--overlap-variants", "--ov-thr", "0.3",
+                          "--ov-min-on-s", "0.25", "--vbx-fb", "0.6", "--dz-thr", "0.45"), runner=fake)
+    base, ov = _stage2(fake.calls[0:3])
+    assert ov[ov.index("--thr") + 1] == "0.3" and ov[ov.index("--min-on-s") + 1] == "0.25"
+    assert ov[ov.index("--fb") + 1] == "0.6" and base[base.index("--thr") + 1] == "0.45"
+
+
+def test_overlap_variant_reuses_existing_inputs_and_runs_only_the_variants(tmp_path):
+    src, sp = _make_samples(tmp_path)
+    out = tmp_path / "out"
+    for name in ("01_First_one", "02_Second_one"):
+        sdir = out / name
+        probs = sdir / "runs" / "nemotron_dz" / "probs"
+        probs.mkdir(parents=True)
+        (probs / "plan.json").write_text(json.dumps({"duration": 30.0, "frame_s": 0.08, "pieces": []}), encoding="utf-8")
+        for arm in ("nemotron_dz", "nemotron_dz_demucs"):
+            (sdir / "runs" / arm / "out").mkdir(parents=True)
+            (sdir / "runs" / arm / "out" / "segments.json").write_text('{"segments": []}', encoding="utf-8")
+        sf.write(str(sdir / "chunk_vocals.wav"), np.zeros(1600, dtype=np.float32), 16000)
+    fake = FakeDemucs()
+    rc = X.main(_windowed_args(sp, src, out, "J,K", "--overlap-variants", "--reuse"), runner=fake)
+    assert rc == 0
+    assert len(fake.calls) == 4                                   # two variants per sample, nothing else
+    assert all(X.VBX_STAGE_SCRIPT in c and "_ov/" in _stage2_out(c) for c in fake.calls)
+    assert all("--min-on-s" in c for c in fake.calls)
+
+
+def test_overlap_variants_keep_the_fb_sweep_arms_at_the_base_threshold(tmp_path):
+    src, sp = _make_samples(tmp_path)
+    fake = FakeDemucs()
+    rc = X.main(_windowed_args(sp, src, tmp_path / "out", "J,K", "--fb-sweep", "0.2,0.4", "--overlap-variants"),
+                runner=fake)
+    assert rc == 0
+    per_sample = len(fake.calls) // 2
+    assert per_sample == 10                 # stage 1, J, J@0.2, J@0.4, J+ov, demucs, K, K@0.2, K@0.4, K+ov
+    stage2 = _stage2(fake.calls[0:per_sample])
+    assert len(stage2) == 8
+    names = [_stage2_out(c).split("runs/")[1].split("/out/")[0] for c in stage2]
+    assert names == ["nemotron_dz", "nemotron_dz_fb0.2", "nemotron_dz_fb0.4", "nemotron_dz_ov",
+                     "nemotron_dz_demucs", "nemotron_dz_demucs_fb0.2", "nemotron_dz_demucs_fb0.4",
+                     "nemotron_dz_demucs_ov"]
+    for cmd, name in zip(stage2, names):
+        if name.endswith("_ov"):
+            assert cmd[cmd.index("--thr") + 1] == "0.35" and cmd[cmd.index("--min-on-s") + 1] == "0.2"
+        else:
+            assert cmd[cmd.index("--thr") + 1] == "0.5" and "--min-on-s" not in cmd
+    fb_of = {n: c[c.index("--fb") + 1] for c, n in zip(stage2, names)}
+    assert fb_of["nemotron_dz_fb0.2"] == "0.2" and fb_of["nemotron_dz_ov"] == "0.8"
+
+
+@pytest.mark.parametrize("flag, bad", [("--ov-thr", "0"), ("--ov-thr", "1"), ("--ov-thr", "1.5"),
+                                       ("--ov-thr", "-0.1"), ("--ov-thr", "nan"),
+                                       ("--ov-min-on-s", "-0.1"), ("--ov-min-on-s", "nan")])
+def test_overlap_variant_values_are_refused_before_anything_runs(tmp_path, flag, bad):
+    src, sp = _make_samples(tmp_path)
+    fake = FakeDemucs()
+    with pytest.raises(SystemExit):
+        X.main(_windowed_args(sp, src, tmp_path / "out", "J,K", "--overlap-variants", flag, bad), runner=fake)
+    assert fake.calls == []
+
+
+def test_overlap_variants_need_arm_j_or_k(tmp_path):
+    src, sp = _make_samples(tmp_path)
+    fake = FakeDemucs()
+    with pytest.raises(SystemExit):
+        X.main(_windowed_args(sp, src, tmp_path / "out", "A", "--overlap-variants"), runner=fake)
+    assert fake.calls == []
+
+
+def test_overlap_key_names_and_split():
+    assert X.arm_name("J+ov") == "nemotron_dz_ov" and X.arm_name("K+ov") == "nemotron_dz_demucs_ov"
+    assert X.split_key("J+ov") == ("J", None) and X.is_ov("J+ov") and not X.is_ov("J@0.2")
+    assert X.arm_name(X.ov_key("K")) == "nemotron_dz_demucs_ov" and X.arm_name("J") == "nemotron_dz"

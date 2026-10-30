@@ -44,3 +44,11 @@ def test_embed_audio_of_another_length_is_refused():
 def test_embed_audio_of_another_rate_is_refused():
     with pytest.raises(ValueError, match="must match"):
         V.embedder_waveform(np.zeros(32000), 16000, np.zeros(32000), 8000)
+
+
+@pytest.mark.parametrize("bad", ["-0.2", "nan"])
+def test_min_on_s_below_zero_is_refused_before_any_model_loads(bad, capsys):
+    # argparse refuses it before the stage imports torch, so this runs without a GPU or the diarizen package
+    with pytest.raises(SystemExit):
+        V.main(["--audio", "missing.wav", "--probs-dir", "missing", "--out", "out.json", "--min-on-s", bad])
+    assert "--min-on-s must be 0 or more" in capsys.readouterr().err

@@ -281,3 +281,60 @@ def test_median_filter_size_follows_seconds_not_the_frame_rate():
     assert DZ.frames_for_seconds(0.22, 0.08) == 3
     assert DZ.frames_for_seconds(0.0, 0.01) == 1
     assert DZ.frames_for_seconds(0.2, 0.01) == 21            # 20 is even: the next odd size
+
+
+def test_drop_short_on_runs_keeps_runs_of_min_on_s_and_longer_and_never_touches_off_frames():
+    fs = 0.05                                             # 0.15 s = 3 frames, 0.2 s = 4 frames, 0.25 s = 5 frames
+    track = np.array([1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 1, 0], dtype=float)
+    out = DZ.drop_short_on_runs(track, fs, 0.2)
+    assert out.tolist() == [0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0]   # 3-frame and 1-frame runs gone
+    assert (out[track == 0] == 0).all()                    # OFF stays OFF
+    assert DZ.drop_short_on_runs(track, fs, 0.0).tolist() == track.tolist()
+    assert DZ.drop_short_on_runs(np.array([]), fs, 0.2).size == 0
+
+
+def test_min_on_s_removes_a_short_on_run_from_the_binarised_output():
+    fs = 0.05
+    track = np.zeros(40)
+    track[2:5] = 1.0                                       # 0.15 s
+    track[10:15] = 1.0                                     # 0.25 s
+    track[20:24] = 1.0                                     # exactly 0.2 s
+    kept = DZ.binarize_frames(DZ.drop_short_on_runs(track, fs, 0.2), fs)
+    assert kept == [pytest.approx((0.525, 0.775)), pytest.approx((1.025, 1.225))]
+    assert DZ.binarize_frames(track, fs) == [pytest.approx((0.125, 0.275)), pytest.approx((0.525, 0.775)),
+                                             pytest.approx((1.025, 1.225))]
+
+
+def test_run_piece_dz_with_min_on_s_zero_is_the_same_output_as_without_the_argument():
+    prob_fn, embed_fn, vbx_fn, _ = _make_fakes(overlap=(20.0, 23.0))
+    plain = DZ.run_piece_dz(60.0, prob_fn, embed_fn, vbx_fn=vbx_fn, window_s=16.0, hop_s=0.8, frame_s=FS)
+    prob_fn, embed_fn, vbx_fn, _ = _make_fakes(overlap=(20.0, 23.0))
+    zero = DZ.run_piece_dz(60.0, prob_fn, embed_fn, vbx_fn=vbx_fn, window_s=16.0, hop_s=0.8, frame_s=FS,
+                           min_on_s=0.0)
+    assert zero.segments == plain.segments and zero.n_clusters == plain.n_clusters
+    assert zero.stats == plain.stats and zero.windows[0].cluster_of.tolist() == plain.windows[0].cluster_of.tolist()
+
+
+def test_run_piece_dz_min_on_s_cleans_each_cluster_on_its_own():
+    # The overlap piece: speaker 2 sits on speaker 1 for 3 s (20-23). Turns last 6 s. A 3.5 s minimum drops only the
+    # 3 s overlap run; the turns of both clusters stay and the other speaker keeps talking through the overlap.
+    prob_fn, embed_fn, vbx_fn, _ = _make_fakes(overlap=(20.0, 23.0))
+    plain = DZ.run_piece_dz(60.0, prob_fn, embed_fn, vbx_fn=vbx_fn, window_s=16.0, hop_s=0.8, frame_s=FS)
+    prob_fn, embed_fn, vbx_fn, _ = _make_fakes(overlap=(20.0, 23.0))
+    cut = DZ.run_piece_dz(60.0, prob_fn, embed_fn, vbx_fn=vbx_fn, window_s=16.0, hop_s=0.8, frame_s=FS,
+                          min_on_s=3.5)
+    # each run is dropped or kept as a whole, so the cut output is the plain output without its short runs
+    short = [r for r in plain.segments if r["end"] - r["start"] < 3.5 - 1e-9]
+    assert short and len(short) < len(plain.segments)
+    assert cut.segments == [r for r in plain.segments if r not in short]
+    assert all(r["end"] - r["start"] >= 3.5 - 1e-6 for r in cut.segments)
+    assert len({r["cluster"] for r in cut.segments if r["start"] <= 21.5 < r["end"]}) == 1   # overlap run gone
+    assert cut.n_clusters == plain.n_clusters and cut.stats == plain.stats    # counts and VBx are untouched
+
+
+def test_negative_or_nan_min_on_s_is_refused():
+    prob_fn, embed_fn, vbx_fn, _ = _make_fakes()
+    for bad in (-0.1, float("nan")):
+        with pytest.raises(ValueError):
+            DZ.run_piece_dz(10.0, prob_fn, embed_fn, vbx_fn=vbx_fn, window_s=10.0, hop_s=1.0, frame_s=FS,
+                            min_on_s=bad)

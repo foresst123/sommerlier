@@ -5,7 +5,7 @@
         [--clustering vbx|ahc] [--embedder pyannote|wespeaker] [--max-embed-s 6] \
         [--plda-dir DIR] [--embedding-model pyannote/wespeaker-voxceleb-resnet34-LM] [--ahc-threshold 0.6] \
         [--fa 0.07] [--fb 0.8] [--lda-dim 128] [--max-iters 20] [--init-smoothing 7.0] [--device cuda:0] \
-        [--embed-audio VOCALS.wav]
+        [--embed-audio VOCALS.wav] [--min-on-s 0.2]
 
 --embed-audio (arm K) is the waveform the embedder cuts its windows from: a Demucs vocals stem of --audio with the
 same sample rate and sample count. The probabilities and masks still come from --audio. Without it nothing changes.
@@ -235,6 +235,9 @@ def main(argv=None):
     ap.add_argument("--min-frames-ratio", type=float, default=0.1,
                     help="dz: share of a window's frames a slot needs alone to enter the clustering (DiariZen 0.1)")
     ap.add_argument("--max-speakers", type=int, default=20, help="dz: cap of the per-frame speaker count")
+    ap.add_argument("--min-on-s", type=float, default=0.0,
+                    help="dz (experiment): drop each cluster's ON runs shorter than this many seconds after the "
+                         "binarisation; 0 = off (DiariZen has no minimum). Must be 0 or more.")
     ap.add_argument("--max-embed-s", type=float, default=6.0,
                     help="clean seconds embedded per (window, label); 0 = all of it")
     ap.add_argument("--plda-dir", help="folder with xvec_transform.npz and plda.npz (default: HF cache)")
@@ -251,6 +254,8 @@ def main(argv=None):
                     help="WAV the embedder cuts its windows from (arm K: the Demucs vocals of --audio). Same sample "
                          "rate and sample count as --audio. Probabilities, masks and timing still use --audio.")
     a = ap.parse_args(argv)
+    if not a.min_on_s >= 0:                       # also catches nan
+        ap.error(f"--min-on-s must be 0 or more, got {a.min_on_s}")
 
     import soundfile as sf
     try:
@@ -285,7 +290,7 @@ def main(argv=None):
             median_frames = a.median_frames or dz.frames_for_seconds(a.median_s, float(plan["frame_s"]))
             params.update({"thr": a.thr, "median_frames": median_frames, "median_s": a.median_s,
                            "frame_s": float(plan["frame_s"]), "min_frames_ratio": a.min_frames_ratio,
-                           "max_speakers": a.max_speakers})
+                           "max_speakers": a.max_speakers, "min_on_s": a.min_on_s})
         start = {"plda_dir": plda_dir, "plda_candidates": plda_candidates()}
     else:
         params["cosine_threshold"] = a.cosine_threshold
@@ -379,7 +384,7 @@ def main(argv=None):
                              hop_s=plan["params"]["hop_s"], frame_s=float(plan["frame_s"]), piece_fn=dz.run_piece_dz,
                              vbx_fn=dz_vbx, thr=a.thr, median_frames=median_frames,
                              min_frames_ratio=a.min_frames_ratio, min_num_frames=min_frames,
-                             max_speakers=a.max_speakers)
+                             max_speakers=a.max_speakers, min_on_s=a.min_on_s)
         progress["failed"] = masked_failed["n"]
     else:
         result = wc.run_file(duration, None, make_prob_fn=make_prob_fn, make_embed_fn=make_embed_fn,
