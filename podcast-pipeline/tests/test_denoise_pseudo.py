@@ -233,3 +233,48 @@ def test_two_stage_chain_with_a_light_first_stage_and_a_light_second_stage():
 def test_dry_before_any_backend_is_refused_and_keeps_the_unfiltered_audio():
     before, out, info = run("dry50>half")
     assert np.array_equal(out, before) and info["errors"] and "cannot be first" in info["errors"][0]
+
+
+# ---- hpNN: high-pass in Hz
+
+@pytest.mark.parametrize("tok,val", [("hp60", ("hp", 60)), ("HP80", ("hp", 80)), ("hp10", ("hp", 10)), ("hp200", ("hp", 200))])
+def test_parse_hp(tok, val):
+    assert parse_pseudo(tok) == val and is_pseudo(tok)
+
+
+@pytest.mark.parametrize("tok", ["hp", "hp5", "hp9", "hp201", "hp1000", "hp-60", "hp6.0"])
+def test_parse_hp_invalid(tok):
+    assert parse_pseudo(tok) is None
+
+
+def test_hp_may_lead_a_chain_but_blend_may_not():
+    validate_chain_tokens(["hp60", "half"])
+    validate_chain_tokens(["half", "hp60"])
+    with pytest.raises(ValueError):
+        validate_chain_tokens(["blend20", "half"])
+
+
+def test_highpass_removes_rumble_and_keeps_a_low_male_fundamental():
+    from models.denoise.pseudo import highpass
+    t = np.arange(SR * 3) / SR
+    f = lambda hz: np.sin(2 * np.pi * hz * t).astype(np.float32)
+    rms = lambda x: float(np.sqrt(np.mean(x[SR // 2:-SR // 2] ** 2)))
+    assert rms(highpass(f(30), SR, 60)) < 0.12 * rms(f(30))     # 30 Hz rumble is removed
+    kept = rms(highpass(f(85), SR, 60)) / rms(f(85))
+    assert 0.76 < kept < 0.84                                   # 85 Hz loses about 1.9 dB (zero-phase squares the response)
+    assert rms(highpass(f(300), SR, 60)) > 0.99 * rms(f(300))
+    assert len(highpass(f(85), SR, 60)) == len(t)
+
+
+def test_hp_step_runs_in_a_chain_and_is_recorded():
+    a = audio(speech(3.0))
+    info = DenoiseService().apply(a, "half>hp60")
+    assert info["errors"] == [] and info["highpass_hz"] == 60
+    assert [s["kind"] for s in info["steps"]] == ["backend", "hp"]
+
+
+def test_hp_step_in_apply_many():
+    xs = [speech(3.0), speech(2.5)]
+    outs, info = DenoiseService().apply_many(xs, SR, "half>hp60")
+    assert info["errors"] == [] and info["highpass_hz"] == 60
+    assert [len(o) for o in outs] == [len(x) for x in xs]

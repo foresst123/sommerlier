@@ -123,7 +123,7 @@ class DenoiseService:
         out = inp  # inp is also the chain input that blend steps mix back in
         step_in = inp  # what the latest backend step was given; dry steps mix this back in
         try:
-            from models.denoise.pseudo import blend, parse_pseudo, validate_chain_tokens
+            from models.denoise.pseudo import blend, highpass, parse_pseudo, validate_chain_tokens
             get_backend, parse_chain, chain_id = _load_api()
             chain = list(parse_chain(chain_spec))
             info["chain"] = chain
@@ -139,13 +139,18 @@ class DenoiseService:
             try:
                 if pseudo is not None:
                     kind, pct = pseudo
-                    cand = blend(out, inp if kind == "blend" else step_in, pct)
+                    if kind == "hp":
+                        cand = highpass(out, sr, pct)
+                    else:
+                        cand = blend(out, inp if kind == "blend" else step_in, pct)
                     problem = _check(inp, cand, sr, name)
                     if problem:
                         raise ValueError(problem)
                     out = cand
                     if kind == "blend":
                         info["blend"] = {"percent": pct}
+                    elif kind == "hp":
+                        info["highpass_hz"] = pct
                     else:
                         info.setdefault("dry", []).append({"percent": pct})
                     info["steps"].append({"token": name, "kind": kind,
@@ -210,7 +215,7 @@ class DenoiseService:
         step_ins = dict(outs)
         silenced = set()
         try:
-            from models.denoise.pseudo import blend, parse_pseudo, validate_chain_tokens
+            from models.denoise.pseudo import blend, highpass, parse_pseudo, validate_chain_tokens
             get_backend, parse_chain, chain_id = _load_api()
             chain = list(parse_chain(chain_spec))
             info["chain"] = chain
@@ -229,13 +234,18 @@ class DenoiseService:
                     for i in todo:
                         if i in silenced:
                             continue
-                        cand = blend(outs[i], ins[i] if kind == "blend" else step_ins[i], pct)
+                        if kind == "hp":
+                            cand = highpass(outs[i], sr, pct)
+                        else:
+                            cand = blend(outs[i], ins[i] if kind == "blend" else step_ins[i], pct)
                         problem = _check(ins[i], cand, sr, name)
                         if problem:
                             raise ValueError(f"array {i}: {problem}")
                         outs[i] = cand
                     if kind == "blend":
                         info["blend"] = {"percent": pct}
+                    elif kind == "hp":
+                        info["highpass_hz"] = pct
                 else:
                     backend = get_backend(name, cfg, logger)
                     backend.load()
@@ -259,7 +269,7 @@ class DenoiseService:
                         if problem:
                             raise ValueError(f"array {i}: {problem}")
                         outs[i] = cand
-                info["steps"].append({"token": name, "kind": "blend" if pseudo else "backend",
+                info["steps"].append({"token": name, "kind": pseudo[0] if pseudo else "backend",
                                       "seconds": round(time.time() - started, 3)})
             except Exception as exc:
                 info["errors"].append(f"{name}: {exc}" if name not in str(exc) else str(exc))

@@ -161,12 +161,13 @@ def test_a100_clean_chain_is_configured_and_valid():
     from models.denoise.pseudo import validate_chain_tokens
     exports = _config()["a100"]["conversation_exports"]
     chain = exports["assistant_clean_chain"]
-    # MP-SENet is lightened with dry50: half its output, half of what it was given (not the raw, noisy audio)
-    assert chain == "rf_vocals_resurrection>mpsenet_dns>dry50"
+    # No blend on the two RoFormer steps; MP-SENet keeps 80% of its output plus 20% of what it was given
+    # (dry20, not the raw audio); hp60 last clears rumble and hum that dry20 mixes back in
+    assert chain == "rf_crowd>rf_vocals_resurrection>mpsenet_dns>dry20>hp60"
     assert exports["user_clean_chain"] == chain
     tokens = parse_chain(chain)
     validate_chain_tokens(tokens)
-    assert all(t in BACKENDS or t.startswith(("blend", "dry")) for t in tokens)
+    assert all(t in BACKENDS or t.startswith(("blend", "dry", "hp")) for t in tokens)
     for spec in (_config()["a100"]["pipeline"]["denoise"], chain):
         validate_chain_tokens(parse_chain(spec))
 
