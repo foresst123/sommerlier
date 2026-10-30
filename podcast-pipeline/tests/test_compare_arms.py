@@ -147,24 +147,36 @@ def test_overlap_ratio_is_nan_without_speech():
 
 
 def test_ov_arms_are_raw_and_get_the_postprocess(tmp_path):
-    assert C.is_raw_arm("nemotron_dz_ov") and C.is_raw_arm("nemotron_dz_demucs_ov")
+    assert C.is_raw_arm("nemotron_dz_ov_thr0.35_on0.2") and C.is_raw_arm("nemotron_dz_demucs_ov_thr0.35_on0.2")
     assert not C.is_raw_arm("nemotron") and not C.is_raw_arm("diarizen_auto")
     d = tmp_path / "01_a"
     d.mkdir()
     (d / "segments_diarizen_auto.json").write_text(json.dumps({"segments": REF}), encoding="utf-8")
-    (d / "segments_nemotron_dz_ov.json").write_text(
+    (d / "segments_nemotron_dz_ov_thr0.35_on0.2.json").write_text(
         json.dumps({"segments": [seg(0, 2, "x"), seg(2.3, 4, "x")]}), encoding="utf-8")
     plain = {r["arm"]: r for r in C.run(str(tmp_path), "diarizen_auto", None, 0.0)}
     merged = {r["arm"]: r for r in C.run(str(tmp_path), "diarizen_auto", None, 0.0, postprocess=True)}
-    assert plain["nemotron_dz_ov"]["arm_s"] == pytest.approx(3.7)
-    assert merged["nemotron_dz_ov"]["arm_s"] == pytest.approx(4.0)
+    assert plain["nemotron_dz_ov_thr0.35_on0.2"]["arm_s"] == pytest.approx(3.7)
+    assert merged["nemotron_dz_ov_thr0.35_on0.2"]["arm_s"] == pytest.approx(4.0)
+
+
+def test_grid_and_trial_names_are_raw_but_old_or_malformed_names_are_not():
+    # the grid and trial names of tools/diar_arms_experiment.py; the plain _ov names were never run
+    for name in ("nemotron_dz_ov_thr0.3_on0", "nemotron_dz_demucs_ov_thr0.35_on0.2", "nemotron_dz_emb_r34lm_c0.5",
+                 "nemotron_dz_demucs_emb_wespeaker_simam100_c0.4", "nemotron_dz_emb_espnet_spk_c0.6",
+                 "nemotron_dz_fb0.2", "nemotron_dz_demucs_fb0.4"):
+        assert C.is_raw_arm(name), name
+    for name in ("nemotron_dz_ov", "nemotron_dz_demucs_ov", "nemotron_dz_ov_thr0.35", "nemotron_dz_fb",
+                 "nemotron_dz_emb_r34lm", "nemotron_dzX_ov_thr0.35_on0.2", "nemotron_ov_thr0.35_on0.2",
+                 "nemotron", "diarizen_auto"):
+        assert not C.is_raw_arm(name), name
 
 
 def test_csv_keeps_its_columns_and_adds_the_overlap_ones_at_the_end(tmp_path):
     d = tmp_path / "01_a"
     d.mkdir()
     (d / "segments_diarizen_auto.json").write_text(json.dumps({"segments": REF}), encoding="utf-8")
-    (d / "segments_nemotron_dz_ov.json").write_text(
+    (d / "segments_nemotron_dz_ov_thr0.35_on0.2.json").write_text(
         json.dumps({"segments": [seg(0, 4, "x"), seg(2, 6, "y")]}), encoding="utf-8")
     csv_path = tmp_path / "t.csv"
     assert C.main([str(tmp_path), "--collar", "0", "--csv", str(csv_path)]) == 0
@@ -178,10 +190,10 @@ def test_table_shows_the_overlap_columns_and_the_reference_in_the_header(tmp_pat
     d = tmp_path / "01_a"
     d.mkdir()
     (d / "segments_diarizen_auto.json").write_text(json.dumps({"segments": REF}), encoding="utf-8")
-    (d / "segments_nemotron_dz_ov.json").write_text(
+    (d / "segments_nemotron_dz_ov_thr0.35_on0.2.json").write_text(
         json.dumps({"segments": [seg(0, 4, "x"), seg(2, 6, "y")]}), encoding="utf-8")
     assert C.main([str(tmp_path), "--collar", "0"]) == 0
     out = capsys.readouterr().out
     assert "ovl %" in out and "ref overlap: 0.0 s, 0.0%" in out
     # arm: 2 s with two speakers over 6 s with any speech (0-6), so 33.3%
-    assert "33.3" in out.split("nemotron_dz_ov")[1].splitlines()[0]
+    assert "33.3" in out.split("nemotron_dz_ov_thr0.35_on0.2")[1].splitlines()[0]

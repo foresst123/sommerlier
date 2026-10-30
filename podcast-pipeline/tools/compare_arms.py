@@ -34,6 +34,7 @@ import glob
 import json
 import math
 import os
+import re
 import sys
 from typing import Optional
 
@@ -46,12 +47,18 @@ STEP = 0.01
 RAW_ARMS = ("nemotron_windowed", "nemotron_windowed_vbx", "nemotron_dense_vbx", "nemotron_dz", "nemotron_dz_demucs")
 
 
+RAW_SUFFIX = re.compile(
+    r"_fb[0-9.]+"                                   # --fb-sweep arms: nemotron_dz_fb0.4
+    r"|_ov_thr[0-9.]+_on[0-9.]+"                    # --overlap-variants grid: nemotron_dz_ov_thr0.35_on0.2
+    r"|_emb_[A-Za-z0-9_]+_c[0-9.]+")                # --embedder-trials: nemotron_dz_emb_r34lm_c0.5
+
+
 def is_raw_arm(arm: str) -> bool:
-    """A RAW_ARMS arm, one of its --fb-sweep arms (nemotron_dz_fb0.4, nemotron_dz_demucs_fb0.2), or one of its
-    --overlap-variants arms (nemotron_dz_ov, nemotron_dz_demucs_ov)."""
-    if arm.endswith("_ov"):
-        arm = arm[: -len("_ov")]
-    return arm in RAW_ARMS or any(arm.startswith(raw + "_fb") for raw in RAW_ARMS)
+    """A RAW_ARMS arm, or one of its raw variants: --fb-sweep (nemotron_dz_fb0.4, nemotron_dz_demucs_fb0.2),
+    --overlap-variants grid (nemotron_dz_ov_thr0.35_on0.2, nemotron_dz_demucs_ov_thr0.3_on0) and embedder trials
+    (nemotron_dz_emb_r34lm_c0.5). All of them are DiariZen-step stage 2 output with no pipeline post-processing."""
+    return any(arm == raw or (arm.startswith(raw) and RAW_SUFFIX.fullmatch(arm[len(raw):]))
+               for raw in RAW_ARMS)
 
 
 OVERLAP_COLUMNS = ("overlap_s", "overlap_ratio", "ref_overlap_s", "ref_overlap_ratio")

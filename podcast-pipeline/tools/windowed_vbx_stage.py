@@ -14,6 +14,13 @@ Arm J is --clustering dz: DiariZen's own pipeline steps (utils/dz_pipeline.py) w
 window, a per-frame speaker count and top-k reconstruction. Run it with the python of the DiariZen env, which has
 the pyannote 3.1.1 fork DiariZen is built on.
 
+EXPERIMENT: --clustering dz-ahc is arm J's steps with cosine AHC instead of VBx (utils/dz_pipeline.make_dz_ahc_fn), so
+any embedder can be tried; the DiariZen PLDA only fits WeSpeaker ResNet34-LM. --embedder-kind picks it (tools/embedders.py):
+r34lm (the same masked call as dz), wespeaker_r293 (--r293-onnx), wespeaker_simam100 (--simam-onnx or --simam-dir),
+espnet_spk (--espnet-tag). The other kinds get the clean frames of each window as audio (make_concat_embedder, 0.5 s
+minimum). Embeddings are cached in --embcache-dir (default OUT_DIR/embcache) by piece, window span and frame mask, so
+another --cos-threshold reads the cache and calls no model. NOT RUN on a real model here: fakes only.
+
 Arm G is the default (--clustering vbx, --embedder pyannote). Arm F is --clustering ahc --embedder wespeaker:
 the constrained AHC of utils/windowed_clustering and the repo's WeSpeaker ResNet-293 ONNX model
 (models/wespeaker_embedding.py), which runs on the GPU here; in the Nemotron env onnxruntime cannot load CUDA 13
@@ -38,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import json
 import math
 import os
@@ -51,6 +59,7 @@ import numpy as np  # noqa: E402
 
 import utils.windowed_clustering as wc  # noqa: E402
 import utils.dz_pipeline as dz  # noqa: E402
+from tools import embedders as EMB  # noqa: E402
 
 SR = 16000
 VBX_REPO = "BUT-FIT/diarizen-wavlm-large-s80-md-v2"
@@ -214,15 +223,139 @@ def crop_for_embedder(wave, piece_audio_start: float, span) -> np.ndarray:
     return wave[int(round((piece_audio_start + s) * SR)): int(round((piece_audio_start + e) * SR))]
 
 
+def file_fingerprint(path: str) -> list:
+    """[absolute path, size, mtime in ns] of a file: what the embedding cache needs to know about an input file."""
+    st = os.stat(path)
+    return [os.path.abspath(path), int(st.st_size), int(st.st_mtime_ns)]
+
+
+def file_sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def embedding_cache_path(cache_dir: str, embedder_id: str, inputs: dict) -> str:
+    """<cache_dir>/<embedder id>_<hash of inputs>.npz. The inputs are everything that decides an embedding except the
+    embedder itself and the cosine threshold, which is not an input: a run with another --cos-threshold finds the file.
+    """
+    digest = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    return os.path.join(cache_dir, f"{embedder_id}_{digest}.npz")
+
+
+class EmbeddingCache:
+    """Embeddings of --clustering dz-ahc, keyed by what run_piece_dz asks the embedder: the piece's start on the file,
+    the window span and the frame mask (hashed). A cached entry is the embedding that same call would give, so a run
+    that finds every key makes no model call. Entries that gave None are cached too (None is a result, not a miss).
+
+    Stored as one .npz (keys, ok, vecs), written through a temporary file and then renamed.
+    """
+
+    def __init__(self, path: str):
+        self.path = path
+        self.table: dict = {}
+        self.hits = 0
+        self.misses = 0
+        self._new = 0
+
+    def load(self) -> "EmbeddingCache":
+        if not os.path.isfile(self.path):
+            return self
+        with np.load(self.path, allow_pickle=False) as z:
+            keys = [str(k) for k in z["keys"]]
+            ok = np.asarray(z["ok"], dtype=bool)
+            vecs = np.asarray(z["vecs"], dtype=float)
+        for i, key in enumerate(keys):
+            self.table[key] = vecs[i].copy() if ok[i] else None
+        return self
+
+    def save(self) -> bool:
+        """Writes the file when this run added entries. Returns whether it wrote."""
+        if not self._new:
+            return False
+        keys = sorted(self.table)
+        dims = {len(v) for v in self.table.values() if v is not None}
+        if len(dims) > 1:
+            raise ValueError(f"cached embeddings have different sizes {sorted(dims)}; one embedder gives one size")
+        dim = dims.pop() if dims else 0
+        vecs = np.zeros((len(keys), dim))
+        ok = np.zeros(len(keys), dtype=bool)
+        for i, key in enumerate(keys):
+            v = self.table[key]
+            if v is not None:
+                vecs[i], ok[i] = v, True
+        os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+        tmp = self.path + ".tmp.npz"
+        np.savez(tmp, keys=np.array(keys, dtype=str), ok=ok, vecs=vecs)
+        os.replace(tmp, self.path)
+        self._new = 0
+        return True
+
+    def wrap(self, piece_start: float, embed_fn):
+        """embed_fn(span, mask) -> the same, answered from the table when the key is there."""
+
+        def cached(span, mask):
+            m = np.ascontiguousarray(np.asarray(mask, dtype=np.float32))
+            key = (f"{round(float(piece_start), 6):.6f}|{float(span[0]):.6f}|{float(span[1]):.6f}|"
+                   f"{hashlib.sha1(m.tobytes()).hexdigest()}")
+            if key in self.table:
+                self.hits += 1
+                v = self.table[key]
+                return None if v is None else v.copy()
+            self.misses += 1
+            v = embed_fn(span, mask)
+            v = None if v is None else np.asarray(v, dtype=np.float64).reshape(-1)
+            self.table[key] = v
+            self._new += 1
+            return None if v is None else v.copy()
+
+        return cached
+
+
+def run_dz_stage(duration: float, plan: dict, pieces: list, tables: dict, make_embed_fn, dz_vbx, *, thr: float,
+                 median_frames: int, min_frames_ratio: float, min_num_frames: int, max_speakers: int,
+                 min_on_s: float) -> dict:
+    """The dz steps over all pieces (utils/dz_pipeline.run_piece_dz through wc.run_file). Torch-free: the callers pass
+    the embedding function of each piece (make_embed_fn(piece) -> embed_fn(span, mask)) and the clustering function
+    (dz_vbx: make_dz_vbx_fn or make_dz_ahc_fn), so the tests can run it on fakes."""
+    def make_prob_fn(piece):
+        table = tables[piece_key(piece)]
+
+        def prob_fn(s, e):
+            return table[(float(s), float(e))]
+        return prob_fn
+
+    return wc.run_file(duration, None, make_prob_fn=make_prob_fn, make_embed_fn=make_embed_fn,
+                       pieces=pieces, piece_s=plan["params"]["piece_s"], window_s=plan["params"]["window_s"],
+                       hop_s=plan["params"]["hop_s"], frame_s=float(plan["frame_s"]), piece_fn=dz.run_piece_dz,
+                       vbx_fn=dz_vbx, thr=thr, median_frames=median_frames, min_frames_ratio=min_frames_ratio,
+                       min_num_frames=min_num_frames, max_speakers=max_speakers, min_on_s=min_on_s)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--audio", required=True, help="16 kHz mono WAV, the same chunk stage 1 read")
     ap.add_argument("--probs-dir", required=True, help="folder written by windowed_nemotron_run.py --dump-probs")
     ap.add_argument("--out", required=True, help="segments.json to write")
-    ap.add_argument("--clustering", choices=("vbx", "ahc", "dz"), default="vbx",
-                    help="vbx = arm G, ahc = arm F (constrained AHC at --cosine-threshold), dz = arm J (DiariZen steps)")
+    ap.add_argument("--clustering", choices=("vbx", "ahc", "dz", "dz-ahc"), default="vbx",
+                    help="vbx = arm G, ahc = arm F (constrained AHC at --cosine-threshold), dz = arm J (DiariZen steps), "
+                         "dz-ahc = arm J's steps with cosine AHC (embedder trials; see --embedder-kind)")
     ap.add_argument("--embedder", choices=("pyannote", "wespeaker"),
-                    help="default: pyannote for vbx, wespeaker (ResNet-293 ONNX) for ahc")
+                    help="default: pyannote for vbx, wespeaker (ResNet-293 ONNX) for ahc. Not for dz-ahc.")
+    ap.add_argument("--embedder-kind", choices=EMB.KINDS, default=None,
+                    help="dz-ahc only: r34lm (default, arm J's embedder), wespeaker_r293, wespeaker_simam100, espnet_spk")
+    ap.add_argument("--cos-threshold", type=float, default=0.5,
+                    help="dz-ahc only: cosine-distance cut of the average-linkage AHC, in (0, 2). Not --cosine-threshold, "
+                         "which is arm F's")
+    ap.add_argument("--r293-onnx", help="dz-ahc, wespeaker_r293: ONNX file (default: the HF hub copy of models/wespeaker_embedding)")
+    ap.add_argument("--simam-onnx", help="dz-ahc, wespeaker_simam100: ONNX file (UNVERIFIED export names)")
+    ap.add_argument("--simam-dir", help="dz-ahc, wespeaker_simam100: folder with config.yaml and avg_model.pt (UNVERIFIED API)")
+    ap.add_argument("--espnet-tag", default=EMB.DEFAULT_ESPNET_TAG, help="dz-ahc, espnet_spk: ESPnet model tag (UNVERIFIED)")
+    ap.add_argument("--embcache-dir",
+                    help="dz-ahc: folder of the embedding cache (default: embcache/ next to --out). Share one folder "
+                         "between runs to reuse embeddings across --cos-threshold values")
     ap.add_argument("--cosine-threshold", type=float, default=0.5, help="cosine cut of the AHC of --clustering ahc")
     ap.add_argument("--min-speakers", type=int, default=1,
                     help="clusters per piece at least; below it VBx falls back to AHC (arm F's AHC stops at it too)")
@@ -256,6 +389,18 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if not a.min_on_s >= 0:                       # also catches nan
         ap.error(f"--min-on-s must be 0 or more, got {a.min_on_s}")
+    if a.clustering == "dz-ahc":
+        if a.embedder:
+            ap.error("--clustering dz-ahc takes its embedder from --embedder-kind, not --embedder")
+        if not (math.isfinite(a.cos_threshold) and 0 < a.cos_threshold < 2):
+            ap.error(f"--cos-threshold must be in (0, 2), got {a.cos_threshold}")
+        try:
+            EMB.validate_args(a.embedder_kind or "r34lm", r293_onnx=a.r293_onnx, simam_onnx=a.simam_onnx,
+                              simam_dir=a.simam_dir)
+        except ValueError as exc:
+            ap.error(str(exc))
+    elif a.embedder_kind:
+        ap.error("--embedder-kind is only for --clustering dz-ahc")
 
     import soundfile as sf
     try:
@@ -264,7 +409,11 @@ def main(argv=None):
         raise SystemExit(f"windowed_vbx_stage needs torch in this env (som): {exc}")
 
     device = a.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
-    embedder = a.embedder or ("wespeaker" if a.clustering == "ahc" else "pyannote")
+    kind = a.embedder_kind or "r34lm"
+    if a.clustering == "dz-ahc":
+        embedder = "dz-ahc"
+    else:
+        embedder = a.embedder or ("wespeaker" if a.clustering == "ahc" else "pyannote")
     if a.clustering in ("vbx", "dz") and embedder != "pyannote":
         raise SystemExit("--clustering vbx and dz need --embedder pyannote: the PLDA was trained for WeSpeaker ResNet34")
     plan, pieces, tables = load_plan(a.probs_dir)
@@ -292,6 +441,14 @@ def main(argv=None):
                            "frame_s": float(plan["frame_s"]), "min_frames_ratio": a.min_frames_ratio,
                            "max_speakers": a.max_speakers, "min_on_s": a.min_on_s})
         start = {"plda_dir": plda_dir, "plda_candidates": plda_candidates()}
+    elif a.clustering == "dz-ahc":                # no PLDA: cosine AHC, so no VBx import and no PLDA folder
+        dz_vbx = dz.make_dz_ahc_fn(a.cos_threshold)
+        median_frames = a.median_frames or dz.frames_for_seconds(a.median_s, float(plan["frame_s"]))
+        params.update({"embedder": kind, "cos_threshold": a.cos_threshold, "thr": a.thr,
+                       "median_frames": median_frames, "median_s": a.median_s, "frame_s": float(plan["frame_s"]),
+                       "min_frames_ratio": a.min_frames_ratio, "max_speakers": a.max_speakers,
+                       "min_on_s": a.min_on_s})
+        start = {}
     else:
         params["cosine_threshold"] = a.cosine_threshold
         start = {}
@@ -299,12 +456,33 @@ def main(argv=None):
                      ensure_ascii=False), flush=True)
 
     counts = {"padded": 0}
+    dz_embed = None                       # the dz embedding call (masked for r34lm, see make_dz_embed_fn)
+    failed = {"fn": lambda: 0}            # refused embeddings so far, for the progress lines
+    adapter = None
     if embedder == "pyannote":
         emb, _torch, emb_path = build_embedder(a.embedding_model, device)
         params["embedding_path"] = emb_path
         embed_clip, counts = make_clip_embedder(emb, torch, device)
         masked_embed, masked_failed = make_masked_embedder(emb, torch, device)
         min_samples = getattr(emb, "min_num_samples", None)
+        dz_embed = masked_embed
+        failed["fn"] = lambda: masked_failed["n"]
+    elif embedder == "dz-ahc":
+        adapter = EMB.make_embedder(kind, device=device, r293_onnx=a.r293_onnx, simam_onnx=a.simam_onnx,
+                                    simam_dir=a.simam_dir, espnet_tag=a.espnet_tag)
+        params["embedder_id"] = adapter.id_string
+        lazy = {}
+
+        def dz_embed(clip, mask):         # the model loads at the first call, i.e. the first cache miss
+            if "fn" not in lazy:
+                if kind == "r34lm":
+                    lazy["fn"], masked_failed = adapter.masked_embed_fn()
+                    lazy["failed"] = lambda: masked_failed["n"]
+                else:
+                    concat = EMB.make_concat_embedder(adapter, min_s=EMB.DEFAULT_MIN_S)
+                    lazy["fn"], lazy["failed"] = concat, lambda: concat.counts["refused"]
+                failed["fn"] = lazy["failed"]
+            return lazy["fn"](clip, mask)
     else:
         embed_clip, providers = build_wespeaker(device)
         params["onnx_providers"] = providers
@@ -329,6 +507,21 @@ def main(argv=None):
             raise SystemExit(str(exc))
         params["embed_audio"] = a.embed_audio
 
+    cache = None
+    if embedder == "dz-ahc":
+        # Keyed by the inputs of every embedding: audio, probabilities, mask-making settings, the embed audio. Not by
+        # --cos-threshold, which only the clustering reads. Other embedder ids get their own file.
+        cache_dir = a.embcache_dir or os.path.join(os.path.dirname(os.path.abspath(a.out)), "embcache")
+        inputs = {"audio": file_fingerprint(a.audio),
+                  "plan": file_sha256(os.path.join(a.probs_dir, "plan.json")),
+                  "pieces": [file_fingerprint(os.path.join(a.probs_dir, e["file"])) for e in plan["pieces"]],
+                  "thr": a.thr, "median_frames": median_frames, "median_s": a.median_s,
+                  "min_frames_ratio": a.min_frames_ratio, "min_s": EMB.DEFAULT_MIN_S,
+                  "embed_audio": file_fingerprint(a.embed_audio) if a.embed_audio else None}
+        cache_file = embedding_cache_path(cache_dir, adapter.id_string, inputs)
+        cache = EmbeddingCache(cache_file).load()
+        params.update({"embedding_cache": cache_file, "embedding_cache_entries_loaded": len(cache.table)})
+
     def make_prob_fn(piece):
         table = tables[piece_key(piece)]
 
@@ -339,16 +532,14 @@ def main(argv=None):
     progress = {"crops": 0, "failed": 0, "t0": time.time()}
 
     def make_dz_embed_fn(piece):
-        win_s = float(plan["params"]["window_s"])
-
         def embed_fn(span, mask):
             progress["crops"] += 1
             if progress["crops"] % 50 == 0:
                 print(json.dumps({"status": "embedding", "embeddings": progress["crops"],
-                                  "failed": masked_failed["n"],
+                                  "failed": failed["fn"](),
                                   "seconds": round(time.time() - progress["t0"], 1)}), flush=True)
-            return masked_embed(crop_for_embedder(embed_wave, piece.audio_start, span), mask)
-        return embed_fn
+            return dz_embed(crop_for_embedder(embed_wave, piece.audio_start, span), mask)
+        return cache.wrap(piece.audio_start, embed_fn) if cache is not None else embed_fn
 
     def make_embed_fn(piece):
         def embed_fn(spans):
@@ -374,18 +565,23 @@ def main(argv=None):
         return embed_fn
 
     t0 = time.time()
-    if a.clustering == "dz":
-        win_frames = int(round(float(plan["params"]["window_s"]) / float(plan["frame_s"])))
-        min_frames = (math.ceil(win_frames * min_samples / (float(plan["params"]["window_s"]) * SR))
-                      if min_samples else 1)
+    if a.clustering in ("dz", "dz-ahc"):
+        if a.clustering == "dz":
+            win_frames = int(round(float(plan["params"]["window_s"]) / float(plan["frame_s"])))
+            min_frames = (math.ceil(win_frames * min_samples / (float(plan["params"]["window_s"]) * SR))
+                          if min_samples else 1)
+        else:
+            # The same formula gives 1 for any min_num_samples up to 1280 (WeSpeaker and pyannote use 400), so 1 here.
+            min_frames = 1
         params["min_num_frames"] = min_frames
-        result = wc.run_file(duration, None, make_prob_fn=make_prob_fn, make_embed_fn=make_dz_embed_fn,
-                             pieces=pieces, piece_s=plan["params"]["piece_s"], window_s=plan["params"]["window_s"],
-                             hop_s=plan["params"]["hop_s"], frame_s=float(plan["frame_s"]), piece_fn=dz.run_piece_dz,
-                             vbx_fn=dz_vbx, thr=a.thr, median_frames=median_frames,
-                             min_frames_ratio=a.min_frames_ratio, min_num_frames=min_frames,
-                             max_speakers=a.max_speakers, min_on_s=a.min_on_s)
-        progress["failed"] = masked_failed["n"]
+        result = run_dz_stage(duration, plan, pieces, tables, make_dz_embed_fn, dz_vbx, thr=a.thr,
+                              median_frames=median_frames, min_frames_ratio=a.min_frames_ratio,
+                              min_num_frames=min_frames, max_speakers=a.max_speakers, min_on_s=a.min_on_s)
+        progress["failed"] = failed["fn"]()
+        if cache is not None:
+            params["embedding_cache_hits"] = cache.hits
+            params["embedding_cache_misses"] = cache.misses
+            params["embedding_cache_written"] = cache.save()
     else:
         result = wc.run_file(duration, None, make_prob_fn=make_prob_fn, make_embed_fn=make_embed_fn,
                              pieces=pieces, piece_s=plan["params"]["piece_s"], window_s=plan["params"]["window_s"],

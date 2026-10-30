@@ -643,8 +643,8 @@ def test_overlap_variants_add_one_stage_two_run_per_base_arm(tmp_path):
     assert per_sample == 6            # stage 1, J, J+ov, demucs, K, K+ov: no stage 1 or demucs for the variants
     assert sum(X.WINDOWED_SCRIPT in c for c in fake.calls) == 2 and sum(X.DEMUCS_SCRIPT in c for c in fake.calls) == 2
     base_j, ov_j, base_k, ov_k = _stage2(fake.calls[0:per_sample])
-    assert _stage2_out(ov_j).endswith("runs/nemotron_dz_ov/out/segments.json")
-    assert _stage2_out(ov_k).endswith("runs/nemotron_dz_demucs_ov/out/segments.json")
+    assert _stage2_out(ov_j).endswith("runs/nemotron_dz_ov_thr0.35_on0.2/out/segments.json")
+    assert _stage2_out(ov_k).endswith("runs/nemotron_dz_demucs_ov_thr0.35_on0.2/out/segments.json")
     for cmd in (ov_j, ov_k):
         assert cmd[0] == "/dz/python" and cmd[cmd.index("--clustering") + 1] == "dz"
         assert cmd[cmd.index("--thr") + 1] == "0.35" and cmd[cmd.index("--min-on-s") + 1] == "0.2"
@@ -655,10 +655,10 @@ def test_overlap_variants_add_one_stage_two_run_per_base_arm(tmp_path):
     assert base_j[base_j.index("--thr") + 1] == "0.5" and "--min-on-s" not in base_j       # base is unchanged
     assert "--min-on-s" not in base_k and base_k[base_k.index("--thr") + 1] == "0.5"
     sdir = sorted(p for p in out.iterdir() if p.is_dir())[0]
-    for name in ("nemotron_dz", "nemotron_dz_ov", "nemotron_dz_demucs", "nemotron_dz_demucs_ov"):
+    for name in ("nemotron_dz", "nemotron_dz_ov_thr0.35_on0.2", "nemotron_dz_demucs", "nemotron_dz_demucs_ov_thr0.35_on0.2"):
         assert (sdir / f"segments_{name}.json").is_file(), name
     index = (out / "index.html").read_text(encoding="utf-8")
-    assert "J nemotron_dz_ov" in index and "K nemotron_dz_demucs_ov" in index
+    assert "J nemotron_dz_ov_thr0.35_on0.2" in index and "K nemotron_dz_demucs_ov_thr0.35_on0.2" in index
 
 
 def test_overlap_variant_command_differs_from_its_base_only_in_thr_and_min_on_s(tmp_path):
@@ -706,7 +706,7 @@ def test_overlap_variant_reuses_existing_inputs_and_runs_only_the_variants(tmp_p
     rc = X.main(_windowed_args(sp, src, out, "J,K", "--overlap-variants", "--reuse"), runner=fake)
     assert rc == 0
     assert len(fake.calls) == 4                                   # two variants per sample, nothing else
-    assert all(X.VBX_STAGE_SCRIPT in c and "_ov/" in _stage2_out(c) for c in fake.calls)
+    assert all(X.VBX_STAGE_SCRIPT in c and "_ov_thr0.35_on0.2/" in _stage2_out(c) for c in fake.calls)
     assert all("--min-on-s" in c for c in fake.calls)
 
 
@@ -721,16 +721,16 @@ def test_overlap_variants_keep_the_fb_sweep_arms_at_the_base_threshold(tmp_path)
     stage2 = _stage2(fake.calls[0:per_sample])
     assert len(stage2) == 8
     names = [_stage2_out(c).split("runs/")[1].split("/out/")[0] for c in stage2]
-    assert names == ["nemotron_dz", "nemotron_dz_fb0.2", "nemotron_dz_fb0.4", "nemotron_dz_ov",
+    assert names == ["nemotron_dz", "nemotron_dz_fb0.2", "nemotron_dz_fb0.4", "nemotron_dz_ov_thr0.35_on0.2",
                      "nemotron_dz_demucs", "nemotron_dz_demucs_fb0.2", "nemotron_dz_demucs_fb0.4",
-                     "nemotron_dz_demucs_ov"]
+                     "nemotron_dz_demucs_ov_thr0.35_on0.2"]
     for cmd, name in zip(stage2, names):
-        if name.endswith("_ov"):
+        if "_ov_thr" in name:
             assert cmd[cmd.index("--thr") + 1] == "0.35" and cmd[cmd.index("--min-on-s") + 1] == "0.2"
         else:
             assert cmd[cmd.index("--thr") + 1] == "0.5" and "--min-on-s" not in cmd
     fb_of = {n: c[c.index("--fb") + 1] for c, n in zip(stage2, names)}
-    assert fb_of["nemotron_dz_fb0.2"] == "0.2" and fb_of["nemotron_dz_ov"] == "0.8"
+    assert fb_of["nemotron_dz_fb0.2"] == "0.2" and fb_of["nemotron_dz_ov_thr0.35_on0.2"] == "0.8"
 
 
 @pytest.mark.parametrize("flag, bad", [("--ov-thr", "0"), ("--ov-thr", "1"), ("--ov-thr", "1.5"),
@@ -753,6 +753,144 @@ def test_overlap_variants_need_arm_j_or_k(tmp_path):
 
 
 def test_overlap_key_names_and_split():
-    assert X.arm_name("J+ov") == "nemotron_dz_ov" and X.arm_name("K+ov") == "nemotron_dz_demucs_ov"
-    assert X.split_key("J+ov") == ("J", None) and X.is_ov("J+ov") and not X.is_ov("J@0.2")
-    assert X.arm_name(X.ov_key("K")) == "nemotron_dz_demucs_ov" and X.arm_name("J") == "nemotron_dz"
+    assert X.arm_name(X.ov_key("J", 0.35, 0.2)) == "nemotron_dz_ov_thr0.35_on0.2"
+    assert X.arm_name(X.ov_key("K", 0.3, 0)) == "nemotron_dz_demucs_ov_thr0.3_on0"
+    assert X.ov_key("J", 0.35, 0.2) == "J+ov|0.35|0.2" and X.ov_params("J+ov|0.35|0.2") == (0.35, 0.2)
+    assert X.split_key("J+ov|0.35|0.2") == ("J", None) and X.is_ov("J+ov|0.35|0.2") and not X.is_ov("J@0.2")
+    assert X.arm_name("J") == "nemotron_dz"
+
+
+def test_parse_grid_takes_comma_lists_and_refuses_bad_ones():
+    assert X.parse_grid("0.3, 0.35", "--ov-thr", lambda v: 0 < v < 1, "r") == [0.3, 0.35]
+    assert X.parse_grid("0.2", "--ov-min-on-s", lambda v: v >= 0, "r") == [0.2]
+    assert X.parse_grid("0", "--ov-min-on-s", lambda v: v >= 0, "r") == [0.0]
+    for bad in ("", " ", "0.3,", "0.3,0.3", "0.3,0.30", "x", "1.0,0.5,0.5"):
+        with pytest.raises(ValueError):
+            X.parse_grid(bad, "--ov-thr", lambda v: 0 < v < 1, "must be in (0, 1)")
+
+
+def test_ov_grid_caps_the_combinations_per_arm_at_24():
+    combos = X.ov_grid([0.3, 0.35, 0.4, 0.45], [0, 0.1, 0.2, 0.3, 0.4, 0.5])     # 4 x 6 = 24
+    assert len(combos) == 24 and combos[0] == (0.3, 0) and combos[1] == (0.3, 0.1)   # thr outer
+    with pytest.raises(ValueError, match="at most 24"):
+        X.ov_grid([0.3, 0.35, 0.4, 0.45, 0.5], [0, 0.1, 0.2, 0.3, 0.4, 0.5])          # 5 x 6 = 30
+
+
+def test_overlap_grid_runs_one_arm_per_combination_for_j_and_k(tmp_path):
+    src, sp = _make_samples(tmp_path)
+    out = tmp_path / "out"
+    fake = FakeDemucs()
+    rc = X.main(_windowed_args(sp, src, out, "J,K", "--overlap-variants", "--ov-thr", "0.3,0.35",
+                               "--ov-min-on-s", "0,0.2"), runner=fake)
+    assert rc == 0
+    per_sample = len(fake.calls) // 2
+    assert per_sample == 12                 # stage 1, J, 4 J grid arms, demucs, K, 4 K grid arms
+    names = [_stage2_out(c).split("runs/")[1].split("/out/")[0] for c in _stage2(fake.calls[0:per_sample])]
+    assert names == ["nemotron_dz", "nemotron_dz_ov_thr0.3_on0", "nemotron_dz_ov_thr0.3_on0.2",
+                     "nemotron_dz_ov_thr0.35_on0", "nemotron_dz_ov_thr0.35_on0.2", "nemotron_dz_demucs",
+                     "nemotron_dz_demucs_ov_thr0.3_on0", "nemotron_dz_demucs_ov_thr0.3_on0.2",
+                     "nemotron_dz_demucs_ov_thr0.35_on0", "nemotron_dz_demucs_ov_thr0.35_on0.2"]
+    stage2 = _stage2(fake.calls[0:per_sample])
+    grid = [c for c in stage2 if "--min-on-s" in c]
+    assert [(c[c.index("--thr") + 1], c[c.index("--min-on-s") + 1]) for c in grid[:4]] == \
+        [("0.3", "0"), ("0.3", "0.2"), ("0.35", "0"), ("0.35", "0.2")]
+    sdir = sorted(p for p in out.iterdir() if p.is_dir())[0]
+    assert (sdir / "segments_nemotron_dz_ov_thr0.3_on0.json").is_file()
+    assert (sdir / "segments_nemotron_dz_demucs_ov_thr0.35_on0.2.json").is_file()
+
+
+@pytest.mark.parametrize("args", [["--ov-thr", "0.3,0.3"], ["--ov-thr", "0.3,0.30"],
+                                  ["--ov-min-on-s", "0,0"], ["--ov-min-on-s", "0.2,0.2000"],
+                                  ["--ov-thr", "0.3,1"], ["--ov-min-on-s", "0,-1"],
+                                  ["--ov-thr", "0.2,0.3,0.4,0.45,0.5", "--ov-min-on-s", "0,0.1,0.2,0.3,0.4,0.5"]])
+def test_overlap_grid_refusals_run_nothing(tmp_path, args):
+    src, sp = _make_samples(tmp_path)
+    fake = FakeDemucs()
+    with pytest.raises(SystemExit):
+        X.main(_windowed_args(sp, src, tmp_path / "out", "J,K", "--overlap-variants", *args), runner=fake)
+    assert fake.calls == []
+
+
+def test_embedder_trial_names_keys_and_parsing():
+    assert X.arm_name(X.trial_key("r34lm", 0.5)) == "nemotron_dz_emb_r34lm_c0.5"
+    assert X.arm_name(X.trial_key("espnet_spk", 0.4, "K")) == "nemotron_dz_demucs_emb_espnet_spk_c0.4"
+    assert X.trial_params("J+emb|espnet_spk|0.6") == ("espnet_spk", 0.6) and X.is_trial("J+emb|r34lm|0.5")
+    assert X.split_key("J+emb|r34lm|0.5") == ("J", None)
+    assert X.parse_kinds("") == [] and X.parse_kinds("r34lm, espnet_spk") == ["r34lm", "espnet_spk"]
+    for bad in ("nope", "r34lm,r34lm"):
+        with pytest.raises(ValueError):
+            X.parse_kinds(bad)
+    assert X.parse_embedder_python(["r34lm=/a/python"], ["r34lm"]) == {"r34lm": "/a/python"}
+    for bad in (["espnet_spk=/x"], ["r34lm"], ["r34lm=/a", "r34lm=/b"]):
+        with pytest.raises(ValueError):
+            X.parse_embedder_python(bad, ["r34lm"])
+
+
+class FailingKind(FakeDemucs):
+    """Stage 2 of the trials of one embedder kind exits 1, like a missing package would."""
+
+    def __init__(self, bad_kind):
+        super().__init__()
+        self.bad_kind = bad_kind
+
+    def __call__(self, cmd, env):
+        if X.VBX_STAGE_SCRIPT in cmd and "--embedder-kind" in cmd:
+            self.calls.append(cmd)
+            if cmd[cmd.index("--embedder-kind") + 1] == self.bad_kind:
+                return 1
+            out = Path(cmd[cmd.index("--out") + 1])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps({"segments": [{"start": 50.0, "end": 60.0, "speaker": "SPEAKER_00"}]}),
+                           encoding="utf-8")
+            return 0
+        return super().__call__(cmd, env)
+
+
+def test_embedder_trials_run_stage_two_per_kind_and_cos_and_continue_past_a_failure(tmp_path, capsys):
+    src, sp = _make_samples(tmp_path)
+    out = tmp_path / "out"
+    fake = FailingKind("wespeaker_r293")
+    rc = X.main(_windowed_args(sp, src, out, "J", "--embedder-trials", "r34lm,wespeaker_r293",
+                               "--cos-thr", "0.4,0.5,0.6", "--embedder-python", "wespeaker_r293=/r293/python",
+                               "--vbx-python", "/dz/python", "--simam-dir", "/unused"), runner=fake)
+    assert rc == 0
+    trials = [c for c in fake.calls if "--embedder-kind" in c]
+    assert len(trials) == 2 * 2 * 3                                 # 2 samples x 2 embedders x 3 cos cuts
+    for cmd in trials:
+        assert cmd[cmd.index("--clustering") + 1] == "dz-ahc"
+        assert cmd[cmd.index("--cos-threshold") + 1] in ("0.4", "0.5", "0.6")
+        assert cmd[0] == ("/r293/python" if cmd[cmd.index("--embedder-kind") + 1] == "wespeaker_r293" else "/dz/python")
+        assert cmd[cmd.index("--embcache-dir") + 1].endswith("embcache")
+        assert "--embed-audio" not in cmd and cmd[cmd.index("--audio") + 1].endswith("chunk.wav")
+    sdir = sorted(p for p in out.iterdir() if p.is_dir())[0]
+    for cos in ("0.4", "0.5", "0.6"):
+        assert (sdir / f"segments_nemotron_dz_emb_r34lm_c{cos}.json").is_file()        # the good embedder ran
+        assert not (sdir / f"segments_nemotron_dz_emb_wespeaker_r293_c{cos}.json").exists()
+    index = (out / "index.html").read_text(encoding="utf-8")
+    assert "J nemotron_dz_emb_r34lm_c0.5" in index and "J nemotron_dz_emb_wespeaker_r293_c0.5" in index
+    printed = capsys.readouterr().out
+    assert "embedder trials failed for 2 (sample, embedder) pairs" in printed
+    assert "First one / wespeaker_r293 (cos 0.4, 0.5, 0.6)" in printed
+    assert "Second one / wespeaker_r293 (cos 0.4, 0.5, 0.6)" in printed
+
+
+def test_embedder_trial_refusals_run_nothing(tmp_path):
+    src, sp = _make_samples(tmp_path)
+    for extra in (["--embedder-trials", "nope"], ["--embedder-trials", "r34lm", "--cos-thr", "0"],
+                  ["--embedder-trials", "r34lm", "--cos-thr", "2"], ["--embedder-python", "r34lm=/p"],
+                  ["--embedder-trials", "wespeaker_simam100"],                 # needs --simam-onnx or --simam-dir
+                  ["--embedder-trials", "wespeaker_simam100", "--simam-onnx", "a", "--simam-dir", "b"]):
+        fake = FakeDemucs()
+        with pytest.raises(SystemExit):
+            X.main(_windowed_args(sp, src, tmp_path / "out", "J", *extra), runner=fake)
+        assert fake.calls == [], extra
+
+
+def test_embedder_trials_default_python_is_the_vbx_python(tmp_path):
+    src, sp = _make_samples(tmp_path)
+    fake = FakeDemucs()
+    X.main(_windowed_args(sp, src, tmp_path / "out", "J", "--embedder-trials", "r34lm", "--cos-thr", "0.5",
+                          "--vbx-python", "/dz/python"), runner=fake)
+    trials = [c for c in fake.calls if "--embedder-kind" in c]
+    assert len(trials) == 2 and all(c[0] == "/dz/python" for c in trials)
+    assert all(c[c.index("--cos-threshold") + 1] == "0.5" for c in trials)

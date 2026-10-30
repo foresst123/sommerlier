@@ -6,7 +6,8 @@
         [--windowed-piece-s 240] [--windowed-hop-s 10] [--windowed-python /path/to/nemotron/python] \
         [--python /path/to/som/python] [--vbx-ahc-threshold 0.6] [--vbx-fa 0.07] [--vbx-fb 0.8] [--plda-dir DIR] \
         [--vbx-python /path/to/dz/python] [--demucs-python /path/to/demucs/python] [--fb-sweep 0.2,0.4] \
-        [--overlap-variants [--ov-thr 0.35] [--ov-min-on-s 0.2]]
+        [--overlap-variants [--ov-thr 0.35] [--ov-min-on-s 0.2]] [--embedder-trials r34lm,espnet_spk \
+        [--cos-thr 0.4,0.5,0.6] [--embedder-python NAME=PATH]]
 
 Per sample (a conversation clip of about 40 s inside a long source recording):
   1. cut a 5 min chunk of the source around the clip (it starts 2 min before the clip, clamped to the file), 16 kHz mono.
@@ -45,9 +46,20 @@ Per sample (a conversation clip of about 40 s inside a long source recording):
      the probs (and K's vocals wav), into runs/<arm>_fb<value>. These extra arms (nemotron_dz_fb0.4, nemotron_dz_demucs_fb0.2)
      are listed like the others. The base arms keep --vbx-fb. No P_loop: DiariZen's VBx runs with loopProb 0.
   4i. --overlap-variants (experiment): for each selected arm J and K, stage 2 only, with --thr --ov-thr (default 0.35)
-     and --min-on-s --ov-min-on-s (default 0.2), into runs/nemotron_dz_ov and runs/nemotron_dz_demucs_ov. Same Fb,
-     median filter and probs as the base arm; K's vocals for the embeddings. Independent of --fb-sweep: the sweep arms
+     and --min-on-s --ov-min-on-s (default 0.2), into runs/nemotron_dz_ov_thr0.35_on0.2 and
+     runs/nemotron_dz_demucs_ov_thr0.35_on0.2. Same Fb, median filter and probs as the base arm; K's vocals for the embeddings. Independent of --fb-sweep: the sweep arms
      keep the base threshold. The base J and K commands do not change (no --min-on-s). UNVERIFIED on GPU.
+     --ov-thr and --ov-min-on-s take comma lists: every combination is one arm per J and K, named
+     nemotron_dz_ov_thr<thr>_on<min_on> (e.g. nemotron_dz_ov_thr0.35_on0.2, nemotron_dz_demucs_ov_thr0.3_on0). At most
+     OV_MAX_COMBOS (24) combinations per base arm; repeats after %g formatting and values outside (0, 1) / below 0 are refused.
+  4j. --embedder-trials LIST (experiment, off by default): for each sample and each kind in LIST (r34lm, wespeaker_r293,
+     wespeaker_simam100, espnet_spk) and each cosine cut of --cos-thr (default 0.4,0.5,0.6), stage 2 only on J's probs and
+     the chunk, with --clustering dz-ahc (utils/dz_pipeline.make_dz_ahc_fn: average-linkage cosine AHC, not VBx, because
+     DiariZen's PLDA only fits ResNet34-LM). Into runs/nemotron_dz_emb_<kind>_c<cos>. The embeddings of a sample are
+     cached in <sample>/embcache, so the other cos cuts make no model call. --embedder-python NAME=PATH picks the python
+     of one kind (default --vbx-python, then --python); --r293-onnx, --simam-onnx or --simam-dir, --espnet-tag pass
+     through. A failing embedder is logged, its arms are listed as errors, the other arms and samples still run, and a
+     summary of the failed (sample, embedder) pairs is printed. The SimAM and ESPnet adapters are UNVERIFIED and NOT run.
   5. every arm is cropped to the clip window and shifted to 0, written as segments_<arm>.json, and drawn in one
      lanes.html per sample (tools/make_diar_lanes_page.py). index.html links the samples with a table of
      speakers, K, segments under 1 s, speech seconds and overlap seconds per arm. No DER, no text.
@@ -79,6 +91,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+from tools import embedders as EMB  # noqa: E402
 from tools.job_diar import INPUT_NAME, build_cmd  # noqa: E402
 from tools.make_diar_lanes_page import build as lanes_build  # noqa: E402
 from tools.make_variant_lanes_page import render  # noqa: E402
@@ -107,10 +120,12 @@ VBX_ARMS = ("G", "I", "J", "K")     # stage 2 with VBx or DiariZen steps, in the
 DZ_ARMS = ("J", "K")                # stage 2 with DiariZen's own steps (--clustering dz)
 DENSE_ARMS = ("I", "J", "K")        # DiariZen-like windows: 16 s, hop 0.8 s
 FB_SWEEP_ARMS = ("J", "K")          # the arms the --fb-sweep values are run for
-OV_ARMS = ("J", "K")                # the arms --overlap-variants adds a `_ov` arm for
-OV_SUFFIX = "+ov"                   # key suffix of an overlap variant: 'J+ov' is nemotron_dz_ov
+OV_ARMS = ("J", "K")                # the arms --overlap-variants adds one arm per grid point for
 OV_THR = 0.35                       # first guess, not validated: a lower slot threshold keeps more overlap
 OV_MIN_ON_S = 0.2                   # stage 2 drops ON runs shorter than this (--min-on-s)
+OV_MAX_COMBOS = 24                  # --ov-thr x --ov-min-on-s combinations per base arm, at most
+TRIAL_COS = (0.4, 0.5, 0.6)         # --cos-thr default: cosine AHC cuts of the embedder trials
+TRIAL_CACHE_DIR = "embcache"        # per sample: shared by the trial arms, so another cos threshold reads the embeddings
 STAGE2_LABEL = {"G": "VBx", "I": "VBx", "J": "DiariZen steps", "K": "DiariZen steps"}
 VBX_AHC_THRESHOLD = 0.6     # UNVERIFIED: not checked against the DiariZen config
 VBX_FA = 0.07               # UNVERIFIED
@@ -384,28 +399,93 @@ def arm_key(letter: str, fb: Optional[str] = None) -> str:
     return letter if fb is None else f"{letter}@{fb}"
 
 
-def ov_key(letter: str) -> str:
-    """'J+ov' for the --overlap-variants arm of J (nemotron_dz_ov)."""
-    return letter + OV_SUFFIX
+def fmt(value: float) -> str:
+    """A number as it appears in a key and an arm name: %g, so 0.35 -> '0.35', 0.2 -> '0.2', 0 -> '0'."""
+    return "%g" % value
+
+
+def ov_key(letter: str, thr: float, min_on_s: float) -> str:
+    """'J+ov|0.35|0.2' for the --overlap-variants arm of J with --ov-thr 0.35 and --ov-min-on-s 0.2."""
+    return f"{letter}+ov|{fmt(thr)}|{fmt(min_on_s)}"
 
 
 def is_ov(key: str) -> bool:
-    return key.endswith(OV_SUFFIX)
+    return "+ov|" in key
+
+
+def ov_params(key: str) -> Tuple[float, float]:
+    """(thr, min_on_s) of an overlap variant key: 'J+ov|0.35|0.2' -> (0.35, 0.2)."""
+    _, _, rest = key.partition("+ov|")
+    thr, _, on = rest.partition("|")
+    return float(thr), float(on)
+
+
+def trial_key(kind: str, cos: float, letter: str = "J") -> str:
+    """'J+emb|r34lm|0.5' for the embedder trial of kind at cosine cut 0.5 (stage 2 on J's probs)."""
+    return f"{letter}+emb|{kind}|{fmt(cos)}"
+
+
+def is_trial(key: str) -> bool:
+    return "+emb|" in key
+
+
+def trial_params(key: str) -> Tuple[str, float]:
+    """(kind, cos) of an embedder trial key: 'J+emb|r34lm|0.5' -> ('r34lm', 0.5)."""
+    _, _, rest = key.partition("+emb|")
+    kind, _, cos = rest.partition("|")
+    return kind, float(cos)
 
 
 def split_key(key: str) -> Tuple[str, Optional[str]]:
-    """(letter, fb). An overlap variant gives its base letter with fb None: check is_ov first."""
-    if is_ov(key):
-        key = key[: -len(OV_SUFFIX)]
-    letter, _, fb = key.partition("@")
+    """(letter, fb). An overlap variant or a trial gives its base letter with fb None (check is_ov and is_trial)."""
+    letter, _, fb = key.split("+", 1)[0].partition("@")
     return letter, (fb or None)
 
 
 def arm_name(key: str) -> str:
-    """The arm's name in the output: nemotron_dz, nemotron_dz_fb0.4 for a sweep arm, nemotron_dz_ov for a variant."""
+    """The arm's name in the output, from the key.
+
+    nemotron_dz (base J), nemotron_dz_fb0.4 (a --fb-sweep arm), nemotron_dz_ov_thr0.35_on0.2 (an overlap variant),
+    nemotron_dz_emb_r34lm_c0.5 (an embedder trial).
+    """
     letter, fb = split_key(key)
-    name = ARMS[letter] if fb is None else f"{ARMS[letter]}_fb{fb}"
-    return name + "_ov" if is_ov(key) else name
+    if is_ov(key):
+        thr, min_on_s = ov_params(key)
+        return f"{ARMS[letter]}_ov_thr{fmt(thr)}_on{fmt(min_on_s)}"
+    if is_trial(key):
+        kind, cos = trial_params(key)
+        return f"{ARMS[letter]}_emb_{kind}_c{fmt(cos)}"
+    return ARMS[letter] if fb is None else f"{ARMS[letter]}_fb{fb}"
+
+
+def parse_grid(text: Optional[str], flag: str, valid: Callable[[float], bool], rule: str) -> List[float]:
+    """'0.3,0.35' -> [0.3, 0.35]: a comma list of numbers that all pass valid, each kept as %g (the value the key and
+    the stage 2 command use). A repeat after that formatting is refused, as is an empty list."""
+    if text is None or not str(text).strip():
+        raise ValueError(f"{flag} needs at least one value")
+    out: List[float] = []
+    for part in str(text).split(","):
+        part = part.strip()
+        if not part:
+            raise ValueError(f"empty value in {flag} {text!r}")
+        try:
+            value = float(part)
+        except ValueError:
+            raise ValueError(f"{flag} value {part!r} is not a number")
+        if not (math.isfinite(value) and valid(value)):
+            raise ValueError(f"{flag} values {rule}, got {part!r}")
+        out.append(float(fmt(value)))
+    if len(set(fmt(v) for v in out)) != len(out):
+        raise ValueError(f"{flag} repeats a value: {text!r}")
+    return out
+
+
+def ov_grid(thrs: Sequence[float], min_ons: Sequence[float]) -> List[Tuple[float, float]]:
+    """Every (thr, min_on_s) pair, thr outer. More than OV_MAX_COMBOS pairs is refused: each one is a stage 2 run."""
+    combos = [(t, m) for t in thrs for m in min_ons]
+    if len(combos) > OV_MAX_COMBOS:
+        raise ValueError(f"--ov-thr x --ov-min-on-s gives {len(combos)} combinations per arm, at most {OV_MAX_COMBOS}")
+    return combos
 
 
 def parse_fb_sweep(text: Optional[str]) -> List[str]:
@@ -426,6 +506,35 @@ def parse_fb_sweep(text: Optional[str]) -> List[str]:
         out.append("%g" % value)
     if len(set(out)) != len(out):
         raise ValueError(f"--fb-sweep repeats a value: {text!r}")
+    return out
+
+
+def parse_kinds(text: Optional[str]) -> List[str]:
+    """'r34lm,espnet_spk' -> ['r34lm', 'espnet_spk']; '' -> [] (trials off). Unknown or repeated kinds are refused."""
+    if not text or not text.strip():
+        return []
+    out = [part.strip() for part in text.split(",")]
+    for kind in out:
+        if kind not in EMB.KINDS:
+            raise ValueError(f"--embedder-trials: unknown embedder {kind!r}, one of {', '.join(EMB.KINDS)}")
+    if len(set(out)) != len(out):
+        raise ValueError(f"--embedder-trials repeats a kind: {text!r}")
+    return out
+
+
+def parse_embedder_python(items: Sequence[str], kinds: Sequence[str]) -> Dict[str, str]:
+    """['r34lm=/x/python'] -> {'r34lm': '/x/python'}. The kind must be one of the trials; a repeat is refused."""
+    out: Dict[str, str] = {}
+    for item in items or []:
+        kind, sep, path = str(item).partition("=")
+        kind, path = kind.strip(), path.strip()
+        if not sep or not kind or not path:
+            raise ValueError(f"--embedder-python takes NAME=PATH, got {item!r}")
+        if kind not in kinds:
+            raise ValueError(f"--embedder-python {kind!r}: that embedder is not in --embedder-trials")
+        if kind in out:
+            raise ValueError(f"--embedder-python repeats {kind!r}")
+        out[kind] = path
     return out
 
 
@@ -492,7 +601,7 @@ def stage2_cmd(arm: str, sample_dir: Path, probs: Path, result: Path, cfg: dict,
     if embed_audio is not None:
         cmd += ["--embed-audio", str(embed_audio)]
     if min_on_s is not None:
-        cmd += ["--min-on-s", str(min_on_s)]
+        cmd += ["--min-on-s", fmt(min_on_s)]          # %g, as in the arm name: 0 -> "0", 0.2 -> "0.2"
     return cmd
 
 
@@ -548,13 +657,59 @@ def run_fb_arm(arm: str, fb: str, sample_dir: Path, cfg: dict, runner: Runner) -
     return run_stage2_arm(arm, arm_name(arm_key(arm, fb)), sample_dir, cfg, runner, fb=fb)
 
 
-def run_ov_arm(arm: str, sample_dir: Path, cfg: dict, runner: Runner) -> Path:
-    """An --overlap-variants arm (J+ov, K+ov): the base arm's stage 2 with --thr ov_thr and --min-on-s ov_min_on_s.
+def run_ov_arm(key: str, sample_dir: Path, cfg: dict, runner: Runner) -> Path:
+    """An --overlap-variants arm (J+ov|thr|on, K+ov|...): the base arm's stage 2 with --thr thr and --min-on-s on.
 
     Everything else is the base arm's: the same Fb (--vbx-fb), median filter and probs; K's vocals for the embeddings.
     """
-    return run_stage2_arm(arm, arm_name(ov_key(arm)), sample_dir, cfg, runner, fb=str(cfg["vbx_fb"]),
-                          thr=cfg["ov_thr"], min_on_s=cfg["ov_min_on_s"])
+    arm, _ = split_key(key)
+    thr, min_on_s = ov_params(key)
+    return run_stage2_arm(arm, arm_name(key), sample_dir, cfg, runner, fb=str(cfg["vbx_fb"]),
+                          thr=thr, min_on_s=min_on_s)
+
+
+def trial_cmd(kind: str, cos: float, sample_dir: Path, probs: Path, result: Path, cfg: dict) -> List[str]:
+    """The stage 2 command of one embedder trial: cosine AHC (--clustering dz-ahc) with embedder `kind` on the chunk.
+
+    The python is --embedder-python for that kind, else --vbx-python, else --python. The embeddings are cached in
+    sample_dir/embcache, shared by the trials of the sample, so each --cos-thr after the first reads them.
+    """
+    python = cfg["embedder_python"].get(kind) or cfg.get("vbx_python") or cfg["python"]
+    cmd = [python, VBX_STAGE_SCRIPT, "--audio", str(sample_dir / "chunk.wav"), "--probs-dir", str(probs),
+           "--out", str(result), "--min-speakers", str(cfg["windowed_min_speakers"]),
+           "--clustering", "dz-ahc", "--embedder-kind", kind, "--cos-threshold", fmt(cos),
+           "--thr", str(cfg["dz_thr"]), "--median-s", str(cfg["dz_median_s"]),
+           "--embcache-dir", str(sample_dir / TRIAL_CACHE_DIR)]
+    if kind == "wespeaker_r293" and cfg.get("r293_onnx"):
+        cmd += ["--r293-onnx", str(cfg["r293_onnx"])]
+    if kind == "wespeaker_simam100":
+        if cfg.get("simam_onnx"):
+            cmd += ["--simam-onnx", str(cfg["simam_onnx"])]
+        elif cfg.get("simam_dir"):
+            cmd += ["--simam-dir", str(cfg["simam_dir"])]
+    if kind == "espnet_spk":
+        cmd += ["--espnet-tag", str(cfg["espnet_tag"])]
+    return cmd
+
+
+def run_trial_arm(key: str, sample_dir: Path, cfg: dict, runner: Runner) -> Path:
+    """An embedder trial (J+emb|kind|cos): stage 2 only, on J's probs, into runs/nemotron_dz_emb_<kind>_c<cos>.
+
+    J's probs are made as for J when missing (stage 1 never reruns once they exist). Nothing else runs: no Demucs,
+    the chunk is the embedding audio.
+    """
+    kind, cos = trial_params(key)
+    name = arm_name(key)
+    run_dir = sample_dir / "runs" / name
+    result = run_dir / "out" / "segments.json"
+    if cfg["reuse"] and result.is_file():
+        return result
+    run_dir.mkdir(parents=True, exist_ok=True)
+    probs = dump_probs("J", sample_dir, cfg, runner, skip_existing=True)
+    code = runner(trial_cmd(kind, cos, sample_dir, probs, result, cfg), gpu_env(cfg))
+    if code != 0 or not result.is_file():
+        raise RuntimeError(f"arm {name} stage 2 (cosine AHC, embedder {kind}) failed (exit {code}), see {run_dir}")
+    return result
 
 
 def process_sample(index: int, sample: dict, cfg: dict, runner: Runner, log: Callable[[str], None] = print) -> dict:
@@ -576,8 +731,11 @@ def process_sample(index: int, sample: dict, cfg: dict, runner: Runner, log: Cal
     for key in cfg["keys"]:              # base arms in letter order, each followed by its --fb-sweep arms
         arm, fb = split_key(key)
         try:
+            if is_trial(key):                   # --embedder-trials: stage 2 only, after every base arm
+                segs[key] = crop(read_rows(str(run_trial_arm(key, sdir, cfg, runner))), rs, re_)
+                continue
             if is_ov(key):                      # --overlap-variants: stage 2 only, after the base arm in the key order
-                segs[key] = crop(read_rows(str(run_ov_arm(arm, sdir, cfg, runner))), rs, re_)
+                segs[key] = crop(read_rows(str(run_ov_arm(key, sdir, cfg, runner))), rs, re_)
                 continue
             if arm == "E":
                 if "A" not in segs or "B" not in segs:
@@ -717,12 +875,29 @@ def main(argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) 
                     help="comma list of VBx Fb values above 0 (e.g. 0.2,0.4): for each selected arm J and K, run "
                          "stage 2 only with that --fb, into runs/<arm>_fb<value>")
     ap.add_argument("--overlap-variants", action="store_true",
-                    help="for each selected arm J and K, one more stage 2 run with --ov-thr and --ov-min-on-s, into "
-                         "runs/nemotron_dz_ov and runs/nemotron_dz_demucs_ov (stage 1 and Demucs are not rerun)")
-    ap.add_argument("--ov-thr", type=float, default=OV_THR,
-                    help="--overlap-variants: slot probability threshold, in (0, 1) (first guess, not validated)")
-    ap.add_argument("--ov-min-on-s", type=float, default=OV_MIN_ON_S,
-                    help="--overlap-variants: stage 2 drops each cluster's ON runs shorter than this (seconds, 0 or more)")
+                    help="for each selected arm J and K, one stage 2 run per --ov-thr x --ov-min-on-s combination, into "
+                         "runs/nemotron_dz_ov_thr<thr>_on<min_on> (stage 1 and Demucs are not rerun)")
+    ap.add_argument("--ov-thr", default=str(OV_THR),
+                    help="--overlap-variants: comma list of slot probability thresholds in (0, 1), e.g. 0.3,0.35,0.4 "
+                         "(first guess, not validated). Each combination with --ov-min-on-s is one arm per J and K")
+    ap.add_argument("--ov-min-on-s", default=str(OV_MIN_ON_S),
+                    help="--overlap-variants: comma list of minimum ON-run lengths in seconds, 0 or more, e.g. 0,0.2: "
+                         "stage 2 drops each cluster's ON runs shorter than this")
+    ap.add_argument("--embedder-trials", default="",
+                    help="comma list of embedder kinds (r34lm, wespeaker_r293, wespeaker_simam100, espnet_spk): for each "
+                         "sample, stage 2 with cosine AHC (--clustering dz-ahc) on J's probs and the chunk, one arm per "
+                         "kind and --cos-thr value (nemotron_dz_emb_<kind>_c<thr>). Off when empty")
+    ap.add_argument("--cos-thr", default=",".join(fmt(c) for c in TRIAL_COS),
+                    help="--embedder-trials: comma list of cosine-distance cuts of the average-linkage AHC, in (0, 2)")
+    ap.add_argument("--embedder-python", action="append", default=[], metavar="NAME=PATH",
+                    help="--embedder-trials: python for one kind, e.g. r34lm=/path/to/dz/python (repeatable). "
+                         "Default: --vbx-python, then --python")
+    ap.add_argument("--r293-onnx", help="--embedder-trials, wespeaker_r293: ONNX file (default: the HF hub copy)")
+    ap.add_argument("--simam-onnx", help="--embedder-trials, wespeaker_simam100: ONNX file (UNVERIFIED export names)")
+    ap.add_argument("--simam-dir", help="--embedder-trials, wespeaker_simam100: folder with config.yaml and avg_model.pt "
+                                        "(UNVERIFIED API); give one of --simam-onnx and --simam-dir")
+    ap.add_argument("--espnet-tag", default=EMB.DEFAULT_ESPNET_TAG,
+                    help="--embedder-trials, espnet_spk: ESPnet model tag (UNVERIFIED)")
     ap.add_argument("--dz-thr", type=float, default=0.5, help="arm J: slot probability threshold")
     ap.add_argument("--dz-median-s", type=float, default=0.22,
                     help="arm J: median filter of the binarised slots in seconds (DiariZen: 11 frames of about 20 ms); "
@@ -743,10 +918,17 @@ def main(argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) 
         ap.error(str(exc))
     if a.fb_sweep is not None and not letters & set(FB_SWEEP_ARMS):
         ap.error("--fb-sweep needs arm J or K in --only-arms")
-    if not (math.isfinite(a.ov_thr) and 0 < a.ov_thr < 1):
-        ap.error(f"--ov-thr must be in (0, 1), got {a.ov_thr}")
-    if not (math.isfinite(a.ov_min_on_s) and a.ov_min_on_s >= 0):
-        ap.error(f"--ov-min-on-s must be 0 or more, got {a.ov_min_on_s}")
+    try:
+        ov_thrs = parse_grid(a.ov_thr, "--ov-thr", lambda v: 0 < v < 1, "must be in (0, 1)")
+        ov_min_ons = parse_grid(a.ov_min_on_s, "--ov-min-on-s", lambda v: v >= 0, "must be 0 or more")
+        ov_combos = ov_grid(ov_thrs, ov_min_ons)
+        cos_thrs = parse_grid(a.cos_thr, "--cos-thr", lambda v: 0 < v < 2, "must be in (0, 2)")
+        trial_kinds = parse_kinds(a.embedder_trials)
+        embedder_python = parse_embedder_python(a.embedder_python, trial_kinds)
+        for kind in trial_kinds:
+            EMB.validate_args(kind, r293_onnx=a.r293_onnx, simam_onnx=a.simam_onnx, simam_dir=a.simam_dir)
+    except ValueError as exc:
+        ap.error(str(exc))
     if a.overlap_variants and not letters & set(OV_ARMS):
         ap.error("--overlap-variants needs arm J or K in --only-arms")
     if a.fusion:
@@ -763,9 +945,10 @@ def main(argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) 
             if letter in FB_SWEEP_ARMS:
                 keys += [arm_key(letter, fb) for fb in fb_values]
             if a.overlap_variants and letter in OV_ARMS:
-                keys.append(ov_key(letter))
+                keys += [ov_key(letter, thr, on) for thr, on in ov_combos]
+    keys += [trial_key(kind, cos) for kind in trial_kinds for cos in cos_thrs]   # after every base arm
     windowed_python = None
-    if run & {"F", "G", "I", "J", "K"}:
+    if run & {"F", "G", "I", "J", "K"} or trial_kinds:       # trials need J's probs, stage 1 of the Nemotron env
         windowed_python = a.windowed_python or resolve_worker_python("nemotron")
 
     out = Path(a.out)
@@ -777,7 +960,9 @@ def main(argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) 
            "windowed_hop_s": a.windowed_hop_s, "dense_window_s": a.dense_window_s, "dense_hop_s": a.dense_hop_s,
            "vbx_python": a.vbx_python, "dz_thr": a.dz_thr, "dz_median_s": a.dz_median_s,
            "windowed_min_speakers": a.windowed_min_speakers, "vbx_ahc_threshold": a.vbx_ahc_threshold, "vbx_fa": a.vbx_fa,
-           "vbx_fb": a.vbx_fb, "plda_dir": a.plda_dir, "ov_thr": a.ov_thr, "ov_min_on_s": a.ov_min_on_s}
+           "vbx_fb": a.vbx_fb, "plda_dir": a.plda_dir,
+           "embedder_python": embedder_python, "r293_onnx": a.r293_onnx, "simam_onnx": a.simam_onnx,
+           "simam_dir": a.simam_dir, "espnet_tag": a.espnet_tag}
     summaries = []
     for i, sample in enumerate(load_samples(a.samples), 1):
         try:
@@ -787,9 +972,26 @@ def main(argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) 
                        "errors": {}}
             print(f"{sample.get('name')}: error: {exc}", file=sys.stderr)
         summaries.append(summary)
+    failures = embedder_failures(summaries)
+    if failures:
+        print(f"embedder trials failed for {len(failures)} (sample, embedder) pairs:")
+        for (name, kind), items in failures.items():
+            cos = ", ".join(fmt(c) for c, _ in items)
+            print(f"  {name} / {kind} (cos {cos}): {items[0][1]}")
     index = write_index(out, summaries, keys)
     print(f"-> {index}")
     return 0
+
+
+def embedder_failures(summaries: Sequence[dict]) -> Dict[Tuple[str, str], List[Tuple[float, str]]]:
+    """(sample name, embedder kind) -> [(cos, message)] of the trial arms that failed, in key order."""
+    out: Dict[Tuple[str, str], List[Tuple[float, str]]] = {}
+    for s in summaries:
+        for key, msg in (s.get("errors") or {}).items():
+            if is_trial(key):
+                kind, cos = trial_params(key)
+                out.setdefault((str(s.get("name")), kind), []).append((cos, msg))
+    return out
 
 
 if __name__ == "__main__":

@@ -338,3 +338,96 @@ def test_negative_or_nan_min_on_s_is_refused():
         with pytest.raises(ValueError):
             DZ.run_piece_dz(10.0, prob_fn, embed_fn, vbx_fn=vbx_fn, window_s=10.0, hop_s=1.0, frame_s=FS,
                             min_on_s=bad)
+
+
+# ---- cosine AHC (embedder trials): make_dz_ahc_fn, same interface as make_dz_vbx_fn ----
+
+def _orthogonal_clusters(n_speakers=2, n_per=20, dim=16, noise=0.05, seed=1):
+    rng = np.random.default_rng(seed)
+    axes = np.eye(dim)[:n_speakers]                    # orthogonal speaker directions: cosine distance 1 between them
+    rows, truth = [], []
+    for k in range(n_speakers):
+        rows.append(axes[k] * 3.0 + rng.normal(scale=noise, size=(n_per, dim)))
+        truth += [k] * n_per
+    return np.vstack(rows), np.array(truth)
+
+
+def _bijection(labels, truth):
+    pairs = set(zip(labels.tolist(), truth.tolist()))
+    return len(pairs) == len(set(labels.tolist())) == len(set(truth.tolist()))
+
+
+def test_ahc_two_speakers_give_two_clusters_that_match_the_truth():
+    X, truth = _orthogonal_clusters(2)
+    fn = DZ.make_dz_ahc_fn(0.5)
+    q, sp = fn(X)
+    assert q.shape == (40, 2) and sp.shape == (2,) and np.all(sp == 1.0)
+    assert _bijection(np.argmax(q, axis=1), truth)                    # each embedding sits in exactly one cluster
+    assert fn.last_info == {"train_embeddings": 40, "ahc_init_clusters": 2, "cos_threshold": 0.5}
+
+
+def test_ahc_three_speakers_give_three_clusters():
+    X, truth = _orthogonal_clusters(3, n_per=15)
+    q, sp = DZ.make_dz_ahc_fn(0.5)(X)
+    assert q.shape == (45, 3) and sp.shape == (3,)
+    assert _bijection(np.argmax(q, axis=1), truth)
+
+
+def test_ahc_threshold_above_the_separation_merges_the_clusters():
+    X, truth = _orthogonal_clusters(2)
+    assert DZ.make_dz_ahc_fn(0.5)(X)[0].shape[1] == 2
+    q, _ = DZ.make_dz_ahc_fn(1.5)(X)                                  # average cosine distance between them is about 1
+    assert q.shape[1] == 1 and np.allclose(q, q[:, :1])
+
+
+def test_ahc_is_scale_invariant_because_it_clusters_on_cosine():
+    X, truth = _orthogonal_clusters(2)
+    scaled = X * np.random.default_rng(3).uniform(0.1, 10.0, size=(len(X), 1))
+    assert _bijection(np.argmax(DZ.make_dz_ahc_fn(0.5)(scaled)[0], axis=1), truth)
+
+
+def test_ahc_centroids_are_the_mean_of_the_unit_vectors_per_cluster():
+    X, _ = _orthogonal_clusters(2)
+    X = X * np.random.default_rng(4).uniform(0.5, 4.0, size=(len(X), 1))     # unequal norms on purpose
+    q, sp = DZ.make_dz_ahc_fn(0.5)(X)
+    centroids = q[:, sp > 1e-7].T @ X                                  # run_piece_dz's own formula
+    labels = np.argmax(q, axis=1)
+    unit = X / np.linalg.norm(X, axis=1, keepdims=True)
+    for k in range(2):
+        assert np.allclose(centroids[k], unit[labels == k].mean(axis=0))
+
+
+def test_ahc_has_the_vbx_interface_and_single_embedding_is_one_cluster():
+    X, _ = _orthogonal_clusters(2)
+    vbx_like = DZ.make_dz_vbx_fn(lambda ahc, fea, phi, **kw: (np.eye(2)[ahc], np.ones(2)),
+                                 lambda x: x, lambda x, lda_dim: x, np.ones(16))
+    q_v, sp_v = vbx_like(X)                                            # the VBx fn, faked, same return shape
+    q_a, sp_a = DZ.make_dz_ahc_fn(0.5)(X)
+    assert q_a.shape == (len(X), sp_a.size) and q_v.shape[0] == q_a.shape[0] and sp_v.ndim == sp_a.ndim == 1
+    q1, sp1 = DZ.make_dz_ahc_fn(0.5)(X[:1])
+    assert q1.shape == (1, 1) and sp1.tolist() == [1.0]
+
+
+@pytest.mark.parametrize("cos", [0.0, 2.0, -0.5, float("nan"), float("inf")])
+def test_ahc_refuses_a_threshold_outside_zero_two(cos):
+    with pytest.raises(ValueError):
+        DZ.make_dz_ahc_fn(cos)
+
+
+def test_ahc_refuses_zero_vectors_and_bad_shapes():
+    fn = DZ.make_dz_ahc_fn(0.5)
+    with pytest.raises(ValueError, match="zero-norm"):
+        fn(np.array([[1.0, 0.0], [0.0, 0.0]]))
+    with pytest.raises(ValueError):
+        fn(np.zeros((0, 4)))
+    with pytest.raises(ValueError):
+        fn(np.ones(4))
+
+
+def test_ahc_fn_runs_unchanged_through_run_piece_dz_on_the_fake_speakers():
+    prob_fn, embed_fn, _vbx, truth = _make_fakes()
+    res = DZ.run_piece_dz(60.0, prob_fn, embed_fn, vbx_fn=DZ.make_dz_ahc_fn(0.5), window_s=16.0, hop_s=0.8,
+                          frame_s=FS)
+    assert res.n_clusters == 3
+    assert res.stats["ahc_init_clusters"] == 3 and res.stats["cos_threshold"] == 0.5
+    assert _agreement(res.segments, truth, 60.0) > 0.95

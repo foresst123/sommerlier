@@ -97,6 +97,47 @@ def make_dz_vbx_fn(cluster_vbx: Callable, xvec_tf: Callable, plda_tf: Callable, 
     return fn
 
 
+def make_dz_ahc_fn(cos_threshold: float = 0.5) -> VbxFn:
+    """train embeddings (n, dim, raw) -> (q, sp) like make_dz_vbx_fn, with cosine AHC instead of VBx (embedder trials).
+
+    The PLDA of DiariZen was trained for WeSpeaker ResNet34-LM, so other embedders cannot use VBx; this clustering
+    needs no PLDA and works with any embedder. Average linkage on cosine distance (1 - cos) of the unit vectors, cut at
+    cos_threshold (scipy fcluster, criterion "distance"). min_speakers and max_speakers are not used, as in the VBx path.
+
+    run_piece_dz takes its centroids as q[:, sp > 1e-7].T @ train. Here q[i, k] = 1 / (n_k * ||x_i||) for x_i in cluster
+    k and 0 elsewhere, so that product is the mean of the unit vectors of each cluster: the cosine centroid. sp is 1 for
+    every cluster. fn.last_info keeps the counts and the threshold. Pure numpy/scipy; no model is involved here.
+    """
+    if not (math.isfinite(cos_threshold) and 0 < cos_threshold < 2):
+        raise ValueError(f"cos_threshold must be in (0, 2), got {cos_threshold}")
+
+    def fn(train):
+        train = np.asarray(train, dtype=float)
+        if train.ndim != 2 or len(train) == 0:
+            raise ValueError(f"train embeddings must be a (n, dim) array with n >= 1, got shape {train.shape}")
+        norms = np.linalg.norm(train, axis=1)
+        if not np.all(norms > 0):
+            raise ValueError("a zero-norm embedding cannot be clustered by cosine")
+        normed = train / norms[:, None]
+        if len(train) == 1:
+            labels = np.zeros(1, dtype=int)
+        else:
+            labels = fcluster(linkage(normed, method="average", metric="cosine"), cos_threshold,
+                              criterion="distance") - 1
+        _, labels = np.unique(labels, return_inverse=True)
+        labels = labels.reshape(-1)
+        k = int(labels.max()) + 1
+        counts = np.bincount(labels, minlength=k)
+        q = np.zeros((len(train), k))
+        q[np.arange(len(train)), labels] = 1.0 / (counts[labels] * norms)
+        fn.last_info = {"train_embeddings": int(len(train)), "ahc_init_clusters": k,
+                        "cos_threshold": float(cos_threshold)}
+        return q, np.ones(k)
+
+    fn.last_info = {}
+    return fn
+
+
 def constrained_argmax(soft: np.ndarray) -> np.ndarray:
     """soft (windows, slots, clusters) -> hard (windows, slots); -2 for a slot that gets no cluster.
 
