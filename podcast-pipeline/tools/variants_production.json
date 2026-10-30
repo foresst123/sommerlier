@@ -2,9 +2,9 @@
   "variants": [
     {
       "id": "prod",
-      "label": "production a100: rf_crowd>blend50 before diarization, nothing else filtered",
+      "label": "production a100: wpe>rf_crowd>blend50 before diarization, nothing else filtered",
       "group": "lab",
-      "chain": "rf_crowd>blend50"
+      "chain": "wpe>rf_crowd>blend50"
     }
   ]
 }

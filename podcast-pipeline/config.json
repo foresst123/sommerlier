@@ -273,7 +273,7 @@
         "bss": true,
         "music": false,
         "music_scope": "full",
-        "denoise": "rf_crowd>blend50",
+        "denoise": "wpe>rf_crowd>blend50",
         "denoise_pre_separation": "none",
         "denoise_pre_asr": "none",
         "llm_trace": true,

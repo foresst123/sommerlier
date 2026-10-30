@@ -24,3 +24,6 @@ huggingface-hub>=0.26.2
 # mpsenet: not a pip package. git clone https://github.com/yxlu-0102/MP-SENet and set MPSENET_DIR.
 # Its model code needs einops (above). pesq / joblib / matplotlib are imported by upstream at module
 # level but only used for training metrics; models/denoise/mpsenet.py stubs them when absent.
+
+# wpe: single-channel WPE dereverberation (numpy only, no weights).
+nara_wpe==0.0.11

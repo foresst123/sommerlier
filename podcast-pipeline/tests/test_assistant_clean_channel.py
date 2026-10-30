@@ -147,7 +147,7 @@ def _config():
 
 def test_a100_filters_once_before_diarization_and_runs_no_music_step():
     a100 = _config()["a100"]
-    assert a100["pipeline"]["denoise"] == "rf_crowd>blend50"
+    assert a100["pipeline"]["denoise"] == "wpe>rf_crowd>blend50"
     assert a100["pipeline"]["denoise_pre_separation"] == "none"
     assert a100["pipeline"]["denoise_pre_asr"] == "none"
     assert a100["steps"]["music_analysis"] is False
@@ -181,7 +181,7 @@ def test_kaggle_is_unchanged_by_the_a100_switch():
 
 def test_a100_resolves_to_the_new_settings_through_main():
     args = _resolve(["--audio", "x.mp3", "--env", "a100"])
-    assert args["denoise"] == "rf_crowd>blend50"
+    assert args["denoise"] == "wpe>rf_crowd>blend50"
     assert args["step_music_removal"] is False
     assert args["step_music_analysis"] is False
     assert args["step_cut_music"] is False

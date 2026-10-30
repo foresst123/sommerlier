@@ -311,9 +311,9 @@ def test_denoise_flag_overrides_and_accepts_stop_after_asr():
 
 
 def test_both_profiles_carry_the_key():
-    # a100 filters the recording before diarization (rf_crowd, then a 50% mix back of the
+    # a100 filters the recording before diarization (wpe, then rf_crowd, then a 50% mix back of the
     # raw audio); kaggle is unchanged. A new profile must state its choice here.
-    expected = {"kaggle": "none", "a100": "rf_crowd>blend50"}
+    expected = {"kaggle": "none", "a100": "wpe>rf_crowd>blend50"}
     with open(os.path.join(ROOT, "config.json"), encoding="utf-8") as fh:
         cfg = json.load(fh)
     for name, profile in cfg["environments"].items():

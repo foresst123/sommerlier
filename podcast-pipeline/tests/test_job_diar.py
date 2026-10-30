@@ -237,7 +237,7 @@ def test_params_schema_defaults_from_config(server):
     assert backend["type"] == "choice" and backend["default"] == "nemotron"
     assert backend["choices"] == ["nemotron", "diarizen"]
     denoise = items["pipeline.denoise"]
-    assert denoise["default"] == "rf_crowd>blend50" and "none" in denoise["choices"]
+    assert denoise["default"] == "wpe>rf_crowd>blend50" and "none" in denoise["choices"]
     assert "models.diarizen.num_speakers" not in items        # not in config, so not offered
     assert items["models.diarizen.max_speakers"]["default"] == cfg["models"]["diarizen"]["max_speakers"]
     for p in items.values():
