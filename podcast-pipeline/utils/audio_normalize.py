@@ -98,7 +98,7 @@ def normalize_for_asr(waveform: np.ndarray,
 # Audio at each end of the splice used to align levels there. 20ms is one
 # analysis frame -- long enough to average out pitch, short enough that it is
 # still "the edge" rather than a third of a backchannel.
-EDGE_SAMPLES = 480          # 20ms at 24kHz
+EDGE_SAMPLES = 320          # 20ms at the pipeline's 16kHz
 
 
 def match_splice_level(host: np.ndarray, patch: np.ndarray,

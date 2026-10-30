@@ -14,6 +14,7 @@ _BSS_TIMING = os.environ.get("BSS_TIMING", "0") == "1"
 import numpy as np
 from typing import Callable, Dict, List, Optional, Tuple
 from schemas.audio import AudioData
+from services.audio_service import PIPELINE_SAMPLE_RATE
 from schemas.segment import Segment, SpeechSegment
 from algorithms.diarization.overlap import detect_overlapping_segments
 from utils.audio_normalize import safe_limit
@@ -692,7 +693,7 @@ class SeparationService:
 
     @staticmethod
     def _track_has_speech(host: np.ndarray, track: np.ndarray,
-                          frame_sec: float = 0.02, sr_hint: int = 24000) -> bool:
+                          frame_sec: float = 0.02, sr_hint: int = PIPELINE_SAMPLE_RATE) -> bool:
         """Kiểm tra track có lời tại những nơi mixture có lời.
         So năng lượng từng khung ngắn: RMS toàn đoạn có thể bỏ sót trường hợp
         track im lặng gần hết overlap nhưng chỉ có đuôi giọng khác ở cuối."""

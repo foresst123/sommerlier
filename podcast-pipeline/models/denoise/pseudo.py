@@ -57,15 +57,19 @@ def describe(token) -> str:
 
 
 def validate_chain_tokens(tokens) -> None:
-    """ValueError if a pseudo-step leads the chain or the chain has no backend at all."""
+    """ValueError if a blend/dry leads the chain, or a chain without backends has a blend/dry.
+
+    A chain of hp tokens only (e.g. ["hp60"]) is valid: a high-pass filters the input itself,
+    so it needs no backend. A blend or dry with no backend has nothing to mix against.
+    """
     tokens = list(tokens)
     if not tokens:
         return
     if is_pseudo(tokens[0]) and parse_pseudo(tokens[0])[0] != "hp":
         raise ValueError(f"pseudo-step {tokens[0]!r} cannot be first in a denoise chain: "
                          "there is no filtered audio to blend yet")
-    if not backend_tokens(tokens):
-        raise ValueError("a denoise chain needs at least one backend, not only pseudo-steps")
+    if not backend_tokens(tokens) and any(parse_pseudo(t)[0] != "hp" for t in tokens):
+        raise ValueError("a denoise chain with blend or dry steps needs at least one backend")
     seen_backend = False
     for t in tokens:
         if not is_pseudo(t):

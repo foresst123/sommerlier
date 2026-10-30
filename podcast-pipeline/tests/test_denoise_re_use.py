@@ -109,7 +109,7 @@ def test_enhance_runs_the_worker_at_24k_with_config(tmp_path):
     y = be.enhance(x, 16000)
     assert y.dtype == np.float32 and y.shape == x.shape                 # same length and rate as the input
     seen = json.loads(log.read_text())
-    assert seen["sr"] == 24000 and seen["n"] == 24000                   # the model saw the pipeline's 24 kHz
+    assert seen["sr"] == 24000 and seen["n"] == 24000                   # the model ran at its native 24 kHz (16 kHz in, resampled up)
     assert seen["chunk_s"] == 5.0 and seen["hop_portion"] == 0.5
     assert seen["hf_repo"] == "nvidia/NVIDIA-NemotronLabs-RE-USE"
     lau = get_backend("re_use_laughter", {"python": PY, "worker": w, "delay_compensation": False})

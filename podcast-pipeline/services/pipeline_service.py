@@ -21,6 +21,7 @@ from services.word_alignment_service import apply_word_alignments
 from services.stage_output_service import StageOutputService
 from schemas.audio import AudioData
 from services.denoise_service import is_none
+from services.audio_service import PIPELINE_SAMPLE_RATE
 from utils.sdpa_guard import capture_baseline, restore_if_changed
 
 # Taken at import, before any stage can run a third-party sdpa_kernel().
@@ -172,7 +173,7 @@ class PipelineService:
                 stale = False
         if stale:
             if waveform is None or sample_rate is None:
-                decoded_audio = self.audio_svc.load_audio(audio_path, target_sr=24000)
+                decoded_audio = self.audio_svc.load_audio(audio_path, target_sr=PIPELINE_SAMPLE_RATE)
                 waveform = decoded_audio.waveform
                 sample_rate = decoded_audio.sample_rate
             report = gate.check(waveform, sample_rate, source_path=audio_path)
@@ -907,7 +908,7 @@ class PipelineService:
             source = {"path": os.path.abspath(audio_path)}
         material = {
             "source": source,
-            "sample_rate": 24000,
+            "sample_rate": PIPELINE_SAMPLE_RATE,
             "music_scope": cls._music_scope(args),
             "separator": cls._music_checkpoint_name(args, config),
             "music": music_payload or {"fps": 100.0, "spans": []},
@@ -1654,16 +1655,16 @@ class PipelineService:
         if processed_audio_cached:
             audio_data = AudioData(
                 waveform=processed_waveform,
-                sample_rate=24000,
+                sample_rate=PIPELINE_SAMPLE_RATE,
                 name=os.path.basename(audio_path),
                 audio_segment=None,
-                duration=len(processed_waveform) / 24000.0,
+                duration=len(processed_waveform) / float(PIPELINE_SAMPLE_RATE),
             )
             if self.logger:
                 self.logger.info("Loading post-music waveform from checkpoint cache")
         else:
             audio_data = (preflight_audio
-                          or self.audio_svc.load_audio(audio_path, target_sr=24000))
+                          or self.audio_svc.load_audio(audio_path, target_sr=PIPELINE_SAMPLE_RATE))
 
         # Chỉ ghi dữ liệu đầu vào một lần mỗi file, không ghi lại ở từng lần
         # run() khi chạy theo giai đoạn.

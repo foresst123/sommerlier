@@ -311,9 +311,9 @@ def test_denoise_flag_overrides_and_accepts_stop_after_asr():
 
 
 def test_both_profiles_carry_the_key():
-    # a100 filters the recording before diarization (wpe, then rf_crowd, then a 50% mix back of the
-    # raw audio); kaggle is unchanged. A new profile must state its choice here.
-    expected = {"kaggle": "none", "a100": "wpe>rf_crowd>blend50"}
+    # a100 filters the recording before diarization with a high-pass at 60 Hz only (hp60, no backend);
+    # kaggle is unchanged. A new profile must state its choice here.
+    expected = {"kaggle": "none", "a100": "hp60"}
     with open(os.path.join(ROOT, "config.json"), encoding="utf-8") as fh:
         cfg = json.load(fh)
     for name, profile in cfg["environments"].items():
@@ -321,4 +321,4 @@ def test_both_profiles_carry_the_key():
             assert profile["pipeline"].get("denoise") == expected[name], name
 
 
-GOLDEN_NAMESPACE = "v1-8f1af1a315b51aaaa1ec"
+GOLDEN_NAMESPACE = "v1-4b33bbe2e2468e3d524d"   # 16 kHz pipeline rate (was v1-8f1af1a315b51aaaa1ec at 24 kHz)

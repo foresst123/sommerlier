@@ -14,7 +14,9 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from services.audio_service import PIPELINE_SAMPLE_RATE
 from utils.audio_normalize import (
+    EDGE_SAMPLES,
     MAX_GAIN,
     TARGET_RMS,
     match_splice_level,
@@ -24,7 +26,7 @@ from utils.audio_normalize import (
     safe_limit,
 )
 
-SR = 24000
+SR = PIPELINE_SAMPLE_RATE
 
 
 def _noise(dur, scale, seed=0):
@@ -141,7 +143,7 @@ def test_the_edges_decide_the_gain_not_the_whole_span():
     worst joins on the measured corpus sat inside spans holding 22-35 dB of
     internal range.
     """
-    sr = 24000
+    sr = PIPELINE_SAMPLE_RATE
     rng = np.random.default_rng(0)
 
     # Host: quiet at both ends, loud in the middle.
@@ -151,7 +153,7 @@ def test_the_edges_decide_the_gain_not_the_whole_span():
     patch = host * 0.5
 
     matched = match_splice_level(host, patch)
-    edge = slice(0, 480)
+    edge = slice(0, EDGE_SAMPLES)     # 20 ms at the pipeline rate
     ratio = (np.sqrt(np.mean(host[edge] ** 2))
              / np.sqrt(np.mean(matched[edge] ** 2)))
     assert abs(20 * np.log10(ratio)) < 1.0, "edges should line up"
@@ -159,7 +161,7 @@ def test_the_edges_decide_the_gain_not_the_whole_span():
 
 def test_a_uniform_span_is_unaffected_by_the_change():
     """With no internal dynamics the edge gain and the mean gain agree."""
-    sr = 24000
+    sr = PIPELINE_SAMPLE_RATE
     host = np.random.default_rng(1).standard_normal(sr) * 0.1
     matched = match_splice_level(host, host * 0.4)
     assert np.allclose(matched, host, rtol=0.05)
@@ -167,7 +169,7 @@ def test_a_uniform_span_is_unaffected_by_the_change():
 
 def test_a_silent_edge_falls_back_to_the_whole_span():
     """At a genuine speech onset the step is the recording, not an artifact."""
-    sr = 24000
+    sr = PIPELINE_SAMPLE_RATE
     host = np.zeros(sr)
     host[sr // 2:] = np.random.default_rng(2).standard_normal(sr // 2) * 0.1
     patch = host * 0.5
@@ -178,7 +180,7 @@ def test_a_silent_edge_falls_back_to_the_whole_span():
 
 def test_the_gain_stays_within_max_adjust():
     """A loud consonant at one edge may not set the level for everything."""
-    sr = 24000
+    sr = PIPELINE_SAMPLE_RATE
     rng = np.random.default_rng(3)
     host = rng.standard_normal(sr) * 0.5
     patch = rng.standard_normal(sr) * 0.001          # needs 500x
@@ -188,7 +190,7 @@ def test_the_gain_stays_within_max_adjust():
 
 
 def test_a_span_too_short_to_have_edges_still_returns_audio():
-    sr = 24000
+    sr = PIPELINE_SAMPLE_RATE
     host = np.random.default_rng(4).standard_normal(200) * 0.1
     out = match_splice_level(host, host * 0.5)
     assert len(out) == len(host)

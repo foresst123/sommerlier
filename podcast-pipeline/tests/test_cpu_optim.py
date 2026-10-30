@@ -13,7 +13,7 @@ import soundfile as sf
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services.audio_service import AudioService
+from services.audio_service import PIPELINE_SAMPLE_RATE, AudioService
 from utils.cpu_plan import apply_to_env, thread_plan, usable_cores
 
 SR = 24000
@@ -200,3 +200,16 @@ def test_a_segment_size_is_only_honoured_when_the_override_is_asked_for():
     for name, block in _bs_roformer_profiles().items():
         if "segment_size" in block:
             assert block.get("override_model_segment_size") is True, name
+
+
+# --- pipeline rate -------------------------------------------------------
+
+def test_pipeline_rate_is_16k_and_a_44k_source_loads_at_it(tmp_path):
+    """Everything downstream of the load (stages, caches, exports) runs at the pipeline rate."""
+    assert PIPELINE_SAMPLE_RATE == 16000
+    src = _write_wav(tmp_path / "talk44.wav", seconds=2.0, sr=44100)
+    loaded = AudioService().load_audio(str(src), target_sr=PIPELINE_SAMPLE_RATE)
+    assert loaded.sample_rate == 16000
+    assert loaded.waveform.ndim == 1 and loaded.waveform.dtype == np.float32
+    assert abs(len(loaded.waveform) - 2 * 16000) <= 2
+    assert abs(loaded.duration - 2.0) < 0.01

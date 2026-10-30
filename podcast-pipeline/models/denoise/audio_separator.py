@@ -4,7 +4,7 @@ STATUS: ANALYSIS-FIRST: changes the signal; output goes through the verification
 exported. These are music/vocal/reverb separators, not speech enhancers. None was trained on Vietnamese
 conversation; what each does to soft speech, breaths, laughs and backchannels is UNVERIFIED. Listen first.
 
-How it works: the 24 kHz mono input is upsampled to the checkpoint's 44.1 kHz (base class; the band above
+How it works: the mono input (the pipeline's 16 kHz) is upsampled to the checkpoint's 44.1 kHz (base class; the band above
 12 kHz is empty, so the model sees narrowband audio it was not trained on), duplicated to stereo, written as a
 32-bit float WAV, separated by `Separator.separate`, and the kept stem is read back, folded to mono, trimmed or
 zero-padded to the exact input length and resampled to the input rate. These models have no delay, so no

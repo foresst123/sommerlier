@@ -1031,7 +1031,8 @@ class ASRService:
         try:
             if self.logger:
                 self.logger.info(f"ASR processing {len(segments)} segments using Batched Inference")
-                self.logger.info("Note: ASR models require 16kHz audio. Resampling from base 24kHz to 16kHz internally.")
+                self.logger.info(f"Note: ASR models require 16kHz audio. Pipeline audio is "
+                                 f"{audio.sample_rate}Hz; resampled to 16kHz only if it differs.")
 
             # 1. Prepare data
             prep = self._prepare(segments, audio)

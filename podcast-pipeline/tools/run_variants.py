@@ -421,8 +421,10 @@ def _first_line(text, limit=200):
 
 
 def _has_real_filter(chain):
-    """True when the chain runs a real backend (not blend pseudo-steps, not the identity test backend)."""
-    return any(t != "identity" for t in _backend_tokens(chain))
+    """True when the chain runs a real backend or a high-pass (not blend pseudo-steps, not the identity test backend)."""
+    if any(t != "identity" for t in _backend_tokens(chain)):
+        return True
+    return any(re.match(r"^hp\d+$", t) for t in chain)      # hp60 has no backend but is a filter
 
 
 def file_verdict(chain, info, exists=True, stage_dir="01b_denoise"):

@@ -38,7 +38,7 @@ MODEL_FILE = os.path.join("models", "generator_SEMamba_time_d4.py")
 
 class ReUseBackend(DenoiseBackend):
     name = "re_use"
-    native_sr = 24000          # the pipeline's working rate; the model accepts 8-48 kHz, STFT sizes scale with it
+    native_sr = 24000          # the rate the checkpoint runs at (base.enhance resamples 16 kHz pipeline audio up and back); the model accepts 8-48 kHz
     default_chunk_s = 5.0      # upstream's long-file script uses 5 s chunks, hop 0.5
     default_overlap_s = 1.0    # unused: the worker overlaps by hop_portion
     default_delay = "auto"

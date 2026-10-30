@@ -403,6 +403,8 @@ def test_file_verdict_per_case():
     assert fv(["identity"], {"errors": [], "corr_with_input": 1.0})["verdict"] == "ok"   # test backend is exempt
     assert fv(["identity", "blend50"], {"errors": [], "corr_with_input": 1.0})["verdict"] == "ok"
     assert fv(["identity", "dfn3"], {"errors": [], "corr_with_input": 1.0})["verdict"] == "suspect_noop"
+    assert fv(["hp60"], {"errors": [], "corr_with_input": 1.0})["verdict"] == "suspect_noop"   # a high-pass that changed nothing
+    assert fv(["hp60"], {"errors": [], "corr_with_input": 0.999})["verdict"] == "ok"
     assert fv(["dfn3"], {"errors": [], "corr_with_input": None})["verdict"] == "ok"
 
 

@@ -147,7 +147,7 @@ def _config():
 
 def test_a100_filters_once_before_diarization_and_runs_no_music_step():
     a100 = _config()["a100"]
-    assert a100["pipeline"]["denoise"] == "wpe>rf_crowd>blend50"
+    assert a100["pipeline"]["denoise"] == "hp60"
     assert a100["pipeline"]["denoise_pre_separation"] == "none"
     assert a100["pipeline"]["denoise_pre_asr"] == "none"
     assert a100["steps"]["music_analysis"] is False
@@ -162,8 +162,10 @@ def test_a100_clean_chain_is_configured_and_valid():
     exports = _config()["a100"]["conversation_exports"]
     chain = exports["assistant_clean_chain"]
     # No blend on the two RoFormer steps; MP-SENet keeps 80% of its output plus 20% of what it was given
-    # (dry20, not the raw audio); hp60 last clears rumble and hum that dry20 mixes back in
-    assert chain == "rf_crowd>rf_vocals_resurrection>mpsenet_dns>dry20>hp60"
+    # (dry20, not the raw audio). The high-pass is no longer at the end: pipeline.denoise (hp60) already
+    # removed rumble and hum from the input, so nothing here adds it back.
+    assert chain == "rf_crowd>rf_vocals_resurrection>mpsenet_dns>dry20"
+    assert "hp60" not in parse_chain(chain)
     assert exports["user_clean_chain"] == chain
     tokens = parse_chain(chain)
     validate_chain_tokens(tokens)
@@ -181,7 +183,7 @@ def test_kaggle_is_unchanged_by_the_a100_switch():
 
 def test_a100_resolves_to_the_new_settings_through_main():
     args = _resolve(["--audio", "x.mp3", "--env", "a100"])
-    assert args["denoise"] == "wpe>rf_crowd>blend50"
+    assert args["denoise"] == "hp60"
     assert args["step_music_removal"] is False
     assert args["step_music_analysis"] is False
     assert args["step_cut_music"] is False

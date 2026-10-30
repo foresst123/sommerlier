@@ -24,7 +24,7 @@ Times are in after_music.wav's clock, the clock every stage output shares; use
 
 With only the checkpoint cache (no stage output), read it instead; run from
 podcast-pipeline/ so the pickles can import the segment classes. The audio is
-the cached post-music waveform (24 kHz), which is the same clock:
+the cached post-music waveform (16 kHz, the pipeline rate), which is the same clock:
 
     python tools/collect_overlap_samples.py --cache cache --out overlap_samples
 """
@@ -42,7 +42,9 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-CACHE_SR = 24000
+from services.audio_service import PIPELINE_SAMPLE_RATE  # noqa: E402
+
+CACHE_SR = PIPELINE_SAMPLE_RATE
 BINS = [("short", 0.0, 0.5), ("medium", 0.5, 2.0), ("long", 2.0, 5.0), ("xlong", 5.0, 1e9)]
 
 

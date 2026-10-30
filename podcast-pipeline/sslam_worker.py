@@ -3,7 +3,7 @@
 Line-JSON on stdio (see services/base_worker_service.py); audio and scores move as
 files, so a request stays a few bytes however long the recording is:
 
-  {"id", "cmd": "tag", "audio_path": "<x>.npy", "sample_rate": 24000}
+  {"id", "cmd": "tag", "audio_path": "<x>.npy", "sample_rate": 16000}
       -> {"id", "scores_path": "<x>_scores.npz", "fps": 2.0, "worker_seconds": 12.3}
          | {"id", "error": "..."}
 

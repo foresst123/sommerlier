@@ -5,6 +5,12 @@ import numpy as np
 
 from schemas.audio import AudioData
 
+# Sample rate of the whole pipeline: every waveform is decoded to this rate when it is
+# loaded, and every stage, cache and exported file is at this rate. 16 kHz is what the
+# ASR and VAD models take natively, so nothing downstream resamples. Changing it changes
+# every cache key (see the processed_audio namespace in pipeline_service.py).
+PIPELINE_SAMPLE_RATE = 16000
+
 # Widest correction allowed when normalizing loudness. Enough to lift a
 # quiet recording to target without amplifying a near-silent one into noise.
 MAX_GAIN_DB = 12.0
@@ -113,7 +119,7 @@ class AudioService:
         return waveform
 
     # ------------------------------------------------------------------
-    def load_audio(self, file_path: str, target_sr: int = 16000) -> AudioData:
+    def load_audio(self, file_path: str, target_sr: int = PIPELINE_SAMPLE_RATE) -> AudioData:
         """Load audio file into memory, normalize and return AudioData schema."""
         cached = self._load_cached(file_path, target_sr)
         if cached is not None:

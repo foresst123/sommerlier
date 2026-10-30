@@ -273,6 +273,41 @@ def test_hp_step_runs_in_a_chain_and_is_recorded():
     assert [s["kind"] for s in info["steps"]] == ["backend", "hp"]
 
 
+def test_a_chain_of_only_highpass_steps_is_valid():
+    validate_chain_tokens(["hp60"])
+    validate_chain_tokens(["hp60", "hp80"])
+
+
+@pytest.mark.parametrize("chain", [["blend20"], ["dry20"], ["blend20", "hp60"], ["hp60", "blend20"], ["hp60", "dry20"]])
+def test_blend_or_dry_without_a_backend_is_still_refused(chain):
+    with pytest.raises(ValueError):
+        validate_chain_tokens(chain)
+
+
+def test_hp60_chain_alone_removes_30hz_and_keeps_85hz_at_16k():
+    from schemas.audio import AudioData
+    from services.audio_service import PIPELINE_SAMPLE_RATE
+    sr = PIPELINE_SAMPLE_RATE
+    t = np.arange(sr * 3) / sr
+    tone = lambda hz: np.sin(2 * np.pi * hz * t).astype(np.float32)
+    mid_rms = lambda x: float(np.sqrt(np.mean(np.asarray(x[sr // 2:-sr // 2], dtype=np.float64) ** 2)))
+
+    def run(x):
+        data = AudioData(waveform=x.copy(), sample_rate=sr, name="tone.wav", audio_segment=None,
+                         duration=len(x) / sr)
+        info = DenoiseService().apply(data, "hp60")
+        assert info["errors"] == [] and info["chain"] == ["hp60"] and info["highpass_hz"] == 60
+        assert info["steps"] and info["steps"][0]["kind"] == "hp"      # no backend was loaded
+        return data.waveform
+
+    rumble = run(tone(30))
+    assert mid_rms(rumble) < 0.12 * mid_rms(tone(30))                  # 30 Hz is removed
+    voice = run(tone(85))
+    db = 20 * np.log10(mid_rms(voice) / mid_rms(tone(85)))
+    assert -2.4 < db < -1.5                                            # 85 Hz loses about 1.9 dB
+    assert len(voice) == len(t)
+
+
 def test_hp_step_in_apply_many():
     xs = [speech(3.0), speech(2.5)]
     outs, info = DenoiseService().apply_many(xs, SR, "half>hp60")

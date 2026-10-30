@@ -274,7 +274,7 @@ class SileroVAD:
 
             temp_audio = audio_data[start_frame:end_frame]
 
-            # resample from 24k to 16k
+            # resample from the input rate to 16k (a no-op when the pipeline already gives 16k)
             temp_audio_resampled = librosa.resample(
                 temp_audio, orig_sr=sampling_rate, target_sr=SAMPLING_RATE
             )

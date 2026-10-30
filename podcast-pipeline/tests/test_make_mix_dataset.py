@@ -11,7 +11,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
 import make_mix_dataset as mmd  # noqa: E402
 
 sf = pytest.importorskip("soundfile")
-SR = 24000
+from services.audio_service import PIPELINE_SAMPLE_RATE
+SR = PIPELINE_SAMPLE_RATE      # the cache, and so every stem, is at the pipeline rate
 
 
 def _tone(seconds, freq, amp=0.2):
