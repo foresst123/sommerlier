@@ -150,6 +150,12 @@ Nguyên tắc: **việc nào cần nhãn vàng thì chờ nhãn.** Hai cải ti�
 7. **Gán lại đoạn ngắn** về cụm gần nhất cho arm J.
 8. **Dài hạn, tốn công**: tinh chỉnh embedding trên ViYT-Diar; vòng hai TS-VAD; embedding đa tỷ lệ kiểu MSDD.
 
+**Đã viết mã, chưa kiểm chứng (arm K và quét Fb).** Arm K (`nemotron_dz_demucs`) là arm J với HT Demucs chỉ cho nhánh embedding: xác suất giữ audio gốc, embedding lấy từ `chunk_vocals.wav`. Chạy (`$AUDIO` là thư mục nguồn, `$OUT` là thư mục đầu ra):
+`python tools/diar_arms_experiment.py --audio-dir $AUDIO --samples tools/diar_arms_samples.json --out $OUT/diar_arms --only-arms K --windowed-python $NEMOTRON_PY --vbx-python $DZ_PY --demucs-python $DEMUCS_PY --python $SOM_PY`
+Quét Fb cho J và K (chỉ chạy stage 2, không chạy lại stage 1 hay Demucs; kết quả là `nemotron_dz_fb0.2`, `nemotron_dz_demucs_fb0.4`, ...):
+`python tools/diar_arms_experiment.py --audio-dir $AUDIO --samples tools/diar_arms_samples.json --out $OUT/diar_arms --only-arms J,K --fb-sweep 0.2,0.4 --windowed-python $NEMOTRON_PY --vbx-python $DZ_PY --demucs-python $DEMUCS_PY --python $SOM_PY`
+HT Demucs là bộ tách nguồn **âm nhạc** (stem giọng hát), không phải bộ khử nhiễu lời nói; nó chỉ thử trên nhánh embedding. Chưa kiểm chứng: Demucs chưa chạy trên GPU, các giá trị Fb 0.2 và 0.4 chỉ là điểm quét đầu tiên, và chưa có nhãn tay để so.
+
 Chưa giải thích được: G sụp về 1 người (nghi do 30 s và ít embedding; chưa tách nguyên nhân). Chưa xem kết quả chạy thr 0.35 và median 0.22.
 
 ## 9. Việc cần kiểm lại trước khi trích dẫn

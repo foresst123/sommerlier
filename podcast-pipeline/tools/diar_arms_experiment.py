@@ -4,7 +4,8 @@
     python tools/diar_arms_experiment.py --audio-dir SRC --samples tools/diar_arms_samples.json --out OUT/diar_arms \
         [--final OUT/final] [--gpu 6] [--env a100] [--only-arms A,C,F,G] [--fusion] [--k-min-clean 1.0] [--reuse] \
         [--windowed-piece-s 240] [--windowed-hop-s 10] [--windowed-python /path/to/nemotron/python] \
-        [--python /path/to/som/python] [--vbx-ahc-threshold 0.6] [--vbx-fa 0.07] [--vbx-fb 0.8] [--plda-dir DIR]
+        [--python /path/to/som/python] [--vbx-ahc-threshold 0.6] [--vbx-fa 0.07] [--vbx-fb 0.8] [--plda-dir DIR] \
+        [--vbx-python /path/to/dz/python] [--demucs-python /path/to/demucs/python] [--fb-sweep 0.2,0.4]
 
 Per sample (a conversation clip of about 40 s inside a long source recording):
   1. cut a 5 min chunk of the source around the clip (it starts 2 min before the clip, clamped to the file), 16 kHz mono.
@@ -34,6 +35,14 @@ Per sample (a conversation clip of about 40 s inside a long source recording):
      embedding of the whole window per slot (the ResNet gets the window and `weights` = the slot's clean frames), the
      10% clean-frame rule, VBx, a Hungarian assignment per window and the top-count reconstruction. Stage 2 should run
      with --vbx-python set to the DiariZen env. --dz-thr and --dz-median-s set the Nemotron binarisation. UNVERIFIED on GPU.
+  4g. arm K (--only-arms K, not in the default set), nemotron_dz_demucs: arm J with HT Demucs on the EMBEDDING branch
+     only (the probabilities keep the original audio). Stage 1 is not rerun: K reuses arm J's probs folder of the same
+     sample (J's stage 1 runs first when its plan.json is missing). Then tools/demucs_vocals.py (--demucs-python, default
+     --python) writes chunk_vocals.wav, the vocals stem of chunk.wav; --reuse skips it when the file exists. Stage 2 is
+     J's with --embed-audio chunk_vocals.wav. HT Demucs is a MUSIC separator. UNVERIFIED on GPU.
+  4h. --fb-sweep "0.2,0.4" (values above 0): for each selected arm J and K, stage 2 only, with --fb <value>, reusing
+     the probs (and K's vocals wav), into runs/<arm>_fb<value>. These extra arms (nemotron_dz_fb0.4, nemotron_dz_demucs_fb0.2)
+     are listed like the others. The base arms keep --vbx-fb. No P_loop: DiariZen's VBx runs with loopProb 0.
   5. every arm is cropped to the clip window and shifted to 0, written as segments_<arm>.json, and drawn in one
      lanes.html per sample (tools/make_diar_lanes_page.py). index.html links the samples with a table of
      speakers, K, segments under 1 s, speech seconds and overlap seconds per arm. No DER, no text.
@@ -52,6 +61,7 @@ Arm runs use tools/job_diar.build_cmd (main.py --stop_after diarization). CUDA_V
 import argparse
 import html
 import json
+import math
 import os
 import re
 import shutil
@@ -77,8 +87,8 @@ SHORT_S = 1.0           # segments shorter than this are counted as short
 AUDIO_EXT = (".wav", ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".mp4", ".webm")
 ARMS = {"A": "nemotron", "B": "diarizen_auto", "C": "diarizen_k", "D": "diarizen_1_k", "E": "fusion",
         "F": "nemotron_windowed", "G": "nemotron_windowed_vbx", "H": "nemotron_one_pass",
-        "I": "nemotron_dense_vbx", "J": "nemotron_dz"}
-ARM_ORDER = "ABCDEFGHIJ"
+        "I": "nemotron_dense_vbx", "J": "nemotron_dz", "K": "nemotron_dz_demucs"}
+ARM_ORDER = "ABCDEFGHIJK"
 DEFAULT_ARMS = "A,B,C,D"
 WINDOWED_PIECE_S = 240.0
 WINDOWED_HOP_S = 10.0
@@ -86,6 +96,13 @@ DENSE_WINDOW_S = 16.0       # arm I: DiariZen's window and a hop of 0.8 s, so ev
 DENSE_HOP_S = 0.8
 WINDOWED_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "windowed_nemotron_run.py")
 VBX_STAGE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "windowed_vbx_stage.py")
+DEMUCS_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "demucs_vocals.py")
+VOCALS_NAME = "chunk_vocals.wav"
+VBX_ARMS = ("G", "I", "J", "K")     # stage 2 with VBx or DiariZen steps, in the --vbx-python env
+DZ_ARMS = ("J", "K")                # stage 2 with DiariZen's own steps (--clustering dz)
+DENSE_ARMS = ("I", "J", "K")        # DiariZen-like windows: 16 s, hop 0.8 s
+FB_SWEEP_ARMS = ("J", "K")          # the arms the --fb-sweep values are run for
+STAGE2_LABEL = {"G": "VBx", "I": "VBx", "J": "DiariZen steps", "K": "DiariZen steps"}
 VBX_AHC_THRESHOLD = 0.6     # UNVERIFIED: not checked against the DiariZen config
 VBX_FA = 0.07               # UNVERIFIED
 VBX_FB = 0.8                # UNVERIFIED
@@ -353,51 +370,144 @@ def run_arm(sample_dir: Path, arm: str, values: dict, backend: str, cfg: dict, r
     return result
 
 
+def arm_key(letter: str, fb: Optional[str] = None) -> str:
+    """'J' for the base arm, 'J@0.4' for its --fb-sweep arm with Fb 0.4 (the text as printed in the arm name)."""
+    return letter if fb is None else f"{letter}@{fb}"
+
+
+def split_key(key: str) -> Tuple[str, Optional[str]]:
+    letter, _, fb = key.partition("@")
+    return letter, (fb or None)
+
+
+def arm_name(key: str) -> str:
+    """The arm's name in the output: nemotron_dz, or nemotron_dz_fb0.4 for a sweep arm."""
+    letter, fb = split_key(key)
+    return ARMS[letter] if fb is None else f"{ARMS[letter]}_fb{fb}"
+
+
+def parse_fb_sweep(text: Optional[str]) -> List[str]:
+    """'0.2,0.4' -> ['0.2', '0.4']: each value above 0, formatted with %g as it appears in the arm name."""
+    if text is None:
+        return []
+    out = []
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            raise ValueError(f"empty value in --fb-sweep {text!r}")
+        try:
+            value = float(part)
+        except ValueError:
+            raise ValueError(f"--fb-sweep value {part!r} is not a number")
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"--fb-sweep values must be above 0, got {part!r}")
+        out.append("%g" % value)
+    if len(set(out)) != len(out):
+        raise ValueError(f"--fb-sweep repeats a value: {text!r}")
+    return out
+
+
+def gpu_env(cfg: dict) -> dict:
+    return dict(os.environ, CUDA_VISIBLE_DEVICES=str(cfg["gpu"]))
+
+
+def dump_probs(arm: str, sample_dir: Path, cfg: dict, runner: Runner, skip_existing: bool) -> Path:
+    """Stage 1 of a windowed arm (Nemotron env): the per-window probabilities in runs/<arm>/probs.
+
+    With skip_existing and a plan.json already there, nothing runs.
+    """
+    run_dir = sample_dir / "runs" / ARMS[arm]
+    probs = run_dir / "probs"
+    if skip_existing and (probs / "plan.json").is_file():
+        return probs
+    run_dir.mkdir(parents=True, exist_ok=True)
+    dense = arm in DENSE_ARMS
+    window_s = cfg["dense_window_s"] if dense else None
+    hop_s = cfg["dense_hop_s"] if dense else cfg["windowed_hop_s"]
+    cmd1 = [cfg["windowed_python"], WINDOWED_SCRIPT, "--audio", str(sample_dir / "chunk.wav"),
+            "--out", str(run_dir / "unused.json"), "--dump-probs", str(probs),
+            "--piece-s", str(cfg["windowed_piece_s"]), "--hop-s", str(hop_s),
+            "--config", cfg["config"], "--env", cfg["env"]]
+    if window_s is not None:
+        cmd1 += ["--window-s", str(window_s)]
+    code = runner(cmd1, gpu_env(cfg))
+    if code != 0 or not (probs / "plan.json").is_file():
+        raise RuntimeError(f"arm {ARMS[arm]} stage 1 (probabilities) failed (exit {code}), see {run_dir}")
+    return probs
+
+
+def ensure_vocals(sample_dir: Path, cfg: dict, runner: Runner, skip_existing: bool) -> Path:
+    """Arm K's embedding input: chunk_vocals.wav, the HT Demucs vocals stem of chunk.wav (tools/demucs_vocals.py)."""
+    wav = sample_dir / VOCALS_NAME
+    if skip_existing and wav.is_file():
+        return wav
+    cmd = [cfg["demucs_python"], DEMUCS_SCRIPT, "--in", str(sample_dir / "chunk.wav"), "--out", str(wav)]
+    code = runner(cmd, gpu_env(cfg))
+    if code != 0 or not wav.is_file():
+        raise RuntimeError(f"arm {ARMS['K']} demucs step failed (exit {code}), see {wav}")
+    return wav
+
+
+def stage2_cmd(arm: str, sample_dir: Path, probs: Path, result: Path, cfg: dict, fb: str,
+               embed_audio: Optional[Path] = None) -> List[str]:
+    """The stage 2 command of a windowed arm. Without embed_audio it is the same command as before arm K existed."""
+    python = (cfg.get("vbx_python") or cfg["python"]) if arm in VBX_ARMS else cfg["python"]
+    cmd = [python, VBX_STAGE_SCRIPT, "--audio", str(sample_dir / "chunk.wav"), "--probs-dir", str(probs),
+           "--out", str(result), "--min-speakers", str(cfg["windowed_min_speakers"])]
+    if arm in VBX_ARMS:
+        if arm in DZ_ARMS:
+            cmd += ["--clustering", "dz", "--thr", str(cfg["dz_thr"]), "--median-s", str(cfg["dz_median_s"])]
+        cmd += ["--ahc-threshold", str(cfg["vbx_ahc_threshold"]), "--fa", str(cfg["vbx_fa"]), "--fb", fb]
+        if cfg["plda_dir"]:
+            cmd += ["--plda-dir", str(cfg["plda_dir"])]
+    else:
+        cmd += ["--clustering", "ahc", "--embedder", "wespeaker"]
+    if embed_audio is not None:
+        cmd += ["--embed-audio", str(embed_audio)]
+    return cmd
+
+
 def run_windowed_arm(arm: str, sample_dir: Path, cfg: dict, runner: Runner) -> Path:
-    """Arms F, G, I and J on sample_dir/chunk.wav, in two steps.
+    """Arms F, G, I, J and K on sample_dir/chunk.wav, in two steps.
 
     Stage 1 (Nemotron env) dumps the per-window probabilities. Stage 2 (--python, the som env) embeds on the GPU
     and clusters: arm F with the repo's WeSpeaker ResNet-293 and constrained AHC, arm G with pyannote's ResNet34
     and DiariZen's VBx. The Nemotron env cannot run ONNX Runtime on the GPU (it needs CUDA 13), so F no longer
-    embeds there.
+    embeds there. Arm K has no stage 1 of its own: it reuses arm J's probs, runs Demucs for the embedding input,
+    and then stage 2 with --embed-audio.
     """
-    label = {"G": "VBx", "I": "VBx", "J": "DiariZen steps"}.get(arm, "AHC")
-    dense = arm in ("I", "J")                                    # arms I and J: DiariZen-like dense windows
-    window_s = cfg["dense_window_s"] if dense else None
-    hop_s = cfg["dense_hop_s"] if dense else cfg["windowed_hop_s"]
-    stage2_python = (cfg.get("vbx_python") or cfg["python"]) if arm in ("G", "I", "J") else cfg["python"]
     run_dir = sample_dir / "runs" / ARMS[arm]
-    probs = run_dir / "probs"
     result = run_dir / "out" / "segments.json"
     if cfg["reuse"] and result.is_file():
         return result
     run_dir.mkdir(parents=True, exist_ok=True)
-    chunk = str(sample_dir / "chunk.wav")
-    env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(cfg["gpu"]))
-    if not (cfg["reuse"] and (probs / "plan.json").is_file()):
-        cmd1 = [cfg["windowed_python"], WINDOWED_SCRIPT, "--audio", chunk,
-                "--out", str(run_dir / "unused.json"), "--dump-probs", str(probs),
-                "--piece-s", str(cfg["windowed_piece_s"]), "--hop-s", str(hop_s),
-                "--config", cfg["config"], "--env", cfg["env"]]
-        if window_s is not None:
-            cmd1 += ["--window-s", str(window_s)]
-        code = runner(cmd1, env)
-        if code != 0 or not (probs / "plan.json").is_file():
-            raise RuntimeError(f"arm {ARMS[arm]} stage 1 (probabilities) failed (exit {code}), see {run_dir}")
-    cmd2 = [stage2_python, VBX_STAGE_SCRIPT, "--audio", chunk, "--probs-dir", str(probs), "--out", str(result),
-            "--min-speakers", str(cfg["windowed_min_speakers"])]
-    if arm in ("G", "I", "J"):
-        if arm == "J":
-            cmd2 += ["--clustering", "dz", "--thr", str(cfg["dz_thr"]), "--median-s", str(cfg["dz_median_s"])]
-        cmd2 += ["--ahc-threshold", str(cfg["vbx_ahc_threshold"]), "--fa", str(cfg["vbx_fa"]),
-                 "--fb", str(cfg["vbx_fb"])]
-        if cfg["plda_dir"]:
-            cmd2 += ["--plda-dir", str(cfg["plda_dir"])]
+    if arm == "K":
+        probs = dump_probs("J", sample_dir, cfg, runner, skip_existing=True)
+        embed_audio = ensure_vocals(sample_dir, cfg, runner, skip_existing=cfg["reuse"])
     else:
-        cmd2 += ["--clustering", "ahc", "--embedder", "wespeaker"]
-    code = runner(cmd2, env)
+        probs = dump_probs(arm, sample_dir, cfg, runner, skip_existing=cfg["reuse"])
+        embed_audio = None
+    cmd2 = stage2_cmd(arm, sample_dir, probs, result, cfg, fb=str(cfg["vbx_fb"]), embed_audio=embed_audio)
+    code = runner(cmd2, gpu_env(cfg))
     if code != 0 or not result.is_file():
-        raise RuntimeError(f"arm {ARMS[arm]} stage 2 ({label}) failed (exit {code}), see {run_dir}")
+        raise RuntimeError(f"arm {ARMS[arm]} stage 2 ({STAGE2_LABEL.get(arm, 'AHC')}) failed (exit {code}), see {run_dir}")
+    return result
+
+
+def run_fb_arm(arm: str, fb: str, sample_dir: Path, cfg: dict, runner: Runner) -> Path:
+    """A --fb-sweep arm: stage 2 only, with --fb <fb>, on arm J's probs (and K's vocals). Never reruns stage 1 or Demucs."""
+    name = arm_name(arm_key(arm, fb))
+    run_dir = sample_dir / "runs" / name
+    result = run_dir / "out" / "segments.json"
+    if cfg["reuse"] and result.is_file():
+        return result
+    run_dir.mkdir(parents=True, exist_ok=True)
+    probs = dump_probs("J", sample_dir, cfg, runner, skip_existing=True)
+    embed_audio = ensure_vocals(sample_dir, cfg, runner, skip_existing=True) if arm == "K" else None
+    cmd2 = stage2_cmd(arm, sample_dir, probs, result, cfg, fb=fb, embed_audio=embed_audio)
+    code = runner(cmd2, gpu_env(cfg))
+    if code != 0 or not result.is_file():
+        raise RuntimeError(f"arm {name} stage 2 ({STAGE2_LABEL[arm]}) failed (exit {code}), see {run_dir}")
     return result
 
 
@@ -417,38 +527,38 @@ def process_sample(index: int, sample: dict, cfg: dict, runner: Runner, log: Cal
     segs: Dict[str, List[dict]] = {}
     errors: Dict[str, str] = {}
     k: Optional[int] = None
-    for arm in ARM_ORDER:
-        if arm not in cfg["run"]:
-            continue
+    for key in cfg["keys"]:              # base arms in letter order, each followed by its --fb-sweep arms
+        arm, fb = split_key(key)
         try:
             if arm == "E":
                 if "A" not in segs or "B" not in segs:
                     raise RuntimeError("fusion needs arms A and B")
-                segs["E"] = fuse(segs["B"], segs["A"])
+                segs[key] = fuse(segs["B"], segs["A"])
                 continue
             if arm == "F":                      # windowed Nemotron: no K needed
-                segs["F"] = crop(read_rows(str(run_windowed_arm("F", sdir, cfg, runner))), rs, re_)
+                segs[key] = crop(read_rows(str(run_windowed_arm("F", sdir, cfg, runner))), rs, re_)
                 continue
-            if arm in ("G", "I", "J"):          # windowed Nemotron + VBx (G sparse, I dense) or DiariZen steps (J)
-                segs[arm] = crop(read_rows(str(run_windowed_arm(arm, sdir, cfg, runner))), rs, re_)
+            if arm in VBX_ARMS:                 # windowed Nemotron + VBx (G sparse, I dense), DiariZen steps (J, K)
+                path = run_fb_arm(arm, fb, sdir, cfg, runner) if fb else run_windowed_arm(arm, sdir, cfg, runner)
+                segs[key] = crop(read_rows(str(path)), rs, re_)
                 continue
             backend, values = arm_settings(arm, k)
             path = run_arm(sdir, arm, values, backend, cfg, runner)
-            segs[arm] = crop(read_rows(str(path)), rs, re_)
+            segs[key] = crop(read_rows(str(path)), rs, re_)
             if arm == "A":
                 k = estimate_k(segs["A"], cfg["k_min_clean"])
         except Exception as exc:  # the other arms still run
-            errors[arm] = str(exc)
-            log(f"  arm {arm}: {exc}")
+            errors[key] = str(exc)
+            log(f"  arm {arm_name(key)}: {exc}")
     if k is not None:
         log(f"  K = {k} (from A, k_min_clean {cfg['k_min_clean']})")
 
-    for arm in ARM_ORDER:
-        if arm in segs:
-            with open(sdir / f"segments_{ARMS[arm]}.json", "w", encoding="utf-8") as fh:
-                json.dump({"segments": segs[arm]}, fh, ensure_ascii=False, indent=1)
+    for key in cfg["keys"]:
+        if key in segs:
+            with open(sdir / f"segments_{arm_name(key)}.json", "w", encoding="utf-8") as fh:
+                json.dump({"segments": segs[key]}, fh, ensure_ascii=False, indent=1)
     lanes = None
-    diars = [(ARMS[a], str(sdir / f"segments_{ARMS[a]}.json")) for a in ARM_ORDER if a in segs]
+    diars = [(arm_name(a), str(sdir / f"segments_{arm_name(a)}.json")) for a in cfg["keys"] if a in segs]
     if diars:
         data = lanes_build(str(clip), diars, str(sdir / "lanes.html"), audio_url="clip.wav")
         if data["variants"][0]["peaks"] is None:
@@ -481,7 +591,7 @@ def write_index(out: Path, summaries: List[dict], arms: Sequence[str]) -> Path:
             else:
                 tail = f'<td>{s["k"] if s["k"] is not None else "-"}</td><td colspan="4">-</td>' \
                        f'<td>{_cell(s["errors"].get(arm, "not run"))}</td>'
-            rows.append(f"<tr><td>{name}</td><td>{arm} {ARMS[arm]}</td>{tail}</tr>")
+            rows.append(f"<tr><td>{name}</td><td>{split_key(arm)[0]} {arm_name(arm)}</td>{tail}</tr>")
     body = "\n".join(rows)
     page = f"""<!doctype html>
 <html lang="vi"><head><meta charset="utf-8">
@@ -529,9 +639,10 @@ def main(argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) 
     ap.add_argument("--gpu", default="0", help="physical GPU id, set as CUDA_VISIBLE_DEVICES")
     ap.add_argument("--env", default="a100", help="environment profile in config.json")
     ap.add_argument("--only-arms", default=DEFAULT_ARMS,
-                    help="comma list of A,B,C,D,F,G,H,I,J (E needs --fusion; F is the windowed Nemotron arm, "
+                    help="comma list of A,B,C,D,F,G,H,I,J,K (E needs --fusion; F is the windowed Nemotron arm, "
                          "G the same windows with VBx clustering, H Nemotron in one pass over the chunk, "
-                         "I dense windows like DiariZen with VBx, J DiariZen's own pipeline steps)")
+                         "I dense windows like DiariZen with VBx, J DiariZen's own pipeline steps, K J with "
+                         "Demucs vocals for the embeddings)")
     ap.add_argument("--fusion", action="store_true", help="also build arm E")
     ap.add_argument("--k-min-clean", type=float, default=1.0, help="clean seconds for a speaker to count toward K")
     ap.add_argument("--reuse", action="store_true", help="skip arms whose segments.json already exists")
@@ -551,6 +662,11 @@ def main(argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) 
     ap.add_argument("--vbx-python",
                     help="python of stage 2 for the VBx arms G, I and J; the DiariZen env gives arm J DiariZen's own "
                          "pyannote 3.1.1 (default: --python)")
+    ap.add_argument("--demucs-python",
+                    help="arm K: python with the demucs package (HT Demucs, tools/demucs_vocals.py) (default: --python)")
+    ap.add_argument("--fb-sweep",
+                    help="comma list of VBx Fb values above 0 (e.g. 0.2,0.4): for each selected arm J and K, run "
+                         "stage 2 only with that --fb, into runs/<arm>_fb<value>")
     ap.add_argument("--dz-thr", type=float, default=0.5, help="arm J: slot probability threshold")
     ap.add_argument("--dz-median-s", type=float, default=0.22,
                     help="arm J: median filter of the binarised slots in seconds (DiariZen: 11 frames of about 20 ms); "
@@ -565,6 +681,12 @@ def main(argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) 
     letters = {x.strip().upper() for x in a.only_arms.split(",") if x.strip()}
     if letters - set(ARM_ORDER):
         ap.error(f"unknown arms in --only-arms: {sorted(letters - set(ARM_ORDER))}")
+    try:
+        fb_values = parse_fb_sweep(a.fb_sweep)
+    except ValueError as exc:
+        ap.error(str(exc))
+    if a.fb_sweep is not None and not letters & set(FB_SWEEP_ARMS):
+        ap.error("--fb-sweep needs arm J or K in --only-arms")
     if a.fusion:
         letters.add("E")
     run = set(letters)
@@ -572,18 +694,24 @@ def main(argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) 
         run.add("A")            # K comes from arm A
     if "E" in run:
         run.add("B")            # fusion boundaries come from arm B
-    arms = [x for x in ARM_ORDER if x in run]
+    keys = []                   # base arms in letter order, each followed by its --fb-sweep arms
+    for letter in ARM_ORDER:
+        if letter in run:
+            keys.append(arm_key(letter))
+            if letter in FB_SWEEP_ARMS:
+                keys += [arm_key(letter, fb) for fb in fb_values]
     windowed_python = None
-    if run & {"F", "G", "I", "J"}:
+    if run & {"F", "G", "I", "J", "K"}:
         windowed_python = a.windowed_python or resolve_worker_python("nemotron")
 
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     cfg = {"audio_dir": a.audio_dir, "final": a.final, "out": str(out), "gpu": a.gpu, "env": a.env,
-           "run": run, "k_min_clean": a.k_min_clean, "reuse": a.reuse, "config": a.config, "python": a.python,
+           "run": run, "keys": keys, "k_min_clean": a.k_min_clean, "reuse": a.reuse, "config": a.config,
+           "python": a.python, "demucs_python": a.demucs_python or a.python,
            "windowed_python": windowed_python, "windowed_piece_s": a.windowed_piece_s,
-           "windowed_hop_s": a.windowed_hop_s, "dense_window_s": a.dense_window_s, "dense_hop_s": a.dense_hop_s, "vbx_python": a.vbx_python,
-           "dz_thr": a.dz_thr, "dz_median_s": a.dz_median_s,
+           "windowed_hop_s": a.windowed_hop_s, "dense_window_s": a.dense_window_s, "dense_hop_s": a.dense_hop_s,
+           "vbx_python": a.vbx_python, "dz_thr": a.dz_thr, "dz_median_s": a.dz_median_s,
            "windowed_min_speakers": a.windowed_min_speakers, "vbx_ahc_threshold": a.vbx_ahc_threshold, "vbx_fa": a.vbx_fa,
            "vbx_fb": a.vbx_fb, "plda_dir": a.plda_dir}
     summaries = []
@@ -595,7 +723,7 @@ def main(argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) 
                        "errors": {}}
             print(f"{sample.get('name')}: error: {exc}", file=sys.stderr)
         summaries.append(summary)
-    index = write_index(out, summaries, arms)
+    index = write_index(out, summaries, keys)
     print(f"-> {index}")
     return 0
 

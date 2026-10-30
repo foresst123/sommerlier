@@ -4,7 +4,11 @@
     <som python> tools/windowed_vbx_stage.py --audio chunk.wav --probs-dir DIR --out segments.json \
         [--clustering vbx|ahc] [--embedder pyannote|wespeaker] [--max-embed-s 6] \
         [--plda-dir DIR] [--embedding-model pyannote/wespeaker-voxceleb-resnet34-LM] [--ahc-threshold 0.6] \
-        [--fa 0.07] [--fb 0.8] [--lda-dim 128] [--max-iters 20] [--init-smoothing 7.0] [--device cuda:0]
+        [--fa 0.07] [--fb 0.8] [--lda-dim 128] [--max-iters 20] [--init-smoothing 7.0] [--device cuda:0] \
+        [--embed-audio VOCALS.wav]
+
+--embed-audio (arm K) is the waveform the embedder cuts its windows from: a Demucs vocals stem of --audio with the
+same sample rate and sample count. The probabilities and masks still come from --audio. Without it nothing changes.
 
 Arm J is --clustering dz: DiariZen's own pipeline steps (utils/dz_pipeline.py) with masked embeddings of the whole
 window, a per-frame speaker count and top-k reconstruction. Run it with the python of the DiariZen env, which has
@@ -188,6 +192,28 @@ def piece_key(piece) -> tuple[float, float]:
     return (round(piece.audio_start, 6), round(piece.audio_end, 6))
 
 
+def embedder_waveform(audio_wave, audio_sr: int, embed_wave, embed_sr: int):
+    """The waveform the embedder cuts its windows from: --audio when --embed-audio is not given, else that file.
+
+    An --embed-audio file must have the sample rate and the exact number of samples of --audio, so every frame of
+    the probabilities still lines up with it (arm K: the same chunk, its vocals stem).
+    """
+    if embed_wave is None:
+        return audio_wave
+    if int(embed_sr) != int(audio_sr):
+        raise ValueError(f"--embed-audio is {embed_sr} Hz, --audio is {audio_sr} Hz: they must match")
+    if len(embed_wave) != len(audio_wave):
+        raise ValueError(f"--embed-audio has {len(embed_wave)} samples, --audio has {len(audio_wave)}: "
+                         "they must be the same length so the frames line up")
+    return embed_wave
+
+
+def crop_for_embedder(wave, piece_audio_start: float, span) -> np.ndarray:
+    """The samples of span (s, e), seconds from the piece's start, as the embedder gets them."""
+    s, e = span
+    return wave[int(round((piece_audio_start + s) * SR)): int(round((piece_audio_start + e) * SR))]
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--audio", required=True, help="16 kHz mono WAV, the same chunk stage 1 read")
@@ -221,6 +247,9 @@ def main(argv=None):
     ap.add_argument("--max-iters", type=int, default=20)
     ap.add_argument("--init-smoothing", type=float, default=7.0)
     ap.add_argument("--device", help="cuda:0 or cpu (default: cuda:0 when available)")
+    ap.add_argument("--embed-audio", default=None,
+                    help="WAV the embedder cuts its windows from (arm K: the Demucs vocals of --audio). Same sample "
+                         "rate and sample count as --audio. Probabilities, masks and timing still use --audio.")
     a = ap.parse_args(argv)
 
     import soundfile as sf
@@ -284,9 +313,16 @@ def main(argv=None):
     duration = len(wave) / float(SR)
     if abs(duration - float(plan["duration"])) > 0.05:
         raise SystemExit(f"audio is {duration:.2f} s but the probabilities were made for {plan['duration']:.2f} s")
-
-    def idx(t):
-        return int(round(t * SR))
+    embed_wave = wave
+    if a.embed_audio:
+        ew, esr = sf.read(a.embed_audio, dtype="float32", always_2d=False)
+        if getattr(ew, "ndim", 1) == 2:
+            ew = ew.mean(axis=1)
+        try:
+            embed_wave = embedder_waveform(wave, sr, ew, esr)
+        except ValueError as exc:
+            raise SystemExit(str(exc))
+        params["embed_audio"] = a.embed_audio
 
     def make_prob_fn(piece):
         table = tables[piece_key(piece)]
@@ -306,7 +342,7 @@ def main(argv=None):
                 print(json.dumps({"status": "embedding", "embeddings": progress["crops"],
                                   "failed": masked_failed["n"],
                                   "seconds": round(time.time() - progress["t0"], 1)}), flush=True)
-            return masked_embed(wave[idx(piece.audio_start + span[0]): idx(piece.audio_start + span[1])], mask)
+            return masked_embed(crop_for_embedder(embed_wave, piece.audio_start, span), mask)
         return embed_fn
 
     def make_embed_fn(piece):
@@ -314,7 +350,7 @@ def main(argv=None):
             rows = []
             for s, e in spans:
                 try:
-                    rows.append(embed_clip(wave[idx(piece.audio_start + s): idx(piece.audio_start + e)]))
+                    rows.append(embed_clip(crop_for_embedder(embed_wave, piece.audio_start, (s, e))))
                 except ValueError:                       # the embedder refuses this crop; run_piece drops its row
                     rows.append(None)
                     progress["failed"] += 1

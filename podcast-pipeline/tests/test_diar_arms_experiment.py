@@ -431,3 +431,183 @@ def test_arm_j_runs_the_diarizen_steps_in_the_diarizen_env(tmp_path):
             "--windowed-python", sys.executable, "--python", "/som/python", "--vbx-python", "/dz/python"],
            runner=fake_f)
     assert fake_f.calls[1][0] == "/som/python"
+
+
+class FakeDemucs(FakeWindowedVbx):
+    """The two windowed stages as FakeWindowedVbx; the demucs step writes its --out wav (fail_demucs makes it exit 1)."""
+
+    def __init__(self, fail_demucs=False):
+        super().__init__()
+        self.fail_demucs = fail_demucs
+
+    def __call__(self, cmd, env):
+        if X.DEMUCS_SCRIPT in cmd:
+            self.calls.append(cmd)
+            if self.fail_demucs:
+                return 1
+            sf.write(cmd[cmd.index("--out") + 1], np.zeros(1600, dtype=np.float32), 16000)
+            return 0
+        return super().__call__(cmd, env)
+
+
+def _windowed_args(samples_path, src, out, arms, *extra):
+    return ["--audio-dir", str(src), "--samples", str(samples_path), "--out", str(out), "--only-arms", arms,
+            "--windowed-python", sys.executable, "--python", sys.executable, *extra]
+
+
+def _stage2_out(cmd):
+    return Path(cmd[cmd.index("--out") + 1]).as_posix()
+
+
+def test_arm_k_is_listed_and_not_a_default_arm():
+    assert X.ARMS["K"] == "nemotron_dz_demucs" and "K" in X.ARM_ORDER
+    assert "K" not in X.DEFAULT_ARMS.split(",")
+
+
+def test_arm_k_runs_stage_one_then_demucs_then_stage_two_with_embed_audio(tmp_path):
+    src, sp = _make_samples(tmp_path)
+    out = tmp_path / "out"
+    fake = FakeDemucs()
+    rc = X.main(_windowed_args(sp, src, out, "K", "--demucs-python", "/demucs/python", "--vbx-python", "/dz/python",
+                               "--dz-thr", "0.4", "--dz-median-s", "0.3"), runner=fake)
+    assert rc == 0
+    assert len(fake.calls) == 6                                    # per sample: stage 1, demucs, stage 2
+    for dump, demucs, stage2 in (fake.calls[0:3], fake.calls[3:6]):
+        assert dump[1] == X.WINDOWED_SCRIPT and dump[dump.index("--dump-probs") + 1].endswith("runs/nemotron_dz/probs")
+        assert demucs[0] == "/demucs/python" and demucs[1] == X.DEMUCS_SCRIPT
+        assert demucs[demucs.index("--in") + 1].endswith("chunk.wav")
+        vocals = demucs[demucs.index("--out") + 1]
+        assert vocals.endswith("chunk_vocals.wav")
+        assert stage2[0] == "/dz/python" and stage2[1] == X.VBX_STAGE_SCRIPT
+        assert stage2[stage2.index("--probs-dir") + 1] == dump[dump.index("--dump-probs") + 1]
+        assert stage2[stage2.index("--embed-audio") + 1] == vocals
+        assert stage2[stage2.index("--clustering") + 1] == "dz"
+        assert stage2[stage2.index("--thr") + 1] == "0.4" and stage2[stage2.index("--median-s") + 1] == "0.3"
+        assert stage2[stage2.index("--fb") + 1] == "0.8"                 # the base arm keeps --vbx-fb
+        assert _stage2_out(stage2).endswith("runs/nemotron_dz_demucs/out/segments.json")
+    sdir = sorted(p for p in out.iterdir() if p.is_dir())[0]
+    assert (sdir / "segments_nemotron_dz_demucs.json").is_file()
+    assert not (sdir / "segments_nemotron_dz.json").exists()       # arm J did not run
+    assert "nemotron_dz_demucs" in (out / "index.html").read_text(encoding="utf-8")
+
+
+def test_arm_j_stage_two_has_no_embed_audio(tmp_path):
+    src, sp = _make_samples(tmp_path)
+    fake = FakeWindowedVbx()
+    X.main(_windowed_args(sp, src, tmp_path / "out", "J"), runner=fake)
+    stage2 = fake.calls[1]
+    assert "--embed-audio" not in stage2 and stage2[stage2.index("--clustering") + 1] == "dz"
+
+
+def test_arm_k_reuses_arm_j_probs_and_skips_stage_one_when_they_exist(tmp_path):
+    src, sp = _make_samples(tmp_path)
+    out = tmp_path / "out"
+    for name in ("01_First_one", "02_Second_one"):                  # arm J's probs of each sample, from an earlier run
+        probs = out / name / "runs" / "nemotron_dz" / "probs"
+        probs.mkdir(parents=True)
+        (probs / "plan.json").write_text(json.dumps({"duration": 30.0, "frame_s": 0.08, "pieces": []}), encoding="utf-8")
+    fake = FakeDemucs()
+    assert X.main(_windowed_args(sp, src, out, "K"), runner=fake) == 0
+    assert not any(X.WINDOWED_SCRIPT in c for c in fake.calls)     # no stage 1
+    assert [X.DEMUCS_SCRIPT in c for c in fake.calls] == [True, False, True, False]
+
+
+def test_demucs_wav_is_reused_with_reuse_and_rebuilt_without(tmp_path):
+    src, sp = _make_samples(tmp_path)
+    out = tmp_path / "out"
+    first = FakeDemucs()
+    X.main(_windowed_args(sp, src, out, "K"), runner=first)
+    assert sum(X.DEMUCS_SCRIPT in c for c in first.calls) == 2      # one per sample
+    for seg in out.glob("*/runs/nemotron_dz_demucs/out/segments.json"):
+        seg.unlink()                                               # K's result is gone, the vocals wav is not
+    again = FakeDemucs()
+    assert X.main(_windowed_args(sp, src, out, "K", "--reuse"), runner=again) == 0
+    assert not any(X.DEMUCS_SCRIPT in c for c in again.calls)      # reuse: no demucs
+    assert not any(X.WINDOWED_SCRIPT in c for c in again.calls)    # and no stage 1
+    assert sum(X.VBX_STAGE_SCRIPT in c for c in again.calls) == 2
+    plain = FakeDemucs()
+    X.main(_windowed_args(sp, src, out, "K"), runner=plain)        # without reuse the step runs again
+    assert sum(X.DEMUCS_SCRIPT in c for c in plain.calls) == 2
+
+
+def test_demucs_failure_is_recorded_and_stage_two_does_not_run(tmp_path):
+    src, sp = _make_samples(tmp_path)
+    out = tmp_path / "out"
+    fake = FakeDemucs(fail_demucs=True)
+    assert X.main(_windowed_args(sp, src, out, "J,K"), runner=fake) == 0
+    index = (out / "index.html").read_text(encoding="utf-8")
+    assert "arm nemotron_dz_demucs demucs step failed (exit 1)" in index
+    assert not any(X.VBX_STAGE_SCRIPT in c and "runs/nemotron_dz_demucs" in " ".join(c) for c in fake.calls)
+    sdir = sorted(p for p in out.iterdir() if p.is_dir())[0]
+    assert (sdir / "segments_nemotron_dz.json").is_file()          # arm J still ran
+
+
+def test_demucs_python_defaults_to_python(tmp_path):
+    src, sp = _make_samples(tmp_path)
+    fake = FakeDemucs()
+    X.main(_windowed_args(sp, src, tmp_path / "out", "K", "--python", "/som/python"), runner=fake)
+    demucs = next(c for c in fake.calls if X.DEMUCS_SCRIPT in c)
+    assert demucs[0] == "/som/python"
+    assert next(c for c in fake.calls if X.VBX_STAGE_SCRIPT in c)[0] == "/som/python"
+
+
+def test_fb_sweep_adds_arms_that_reuse_probs_and_vocals(tmp_path):
+    src, sp = _make_samples(tmp_path)
+    out = tmp_path / "out"
+    fake = FakeDemucs()
+    rc = X.main(_windowed_args(sp, src, out, "J,K", "--fb-sweep", "0.2,0.4"), runner=fake)
+    assert rc == 0
+    per_sample = len(fake.calls) // 2
+    assert per_sample == 8                       # stage 1, J, J@0.2, J@0.4, demucs, K, K@0.2, K@0.4
+    assert sum(X.WINDOWED_SCRIPT in c for c in fake.calls) == 2    # stage 1 once per sample, never for the sweep
+    assert sum(X.DEMUCS_SCRIPT in c for c in fake.calls) == 2      # demucs once per sample, never for the sweep
+    calls = fake.calls[0:per_sample]
+    stage2 = [c for c in calls if X.VBX_STAGE_SCRIPT in c]
+    expected = [("0.8", "runs/nemotron_dz/out/"), ("0.2", "runs/nemotron_dz_fb0.2/out/"),
+                ("0.4", "runs/nemotron_dz_fb0.4/out/"), ("0.8", "runs/nemotron_dz_demucs/out/"),
+                ("0.2", "runs/nemotron_dz_demucs_fb0.2/out/"), ("0.4", "runs/nemotron_dz_demucs_fb0.4/out/")]
+    assert len(stage2) == len(expected)
+    for cmd, (fb, where) in zip(stage2, expected):
+        assert cmd[cmd.index("--fb") + 1] == fb
+        assert where in _stage2_out(cmd)
+        assert cmd[cmd.index("--clustering") + 1] == "dz"
+        assert ("--embed-audio" in cmd) == ("demucs" in where)     # only the K arms embed the vocals
+    sdir = sorted(p for p in out.iterdir() if p.is_dir())[0]
+    for name in ("nemotron_dz", "nemotron_dz_fb0.2", "nemotron_dz_fb0.4", "nemotron_dz_demucs",
+                 "nemotron_dz_demucs_fb0.2", "nemotron_dz_demucs_fb0.4"):
+        assert (sdir / f"segments_{name}.json").is_file(), name
+    index = (out / "index.html").read_text(encoding="utf-8")
+    assert "J nemotron_dz_fb0.4" in index and "K nemotron_dz_demucs_fb0.2" in index
+
+
+def test_fb_sweep_for_j_alone_needs_no_demucs(tmp_path):
+    src, sp = _make_samples(tmp_path)
+    fake = FakeDemucs()
+    X.main(_windowed_args(sp, src, tmp_path / "out", "J", "--fb-sweep", "0.6"), runner=fake)
+    assert not any(X.DEMUCS_SCRIPT in c for c in fake.calls)
+    assert sum(X.VBX_STAGE_SCRIPT in c for c in fake.calls) == 4  # J and J@0.6, two samples
+
+
+@pytest.mark.parametrize("bad", ["0", "-0.4", "0.2,0", "abc", "0.2,,0.4", "nan", "0.2,0.2", " "])
+def test_fb_sweep_refuses_bad_values_before_anything_runs(tmp_path, bad):
+    src, sp = _make_samples(tmp_path)
+    fake = FakeDemucs()
+    with pytest.raises(SystemExit):
+        X.main(_windowed_args(sp, src, tmp_path / "out", "J,K", "--fb-sweep", bad), runner=fake)
+    assert fake.calls == []
+
+
+def test_fb_sweep_needs_arm_j_or_k(tmp_path):
+    src, sp = _make_samples(tmp_path)
+    fake = FakeDemucs()
+    with pytest.raises(SystemExit):
+        X.main(_windowed_args(sp, src, tmp_path / "out", "A", "--fb-sweep", "0.4"), runner=fake)
+    assert fake.calls == []
+
+
+def test_parse_fb_sweep_and_arm_names():
+    assert X.parse_fb_sweep("0.2, 0.4") == ["0.2", "0.4"]
+    assert X.parse_fb_sweep(None) == []
+    assert X.arm_name("J") == "nemotron_dz" and X.arm_name("J@0.4") == "nemotron_dz_fb0.4"
+    assert X.arm_name("K@0.2") == "nemotron_dz_demucs_fb0.2"
+    assert X.split_key("K@0.2") == ("K", "0.2") and X.split_key("A") == ("A", None)

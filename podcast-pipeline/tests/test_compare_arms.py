@@ -105,3 +105,18 @@ def test_hand_labels_are_a_reference_with_their_own_tolerance_and_ignored_region
     assert C.main([str(tmp_path), "--ref", "labels"]) == 0
     assert "your hand labels" in capsys.readouterr().out
     assert C.main([str(tmp_path / "02_unlabelled"), "--ref", "labels"]) == 1
+
+
+def test_fb_sweep_arms_are_raw_and_get_the_postprocess(tmp_path):
+    assert C.is_raw_arm("nemotron_dz_demucs") and C.is_raw_arm("nemotron_dz_fb0.4")
+    assert C.is_raw_arm("nemotron_dz_demucs_fb0.2")
+    assert not C.is_raw_arm("nemotron") and not C.is_raw_arm("diarizen_auto")
+    d = tmp_path / "01_a"
+    d.mkdir()
+    (d / "segments_diarizen_auto.json").write_text(json.dumps({"segments": REF}), encoding="utf-8")
+    (d / "segments_nemotron_dz_fb0.4.json").write_text(
+        json.dumps({"segments": [seg(0, 2, "x"), seg(2.3, 4, "x")]}), encoding="utf-8")
+    plain = {r["arm"]: r for r in C.run(str(tmp_path), "diarizen_auto", None, 0.0)}
+    merged = {r["arm"]: r for r in C.run(str(tmp_path), "diarizen_auto", None, 0.0, postprocess=True)}
+    assert plain["nemotron_dz_fb0.4"]["arm_s"] == pytest.approx(3.7)   # the 0.3 s gap is not filled
+    assert merged["nemotron_dz_fb0.4"]["arm_s"] == pytest.approx(4.0)   # merged like the pipeline would

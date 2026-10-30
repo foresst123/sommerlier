@@ -39,7 +39,14 @@ from scipy.optimize import linear_sum_assignment
 STEP = 0.01
 # Arms whose segments.json is the raw output of tools/windowed_*: arms A, B and H went through the pipeline's own
 # post-processing (main.py), these did not. --postprocess gives them the same one.
-RAW_ARMS = ("nemotron_windowed", "nemotron_windowed_vbx", "nemotron_dense_vbx", "nemotron_dz")
+RAW_ARMS = ("nemotron_windowed", "nemotron_windowed_vbx", "nemotron_dense_vbx", "nemotron_dz", "nemotron_dz_demucs")
+
+
+def is_raw_arm(arm: str) -> bool:
+    """A RAW_ARMS arm, or one of its --fb-sweep arms (nemotron_dz_fb0.4, nemotron_dz_demucs_fb0.2)."""
+    return arm in RAW_ARMS or any(arm.startswith(raw + "_fb") for raw in RAW_ARMS)
+
+
 MERGE_GAP, BRIDGE_GAP, MAX_SEGMENT = 0.5, 3.0, 20.0     # config.json, a100: merge_gap, bridge_gap, max_segment_length
 SHORT_S = 1.0
 MIN_SPEAKER_S = 1.0
@@ -212,7 +219,7 @@ def run(root: str, ref_arm: str, arms: Optional[list[str]], collar: Optional[flo
             tol = 0.25 if collar is None else collar
             candidates = sorted(a for a in segs if a != ref_arm)
         if postprocess:
-            segs = {a: pipeline_postprocess(v) if a in RAW_ARMS else v for a, v in segs.items()}
+            segs = {a: pipeline_postprocess(v) if is_raw_arm(a) else v for a, v in segs.items()}
         duration = clip_duration(sdir, [ref_segs] + list(segs.values()))
         for arm in candidates:
             if arms and arm not in arms:
