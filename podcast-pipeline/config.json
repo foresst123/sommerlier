@@ -245,8 +245,8 @@
         }
       },
       "conversation_exports": {
-        "assistant_clean_chain": "rf_crowd>rf_vocals_resurrection>mpsenet_dns>blend20",
-        "user_clean_chain": "rf_crowd>rf_vocals_resurrection>mpsenet_dns>blend20",
+        "assistant_clean_chain": "rf_crowd>rf_vocals_resurrection>mpsenet_dns>dry20",
+        "user_clean_chain": "rf_crowd>rf_vocals_resurrection>mpsenet_dns>dry20",
         "clean_postprocess": true,
         "user_ambience": {
           "mode": "none"
