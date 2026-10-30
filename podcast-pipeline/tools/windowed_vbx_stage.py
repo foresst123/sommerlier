@@ -82,6 +82,32 @@ def plda_candidates(cache_root: str | None = None, repo: str = VBX_REPO) -> list
     return sorted(found, key=os.path.getmtime, reverse=True)
 
 
+def read_plda_meta(plda_dir: str):
+    """The parsed plda_meta.json of a PLDA folder (tools/train_plda.py writes it), or None when the file is absent."""
+    path = os.path.join(plda_dir, "plda_meta.json")
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def plda_embedder_problem(kind: str, plda_meta) -> str | None:
+    """Why a PLDA folder cannot be used with embedder `kind`, or None when it can. Pure: no files are read here.
+
+    plda_meta is the parsed plda_meta.json, or None when the file is absent. The file is required for every kind but
+    r34lm: the default DiariZen PLDA (no --plda-dir) and any --plda-dir folder without a meta file are ResNet34-LM.
+    """
+    if plda_meta is None:
+        if kind == "r34lm":
+            return None
+        return (f"plda_meta.json is absent, so nothing says this PLDA was fitted for {kind}; "
+                "train it with tools/train_plda.py --embedder-id " + kind)
+    got = plda_meta.get("embedder_id")
+    if got != kind:
+        return f"the PLDA was fitted for embedder_id {got!r}, but the embedder is {kind!r}"
+    return None
+
+
 def find_plda_dir(explicit: str | None = None) -> str:
     if explicit:
         if not all(os.path.isfile(os.path.join(explicit, f)) for f in PLDA_FILES):
@@ -423,6 +449,10 @@ def main(argv=None):
     cluster_fn = None
     dz_vbx = None
     if a.clustering in ("vbx", "dz"):
+        if a.plda_dir:                            # refuse a PLDA fitted for another embedder before any model load
+            problem = plda_embedder_problem(kind, read_plda_meta(a.plda_dir))
+            if problem:
+                raise SystemExit(f"--plda-dir {a.plda_dir}: {problem}")
         cluster_vbx, vbx_setup = import_vbx()
         plda_dir = find_plda_dir(a.plda_dir)
         xvec_tf, plda_tf, plda_psi = vbx_setup(plda_dir)

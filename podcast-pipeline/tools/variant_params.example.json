@@ -1,0 +1,19 @@
+{
+  "_note": "filled after measurement. null = not measured yet; commands refuses any variant that needs a null value.",
+  "plda.r34lm.dir": null,
+  "plda.r34lm.lda_dim": null,
+  "plda.r34lm.holdout": null,
+  "cos.r34lm": null,
+  "plda.wespeaker_r293.dir": null,
+  "plda.wespeaker_r293.lda_dim": null,
+  "plda.wespeaker_r293.holdout": null,
+  "cos.wespeaker_r293": null,
+  "plda.wespeaker_simam100.dir": null,
+  "plda.wespeaker_simam100.lda_dim": null,
+  "plda.wespeaker_simam100.holdout": null,
+  "cos.wespeaker_simam100": null,
+  "plda.espnet_spk.dir": null,
+  "plda.espnet_spk.lda_dim": null,
+  "plda.espnet_spk.holdout": null,
+  "cos.espnet_spk": null
+}

@@ -166,6 +166,15 @@ Giá trị 0.35 chỉ là điểm đoán đầu tiên, chưa kiểm chứng trê
 
 Chưa giải thích được: G sụp về 1 người (nghi do 30 s và ít embedding; chưa tách nguyên nhân). Chưa xem kết quả chạy thr 0.35 và median 0.22.
 
+**Đã định nghĩa biến thể, chưa chạy biến thể nào (`podcast-pipeline/tools/variants.py`).** Quy trình có hai pha rồi mới chạy:
+- Pha 1 (xong): registry 17 biến thể gồm J, K, cặp overlap (thr 0.35, min-on 0.2), Fb 0.2 và 0.4 cho J và K, embedder bằng cosine AHC và bằng VBx (r34lm, wespeaker_r293, wespeaker_simam100, espnet_spk). Tham số chưa đo nằm trong `tools/variant_params.example.json`, mọi giá trị là null ("filled after measurement").
+- Pha 2 (chưa làm): đo PLDA cho từng embedder bằng `tools/train_plda.py` (ghi `plda_meta.json` với `embedder_id`) và đo cos cut trên clip đã gán nhãn tay; điền kết quả vào một bản `params.json`.
+- Liệt kê: `python tools/variants.py list`. Dry-run (không chạy gì): `python tools/variants.py commands --params params.json --samples tools/diar_arms_samples.json --out $OUT --only J_base,K_base`. Biến thể còn tham số null bị từ chối và in tên tham số; lệnh của J và K trùng với lệnh của `diar_arms_experiment.py` (test trong `tests/test_variants.py`).
+- SC-pNA (nhánh `nemo_sc`) CHƯA được cài đặt: biến thể `sc_pna` có trạng thái `todo` và không chạy. VBx với embedder khác r34lm cũng `todo`, vì `windowed_vbx_stage.py` chưa nhận `--embedder-kind` trên đường VBx.
+- Chạy song song trên hai GPU chưa viết: bước sau sẽ chạy từng lệnh trên một GPU (CUDA_VISIBLE_DEVICES), sau khi xác suất (và Demucs cho nhánh K) của mẫu đó đã có.
+- Guard: `windowed_vbx_stage.py --plda-dir` từ chối PLDA có `embedder_id` khác embedder, hoặc thiếu `plda_meta.json` với embedder khác r34lm. Đường mặc định (r34lm, PLDA của DiariZen) không đổi.
+- Chưa có biến thể nào được chạy và chưa có số liệu mới từ bước này.
+
 ## 9. Việc cần kiểm lại trước khi trích dẫn
 
 Những ý trong bản tra cứu gốc mà ta **chưa kiểm** hoặc **đã thấy sai lệch**:
