@@ -281,7 +281,10 @@ class EspnetAdapter(_Adapter):
         except ImportError as exc:
             raise _missing(self.name, "espnet and torch (espnet2.bin.spk_inference)", exc)
         try:
-            s2e = Speech2Embedding.from_pretrained(model_tag=self.tag)     # UNVERIFIED call
+            try:                                  # UNVERIFIED: device= makes Speech2Embedding move its input too
+                s2e = Speech2Embedding.from_pretrained(model_tag=self.tag, device=self.device)
+            except TypeError:
+                s2e = Speech2Embedding.from_pretrained(model_tag=self.tag)
         except Exception as exc:
             raise RuntimeError(f"embedder espnet_spk: cannot load model tag {self.tag!r} ({exc}). Check the tag "
                                f"on the espnet Hugging Face hub (UNVERIFIED API).") from exc
