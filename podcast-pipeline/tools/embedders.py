@@ -252,7 +252,7 @@ class SimamDirAdapter(_Adapter):
     def _embed(self, wave):
         st = self._state
         torch = st["torch"]
-        x = torch.as_tensor(wave * (1 << 15), dtype=torch.float32).reshape(1, -1)
+        x = torch.as_tensor(wave * (1 << 15), dtype=torch.float32).reshape(1, -1).to(self.device)
         feats = st["kaldi"].fbank(x, num_mel_bins=st["bins"], frame_length=st["frame_length"],
                                   frame_shift=st["frame_shift"], dither=0.0, sample_frequency=SR,
                                   window_type="hamming", use_energy=False)
