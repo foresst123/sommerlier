@@ -19,12 +19,13 @@ export OUT=/home/lamkd2/data/output/sitcom/final/lhotse/diar_arms_src30
 | Giai đoạn | File | Commit | Trạng thái |
 |---|---|---|---|
 | 0 Kiểm tra trước | `tools/preflight_check.py` | `589db37` | Đã có, 8 test pass |
-| 1 Trích VoxCeleb2 | `tools/extract_voxceleb_embeddings.py` | `fbb6bba` | Đã có, 7 test pass |
+| 1 Trích VoxCeleb2 | `tools/extract_voxceleb_embeddings.py` | `fbb6bba` | Đã có, 7 test pass; mặc định 50 utterance mỗi speaker |
 | 2 Huấn luyện PLDA | `tools/train_plda.py` | `8879477` (có trước) | Đã có, không sửa |
 | 3 So sánh PLDA | `tools/compare_plda_runs.py` | `d071f36` | Đã có, 5 test pass |
 | 4 Embedder khác | — | — | Chưa làm, xem mục "Chưa làm" |
 | 5 Chạy đầy đủ | `tools/variants.py` (có sẵn) | `d9c0a40` | Cần điền tham số, xem giai đoạn 5 |
 | 6 Chia A/B | `tools/make_split.py`, `analyze_arms_detail.py --split` | `b62392f` | Đã có, 7 test pass |
+| 2b EER trên VoxCeleb1 test | `tools/eval_verification.py` | `9c1dcaf` | Đã có, 5 test pass; cần audio VoxCeleb1 test |
 
 ## Giai đoạn 0: kiểm tra trước
 
@@ -56,6 +57,29 @@ python tools/extract_voxceleb_embeddings.py --out $PLDA_ROOT/r34lm_vox2 --embedd
 
 Qua khi: `train.npz` tồn tại, không có lỗi chiều, số speaker gần 5.994 và số embedding gần 5.994 × 50.
 
+## Giai đoạn 2b: EER trên VoxCeleb1 test
+
+Quyết định đã chấp nhận: tải audio VoxCeleb1 test để có EER trên speaker chưa thấy.
+
+Chưa xác minh link tải trong môi trường này (sandbox bị chặn tới host của Oxford VGG). Trên DGX, kiểm tra trước khi tải:
+
+```bash
+curl -sI <URL_VOXCELEB1_TEST_TỪ_TRANG_CHÍNH_THỨC> | head -3
+```
+
+Trang chính thức của VoxCeleb (Oxford VGG) là nguồn cần kiểm tra. Nếu dùng nguồn khác, ghi rõ tên nguồn và kiểm tra checksum.
+
+Sau khi có audio và `veri_test2.txt`:
+
+```bash
+python tools/eval_verification.py --trials $VOX1/veri_test2.txt --audio-root $VOX1/wav \
+  --embedder r34lm --device cuda --out $PLDA_ROOT/eer_r34lm_cosine_only.json
+python tools/eval_verification.py --trials $VOX1/veri_test2.txt --audio-root $VOX1/wav \
+  --embedder r34lm --device cuda --plda-dir $PLDA_ROOT/plda_r34lm --out $PLDA_ROOT/eer_r34lm_plda.json
+```
+
+Qua khi: `files_failed` bằng 0 hoặc được giải thích, và EER PLDA không tệ hơn cosine. Nếu PLDA tệ hơn, cần xem lại dữ liệu trích hoặc tham số `--lda-dim`.
+
 ## Giai đoạn 2: huấn luyện PLDA
 
 ```bash
@@ -79,9 +103,9 @@ Qua khi: báo "ĐẠT", tức |trung bình hiệu| ≤ 0,5 điểm DER. Nếu kh
 ## Giai đoạn 4: embedder khác
 
 Chưa làm. Lý do:
-- **SimAM-ResNet100:** trọng số CC BY-NC-SA 4.0 (không thương mại), và adapter chưa xác minh. Chờ quyết định về giấy phép.
+- **SimAM-ResNet100:** đã bỏ theo quyết định (trọng số CC BY-NC-SA 4.0, không dùng thương mại; adapter chưa xác minh).
 - **ESPnet:** adapter chưa xác minh. Chưa có trọng số đã kiểm tra.
-- **ResNet-293 (`wespeaker_r293`):** có sẵn adapter ONNX. Có thể chạy giai đoạn 1–3 với `--embedder wespeaker_r293 --r293-onnx <đường dẫn>`, cùng quy trình như r34lm.
+- **ResNet-293 (`wespeaker_r293`):** embedder thứ hai được chọn. Adapter ONNX có sẵn. Chạy giai đoạn 1, 2, 2b với `--embedder wespeaker_r293 --r293-onnx <đường dẫn>`, cùng quy trình như r34lm.
 
 ## Giai đoạn 5: chạy đầy đủ
 
@@ -135,7 +159,7 @@ Không đổi file split sau khi đã chọn tham số. Nếu bắt buộc đổ
 
 ## Chưa làm
 
-- Tải audio VoxCeleb1 test để tính EER trên `veri_test2.txt`.
-- SimAM và ESPnet (chờ xác minh và quyết định giấy phép).
+- SimAM-ResNet100: đã bỏ theo quyết định (giấy phép CC BY-NC-SA 4.0, adapter chưa xác minh).
+- ESPnet: adapter chưa xác minh.
 - SC-pNA: chưa cài đặt.
 - Các biến thể `emb_*_vbx` và `sc_pna` đang ở trạng thái `todo` trong `variants.py`, chưa chạy được.
