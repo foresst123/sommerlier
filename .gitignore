@@ -111,3 +111,6 @@ lab_runs/
 *.lock
 podcast-pipeline/logs/
 logs/
+
+# Claude Code local state (worktrees of agent sessions)
+.claude/
