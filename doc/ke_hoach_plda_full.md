@@ -20,7 +20,7 @@ export OUT=/home/lamkd2/data/output/sitcom/final/lhotse/diar_arms_src30
 |---|---|---|---|
 | 0 Kiểm tra trước | `tools/preflight_check.py` | `589db37` | Đã có, 8 test pass |
 | 1 Trích VoxCeleb2 | `tools/extract_voxceleb_embeddings.py` | `fbb6bba` | Đã có, 7 test pass; mặc định 50 utterance mỗi speaker |
-| 2 Huấn luyện PLDA | `tools/train_plda.py` | `8879477` (có trước) | Đã có, không sửa |
+| 2 Huấn luyện PLDA | `tools/train_plda.py`, `tools/split_speakers.py` | `8879477` (có trước), chia nửa: commit mới | Đã có; chia nửa theo speaker, 5 test pass |
 | 3 So sánh PLDA | `tools/compare_plda_runs.py` | `d071f36` | Đã có, 5 test pass |
 | 4 Embedder khác | — | — | Chưa làm, xem mục "Chưa làm" |
 | 5 Chạy đầy đủ | `tools/variants.py` (có sẵn) | `d9c0a40` | Cần điền tham số, xem giai đoạn 5 |
@@ -80,7 +80,24 @@ python tools/eval_verification.py --trials $VOX1/veri_test2.txt --audio-root $VO
 
 Qua khi: `files_failed` bằng 0 hoặc được giải thích, và EER PLDA không tệ hơn cosine. Nếu PLDA tệ hơn, cần xem lại dữ liệu trích hoặc tham số `--lda-dim`.
 
-## Giai đoạn 2: huấn luyện PLDA
+## Giai đoạn 2: tách VoxCeleb2 thành hai nửa theo speaker, huấn luyện và đánh giá
+
+Quy ước: nửa 1 để huấn luyện PLDA, nửa 2 để đánh giá. Chia theo speaker để không có người nào nằm ở cả hai nửa.
+
+```bash
+python tools/split_speakers.py split --train $PLDA_ROOT/r34lm_vox2/train.npz --out-dir $PLDA_ROOT/r34lm_half \
+  --frac 0.5 --seed 0
+python tools/train_plda.py --train $PLDA_ROOT/r34lm_half/train_half.npz --out $PLDA_ROOT/plda_r34lm_half \
+  --embedder-id r34lm --lda-dim 128 --holdout-speakers 0
+python tools/split_speakers.py eval --heldout $PLDA_ROOT/r34lm_half/heldout_half.npz \
+  --plda-dir $PLDA_ROOT/plda_r34lm_half --out $PLDA_ROOT/eer_heldout_r34lm.json
+```
+
+Qua khi: `split.json` cho thấy hai nửa không trùng speaker, PLDA huấn luyện thành công, và `eer_plda` có giá trị trên nửa held-out. Với nửa 2 làm chuẩn, so sánh `eer_plda` với `eer_cosine` để biết PLDA có giúp không.
+
+Cách cũ (giữ 20 % speaker để kiểm tra, `--holdout-speakers 0.2`) vẫn dùng được nhưng không thay thế bước này.
+
+## Giai đoạn 2 (cũ): huấn luyện PLDA
 
 ```bash
 python tools/train_plda.py --train $PLDA_ROOT/r34lm_vox2/train.npz --out $PLDA_ROOT/plda_r34lm \
