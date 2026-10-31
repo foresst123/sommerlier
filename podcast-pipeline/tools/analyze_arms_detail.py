@@ -88,11 +88,14 @@ BIN_NAMES = {"ref_people": ["0 người", "1 người", "2 người", "3+ ngư�
 
 # ----------------------------------------------------------------------------- nạp dữ liệu
 
-def load_samples(root: str, arms: list[str] | None, postprocess: bool, exclude: list[str]) -> list[dict]:
+def load_samples(root: str, arms: list[str] | None, postprocess: bool, exclude: list[str],
+                 keep: set[str] | None = None) -> list[dict]:
     out = []
     for sdir in sorted(d for d in glob.glob(os.path.join(root, "*")) if os.path.isdir(d)):
         name = os.path.basename(sdir.rstrip("/"))
         if any(x and x in name for x in exclude):
+            continue
+        if keep is not None and name not in keep:
             continue
         doc = ca.load_labels(sdir)
         if doc is None:
@@ -509,15 +512,23 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default=None)
     ap.add_argument("--top", type=int, default=25)
     ap.add_argument("--boot", type=int, default=2000)
+    ap.add_argument("--split", default=None, help="file JSON của tools/make_split.py")
+    ap.add_argument("--half", choices=("A", "B"), default=None, help="nửa của --split để báo cáo (A hoặc B)")
     args = ap.parse_args(argv)
+    if bool(args.split) != bool(args.half):
+        ap.error("--split và --half đi cùng nhau")
 
     arms = [x.strip() for x in args.arms.split(",") if x.strip()]
     excl = [x.strip() for x in args.exclude.split(",") if x.strip()]
-    out_dir = args.out or os.path.join(args.root, "analysis_detail")
+    keep = None
+    if args.split:
+        from make_split import load_split
+        keep = set(load_split(args.split)[args.half])
+    out_dir = args.out or os.path.join(args.root, "analysis_detail" + (f"_half{args.half}" if args.half else ""))
     os.makedirs(out_dir, exist_ok=True)
     rng = random.Random(0)
 
-    samples = load_samples(args.root, arms, args.postprocess, excl)
+    samples = load_samples(args.root, arms, args.postprocess, excl, keep)
     if not samples:
         print(f"không có mẫu nào có labels.json và segments_*.json dưới {args.root}", file=sys.stderr)
         return 1
