@@ -35,9 +35,10 @@ def test_count_voxceleb_layout(tmp_path):
     (root / "id00001" / "v1" / "b.m4a").write_bytes(b"x")
     (root / "id00002" / "v2").mkdir(parents=True)
     (root / "id00002" / "v2" / "c.wav").write_bytes(b"x")
-    assert P.count_voxceleb(str(root), "m4a") == (2, 2)
-    assert P.count_voxceleb(str(root), "wav") == (2, 1)
-    assert P.count_voxceleb(str(tmp_path / "missing"), "m4a") == (0, 0)
+    assert P.count_voxceleb(str(root), "m4a") == (2, 2, 2)
+    assert P.count_voxceleb(str(root), "wav") == (2, 1, 2)
+    assert P.count_voxceleb(str(root), "m4a", sample=1) == (2, 2, 1)
+    assert P.count_voxceleb(str(tmp_path / "missing"), "m4a") == (0, 0, 0)
 
 
 def test_check_voxceleb_compares_speaker_count(tmp_path):

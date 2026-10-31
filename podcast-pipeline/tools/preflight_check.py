@@ -92,23 +92,30 @@ def check_env(name: str, spec: str) -> Check:
     return Check(f"env {name}", True, f"{python}{shown}")
 
 
-def count_voxceleb(audio_root: str, ext: str) -> tuple[int, int]:
-    """(số thư mục speaker, số file có đuôi ext) của layout <speaker>/<video>/<file>."""
+FILE_SAMPLE_SPEAKERS = 20
+
+
+def count_voxceleb(audio_root: str, ext: str, sample: int = FILE_SAMPLE_SPEAKERS) -> tuple[int, int, int]:
+    """(số thư mục speaker, số file .ext trong `sample` speaker đầu, số speaker được đếm file).
+
+    Đếm file trên mọi speaker chậm trên ổ mạng (VoxCeleb2 có hàng triệu file), nên chỉ đếm trên một mẫu."""
     if not os.path.isdir(audio_root):
-        return 0, 0
-    speakers = [d for d in os.listdir(audio_root) if os.path.isdir(os.path.join(audio_root, d))]
+        return 0, 0, 0
+    speakers = sorted(d for d in os.listdir(audio_root) if os.path.isdir(os.path.join(audio_root, d)))
     suffix = "." + ext.lower().lstrip(".")
     files = 0
-    for spk in speakers:
+    sampled = speakers[:sample]
+    for spk in sampled:
         for _, _, names in os.walk(os.path.join(audio_root, spk)):
             files += sum(1 for n in names if n.lower().endswith(suffix))
-    return len(speakers), files
+    return len(speakers), files, len(sampled)
 
 
 def check_voxceleb(audio_root: str, ext: str, expect_speakers: int) -> Check:
-    n_spk, n_files = count_voxceleb(audio_root, ext)
+    n_spk, n_files, n_sampled = count_voxceleb(audio_root, ext)
     ok = n_spk == expect_speakers and n_files > 0
-    return Check("voxceleb2", ok, f"{audio_root}: {n_spk} speaker (cần {expect_speakers}), {n_files} file .{ext}")
+    return Check("voxceleb2", ok, f"{audio_root}: {n_spk} speaker (cần {expect_speakers}), "
+                                  f"{n_files} file .{ext} trong {n_sampled} speaker đầu (mẫu)")
 
 
 def check_archives(pattern: str) -> list[Check]:
