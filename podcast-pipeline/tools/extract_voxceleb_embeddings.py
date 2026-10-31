@@ -134,10 +134,24 @@ def chunk_path(out: str, speaker: str) -> str:
     return os.path.join(out, "chunks", f"{speaker}.npz")
 
 
+def parse_shard(text: str) -> tuple[int, int]:
+    """'K/N' -> (K, N) with 0 <= K < N. Shard K takes every N-th speaker starting at K."""
+    try:
+        k, n = (int(x) for x in text.split("/"))
+    except ValueError:
+        raise ValueError(f"--shard phải có dạng K/N, có {text!r}") from None
+    if n < 1 or not 0 <= k < n:
+        raise ValueError(f"--shard {text}: cần 0 <= K < N")
+    return k, n
+
+
 def extract(audio_root: str, out: str, adapter, *, ext: str, per_speaker: int, min_s: float, seed: int,
             limit_speakers: int = 0, decode_fn: Callable[[str, int], np.ndarray] = decode,
-            workers: int = 1, log: Callable[[str], None] = print) -> dict:
-    """Trích từng speaker, bỏ qua speaker đã có chunk. Trả về số liệu tổng."""
+            workers: int = 1, shard: tuple[int, int] = (0, 1), log: Callable[[str], None] = print) -> dict:
+    """Trích từng speaker, bỏ qua speaker đã có chunk. Trả về số liệu tổng.
+
+    shard (K, N): chỉ làm speaker thứ K, K+N, K+2N, ... Nhiều tiến trình với các K khác nhau trên cùng GPU
+    chạy song song mà không trùng speaker; các chunk đều vào cùng một thư mục."""
     os.makedirs(os.path.join(out, "chunks"), exist_ok=True)
     speakers = list_speakers(audio_root, ext)
     names = sorted(speakers)
@@ -145,6 +159,8 @@ def extract(audio_root: str, out: str, adapter, *, ext: str, per_speaker: int, m
         names = names[:limit_speakers]
     if not names:
         raise SystemExit(f"không tìm thấy file .{ext} nào dưới {audio_root}")
+    k, n = shard
+    names = names[k::n]
     totals = {"speakers": len(names), "done_before": 0, "done_now": 0, "embeddings": 0, "dim": None}
     progress_path = os.path.join(out, "progress.jsonl")
     t0 = time.time()
@@ -213,6 +229,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--limit-speakers", type=int, default=0, help="chỉ speaker đầu theo thứ tự tên (để thử)")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--workers", type=int, default=8, help="luồng giải mã song song (ffmpeg)")
+    ap.add_argument("--shard", default="0/1", help="K/N: tiến trình thứ K trong N tiến trình song song")
     ap.add_argument("--r293-onnx")
     ap.add_argument("--simam-onnx")
     ap.add_argument("--simam-dir")
@@ -235,7 +252,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                               simam_dir=a.simam_dir, espnet_tag=a.espnet_tag)
     adapter.load()
     totals = extract(a.audio_root, a.out, adapter, ext=a.ext, per_speaker=a.per_speaker, min_s=a.min_s,
-                      seed=a.seed, limit_speakers=a.limit_speakers, workers=a.workers)
+                      seed=a.seed, limit_speakers=a.limit_speakers, workers=a.workers,
+                      shard=parse_shard(a.shard))
     print(f"xong: {totals}")
     return 0
 

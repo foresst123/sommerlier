@@ -128,3 +128,21 @@ def test_parallel_decode_gives_the_same_embeddings(voxroot):
     parallel, p_stats = X.embed_paths(paths, FakeAdapter(), min_s=0.5, workers=4)
     assert np.array_equal(serial, parallel)
     assert s_stats == p_stats
+
+
+def test_shards_cover_each_speaker_exactly_once(voxroot, tmp_path):
+    out = str(tmp_path / "sharded")
+    done = []
+    for k in range(3):
+        t = X.extract(str(voxroot), out, FakeAdapter(), ext="wav", per_speaker=0, min_s=0.5, seed=0,
+                      shard=(k, 3), log=lambda s: None)
+        done.append(t["done_now"])
+    assert sum(done) == 2                          # two speakers in the fixture
+    assert sorted(os.listdir(os.path.join(out, "chunks"))) == ["id00001.npz", "id00002.npz"]
+
+
+def test_parse_shard_rejects_bad_values():
+    assert X.parse_shard("2/4") == (2, 4)
+    for bad in ("4/4", "a/b", "1", "0/0", "-1/3"):
+        with pytest.raises(ValueError):
+            X.parse_shard(bad)
