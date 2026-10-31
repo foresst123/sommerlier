@@ -229,9 +229,12 @@ class SimamDirAdapter(_Adapter):
             import torch
             import torchaudio.compliance.kaldi as kaldi
             from safetensors.torch import load_file
-            from wespeaker.models.samresnet import SimAM_ResNet100_ASP
+            try:
+                from wespeaker_vendor.samresnet import SimAM_ResNet100_ASP     # tools/ on sys.path
+            except ImportError:
+                from tools.wespeaker_vendor.samresnet import SimAM_ResNet100_ASP
         except ImportError as exc:
-            raise _missing(self.name, "the wespeaker (samresnet), safetensors and torchaudio packages", exc)
+            raise _missing(self.name, "the vendored WeSpeaker model (tools/wespeaker_vendor), safetensors and torchaudio", exc)
         with open(cfg_path, encoding="utf-8") as fh:
             cfg = json.load(fh)
         model = SimAM_ResNet100_ASP(in_planes=cfg["in_planes"], embed_dim=cfg["embed_dim"],
