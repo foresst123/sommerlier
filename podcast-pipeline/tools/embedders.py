@@ -285,6 +285,10 @@ class EspnetAdapter(_Adapter):
         except Exception as exc:
             raise RuntimeError(f"embedder espnet_spk: cannot load model tag {self.tag!r} ({exc}). Check the tag "
                                f"on the espnet Hugging Face hub (UNVERIFIED API).") from exc
+        # Speech2Embedding keeps its network on the CPU by default; move every torch module it holds to the device.
+        for value in list(vars(s2e).values()):
+            if isinstance(value, torch.nn.Module):
+                value.to(self.device)
         return {"s2e": s2e, "torch": torch}
 
     def _embed(self, wave):
