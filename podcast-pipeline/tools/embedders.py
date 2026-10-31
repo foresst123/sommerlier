@@ -187,10 +187,13 @@ class SimamDirAdapter(_Adapter):
         return _safe(f"wespeaker_simam100-{os.path.basename(os.path.normpath(self.model_dir))}")
 
     def _load(self):
+        if os.path.isfile(os.path.join(self.model_dir, "model.safetensors")):
+            return self._load_safetensors()
         cfg_path = os.path.join(self.model_dir, "config.yaml")
         ckpt = os.path.join(self.model_dir, "avg_model.pt")
         if not (os.path.isfile(cfg_path) and os.path.isfile(ckpt)):
-            raise RuntimeError(f"embedder wespeaker_simam100: {self.model_dir} needs config.yaml and avg_model.pt")
+            raise RuntimeError(f"embedder wespeaker_simam100: {self.model_dir} needs config.yaml and avg_model.pt, "
+                               f"or model.safetensors and config.json")
         try:
             import torch
             import yaml
@@ -208,10 +211,40 @@ class SimamDirAdapter(_Adapter):
             raise RuntimeError(f"embedder wespeaker_simam100: loading {self.model_dir} with the wespeaker package "
                                f"failed ({exc}). The wespeaker API may differ from what this adapter assumes "
                                f"(UNVERIFIED); use --simam-onnx instead.") from exc
+        model.to(self.device)
         feat = cfg.get("feature_args", {})
         return {"model": model, "torch": torch, "kaldi": kaldi,
                 "bins": int(feat.get("num_mel_bins", 80)), "frame_length": float(feat.get("frame_length", 25)),
                 "frame_shift": float(feat.get("frame_shift", 10))}
+
+    def _load_safetensors(self):
+        """The Hugging Face layout of the model card: model.safetensors (PyTorch key names) and config.json.
+        SimAM_ResNet100_ASP of wespeaker/models/samresnet.py, loaded strict; the fbank settings are in config.json.
+        Checked against the card and that source file; not yet against a real run."""
+        import json
+        cfg_path = os.path.join(self.model_dir, "config.json")
+        if not os.path.isfile(cfg_path):
+            raise RuntimeError(f"embedder wespeaker_simam100: {self.model_dir} has model.safetensors but no config.json")
+        try:
+            import torch
+            import torchaudio.compliance.kaldi as kaldi
+            from safetensors.torch import load_file
+            from wespeaker.models.samresnet import SimAM_ResNet100_ASP
+        except ImportError as exc:
+            raise _missing(self.name, "the wespeaker (samresnet), safetensors and torchaudio packages", exc)
+        with open(cfg_path, encoding="utf-8") as fh:
+            cfg = json.load(fh)
+        model = SimAM_ResNet100_ASP(in_planes=cfg["in_planes"], embed_dim=cfg["embed_dim"],
+                                    acoustic_dim=cfg["acoustic_dim"], dropout=cfg.get("dropout", 0))
+        try:
+            model.load_state_dict(load_file(os.path.join(self.model_dir, "model.safetensors")), strict=True)
+        except RuntimeError as exc:
+            raise RuntimeError(f"embedder wespeaker_simam100: the weights do not fit SimAM_ResNet100_ASP ({exc})") from exc
+        model.eval()
+        model.to(self.device)
+        fb = cfg["fbank"]
+        return {"model": model, "torch": torch, "kaldi": kaldi, "bins": int(fb["num_mel_bins"]),
+                "frame_length": float(fb["frame_length_ms"]), "frame_shift": float(fb["frame_shift_ms"])}
 
     def _embed(self, wave):
         st = self._state
@@ -222,7 +255,7 @@ class SimamDirAdapter(_Adapter):
                                   window_type="hamming", use_energy=False)
         feats = feats - feats.mean(dim=0, keepdim=True)
         with torch.no_grad():
-            return _vector(st["model"](feats.unsqueeze(0)))
+            return _vector(st["model"](feats.unsqueeze(0).to(self.device)))
 
 
 class EspnetAdapter(_Adapter):
