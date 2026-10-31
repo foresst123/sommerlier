@@ -120,3 +120,11 @@ def test_extract_limit_speakers(voxroot, tmp_path):
                        limit_speakers=1, log=lambda s: None)
     assert totals["speakers"] == 1
     assert os.listdir(os.path.join(out, "chunks")) == ["id00001.npz"]
+
+
+def test_parallel_decode_gives_the_same_embeddings(voxroot):
+    paths = X.list_speakers(str(voxroot), "wav")["id00001"]
+    serial, s_stats = X.embed_paths(paths, FakeAdapter(), min_s=0.5, workers=1)
+    parallel, p_stats = X.embed_paths(paths, FakeAdapter(), min_s=0.5, workers=4)
+    assert np.array_equal(serial, parallel)
+    assert s_stats == p_stats

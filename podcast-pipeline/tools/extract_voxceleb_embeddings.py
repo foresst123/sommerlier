@@ -28,6 +28,7 @@ import subprocess
 import sys
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
 
 import numpy as np
@@ -92,13 +93,20 @@ def decode(path: str, sr: int = SR) -> np.ndarray:
 
 
 def embed_paths(paths: list[str], adapter, *, min_s: float, sr: int = SR,
-                decode_fn: Callable[[str, int], np.ndarray] = decode) -> tuple[np.ndarray, dict]:
+                decode_fn: Callable[[str, int], np.ndarray] = decode, workers: int = 1) -> tuple[np.ndarray, dict]:
     """Embeddings of the utterances that pass. A clip shorter than min_s, or one the adapter refuses with a
-    ValueError or a non-finite vector, is counted and left out. Any other error stops the run."""
+    ValueError or a non-finite vector, is counted and left out. Any other error stops the run.
+
+    workers > 1 decodes the clips in parallel threads (ffmpeg runs in its own process, so the threads wait
+    on it without holding the GIL). The GPU then gets the next clip while the others are still decoding."""
     vecs: list[np.ndarray] = []
     stats = {"offered": len(paths), "used": 0, "too_short": 0, "refused": 0}
-    for path in paths:
-        wave = decode_fn(path, sr)
+    if workers > 1 and len(paths) > 1:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            waves = list(pool.map(lambda p: decode_fn(p, sr), paths))
+    else:
+        waves = (decode_fn(p, sr) for p in paths)
+    for wave in waves:
         if len(wave) < min_s * sr:
             stats["too_short"] += 1
             continue
@@ -128,7 +136,7 @@ def chunk_path(out: str, speaker: str) -> str:
 
 def extract(audio_root: str, out: str, adapter, *, ext: str, per_speaker: int, min_s: float, seed: int,
             limit_speakers: int = 0, decode_fn: Callable[[str, int], np.ndarray] = decode,
-            log: Callable[[str], None] = print) -> dict:
+            workers: int = 1, log: Callable[[str], None] = print) -> dict:
     """Trích từng speaker, bỏ qua speaker đã có chunk. Trả về số liệu tổng."""
     os.makedirs(os.path.join(out, "chunks"), exist_ok=True)
     speakers = list_speakers(audio_root, ext)
@@ -148,7 +156,7 @@ def extract(audio_root: str, out: str, adapter, *, ext: str, per_speaker: int, m
                 continue
             rng = random.Random(f"{seed}:{spk}")
             paths = pick_utterances(speakers[spk], per_speaker, rng)
-            X, stats = embed_paths(paths, adapter, min_s=min_s, decode_fn=decode_fn)
+            X, stats = embed_paths(paths, adapter, min_s=min_s, decode_fn=decode_fn, workers=workers)
             if len(X):
                 if totals["dim"] is None:
                     totals["dim"] = int(X.shape[1])
@@ -204,6 +212,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--limit-speakers", type=int, default=0, help="chỉ speaker đầu theo thứ tự tên (để thử)")
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--workers", type=int, default=8, help="luồng giải mã song song (ffmpeg)")
     ap.add_argument("--r293-onnx")
     ap.add_argument("--simam-onnx")
     ap.add_argument("--simam-dir")
@@ -226,7 +235,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                               simam_dir=a.simam_dir, espnet_tag=a.espnet_tag)
     adapter.load()
     totals = extract(a.audio_root, a.out, adapter, ext=a.ext, per_speaker=a.per_speaker, min_s=a.min_s,
-                      seed=a.seed, limit_speakers=a.limit_speakers)
+                      seed=a.seed, limit_speakers=a.limit_speakers, workers=a.workers)
     print(f"xong: {totals}")
     return 0
 
