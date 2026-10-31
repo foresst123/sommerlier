@@ -2,39 +2,39 @@
 
 ## Project Structure & Module Organization
 
-This repository contains the Sommelier audio-processing pipeline. Core Python code lives in `podcast-pipeline/`: `services/` coordinates stages, `models/` wraps inference backends, `algorithms/` contains diarization/ASR helpers, `schemas/` defines data objects, and `utils/` holds shared audio, timeline, and reporting utilities. Tests live in `podcast-pipeline/tests/`. Operational docs are in `doc/`, assets in `img/`, helper scripts in `scripts/` and `podcast-pipeline/scripts/`, and sample data/config files sit at the repository root.
+The main Python pipeline lives in `podcast-pipeline/`. Stage orchestration belongs in `services/`, inference wrappers in `models/`, ASR and diarization logic in `algorithms/`, data contracts in `schemas/`, and shared audio, timeline, checkpoint, and reporting code in `utils/`. Worker entry points sit at the pipeline root.
+
+Tests are in `podcast-pipeline/tests/`. Use `tools/` only for research, evaluation, and lab utilities; do not couple experiments into production services without an explicit requirement. Supporting material lives in `scripts/`, `doc/`, `docs/superpowers/`, `notebooks/`, `data/`, and `img/`. `training/minicpmo45_audio_text/` is an independent training package.
 
 ## Build, Test, and Development Commands
 
-Set up from `podcast-pipeline/`:
+Run pipeline commands from `podcast-pipeline/`:
 
 ```bash
-pip install torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0
-pip install -r requirements.txt
-```
-
-Run focused tests before broad checks:
-
-```bash
-cd podcast-pipeline
+python -m pip install -r requirements.txt
+python main.py --help
+python main.py --audio /path/to/file --config config.json
+python main.py --audio_dir /path/to/directory --config config.json
 python -m pytest tests/test_separation_logic.py -q
 python -m pytest tests -q
 ```
 
-Run the pipeline with `bash run_test_all.sh` after editing the `folders` array. For direct runs, use `python main.py ...` with the needed stage flags.
+`requirements.txt` is authoritative and currently pins Torch 2.8.0. Do not use the obsolete commands in `README.md` or `run_test_all.sh`; they reference missing entry points.
 
-## Coding Style & Naming Conventions
+For `training/minicpmo45_audio_text/`, create a Python 3.11 virtual environment, run `pip install -e ".[dev]"`, then `pytest`.
 
-Use Python with 4-space indentation, clear function names, and type hints where existing code uses them. Keep comments short and only explain non-obvious audio/timeline logic. Existing code favors explicit stage names (`separation`, `music_map`, `timeline`) and snake_case for functions, variables, and test files.
+## Coding Style & Configuration
+
+Use 4-space indentation, `snake_case`, descriptive stage-oriented names, and type hints where practical. Keep comments brief and reserve them for non-obvious audio or timeline behavior. No repository-wide formatter or linter is configured.
+
+Treat `config.json` profiles as environment-specific configuration. Keep Nemotron, vLLM, and MambAttention dependencies isolated. Never commit secrets, tokens, model weights, source audio, caches, or generated outputs; use `HUGGINGFACE_TOKEN`, `HF_TOKEN`, or `OPENAI_API_KEY` as applicable.
 
 ## Testing Guidelines
 
-Tests use `pytest` and are named `test_*.py`. Add focused regression tests for behavior changes, especially around overlap accounting, timestamp mapping, checkpoint compatibility, and output layout. Prefer small fake models over GPU/model-heavy tests when validating control flow.
+Use `pytest` and name files `test_*.py`. Add focused regression tests with fake workers or models; avoid GPU-heavy inference when testing control flow. `tests/conftest.py` disables environment bootstrap. Do not assume the suite is green—report the exact command and failures observed.
 
-## Commit & Pull Request Guidelines
+## Commit and PR Guidelines
 
-Recent commits use conventional prefixes such as `fix(...)`, `feat(...)`, and `docs:`. Keep commits scoped to one behavior or document update. PR descriptions should explain the trigger, the changed behavior, and the validation command, for example `python -m pytest tests/test_separation_logic.py -q`.
+Follow scoped Conventional Commit forms such as `feat(scope):`, `fix(scope):`, `perf(scope):`, `refactor(scope):`, `chore:`, and `docs:`. Keep each commit to one behavior or documentation change. Do not open a pull request unless requested.
 
-## Agent-Specific Instructions
-
-For Kaggle work, use the external Chrome profile, not the Codex in-app browser. Verify Google Account `lamkdhe180931@fpt.edu.vn`, then open Kaggle. To download notebook outputs, use the Kaggle sidebar: hover/click `/kaggle/working`, expand with the small arrow, hover the target file such as `result.zip`, click its three-dot menu, then choose **Download**. Do not rely on `FileLink` or direct `kkb-production...` URLs; they can open as `404`.
+For Kaggle tasks, use the external Chrome profile and verify the intended Google account before proceeding.
