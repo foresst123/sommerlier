@@ -4,26 +4,29 @@
     # một embedder
     python tools/extract_voxceleb_embeddings.py --audio-root /data/voxceleb2/aac --embedder r34lm \
         --out /data/plda/r34lm_train --per-speaker 50 --device cuda --workers 6 --shard 0/4
-    # nhiều embedder trong cùng một tiến trình (một lần giải mã cho tất cả)
+    # nhiều embedder trong cùng một tiến trình
     python tools/extract_voxceleb_embeddings.py --audio-root /data/voxceleb2/aac \
-        --embedder r34lm,simam100,espnet \
-        --out r34lm=/data/plda/r34lm_train,simam100=/data/plda/simam_train,espnet=/data/plda/espnet_train \
-        --simam-dir /home/lamkd2/models/simam100 --device cuda --workers 6 --shard 0/4
+        --embedder r34lm,wespeaker_simam100 \
+        --out r34lm=/data/plda/r34lm_train,wespeaker_simam100=/data/plda/simam_train \
+        --simam-dir /home/lamkd2/models/simam100 --device cuda --workers 6 --shard 0/4 \
+        --cache-dir /data/plda/wave_cache
     # ghép chunk thành train.npz (một embedder)
     python tools/extract_voxceleb_embeddings.py --out /data/plda/r34lm_train --embedder r34lm --merge
 
 Layout VoxCeleb2: <audio-root>/<speaker>/<video>/<utterance>.m4a. Mỗi speaker lấy tối đa --per-speaker utterance,
-trải đều trên các video, chọn ngẫu nhiên có hạt giống cố định (--seed). Chọn utterance không phụ thuộc embedder,
-nên mọi embedder dùng cùng một tập.
+trải đều trên các video, chọn ngẫu nhiên có hạt giống cố định (--seed). Chọn utterance không phụ thuộc embedder.
+
+--cache-dir: ghi waveform đã giải mã ra <cache-dir>/<speaker>.npz (int16, 16 kHz). Lần chạy sau, hoặc embedder khác,
+đọc từ đây và không giải mã lại. Cả hai đường cho cùng waveform, nên embedding giống nhau. Cần khoảng 40 GB cho
+toàn bộ tập VoxCeleb2 với 50 utterance mỗi speaker. Thư mục này có thể copy sang máy khác.
 
 Đầu ra cho mỗi embedder (thư mục --out của nó):
-  chunks/<speaker>.npz   embedding của một speaker (X, y). Chạy lại sẽ bỏ qua speaker đã có chunk của embedder đó.
+  chunks/<speaker>.npz   embedding của một speaker (X, y). Chạy lại bỏ qua speaker đã có chunk của embedder đó.
   progress.jsonl         một dòng mỗi speaker: số utterance dùng, quá ngắn, bị từ chối.
   train.npz              sau --merge: X (N, D) và y (N,), đúng định dạng tools/train_plda.py đọc.
   extract_meta.json      sau --merge: embedder, D, số speaker, số embedding.
 
---shard K/N: tiến trình thứ K trong N tiến trình song song, mỗi tiến trình lấy speaker K, K+N, ... Các chunk
-không trùng nhau nên các shard không ghi đè lên nhau.
+--shard K/N: tiến trình thứ K trong N tiến trình song song, mỗi tiến trình lấy speaker K, K+N, ...
 """
 
 from __future__ import annotations
@@ -101,25 +104,49 @@ def decode(path: str, sr: int = SR) -> np.ndarray:
     return np.frombuffer(proc.stdout, dtype=np.float32).copy()
 
 
-def embed_paths_multi(paths: list[str], adapters: dict, *, min_s: float, sr: int = SR,
-                      decode_fn: Callable[[str, int], np.ndarray] = decode,
-                      workers: int = 1) -> dict[str, tuple[np.ndarray, dict]]:
-    """Embeddings of the utterances for every adapter, decoding each utterance once.
-
-    adapters: {kind: adapter}. Returns {kind: (X, stats)}. A clip shorter than min_s is left out for every
-    adapter. For one adapter, a clip the adapter refuses (ValueError, or a non-finite vector) is counted and
-    left out; any other error stops the run.
-
-    workers > 1 decodes the clips in parallel threads (ffmpeg runs in its own process, so the threads wait on it
-    without holding the GIL). The adapters take the clips in order."""
-    kinds = list(adapters)
-    vecs = {k: [] for k in kinds}
-    stats = {k: {"offered": len(paths), "used": 0, "too_short": 0, "refused": 0} for k in kinds}
+def decode_all(paths: list[str], decode_fn: Callable[[str, int], np.ndarray], sr: int, workers: int) -> list:
+    """Waveforms of the paths, in order. workers > 1 decodes in parallel threads (ffmpeg runs in its own process,
+    so the threads wait on it without holding the GIL)."""
     if workers > 1 and len(paths) > 1:
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            waves = list(pool.map(lambda p: decode_fn(p, sr), paths))
-    else:
-        waves = (decode_fn(p, sr) for p in paths)
+            return list(pool.map(lambda p: decode_fn(p, sr), paths))
+    return [decode_fn(p, sr) for p in paths]
+
+
+def cache_path(cache_dir: str, speaker: str) -> str:
+    return os.path.join(cache_dir, f"{speaker}.npz")
+
+
+def load_or_decode(speaker: str, paths: list[str], cache_dir: Optional[str],
+                   decode_fn: Callable[[str, int], np.ndarray], workers: int, sr: int = SR) -> list:
+    """The waveforms of one speaker's picked utterances.
+
+    With cache_dir, <cache_dir>/<speaker>.npz is read when it holds exactly these paths. Otherwise the clips are
+    decoded and the file is written: int16 at 16 kHz, one array per clip, plus the paths. Both routes return the
+    same float32 waveforms (the int16 rounding is applied to fresh decodes too)."""
+    if not cache_dir:
+        return decode_all(paths, decode_fn, sr, workers)
+    cp = cache_path(cache_dir, speaker)
+    if os.path.exists(cp):
+        with np.load(cp, allow_pickle=False) as z:
+            if [str(p) for p in z["paths"]] == list(paths):
+                return [z[f"u{i}"].astype(np.float32) / 32768.0 for i in range(len(paths))]
+    os.makedirs(cache_dir, exist_ok=True)
+    fresh = decode_all(paths, decode_fn, sr, workers)
+    quant = [np.clip(np.round(w * 32768.0), -32768, 32767).astype(np.int16) for w in fresh]
+    _atomic_savez(cp, paths=np.array(paths), **{f"u{i}": q for i, q in enumerate(quant)})
+    return [q.astype(np.float32) / 32768.0 for q in quant]
+
+
+def embed_waves_multi(waves: list, adapters: dict, *, min_s: float,
+                      sr: int = SR) -> dict[str, tuple[np.ndarray, dict]]:
+    """Embeddings of waveforms for every adapter, in order. Returns {kind: (X, stats)}.
+
+    A clip shorter than min_s is left out for every adapter. For one adapter, a clip it refuses (ValueError, or a
+    non-finite vector) is counted and left out; any other error stops the run."""
+    kinds = list(adapters)
+    vecs = {k: [] for k in kinds}
+    stats = {k: {"offered": len(waves), "used": 0, "too_short": 0, "refused": 0} for k in kinds}
     for wave in waves:
         if len(wave) < min_s * sr:
             for k in kinds:
@@ -141,6 +168,14 @@ def embed_paths_multi(paths: list[str], adapters: dict, *, min_s: float, sr: int
         X = np.vstack(vecs[k]) if vecs[k] else np.zeros((0, 0), dtype=np.float64)
         out[k] = (X, stats[k])
     return out
+
+
+def embed_paths_multi(paths: list[str], adapters: dict, *, min_s: float, sr: int = SR,
+                      decode_fn: Callable[[str, int], np.ndarray] = decode,
+                      workers: int = 1) -> dict[str, tuple[np.ndarray, dict]]:
+    """Decode each path once, then embed for every adapter."""
+    waves = decode_all(paths, decode_fn, sr, workers)
+    return embed_waves_multi(waves, adapters, min_s=min_s, sr=sr)
 
 
 def embed_paths(paths: list[str], adapter, *, min_s: float, sr: int = SR,
@@ -174,10 +209,11 @@ def parse_shard(text: str) -> tuple[int, int]:
 def extract_multi(audio_root: str, outs: dict[str, str], adapters: dict, *, ext: str, per_speaker: int,
                   min_s: float, seed: int, limit_speakers: int = 0,
                   decode_fn: Callable[[str, int], np.ndarray] = decode, workers: int = 1,
-                  shard: tuple[int, int] = (0, 1), log: Callable[[str], None] = print) -> dict:
+                  shard: tuple[int, int] = (0, 1), cache_dir: Optional[str] = None,
+                  log: Callable[[str], None] = print) -> dict:
     """Trích cho mọi embedder cùng lúc. outs và adapters có cùng các khoá (kind).
 
-    Một speaker được giải mã chỉ khi còn ít nhất một embedder chưa có chunk của speaker đó."""
+    Một speaker chỉ được giải mã (hoặc đọc từ cache) khi còn ít nhất một embedder chưa có chunk của speaker đó."""
     kinds = list(adapters)
     for k in kinds:
         os.makedirs(os.path.join(outs[k], "chunks"), exist_ok=True)
@@ -204,8 +240,8 @@ def extract_multi(audio_root: str, outs: dict[str, str], adapters: dict, *, ext:
                 continue
             rng = random.Random(f"{seed}:{spk}")
             paths = pick_utterances(speakers[spk], per_speaker, rng)
-            results = embed_paths_multi(paths, {k: adapters[k] for k in todo}, min_s=min_s,
-                                        decode_fn=decode_fn, workers=workers)
+            waves = load_or_decode(spk, paths, cache_dir, decode_fn, workers)
+            results = embed_waves_multi(waves, {k: adapters[k] for k in todo}, min_s=min_s)
             for k in todo:
                 X, stats = results[k]
                 if len(X):
@@ -300,6 +336,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--workers", type=int, default=8, help="luồng giải mã song song (ffmpeg)")
     ap.add_argument("--shard", default="0/1", help="K/N: tiến trình thứ K trong N tiến trình song song")
+    ap.add_argument("--cache-dir", default=None, help="ghi/đọc waveform đã giải mã (int16, 16 kHz), mỗi speaker một file")
     ap.add_argument("--r293-onnx")
     ap.add_argument("--simam-onnx")
     ap.add_argument("--simam-dir")
@@ -338,7 +375,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         ad.load()
     totals = extract_multi(a.audio_root, outs, adapters, ext=a.ext, per_speaker=a.per_speaker, min_s=a.min_s,
                            seed=a.seed, limit_speakers=a.limit_speakers, workers=a.workers,
-                           shard=parse_shard(a.shard))
+                           shard=parse_shard(a.shard), cache_dir=a.cache_dir)
     for k in kinds:
         print(f"xong {k}: {totals[k]}")
     return 0

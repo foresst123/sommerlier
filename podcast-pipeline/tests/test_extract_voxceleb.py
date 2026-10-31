@@ -194,3 +194,38 @@ def test_parse_outs_one_or_many():
                        ("r34lm=/x,r34lm=/y", ["r34lm"]), ("r34lm=", ["r34lm"])]:
         with pytest.raises(ValueError):
             X.parse_outs(bad, kinds)
+
+
+def test_cache_is_written_then_read_without_decoding(voxroot, tmp_path):
+    cache = str(tmp_path / "cache")
+    calls = []
+
+    def counting_decode(path, sr=16000):
+        calls.append(path)
+        return X.decode(path, sr)
+
+    out1 = {"one": str(tmp_path / "c1")}
+    X.extract_multi(str(voxroot), out1, {"one": FakeAdapter()}, ext="wav", per_speaker=0, min_s=0.5, seed=0,
+                    decode_fn=counting_decode, cache_dir=cache, log=lambda s: None)
+    first_calls = len(calls)
+    assert first_calls == 6                                    # every clip decoded once
+    assert sorted(os.listdir(cache)) == ["id00001.npz", "id00002.npz"]
+
+    out2 = {"one": str(tmp_path / "c2")}
+    X.extract_multi(str(voxroot), out2, {"one": FakeAdapter()}, ext="wav", per_speaker=0, min_s=0.5, seed=0,
+                    decode_fn=counting_decode, cache_dir=cache, log=lambda s: None)
+    assert len(calls) == first_calls                           # read from the cache: no decode
+    for spk in ("id00001", "id00002"):
+        with np.load(os.path.join(out1["one"], "chunks", spk + ".npz")) as a, \
+                np.load(os.path.join(out2["one"], "chunks", spk + ".npz")) as b:
+            assert np.array_equal(a["X"], b["X"])
+
+
+def test_cache_with_other_paths_is_decoded_again(voxroot, tmp_path):
+    cache = str(tmp_path / "cache")
+    os.makedirs(cache)
+    np.savez(os.path.join(cache, "id00001.npz"), paths=np.array(["something/else.wav"]),
+             u0=np.zeros(16000, dtype=np.int16))
+    wave_list = X.load_or_decode("id00001", X.pick_utterances(X.list_speakers(str(voxroot), "wav")["id00001"],
+                                                              0, random.Random(0)), cache, X.decode, 1)
+    assert len(wave_list) == 4                                  # the stale file was not used
