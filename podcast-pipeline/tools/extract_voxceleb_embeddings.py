@@ -1,20 +1,29 @@
 #!/usr/bin/env python3
-"""Trích embedding VoxCeleb2 cho huấn luyện PLDA (giai đoạn 1 của kế hoạch PLDA → full).
+"""Trích embedding VoxCeleb2 cho huấn luyện PLDA. Mỗi utterance được giải mã MỘT lần, rồi đưa cho mọi embedder.
 
+    # một embedder
     python tools/extract_voxceleb_embeddings.py --audio-root /data/voxceleb2/aac --embedder r34lm \
-        --out /data/plda/r34lm_vox2 [--per-speaker 50] [--min-s 0.5] [--limit-speakers 20] [--device cuda]
-    python tools/extract_voxceleb_embeddings.py --out /data/plda/r34lm_vox2 --embedder r34lm --merge
+        --out /data/plda/r34lm_train --per-speaker 50 --device cuda --workers 6 --shard 0/4
+    # nhiều embedder trong cùng một tiến trình (một lần giải mã cho tất cả)
+    python tools/extract_voxceleb_embeddings.py --audio-root /data/voxceleb2/aac \
+        --embedder r34lm,simam100,espnet \
+        --out r34lm=/data/plda/r34lm_train,simam100=/data/plda/simam_train,espnet=/data/plda/espnet_train \
+        --simam-dir /home/lamkd2/models/simam100 --device cuda --workers 6 --shard 0/4
+    # ghép chunk thành train.npz (một embedder)
+    python tools/extract_voxceleb_embeddings.py --out /data/plda/r34lm_train --embedder r34lm --merge
 
 Layout VoxCeleb2: <audio-root>/<speaker>/<video>/<utterance>.m4a. Mỗi speaker lấy tối đa --per-speaker utterance,
-trải đều trên các video (round-robin), chọn ngẫu nhiên có hạt giống cố định (--seed).
+trải đều trên các video, chọn ngẫu nhiên có hạt giống cố định (--seed). Chọn utterance không phụ thuộc embedder,
+nên mọi embedder dùng cùng một tập.
 
-Đầu ra trong --out:
-  chunks/<speaker>.npz   embedding của một speaker (X, y). Chạy lại sẽ bỏ qua speaker đã có.
+Đầu ra cho mỗi embedder (thư mục --out của nó):
+  chunks/<speaker>.npz   embedding của một speaker (X, y). Chạy lại sẽ bỏ qua speaker đã có chunk của embedder đó.
   progress.jsonl         một dòng mỗi speaker: số utterance dùng, quá ngắn, bị từ chối.
   train.npz              sau --merge: X (N, D) và y (N,), đúng định dạng tools/train_plda.py đọc.
   extract_meta.json      sau --merge: embedder, D, số speaker, số embedding.
 
-Chỉ dùng embedder có sẵn trong tools/embedders.py. SimAM và ESPnet còn UNVERIFIED, chưa nên dùng để huấn luyện.
+--shard K/N: tiến trình thứ K trong N tiến trình song song, mỗi tiến trình lấy speaker K, K+N, ... Các chunk
+không trùng nhau nên các shard không ghi đè lên nhau.
 """
 
 from __future__ import annotations
@@ -92,15 +101,20 @@ def decode(path: str, sr: int = SR) -> np.ndarray:
     return np.frombuffer(proc.stdout, dtype=np.float32).copy()
 
 
-def embed_paths(paths: list[str], adapter, *, min_s: float, sr: int = SR,
-                decode_fn: Callable[[str, int], np.ndarray] = decode, workers: int = 1) -> tuple[np.ndarray, dict]:
-    """Embeddings of the utterances that pass. A clip shorter than min_s, or one the adapter refuses with a
-    ValueError or a non-finite vector, is counted and left out. Any other error stops the run.
+def embed_paths_multi(paths: list[str], adapters: dict, *, min_s: float, sr: int = SR,
+                      decode_fn: Callable[[str, int], np.ndarray] = decode,
+                      workers: int = 1) -> dict[str, tuple[np.ndarray, dict]]:
+    """Embeddings of the utterances for every adapter, decoding each utterance once.
 
-    workers > 1 decodes the clips in parallel threads (ffmpeg runs in its own process, so the threads wait
-    on it without holding the GIL). The GPU then gets the next clip while the others are still decoding."""
-    vecs: list[np.ndarray] = []
-    stats = {"offered": len(paths), "used": 0, "too_short": 0, "refused": 0}
+    adapters: {kind: adapter}. Returns {kind: (X, stats)}. A clip shorter than min_s is left out for every
+    adapter. For one adapter, a clip the adapter refuses (ValueError, or a non-finite vector) is counted and
+    left out; any other error stops the run.
+
+    workers > 1 decodes the clips in parallel threads (ffmpeg runs in its own process, so the threads wait on it
+    without holding the GIL). The adapters take the clips in order."""
+    kinds = list(adapters)
+    vecs = {k: [] for k in kinds}
+    stats = {k: {"offered": len(paths), "used": 0, "too_short": 0, "refused": 0} for k in kinds}
     if workers > 1 and len(paths) > 1:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             waves = list(pool.map(lambda p: decode_fn(p, sr), paths))
@@ -108,20 +122,32 @@ def embed_paths(paths: list[str], adapter, *, min_s: float, sr: int = SR,
         waves = (decode_fn(p, sr) for p in paths)
     for wave in waves:
         if len(wave) < min_s * sr:
-            stats["too_short"] += 1
+            for k in kinds:
+                stats[k]["too_short"] += 1
             continue
-        try:
-            vec = np.asarray(adapter.embed(wave), dtype=np.float64).reshape(-1)
-        except ValueError:
-            stats["refused"] += 1
-            continue
-        if not np.isfinite(vec).all():
-            stats["refused"] += 1
-            continue
-        vecs.append(vec)
-        stats["used"] += 1
-    X = np.vstack(vecs) if vecs else np.zeros((0, 0), dtype=np.float64)
-    return X, stats
+        for k in kinds:
+            try:
+                vec = np.asarray(adapters[k].embed(wave), dtype=np.float64).reshape(-1)
+            except ValueError:
+                stats[k]["refused"] += 1
+                continue
+            if not np.isfinite(vec).all():
+                stats[k]["refused"] += 1
+                continue
+            vecs[k].append(vec)
+            stats[k]["used"] += 1
+    out = {}
+    for k in kinds:
+        X = np.vstack(vecs[k]) if vecs[k] else np.zeros((0, 0), dtype=np.float64)
+        out[k] = (X, stats[k])
+    return out
+
+
+def embed_paths(paths: list[str], adapter, *, min_s: float, sr: int = SR,
+                decode_fn: Callable[[str, int], np.ndarray] = decode, workers: int = 1) -> tuple[np.ndarray, dict]:
+    """One adapter. Same rules as embed_paths_multi."""
+    res = embed_paths_multi(paths, {"one": adapter}, min_s=min_s, sr=sr, decode_fn=decode_fn, workers=workers)
+    return res["one"]
 
 
 def _atomic_savez(path: str, **arrays) -> None:
@@ -145,48 +171,72 @@ def parse_shard(text: str) -> tuple[int, int]:
     return k, n
 
 
-def extract(audio_root: str, out: str, adapter, *, ext: str, per_speaker: int, min_s: float, seed: int,
-            limit_speakers: int = 0, decode_fn: Callable[[str, int], np.ndarray] = decode,
-            workers: int = 1, shard: tuple[int, int] = (0, 1), log: Callable[[str], None] = print) -> dict:
-    """Trích từng speaker, bỏ qua speaker đã có chunk. Trả về số liệu tổng.
+def extract_multi(audio_root: str, outs: dict[str, str], adapters: dict, *, ext: str, per_speaker: int,
+                  min_s: float, seed: int, limit_speakers: int = 0,
+                  decode_fn: Callable[[str, int], np.ndarray] = decode, workers: int = 1,
+                  shard: tuple[int, int] = (0, 1), log: Callable[[str], None] = print) -> dict:
+    """Trích cho mọi embedder cùng lúc. outs và adapters có cùng các khoá (kind).
 
-    shard (K, N): chỉ làm speaker thứ K, K+N, K+2N, ... Nhiều tiến trình với các K khác nhau trên cùng GPU
-    chạy song song mà không trùng speaker; các chunk đều vào cùng một thư mục."""
-    os.makedirs(os.path.join(out, "chunks"), exist_ok=True)
+    Một speaker được giải mã chỉ khi còn ít nhất một embedder chưa có chunk của speaker đó."""
+    kinds = list(adapters)
+    for k in kinds:
+        os.makedirs(os.path.join(outs[k], "chunks"), exist_ok=True)
     speakers = list_speakers(audio_root, ext)
     names = sorted(speakers)
     if limit_speakers > 0:
         names = names[:limit_speakers]
     if not names:
         raise SystemExit(f"không tìm thấy file .{ext} nào dưới {audio_root}")
-    k, n = shard
-    names = names[k::n]
-    totals = {"speakers": len(names), "done_before": 0, "done_now": 0, "embeddings": 0, "dim": None}
-    progress_path = os.path.join(out, "progress.jsonl")
+    k_shard, n_shard = shard
+    names = names[k_shard::n_shard]
+    totals = {k: {"done_before": 0, "done_now": 0, "embeddings": 0, "dim": None} for k in kinds}
     t0 = time.time()
-    with open(progress_path, "a", encoding="utf-8") as prog:
+    progress = {k: open(os.path.join(outs[k], "progress.jsonl"), "a", encoding="utf-8") for k in kinds}
+    try:
         for i, spk in enumerate(names, 1):
-            cpath = chunk_path(out, spk)
-            if os.path.exists(cpath):
-                totals["done_before"] += 1
+            todo = []
+            for k in kinds:
+                if os.path.exists(chunk_path(outs[k], spk)):
+                    totals[k]["done_before"] += 1
+                else:
+                    todo.append(k)
+            if not todo:
                 continue
             rng = random.Random(f"{seed}:{spk}")
             paths = pick_utterances(speakers[spk], per_speaker, rng)
-            X, stats = embed_paths(paths, adapter, min_s=min_s, decode_fn=decode_fn, workers=workers)
-            if len(X):
-                if totals["dim"] is None:
-                    totals["dim"] = int(X.shape[1])
-                elif X.shape[1] != totals["dim"]:
-                    raise RuntimeError(f"{spk}: dimension {X.shape[1]} differs from {totals['dim']}")
-                _atomic_savez(cpath, X=X, y=np.array([spk] * len(X)))
-                totals["embeddings"] += len(X)
-            prog.write(json.dumps({"speaker": spk, **stats}, ensure_ascii=False) + "\n")
-            prog.flush()
-            totals["done_now"] += 1
+            results = embed_paths_multi(paths, {k: adapters[k] for k in todo}, min_s=min_s,
+                                        decode_fn=decode_fn, workers=workers)
+            for k in todo:
+                X, stats = results[k]
+                if len(X):
+                    dim = totals[k]["dim"]
+                    if dim is None:
+                        totals[k]["dim"] = int(X.shape[1])
+                    elif X.shape[1] != dim:
+                        raise RuntimeError(f"{k} {spk}: dimension {X.shape[1]} differs from {dim}")
+                    _atomic_savez(chunk_path(outs[k], spk), X=X, y=np.array([spk] * len(X)))
+                    totals[k]["embeddings"] += len(X)
+                progress[k].write(json.dumps({"speaker": spk, **stats}, ensure_ascii=False) + "\n")
+                progress[k].flush()
+                totals[k]["done_now"] += 1
             if i % 25 == 0 or i == len(names):
-                log(f"{i}/{len(names)} speaker, {totals['embeddings']} embedding mới, "
-                    f"{time.time() - t0:.0f} s")
+                log(f"{i}/{len(names)} speaker, {time.time() - t0:.0f} s")
+    finally:
+        for f in progress.values():
+            f.close()
     return totals
+
+
+def extract(audio_root: str, out: str, adapter, *, ext: str, per_speaker: int, min_s: float, seed: int,
+            limit_speakers: int = 0, decode_fn: Callable[[str, int], np.ndarray] = decode,
+            workers: int = 1, shard: tuple[int, int] = (0, 1), log: Callable[[str], None] = print) -> dict:
+    """Một embedder, một thư mục ra. Trả về số liệu của embedder đó."""
+    totals = extract_multi(audio_root, {"one": out}, {"one": adapter}, ext=ext, per_speaker=per_speaker,
+                           min_s=min_s, seed=seed, limit_speakers=limit_speakers, decode_fn=decode_fn,
+                           workers=workers, shard=shard, log=log)
+    t = totals["one"]
+    return {"speakers": t["done_before"] + t["done_now"], "done_before": t["done_before"],
+            "done_now": t["done_now"], "embeddings": t["embeddings"], "dim": t["dim"]}
 
 
 def merge(out: str, embedder_id: str) -> dict:
@@ -216,12 +266,32 @@ def merge(out: str, embedder_id: str) -> dict:
     return meta
 
 
+def parse_outs(text: str, kinds: list[str]) -> dict[str, str]:
+    """Một embedder: '--out DIR' cũng được. Nhiều: 'kind=DIR,kind=DIR'. Phải có đúng một thư mục cho mỗi kind."""
+    if "=" not in text:
+        if len(kinds) != 1:
+            raise ValueError("với nhiều embedder, --out phải có dạng kind=DIR,kind=DIR")
+        return {kinds[0]: text}
+    outs = {}
+    for item in text.split(","):
+        kind, _, path = item.partition("=")
+        if not path:
+            raise ValueError(f"--out {item!r}: cần kind=DIR")
+        if kind in outs:
+            raise ValueError(f"--out lặp embedder {kind!r}")
+        outs[kind] = path
+    if set(outs) != set(kinds):
+        raise ValueError(f"--out có {sorted(outs)} nhưng --embedder là {kinds}")
+    return outs
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--audio-root", help="thư mục gốc VoxCeleb2 (có các thư mục speaker)")
-    ap.add_argument("--out", required=True, help="thư mục đầu ra (chunks, train.npz)")
-    ap.add_argument("--embedder", required=True, choices=E.KINDS)
-    ap.add_argument("--embedder-id", default=None, help="tên ghi vào extract_meta.json (mặc định: --embedder)")
+    ap.add_argument("--out", required=True, help="DIR (một embedder) hoặc kind=DIR,kind=DIR (nhiều)")
+    ap.add_argument("--embedder", required=True, help="một hoặc nhiều tên, cách nhau bằng dấu phẩy: "
+                                                      + ", ".join(E.KINDS))
+    ap.add_argument("--embedder-id", default=None, help="tên ghi vào extract_meta.json (chỉ với một embedder)")
     ap.add_argument("--ext", default="m4a", help="đuôi file (VoxCeleb2 gốc là m4a)")
     ap.add_argument("--per-speaker", type=int, default=DEFAULT_PER_SPEAKER, help="utterance mỗi speaker, 0 = tất cả")
     ap.add_argument("--min-s", type=float, default=DEFAULT_MIN_S, help="bỏ utterance ngắn hơn (giây)")
@@ -234,27 +304,43 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--simam-onnx")
     ap.add_argument("--simam-dir")
     ap.add_argument("--espnet-tag", default=E.DEFAULT_ESPNET_TAG)
-    ap.add_argument("--merge", action="store_true", help="chỉ ghép chunks thành train.npz")
+    ap.add_argument("--merge", action="store_true", help="chỉ ghép chunks thành train.npz (một embedder)")
     return ap
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     a = build_parser().parse_args(argv)
-    embedder_id = a.embedder_id or a.embedder
+    kinds = [x.strip() for x in a.embedder.split(",") if x.strip()]
+    for k in kinds:
+        if k not in E.KINDS:
+            raise SystemExit(f"embedder {k!r} không có trong {E.KINDS}")
     if a.merge:
-        meta = merge(a.out, embedder_id)
-        print(f"wrote {a.out}/train.npz: embedder={embedder_id} D={meta['embedder_dim']} "
+        if len(kinds) != 1 or "=" in a.out:
+            raise SystemExit("--merge cần đúng một embedder và --out là một thư mục")
+        meta = merge(a.out, a.embedder_id or kinds[0])
+        print(f"wrote {a.out}/train.npz: embedder={meta['embedder_id']} D={meta['embedder_dim']} "
               f"speakers={meta['n_speakers']} embeddings={meta['n_embeddings']}")
         return 0
     if not a.audio_root:
         raise SystemExit("--audio-root là bắt buộc khi trích (không dùng --merge)")
-    adapter = E.make_embedder(a.embedder, device=a.device, r293_onnx=a.r293_onnx, simam_onnx=a.simam_onnx,
-                              simam_dir=a.simam_dir, espnet_tag=a.espnet_tag)
-    adapter.load()
-    totals = extract(a.audio_root, a.out, adapter, ext=a.ext, per_speaker=a.per_speaker, min_s=a.min_s,
-                      seed=a.seed, limit_speakers=a.limit_speakers, workers=a.workers,
-                      shard=parse_shard(a.shard))
-    print(f"xong: {totals}")
+    outs = parse_outs(a.out, kinds)
+    adapters = {}
+    for k in kinds:
+        kw = {}
+        if k == "wespeaker_r293":
+            kw["r293_onnx"] = a.r293_onnx
+        if k == "wespeaker_simam100":
+            kw = {"simam_onnx": a.simam_onnx, "simam_dir": a.simam_dir}
+        if k == "espnet_spk":
+            kw["espnet_tag"] = a.espnet_tag
+        adapters[k] = E.make_embedder(k, device=a.device, **kw)
+    for ad in adapters.values():
+        ad.load()
+    totals = extract_multi(a.audio_root, outs, adapters, ext=a.ext, per_speaker=a.per_speaker, min_s=a.min_s,
+                           seed=a.seed, limit_speakers=a.limit_speakers, workers=a.workers,
+                           shard=parse_shard(a.shard))
+    for k in kinds:
+        print(f"xong {k}: {totals[k]}")
     return 0
 
 

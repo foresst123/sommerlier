@@ -146,3 +146,51 @@ def test_parse_shard_rejects_bad_values():
     for bad in ("4/4", "a/b", "1", "0/0", "-1/3"):
         with pytest.raises(ValueError):
             X.parse_shard(bad)
+
+
+class CountingAdapter(FakeAdapter):
+    def __init__(self, scale):
+        super().__init__()
+        self.scale = scale
+
+    def embed(self, wave_):
+        return super().embed(wave_) * self.scale
+
+
+def test_multi_decodes_each_clip_once_and_writes_one_chunk_set_per_embedder(voxroot, tmp_path):
+    decoded = []
+
+    def counting_decode(path, sr=16000):
+        decoded.append(path)
+        return X.decode(path, sr)
+
+    outs = {"a": str(tmp_path / "a"), "b": str(tmp_path / "b")}
+    adapters = {"a": CountingAdapter(1.0), "b": CountingAdapter(2.0)}
+    totals = X.extract_multi(str(voxroot), outs, adapters, ext="wav", per_speaker=0, min_s=0.5, seed=0,
+                             decode_fn=counting_decode, log=lambda s: None)
+    assert len(decoded) == len(set(decoded)) == 6            # 6 wav files, each decoded once for both
+    assert totals["a"]["embeddings"] == totals["b"]["embeddings"] == 4
+    for k in ("a", "b"):
+        assert sorted(os.listdir(os.path.join(outs[k], "chunks"))) == ["id00001.npz", "id00002.npz"]
+    with np.load(os.path.join(outs["b"], "chunks", "id00001.npz")) as za, \
+            np.load(os.path.join(outs["a"], "chunks", "id00001.npz")) as zb:
+        assert np.allclose(za["X"], 2.0 * zb["X"])
+
+
+def test_multi_resumes_per_embedder(voxroot, tmp_path):
+    outs = {"a": str(tmp_path / "ra"), "b": str(tmp_path / "rb")}
+    X.extract_multi(str(voxroot), outs, {"a": CountingAdapter(1.0)}, ext="wav", per_speaker=0, min_s=0.5,
+                    seed=0, log=lambda s: None)
+    t = X.extract_multi(str(voxroot), outs, {"a": CountingAdapter(1.0), "b": CountingAdapter(1.0)},
+                        ext="wav", per_speaker=0, min_s=0.5, seed=0, log=lambda s: None)
+    assert t["a"]["done_before"] == 2 and t["a"]["done_now"] == 0
+    assert t["b"]["done_before"] == 0 and t["b"]["done_now"] == 2
+
+
+def test_parse_outs_one_or_many():
+    assert X.parse_outs("/x", ["r34lm"]) == {"r34lm": "/x"}
+    assert X.parse_outs("r34lm=/x,simam=/y", ["r34lm", "simam"]) == {"r34lm": "/x", "simam": "/y"}
+    for bad, kinds in [("/x", ["r34lm", "simam"]), ("r34lm=/x", ["r34lm", "simam"]),
+                       ("r34lm=/x,r34lm=/y", ["r34lm"]), ("r34lm=", ["r34lm"])]:
+        with pytest.raises(ValueError):
+            X.parse_outs(bad, kinds)
